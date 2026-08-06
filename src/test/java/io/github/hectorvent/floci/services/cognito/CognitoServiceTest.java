@@ -1616,6 +1616,13 @@ class CognitoServiceTest {
         assertTrue(result.isEmpty());
     }
 
+    /** Signs a hand-crafted {@code poolId|username|clientId|issuedAt|nonce} payload the same way buildRefreshToken does. */
+    private static String signRawRefreshToken(UserPool pool, String raw) {
+        String signature = CognitoService.hmacSha256(CognitoService.refreshTokenSecretBytes(pool), raw);
+        return Base64.getEncoder().withoutPadding()
+                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+    }
+
     // =========================================================================
     // Issue #234 — GetTokensFromRefreshToken
     // =========================================================================
@@ -1633,14 +1640,15 @@ class CognitoServiceTest {
         String refreshToken = (String) auth.get("RefreshToken");
 
         assertNotNull(refreshToken);
-        // Should be parseable as base64 structured token
+        // Should be parseable as base64 structured token: 5 payload fields + trailing HMAC signature
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 5);
-        assertEquals(5, parts.length, "Refresh token should encode 5 pipe-separated fields");
+        String[] parts = decoded.split("\\|", 6);
+        assertEquals(6, parts.length, "Refresh token should encode 5 pipe-separated fields plus a signature");
         assertEquals(pool.getId(), parts[0]);
         assertEquals("alice", parts[1]);
         assertEquals(client.getClientId(), parts[2]);
         assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
+        assertFalse(parts[5].isBlank(), "Refresh token should encode a signature");
     }
 
     @Test
@@ -1704,7 +1712,7 @@ class CognitoServiceTest {
 
         long issuedAt = (System.currentTimeMillis() / 1000L) - 5;
         String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAt + "|" + java.util.UUID.randomUUID();
-        String expiredRefreshToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+        String expiredRefreshToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), expiredRefreshToken));
@@ -1729,6 +1737,70 @@ class CognitoServiceTest {
 
         assertNotNull(refreshed.get("AccessToken"));
         assertNotNull(refreshed.get("IdToken"));
+    }
+
+    // =========================================================================
+    // Issue #2137 — Refresh tokens must be unforgeable (HMAC-signed)
+    // =========================================================================
+
+    @Test
+    void getTokensFromRefreshTokenRejectsUnsignedForgedToken() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Attacker who knows the pool id, client id, and a valid username, but not the pool's secret.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|"
+                + System.currentTimeMillis() + "|" + java.util.UUID.randomUUID();
+        String forgedToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), forgedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsTamperedUsername() {
+        UserPool pool = createPoolAndUser();
+        service.adminCreateUser(pool.getId(), "mallory", Map.of("email", "mallory@example.com"), "TempPass1!");
+        service.adminSetUserPassword(pool.getId(), "mallory", "Perm1234!", true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "mallory", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the username in the decoded payload post-signing; the HMAC no longer matches.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("\\|mallory\\|", "|alice|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenRejectsSwappedPoolId() {
+        UserPool poolA = createPoolAndUser();
+        UserPool poolB = service.createUserPool(Map.of("PoolName", "OtherPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(poolA.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        // Swap the embedded pool id for a different real pool; the signature was computed over poolA's id.
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String tampered = decoded.replaceFirst("^" + poolA.getId() + "\\|", poolB.getId() + "|");
+        String tamperedToken = Base64.getEncoder().withoutPadding().encodeToString(tampered.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), tamperedToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
     // =========================================================================
