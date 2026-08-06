@@ -1816,6 +1816,22 @@ class CognitoServiceTest {
         assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
+    @Test
+    void refreshTokenAuthRejectsNonNumericIssuedAt() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // Validly signed, but with a non-numeric issued-at field, must not throw an
+        // uncaught NumberFormatException — it should be rejected as an invalid token.
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|not-a-number|" + java.util.UUID.randomUUID();
+        String malformedToken = signRawRefreshToken(pool, raw);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", malformedToken)));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
     // =========================================================================
     // deleteUserPool cascades groups
     // =========================================================================
