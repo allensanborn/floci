@@ -1803,6 +1803,19 @@ class CognitoServiceTest {
         assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
+    @Test
+    void refreshTokenAuthRejectsForgedTokenInsteadOfIssuingUnknownUserTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        // A garbage/forged REFRESH_TOKEN must not fall through to minting real, signed
+        // tokens for a hardcoded "unknown" user via InitiateAuth REFRESH_TOKEN_AUTH.
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", "not-a-valid-refresh-token")));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+    }
+
     // =========================================================================
     // deleteUserPool cascades groups
     // =========================================================================
