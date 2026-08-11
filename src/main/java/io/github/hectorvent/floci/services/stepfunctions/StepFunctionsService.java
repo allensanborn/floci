@@ -255,8 +255,8 @@ public class StepFunctionsService implements Resettable {
         if (!"RUNNING".equals(exec.getStatus())) {
             return;
         }
-        exec.setStatus("ABORTED");
         exec.setStopDate(System.currentTimeMillis() / 1000.0);
+        exec.setStatus("ABORTED");
         executionStore.put(arn, exec);
 
         List<HistoryEvent> history = historyCache.getOrDefault(arn, new ArrayList<>());

@@ -205,8 +205,8 @@ public class AslExecutor {
                     runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
             f.get(300, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
-            exec.setStatus("TIMED_OUT");
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStatus("TIMED_OUT");
             onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
@@ -329,12 +329,12 @@ public class AslExecutor {
                     onUpdate.accept(exec, history);
                     return;
                 } catch (Exception e) {
-                    exec.setStatus("FAILED");
-                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
                     String runtimeError = "States.Runtime";
                     String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
                     exec.setError(runtimeError);
                     exec.setCause(runtimeCause);
+                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                    exec.setStatus("FAILED");
                     addEvent(history, eventId, "ExecutionFailed", null,
                             Map.of("error", runtimeError, "cause", runtimeCause));
                     onUpdate.accept(exec, history);
@@ -342,17 +342,25 @@ public class AslExecutor {
                 }
             }
 
-            exec.setStatus("SUCCEEDED");
+            // Status is the publication point, so it is set last. describeExecution hands out this
+            // same live Execution, so a client polling for SUCCEEDED between setStatus and setOutput
+            // would read a terminal execution with a null output, which real Step Functions never
+            // returns. The same ordering applies to every terminal path below.
             exec.setOutput(currentInput.toString());
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStatus("SUCCEEDED");
             addEvent(history, eventId, "ExecutionSucceeded", null,
                     Map.of("output", currentInput.toString()));
             onUpdate.accept(exec, history);
 
         } catch (Exception e) {
             LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
-            exec.setStatus("FAILED");
+            // This path previously set only the status, leaving error and cause null forever on an
+            // execution DescribeExecution reports as FAILED.
+            exec.setError("States.Runtime");
+            exec.setCause(e.getMessage() != null ? e.getMessage() : "Unknown error");
             exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStatus("FAILED");
             onUpdate.accept(exec, history);
         }
     }
@@ -2563,12 +2571,12 @@ public class AslExecutor {
     }
 
     private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId, FailStateException e) {
-        exec.setStatus("FAILED");
-        exec.setStopDate(System.currentTimeMillis() / 1000.0);
         String failError = e.error != null ? e.error : "States.Runtime";
         String failCause = e.cause != null ? e.cause : "";
         exec.setError(failError);
         exec.setCause(failCause);
+        exec.setStopDate(System.currentTimeMillis() / 1000.0);
+        exec.setStatus("FAILED");
         addEvent(history, eventId, "ExecutionFailed", null,
                 Map.of("error", failError, "cause", failCause));
     }
