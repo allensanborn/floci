@@ -1806,8 +1806,64 @@ public class CloudFrontController {
         xml.end("Aliases");
 
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
+        xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
+        xml.raw(xmlLogging(cfg.getLogging()));
+        xml.raw(xmlOriginGroups());
 
         return xml.build();
+    }
+
+    /**
+     * Restrictions is a required member of DistributionConfig: real CloudFront always
+     * returns it, defaulting to a RestrictionType of "none". Omitting it makes the
+     * Terraform AWS provider dereference a null Restrictions.GeoRestriction while
+     * flattening the read-after-create, which kills the provider process with a
+     * segfault instead of failing the apply cleanly.
+     */
+    private String xmlRestrictions(Map<String, Object> geo) {
+        String restrictionType = geo != null ? str(geo.get("RestrictionType")) : "";
+        if (restrictionType.isEmpty()) {
+            restrictionType = "none";
+        }
+        List<String> locations = new ArrayList<>();
+        if (geo != null && geo.get("Items") instanceof List<?> items) {
+            for (Object item : items) {
+                locations.add(str(item));
+            }
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("Restrictions")
+                .start("GeoRestriction")
+                .elem("RestrictionType", restrictionType)
+                .elem("Quantity", locations.size());
+        if (!locations.isEmpty()) {
+            xml.start("Items");
+            for (String location : locations) {
+                xml.elem("Location", location);
+            }
+            xml.end("Items");
+        }
+        return xml.end("GeoRestriction").end("Restrictions").build();
+    }
+
+    /** Logging is likewise always present on a real response, disabled by default. */
+    private String xmlLogging(Map<String, Object> logging) {
+        return new XmlBuilder()
+                .start("Logging")
+                .elem("Enabled", logging != null
+                        && Boolean.parseBoolean(str(logging.get("Enabled"))))
+                .elem("IncludeCookies", logging != null
+                        && Boolean.parseBoolean(str(logging.get("IncludeCookies"))))
+                .elem("Bucket", logging != null ? str(logging.get("Bucket")) : "")
+                .elem("Prefix", logging != null ? str(logging.get("Prefix")) : "")
+                .end("Logging")
+                .build();
+    }
+
+    /** Origin groups are not modelled, but the empty collection is still reported. */
+    private String xmlOriginGroups() {
+        return new XmlBuilder().start("OriginGroups").elem("Quantity", 0).end("OriginGroups").build();
     }
 
     private String xmlOrigin(Origin o) {
