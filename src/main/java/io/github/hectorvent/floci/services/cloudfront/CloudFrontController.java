@@ -1843,8 +1843,27 @@ public class CloudFrontController {
 
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
+        xml.raw(xmlLogging(cfg.getLogging()));
 
         return xml.build();
+    }
+
+    /**
+     * Logging is always present on a real DistributionConfig response, disabled by
+     * default. Callers read it unconditionally, so omitting it when the caller did not
+     * supply one leaves the member missing from every read.
+     */
+    private String xmlLogging(Map<String, Object> logging) {
+        return new XmlBuilder()
+                .start("Logging")
+                .elem("Enabled", logging != null
+                        && Boolean.parseBoolean(str(logging.get("Enabled"))))
+                .elem("IncludeCookies", logging != null
+                        && Boolean.parseBoolean(str(logging.get("IncludeCookies"))))
+                .elem("Bucket", logging != null ? str(logging.get("Bucket")) : "")
+                .elem("Prefix", logging != null ? str(logging.get("Prefix")) : "")
+                .end("Logging")
+                .build();
     }
 
     private String xmlEmptyOriginGroups() {
