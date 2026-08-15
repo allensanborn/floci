@@ -96,12 +96,12 @@ public class OpenSearchService {
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
                                 EbsOptions ebsOptions, Map<String, String> tags, String region) {
-        return createDomain(domainName, engineVersion, clusterConfig, ebsOptions, tags,
+        return createDomain(domainName, engineVersion, clusterConfig, ebsOptions, tags, null,
                 DomainOptions.EMPTY, region);
     }
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
-                                EbsOptions ebsOptions, Map<String, String> tags,
+                                EbsOptions ebsOptions, Map<String, String> tags, String accessPolicies,
                                 DomainOptions options, String region) {
         validateDomainName(domainName);
         OpenSearchVersions.validate(engineVersion);
@@ -119,6 +119,7 @@ public class OpenSearchService {
         domain.setAccountId(accountId);
         domain.setArn(AwsArnUtils.Arn.of("es", region, accountId, "domain/" + domainName).toString());
         domain.setEngineVersion(engineVersion != null ? engineVersion : DEFAULT_ENGINE_VERSION);
+        domain.setAccessPolicies(accessPolicies);
         domain.setProcessing(false);
         domain.setDeleted(false);
         domain.setEndpoint("");
@@ -173,19 +174,22 @@ public class OpenSearchService {
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
                                       String region) {
-        return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions,
+        return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions, null,
                 DomainOptions.EMPTY, region);
     }
 
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
-                                      DomainOptions options, String region) {
+                                      String accessPolicies, DomainOptions options, String region) {
         Domain domain = describeDomain(domainName);
         OpenSearchVersions.validate(engineVersion);
         validateOptions(options);
 
         if (engineVersion != null && !engineVersion.isBlank()) {
             domain.setEngineVersion(engineVersion);
+        }
+        if (accessPolicies != null) {
+            domain.setAccessPolicies(accessPolicies);
         }
         if (clusterConfig != null) {
             ClusterConfig existing = domain.getClusterConfig();
