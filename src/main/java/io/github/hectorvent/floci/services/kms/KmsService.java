@@ -610,10 +610,22 @@ public class KmsService {
         KmsAlias existing = aliasStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
 
-        KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
-        existing.setTargetKeyId(key.getKeyId());
+        KmsKey currentKey = resolveKey(existing.getTargetKeyId(), region);
+        KmsKey newKey = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+
+        if ("PendingDeletion".equals(newKey.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
+        }
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || currentKey.getKeySpec() != newKey.getKeySpec()) {
+            throw new AwsException("ValidationException",
+                    "The replacement KMS key must have the same key usage and key spec as the alias's current target key.",
+                    400);
+        }
+
+        existing.setTargetKeyId(newKey.getKeyId());
         aliasStore.put(storageKey, existing);
-        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, key.getKeyId());
+        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, newKey.getKeyId());
     }
 
     public void deleteAlias(String aliasName, String region) {

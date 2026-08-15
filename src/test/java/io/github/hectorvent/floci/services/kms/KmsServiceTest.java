@@ -536,6 +536,33 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateAliasForPendingDeletionTargetThrows() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+        kmsService.scheduleKeyDeletion(keyB.getKeyId(), 7, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION));
+
+        assertEquals("KMSInvalidStateException", ex.getErrorCode());
+        assertEquals(keyA.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasForIncompatibleKeyUsageThrows() {
+        KmsKey symmetricKey = kmsService.createKey(null, REGION);
+        KmsKey hmacKey = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", symmetricKey.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", hmacKey.getKeyId(), REGION));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(symmetricKey.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
     void deleteAlias() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.createAlias("alias/to-delete", key.getKeyId(), REGION);
