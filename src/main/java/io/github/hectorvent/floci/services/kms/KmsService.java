@@ -227,6 +227,13 @@ public class KmsService {
         return spec != null && spec.getKeyType() == KmsKeySpec.KeyType.HMAC;
     }
 
+    // AWS UpdateAlias only requires the current and new key to be "the same type (both
+    // symmetric or both asymmetric or both HMAC)" - not an exact KeySpec match, so e.g.
+    // RSA_2048 and ECC_NIST_P256 are compatible, but SYMMETRIC_DEFAULT and RSA_2048 are not.
+    private static boolean sameKeyFamily(KmsKeySpec a, KmsKeySpec b) {
+        return isHmac(a) == isHmac(b) && (a == KmsKeySpec.SYMMETRIC_DEFAULT) == (b == KmsKeySpec.SYMMETRIC_DEFAULT);
+    }
+
     private static void validateKeyUsageForSpec(KmsKeyUsage keyUsage, KmsKeySpec spec) {
         if (isHmac(spec) && KmsKeyUsage.GENERATE_VERIFY_MAC != keyUsage) {
             throw new AwsException("ValidationException",
@@ -617,10 +624,10 @@ public class KmsService {
             throw new AwsException("KMSInvalidStateException",
                     "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
         }
-        if (currentKey.getKeyUsage() != newKey.getKeyUsage()
-                || currentKey.getKeySpec().getKeyType() != newKey.getKeySpec().getKeyType()) {
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
             throw new AwsException("ValidationException",
-                    "The replacement KMS key must have the same key usage and key type as the alias's current target key.",
+                    "The replacement KMS key must have the same key usage and key type "
+                            + "(symmetric, asymmetric, or HMAC) as the alias's current target key.",
                     400);
         }
 
