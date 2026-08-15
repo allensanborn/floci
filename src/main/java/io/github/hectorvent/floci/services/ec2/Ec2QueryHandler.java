@@ -61,6 +61,8 @@ public class Ec2QueryHandler {
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
                 case "RebootInstances" -> handleRebootInstances(params, region);
+                case "MonitorInstances" -> handleMonitoring(params, "MonitorInstances", "enabled");
+                case "UnmonitorInstances" -> handleMonitoring(params, "UnmonitorInstances", "disabled");
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
                 case "DescribeInstanceAttribute" -> handleDescribeInstanceAttribute(params, region);
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
@@ -680,6 +682,30 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("instancesSet").end("TerminateInstancesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Detailed monitoring is a CloudWatch billing switch with no emulated behaviour behind
+     * it, so this acknowledges the requested state without storing it. Answering matters
+     * because a single unsupported call fails an entire {@code terraform apply}: an
+     * {@code aws_instance} with {@code monitoring = true} calls MonitorInstances right
+     * after RunInstances, and rejecting it discards everything else the module built.
+     */
+    private Response handleMonitoring(MultivaluedMap<String, String> p, String action, String state) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instancesSet");
+        for (String id : getList(p, "InstanceId")) {
+            xml.start("item")
+                    .elem("instanceId", id)
+                    .start("monitoring")
+                    .elem("state", state)
+                    .end("monitoring")
+                    .end("item");
+        }
+        xml.end("instancesSet").end(action + "Response");
         return xmlResponse(xml.build());
     }
 
