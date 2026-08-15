@@ -605,6 +605,17 @@ public class KmsService {
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
     }
 
+    public void updateAlias(String aliasName, String targetKeyId, String region) {
+        String storageKey = region + "::" + aliasName;
+        KmsAlias existing = aliasStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("NotFoundException", "Alias not found: " + aliasName, 404));
+
+        KmsKey key = resolveKey(targetKeyId, region); // Validate key exists and normalize to plain key ID
+        existing.setTargetKeyId(key.getKeyId());
+        aliasStore.put(storageKey, existing);
+        LOG.infov("Updated KMS alias: {0} -> {1}", aliasName, key.getKeyId());
+    }
+
     public void deleteAlias(String aliasName, String region) {
         String key = region + "::" + aliasName;
         if (aliasStore.get(key).isEmpty()) {

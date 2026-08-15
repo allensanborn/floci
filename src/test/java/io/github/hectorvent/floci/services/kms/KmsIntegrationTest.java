@@ -1183,4 +1183,100 @@ class KmsIntegrationTest {
                 .then()
                 .body("__type", equalTo("NotFoundException"));
     }
+
+    @Test
+    void updateAliasRoundTripThroughJsonHandler() {
+        String keyId1 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        String keyId2 = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-test\",\"TargetKeyId\":\"" + keyId1 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-test\",\"TargetKeyId\":\"" + keyId2 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId2 + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .body("Aliases.find { it.AliasName == 'alias/update-alias-test' }.TargetKeyId", equalTo(keyId2));
+    }
+
+    @Test
+    void updateAliasReturnsNotFoundForUnknownAlias() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/non-existent\",\"TargetKeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    void updateAliasReturnsNotFoundForUnknownTargetKey() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-missing-target\",\"TargetKeyId\":\"" + keyId + "\"}")
+                .when().post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\":\"alias/update-alias-missing-target\",\"TargetKeyId\":\"non-existent-key\"}")
+                .when().post("/")
+                .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+    }
 }

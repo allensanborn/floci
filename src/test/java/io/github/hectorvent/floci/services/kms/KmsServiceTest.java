@@ -502,6 +502,40 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateAlias() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", keyA.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", keyB.getKeyId(), REGION);
+
+        List<KmsAlias> aliases = kmsService.listAliases(REGION);
+        assertEquals(1, aliases.size());
+        assertEquals(keyB.getKeyId(), aliases.getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void updateAliasNotFoundThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/missing", key.getKeyId(), REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateAliasForNonExistentTargetKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/my-key", key.getKeyId(), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.updateAlias("alias/my-key", "no-such-key", REGION));
+
+        assertEquals("NotFoundException", ex.getErrorCode());
+        assertEquals(key.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
     void deleteAlias() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.createAlias("alias/to-delete", key.getKeyId(), REGION);
