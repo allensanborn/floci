@@ -617,9 +617,10 @@ public class KmsService {
             throw new AwsException("KMSInvalidStateException",
                     "KMS key " + newKey.getKeyId() + " is pending deletion.", 400);
         }
-        if (currentKey.getKeyUsage() != newKey.getKeyUsage() || currentKey.getKeySpec() != newKey.getKeySpec()) {
+        if (currentKey.getKeyUsage() != newKey.getKeyUsage()
+                || currentKey.getKeySpec().getKeyType() != newKey.getKeySpec().getKeyType()) {
             throw new AwsException("ValidationException",
-                    "The replacement KMS key must have the same key usage and key spec as the alias's current target key.",
+                    "The replacement KMS key must have the same key usage and key type as the alias's current target key.",
                     400);
         }
 

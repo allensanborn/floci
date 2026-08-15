@@ -563,6 +563,17 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateAliasAllowsSameTypeDifferentSpec() {
+        KmsKey rsa2048 = kmsService.createKey("rsa 2048", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        KmsKey rsa3072 = kmsService.createKey("rsa 3072", "SIGN_VERIFY", "RSA_3072", null, Map.of(), REGION);
+        kmsService.createAlias("alias/my-key", rsa2048.getKeyId(), REGION);
+
+        kmsService.updateAlias("alias/my-key", rsa3072.getKeyId(), REGION);
+
+        assertEquals(rsa3072.getKeyId(), kmsService.listAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
     void deleteAlias() {
         KmsKey key = kmsService.createKey(null, REGION);
         kmsService.createAlias("alias/to-delete", key.getKeyId(), REGION);
