@@ -2386,9 +2386,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                // A CreateImage AMI is not in the catalog, so resolve through its source.
+                // A CreateImage AMI is not in the catalog, so resolve through its source. The
+                // ancestor supplies the guest runtime (systemd vs minimal, cloud-init), which a
+                // committed layer does not change; the captured file system, when there is one,
+                // then replaces the image to actually run.
                 ResolvedAmiImage dockerImage =
                         amiImageResolver.resolveImage(resolveLaunchableImageId(region, imageId));
+                String captured = capturedImageFor(region, imageId);
+                if (captured != null) {
+                    dockerImage = new ResolvedAmiImage(
+                            captured, dockerImage.guestRuntime(), dockerImage.cloudInit());
+                }
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -3903,10 +3911,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 captureBlockDeviceMappings(region, source, sourceImage));
 
         // Carry the launchable ancestor so RunInstances on this AMI starts the same guest instead
-        // of falling through to the catalog default.
+        // of falling through to the catalog default. This is also the fallback when the file
+        // system cannot be captured below.
         image.setSourceImageId(resolveLaunchableImageId(region, source.getImageId()));
+
+        // Capture the instance's file system. Without this the AMI is a metadata record that
+        // launches the *base* image, so everything provisioned on the source instance is
+        // silently discarded -- a Packer build reports success and produces an empty artifact.
+        if (!config.services().ec2().mock()) {
+            image.setDockerImage(containerManager.commitInstance(
+                    source, committedImageTag(image.getImageId())));
+        }
+
         registeredImages.put(key(region, image.getImageId()), image);
         return image;
+    }
+
+    /**
+     * Docker reference for an AMI's captured file system. Keyed by AMI id so it is unique, and
+     * namespaced so these are distinguishable from images Floci did not create.
+     */
+    static String committedImageTag(String imageId) {
+        return "floci-ami/" + imageId + ":latest";
     }
 
     /**
@@ -4018,6 +4044,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * Follows CreateImage ancestry back to an id the AMI resolver can map to a guest image.
      * Images from RegisterImage have no source and stop the walk, as does a catalog id.
      */
+    /**
+     * The captured file system to launch for an AMI, following the CreateImage chain so an image
+     * captured from an instance that was itself launched from a capture still resolves. Null when
+     * no ancestor in the chain was ever captured, which is the case for catalog and
+     * RegisterImage AMIs.
+     */
+    private String capturedImageFor(String region, String imageId) {
+        String current = imageId;
+        for (int hops = 0; hops < 16 && current != null; hops++) {
+            Image registered = registeredImages.get(key(region, current)).orElse(null);
+            if (registered == null) {
+                return null;
+            }
+            if (registered.getDockerImage() != null) {
+                return registered.getDockerImage();
+            }
+            current = registered.getSourceImageId();
+        }
+        return null;
+    }
+
     private String resolveLaunchableImageId(String region, String imageId) {
         String current = imageId;
         for (int hops = 0; hops < 16 && current != null; hops++) {
