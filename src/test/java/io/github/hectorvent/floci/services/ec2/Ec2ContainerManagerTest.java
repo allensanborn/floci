@@ -394,10 +394,10 @@ class Ec2ContainerManagerTest {
     }
 
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
-            "if ! command -v sshd >/dev/null 2>&1; then"
-            + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;"
-            + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server >/dev/null 2>&1;"
-            + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;"
+            "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
+            + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;"
+            + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server openssh-clients >/dev/null 2>&1;"
+            + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;"
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
             + "fi;"
@@ -423,6 +423,21 @@ class Ec2ContainerManagerTest {
         // is the supported front end and yum is only a compatibility shim.
         assertTrue(script.indexOf("command -v dnf") < script.indexOf("command -v yum"),
                 "dnf must be probed before yum");
+    }
+
+    @Test
+    void sshdInstallProbeAlsoInstallsTheSshClientPackage() {
+        // Packer's default file transfer runs scp *on the instance*; without it a shell
+        // provisioner fails with "SCP failed to start. This usually means that SCP is not
+        // properly installed on the remote system." Real AMIs ship the client, so Floci's
+        // guests should too. Verified package names: openssh-clients on rpm distributions,
+        // openssh-client on Debian, and apk's openssh already contains both.
+        String script = SSHD_INSTALL_PROBE_CMD[2];
+        assertTrue(script.contains("openssh-server openssh-clients"), script);
+        assertTrue(script.contains("openssh-server openssh-client >"), script);
+        // The guard has to consider scp too, or an image that already has sshd but no client
+        // skips the install entirely and provisioning still fails.
+        assertTrue(script.contains("! command -v scp"), script);
     }
 
     @Test

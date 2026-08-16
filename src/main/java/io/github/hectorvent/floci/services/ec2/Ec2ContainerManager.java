@@ -528,11 +528,17 @@ public class Ec2ContainerManager {
             // without this branch the chain falls through and no default instance ever gets sshd.
             // dnf stays first because Amazon Linux 2023 and modern Fedora/RHEL provide both, and
             // there dnf is the supported front end.
+            // The client package is installed alongside the server because real AMIs carry it and
+            // provisioning tools need it *on the instance*: Packer's default file transfer runs
+            // scp on the remote host, and without it a shell provisioner fails with "SCP failed
+            // to start. This usually means that SCP is not properly installed on the remote
+            // system." Package names differ -- openssh-clients on rpm distributions,
+            // openssh-client on Debian; apk's openssh already contains both, so it is unchanged.
             ContainerExecResult install = execInContainerForResult(containerId, new String[]{"sh", "-c",
-                    "if ! command -v sshd >/dev/null 2>&1; then" +
-                    "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;" +
-                    "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server >/dev/null 2>&1;" +
-                    "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;" +
+                    "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then" +
+                    "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;" +
+                    "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server openssh-clients >/dev/null 2>&1;" +
+                    "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;" +
                     "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;" +
                     "  fi;" +
                     "fi;" +
