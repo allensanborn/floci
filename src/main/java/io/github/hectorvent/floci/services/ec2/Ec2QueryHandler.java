@@ -118,6 +118,8 @@ public class Ec2QueryHandler {
                 case "DescribeImages" -> handleDescribeImages(params, region);
                 case "CreateImage" -> handleCreateImage(params, region);
                 case "RegisterImage" -> handleRegisterImage(params, region);
+                case "DeregisterImage" -> handleDeregisterImage(params, region);
+                case "CopyImage" -> handleCopyImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
@@ -1651,6 +1653,57 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("imageId", image.getImageId())
                 .end("RegisterImageResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * DeregisterImage. The documented response is requestId plus {@code return} ("Returns true if
+     * the request succeeds; otherwise, it returns an error"), with deleteSnapshotResultSet present
+     * only when DeleteAssociatedSnapshots was requested.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DeregisterImage.html">DeregisterImage</a>
+     */
+    private Response handleDeregisterImage(MultivaluedMap<String, String> p, String region) {
+        List<Ec2Service.SnapshotDeletion> deletions = service.deregisterImage(
+                region,
+                p.getFirst("ImageId"),
+                Boolean.parseBoolean(p.getFirst("DeleteAssociatedSnapshots")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeregisterImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("return", "true");
+        if (!deletions.isEmpty()) {
+            xml.start("deleteSnapshotResultSet");
+            for (Ec2Service.SnapshotDeletion deletion : deletions) {
+                xml.start("item")
+                        .elem("snapshotId", deletion.snapshotId())
+                        .elem("returnCode", deletion.returnCode())
+                        .end("item");
+            }
+            xml.end("deleteSnapshotResultSet");
+        }
+        xml.end("DeregisterImageResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * CopyImage. "The copy operation must be initiated in the destination Region", so the
+     * request's own region is the destination and SourceRegion names where the source AMI lives.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
+     */
+    private Response handleCopyImage(MultivaluedMap<String, String> p, String region) {
+        Image image = service.copyImage(
+                region,
+                p.getFirst("SourceRegion"),
+                p.getFirst("SourceImageId"),
+                p.getFirst("Name"),
+                p.getFirst("Description"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CopyImageResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("imageId", image.getImageId())
+                .end("CopyImageResponse");
         return xmlResponse(xml.build());
     }
 
