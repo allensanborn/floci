@@ -441,6 +441,59 @@ public class Ec2ContainerManager {
         return containerId != null && lifecycleManager.isContainerRunning(containerId);
     }
 
+    /**
+     * Captures an instance's file system as a new Docker image, so that an AMI created from it
+     * carries what was provisioned rather than pointing back at the base image.
+     *
+     * <p>Returns the image reference, or null when there is nothing to capture (no container).
+     * A failure here is reported as null rather than thrown: CreateImage still produces a valid
+     * AMI record, it simply falls back to the ancestor image, which is the previous behaviour.
+     *
+     * @param tag repository:tag to commit to, unique per AMI
+     */
+    public String commitInstance(Instance instance, String tag) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return null;
+        }
+        try {
+            // Committing a running container is what AWS does for CreateImage without
+            // NoReboot; docker quiesces nothing either way, so the semantics match closely
+            // enough. The container is left running -- CreateImage does not terminate its
+            // source instance.
+            String imageId = dockerClient.commitCmd(containerId)
+                    .withRepository(tag.contains(":") ? tag.substring(0, tag.indexOf(':')) : tag)
+                    .withTag(tag.contains(":") ? tag.substring(tag.indexOf(':') + 1) : "latest")
+                    .exec();
+            LOG.infov("Captured EC2 instance {0} as Docker image {1} ({2})",
+                    instance.getInstanceId(), tag, imageId);
+            return tag;
+        } catch (Exception e) {
+            LOG.warnv("Could not capture EC2 instance {0} as an image: {1}",
+                    instance.getInstanceId(), e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Removes an image previously produced by {@link #commitInstance}. Called when the AMI that
+     * owns it is deregistered, so captures do not accumulate on disk indefinitely.
+     */
+    public void removeCommittedImage(String tag) {
+        if (tag == null) {
+            return;
+        }
+        try {
+            dockerClient.removeImageCmd(tag).withForce(true).exec();
+            LOG.infov("Removed captured Docker image {0}", tag);
+        } catch (NotFoundException e) {
+            // Already gone: deregistering twice, or the daemon was pruned. Not an error.
+            LOG.debugv("Captured Docker image {0} was already absent", tag);
+        } catch (Exception e) {
+            LOG.warnv("Could not remove captured Docker image {0}: {1}", tag, e.getMessage());
+        }
+    }
+
     private void injectSshKey(String containerId, String publicKey) {
         try {
             // Ensure .ssh directory exists with correct permissions
