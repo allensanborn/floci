@@ -4187,9 +4187,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         "The image id '[" + imageId + "]' has been deregistered and is no longer available", 400);
             }
             image.setState(DEREGISTERED_STATE);
+            reclaimCapturedImage(region, image);
             registeredImages.put(key(region, imageId), image);
             return deleteAssociatedSnapshots ? deleteSnapshotsOf(region, image) : List.of();
         }
+    }
+
+    /**
+     * Releases the Docker image holding a deregistered AMI's captured file system, so repeated
+     * builds of the same AMI name do not accumulate one committed layer each.
+     *
+     * <p>Skipped while any live instance still resolves to that capture. AWS keeps instances
+     * launched from a deregistered AMI running and lets them stop and start again, so the layer
+     * has to outlive the AMI record whenever something can still boot from it. The tombstone
+     * keeps its dockerImage in that case, and the capture is simply not reclaimed -- correctness
+     * before disk.
+     */
+    private void reclaimCapturedImage(String region, Image image) {
+        String captured = image.getDockerImage();
+        if (captured == null || config.services().ec2().mock()) {
+            return;
+        }
+        boolean stillLaunchable = instances.scan(i -> true).stream()
+                .filter(i -> region.equals(i.getRegion()))
+                .filter(i -> i.getState() != null && !"terminated".equals(i.getState().getName()))
+                .anyMatch(i -> captured.equals(capturedImageFor(region, i.getImageId())));
+        if (stillLaunchable) {
+            LOG.infov("Keeping captured image {0}: an instance can still be launched from it", captured);
+            return;
+        }
+        containerManager.removeCommittedImage(captured);
+        image.setDockerImage(null);
     }
 
     /** The deletion outcome DeregisterImage reports for one of the AMI's backing snapshots. */
