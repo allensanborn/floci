@@ -388,7 +388,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         ExecCreateCmd execCreate = harness.dockerClient.execCreateCmd(TEST_CONTAINER_ID);
-        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, timeout(2000)).withCmd(eq(SSHD_START_CMD));
         // No key pair was supplied, so nothing should have been written to authorized_keys.
         verify(harness.dockerClient, never()).copyArchiveToContainerCmd(TEST_CONTAINER_ID);
     }
@@ -396,11 +396,47 @@ class Ec2ContainerManagerTest {
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
             "if ! command -v sshd >/dev/null 2>&1; then"
             + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;"
+            + "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server >/dev/null 2>&1;"
             + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;"
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
             + "fi;"
             + "command -v sshd >/dev/null 2>&1"};
+
+    /**
+     * OpenSSH re-executes itself per connection and refuses a non-absolute argv[0], so sshd has
+     * to be exec'd by absolute path -- resolved at runtime, since not every image puts it in
+     * /usr/sbin.
+     */
+    private static final String[] SSHD_START_CMD = {"sh", "-c", "exec \"$(command -v sshd)\""};
+
+    @Test
+    void sshdInstallProbeHandlesYumBeforeApt() {
+        // The default EC2 image (public.ecr.aws/amazonlinux/amazonlinux:2) ships yum and none of
+        // dnf/apt-get/apk. Without a yum branch the if/elif chain falls through, the trailing
+        // "command -v sshd" fails, and startSshd() bails -- so no instance launched from the
+        // default image was ever reachable over SSH, despite Floci allocating a host port for it
+        // and injecting authorized_keys.
+        String script = SSHD_INSTALL_PROBE_CMD[2];
+        assertTrue(script.contains("command -v yum"), "expected a yum branch, got: " + script);
+        // dnf must still win where both exist (Amazon Linux 2023, modern Fedora/RHEL), where dnf
+        // is the supported front end and yum is only a compatibility shim.
+        assertTrue(script.indexOf("command -v dnf") < script.indexOf("command -v yum"),
+                "dnf must be probed before yum");
+    }
+
+    @Test
+    void sshdIsNeverStartedByBareName() {
+        // sshd rejects a bare argv[0] with "sshd re-exec requires execution with an absolute
+        // path" and exits 255, so new String[]{"sshd"} never starts a daemon on any image.
+        // SSHD_START_CMD is tied to what the manager actually execs by the verify() calls in
+        // launchWithoutKeyPairStillStartsSshd and launchWhenSshdInstallFails_...; this pins the
+        // one property that matters about it.
+        assertEquals("sh", SSHD_START_CMD[0]);
+        assertTrue(SSHD_START_CMD[2].startsWith("exec "),
+                "sshd must replace the shell, not run as its child: " + SSHD_START_CMD[2]);
+        assertFalse(Arrays.equals(new String[]{"sshd"}, SSHD_START_CMD));
+    }
 
     @Test
     void launchWhenSshdInstallFails_doesNotAttemptKeygenOrStart() throws Exception {
@@ -464,7 +500,7 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
         verify(execCreate, never()).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
-        verify(execCreate, never()).withCmd(eq(new String[]{"sshd"}));
+        verify(execCreate, never()).withCmd(eq(SSHD_START_CMD));
     }
 
     private static LaunchHarness launchHarness() {

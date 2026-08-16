@@ -470,9 +470,15 @@ public class Ec2ContainerManager {
             // whose install command itself failed (e.g. no network yet, apt lock held) still exits 0
             // by bash convention, so every later step here would silently no-op against a daemon that
             // was never installed while still logging success.
+            // yum is checked after dnf and before apt-get: the default EC2 image
+            // (public.ecr.aws/amazonlinux/amazonlinux:2) ships yum and none of the others, so
+            // without this branch the chain falls through and no default instance ever gets sshd.
+            // dnf stays first because Amazon Linux 2023 and modern Fedora/RHEL provide both, and
+            // there dnf is the supported front end.
             ContainerExecResult install = execInContainerForResult(containerId, new String[]{"sh", "-c",
                     "if ! command -v sshd >/dev/null 2>&1; then" +
                     "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;" +
+                    "  elif command -v yum >/dev/null 2>&1; then yum install -y openssh-server >/dev/null 2>&1;" +
                     "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;" +
                     "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;" +
                     "  fi;" +
@@ -490,10 +496,16 @@ public class Ec2ContainerManager {
                         instanceId, keygen.summary());
                 return;
             }
-            // Start sshd without -D so it daemonizes itself and survives this exec session. Resolved
-            // via PATH (like ssh-keygen above) rather than hardcoded to /usr/sbin/sshd, since not
-            // every image installs it to that exact path.
-            ContainerExecResult start = execInContainerForResult(containerId, new String[]{"sshd"}, 5);
+            // Start sshd without -D so it daemonizes itself and survives this exec session.
+            //
+            // It must be exec'd by absolute path. OpenSSH re-executes itself for each incoming
+            // connection and refuses to start when argv[0] is not absolute:
+            //     sshd re-exec requires execution with an absolute path
+            // Passing the bare name (resolved via PATH by the exec) therefore fails with exit 255
+            // on every image. The path is still resolved at runtime via "command -v" rather than
+            // hardcoded to /usr/sbin/sshd, since not every image installs it there.
+            ContainerExecResult start = execInContainerForResult(containerId, new String[]{"sh", "-c",
+                    "exec \"$(command -v sshd)\""}, 5);
             if (start.exitCode() != 0) {
                 LOG.warnv("Could not start sshd for EC2 instance {0}: {1}", instanceId, start.summary());
                 return;
