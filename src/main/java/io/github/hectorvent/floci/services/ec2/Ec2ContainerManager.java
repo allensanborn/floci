@@ -55,6 +55,8 @@ public class Ec2ContainerManager {
     private static final String USER_DATA_SCRIPT_PATH = "/tmp/user-data.sh";
     private static final Pattern MIME_BOUNDARY = Pattern.compile("(?im)^content-type:\\s*multipart/[^;]+;\\s*boundary=\"?([^\";\\n\\r]+)\"?.*$");
     private static final List<String> ALLOWED_SSHD_PATHS = List.of("/usr/sbin/sshd", "/usr/local/sbin/sshd", "/sbin/sshd");
+    /** Exit code the sshd install probe uses for "sshd is present but scp is not". See startSshd. */
+    static final int SSH_CLIENT_MISSING_EXIT_CODE = 2;
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
@@ -501,6 +503,13 @@ public class Ec2ContainerManager {
             // alone would skip the install entirely on an image that already has the server but
             // no client. Package names differ -- openssh-clients on rpm distributions,
             // openssh-client on Debian; apk's openssh already contains both.
+            // The two are not equally fatal, so the script separates them: exit 1 means no sshd
+            // and there is nothing to start, while exit 2 means sshd is there but the client
+            // package did not land. A guest that can serve SSH but cannot scp is still worth
+            // starting - it just cannot run a Packer shell provisioner - so that case warns and
+            // continues rather than leaving the instance unreachable. Checking only sshd at the
+            // end would report that state as outright success, which is the silent failure this
+            // probe exists to prevent.
             ContainerExecResult install = execInContainerForResult(containerId, new String[]{"sh", "-c",
                     "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then" +
                             "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;" +
@@ -508,8 +517,13 @@ public class Ec2ContainerManager {
                             "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;" +
                             "  fi;" +
                             "fi;" +
-                            "command -v sshd >/dev/null 2>&1"}, 120);
-            if (install.exitCode() != 0) {
+                            "command -v sshd >/dev/null 2>&1 || exit 1;" +
+                            "command -v scp >/dev/null 2>&1 || exit 2"}, 120);
+            if (install.exitCode() == SSH_CLIENT_MISSING_EXIT_CODE) {
+                LOG.warnv("sshd is available on EC2 instance {0} but the OpenSSH client package is not:"
+                        + " scp is missing, so provisioners that upload files over scp will fail: {1}",
+                        instanceId, install.summary());
+            } else if (install.exitCode() != 0) {
                 LOG.warnv("Could not install openssh-server for EC2 instance {0}: {1}",
                         instanceId, install.summary());
                 return;

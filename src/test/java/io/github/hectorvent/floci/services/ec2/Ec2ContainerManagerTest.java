@@ -260,6 +260,12 @@ class Ec2ContainerManagerTest {
         // The guard has to consider scp as well, or an image that already has sshd but no
         // client skips the install and provisioning still fails with nothing in the logs.
         assertTrue(script.contains("! command -v scp"), script);
+        // ...and so does the trailing status check, on its own exit code. Ending the script on
+        // "command -v sshd" alone would report a guest that has the server but whose client
+        // install failed as a success, which is the state this guard was widened to catch.
+        assertTrue(script.endsWith("command -v sshd >/dev/null 2>&1 || exit 1;"
+                + "command -v scp >/dev/null 2>&1 || exit "
+                + Ec2ContainerManager.SSH_CLIENT_MISSING_EXIT_CODE), script);
     }
 
     @Test
@@ -465,7 +471,8 @@ class Ec2ContainerManagerTest {
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
             + "fi;"
-            + "command -v sshd >/dev/null 2>&1"};
+            + "command -v sshd >/dev/null 2>&1 || exit 1;"
+            + "command -v scp >/dev/null 2>&1 || exit 2"};
 
     @Test
     void launchWhenSshdInstallFails_doesNotAttemptKeygenOrStart() throws Exception {
@@ -477,6 +484,35 @@ class Ec2ContainerManagerTest {
         // logged success. This forces the install probe to report failure and asserts the later
         // steps are never even attempted, rather than running against a daemon that was never
         // installed.
+        ExecCreateCmd execCreate = launchWithSshdInstallProbeExitCode(1, "i-sshdinstallfail");
+
+        verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
+        verify(execCreate, never()).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
+        verify(execCreate, never()).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
+    }
+
+    @Test
+    void launchWhenOnlySshClientInstallFails_stillStartsSshd() throws Exception {
+        // The probe's guard now also fires when scp is missing, so a guest that already has sshd
+        // but whose client-package install fails must not be reported as a plain success - that is
+        // exactly the state where Packer's default scp-based file transfer breaks. It is not fatal
+        // either: sshd is present and the instance is worth making reachable. The script separates
+        // the two with exit 2, which warns and carries on rather than returning early.
+        ExecCreateCmd execCreate = launchWithSshdInstallProbeExitCode(
+                Ec2ContainerManager.SSH_CLIENT_MISSING_EXIT_CODE, "i-scpinstallfail");
+
+        verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
+        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
+        verify(execCreate, timeout(2000)).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
+    }
+
+    /**
+     * Launches an instance where every exec succeeds except the sshd install probe, which reports
+     * {@code probeExitCode}. Returns the {@link ExecCreateCmd} the launch issued its commands
+     * through so callers can assert on which steps were attempted.
+     */
+    private ExecCreateCmd launchWithSshdInstallProbeExitCode(int probeExitCode, String instanceId)
+            throws Exception {
         LaunchHarness harness = launchHarness();
         InspectContainerCmd inspect = mock(InspectContainerCmd.class);
         InspectContainerResponse withIp = inspectResponse("172.18.0.21");
@@ -514,7 +550,7 @@ class Ec2ContainerManagerTest {
         when(inspectExec.exec()).thenAnswer(invocation -> {
             InspectExecResponse response = mock(InspectExecResponse.class);
             boolean isSshdInstallProbe = Arrays.equals(currentCommand.get(), SSHD_INSTALL_PROBE_CMD);
-            when(response.getExitCodeLong()).thenReturn(isSshdInstallProbe ? 1L : 0L);
+            when(response.getExitCodeLong()).thenReturn(isSshdInstallProbe ? (long) probeExitCode : 0L);
             return response;
         });
 
@@ -522,14 +558,12 @@ class Ec2ContainerManagerTest {
         when(harness.dockerClient.copyArchiveToContainerCmd(TEST_CONTAINER_ID)).thenReturn(copy);
         when(copy.withTarInputStream(any(InputStream.class))).thenReturn(copy);
 
-        Instance instance = instance("i-sshdinstallfail");
+        Instance instance = instance(instanceId);
 
         harness.manager.launch(instance, "ubuntu:24.04", "ssh-ed25519 AAAAtest", "us-west-2");
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(execCreate, timeout(2000)).withCmd(eq(SSHD_INSTALL_PROBE_CMD));
-        verify(execCreate, never()).withCmd(eq(new String[]{"ssh-keygen", "-A"}));
-        verify(execCreate, never()).withCmd(eq(new String[]{"/usr/sbin/sshd"}));
+        return execCreate;
     }
 
     private static LaunchHarness launchHarness() {
