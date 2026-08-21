@@ -246,6 +246,23 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void sshdInstallProbeAlsoInstallsTheSshClientPackage() {
+        // Packer's default file transfer runs scp *on the instance*, so a guest with only
+        // openssh-server fails the shell provisioner with "SCP failed to start. This usually
+        // means that SCP is not properly installed on the remote system." Real AMIs ship the
+        // client; installing only the server leaves sftp-server present but /usr/bin/scp
+        // absent. Package names verified against the images themselves: openssh-clients on
+        // rpm distributions, openssh-client on Debian, and apk's openssh already has both.
+        String script = SSHD_INSTALL_PROBE_CMD[2];
+
+        assertTrue(script.contains("openssh-server openssh-clients"), script);
+        assertTrue(script.contains("openssh-server openssh-client >"), script);
+        // The guard has to consider scp as well, or an image that already has sshd but no
+        // client skips the install and provisioning still fails with nothing in the logs.
+        assertTrue(script.contains("! command -v scp"), script);
+    }
+
+    @Test
     void metadataProxyStartCommandBindsAwsLinkLocalMetadataAddress() {
         String[] command = Ec2ContainerManager.metadataProxyStartCommand("floci", 9169);
 
@@ -442,9 +459,9 @@ class Ec2ContainerManagerTest {
     }
 
     private static final String[] SSHD_INSTALL_PROBE_CMD = {"sh", "-c",
-            "if ! command -v sshd >/dev/null 2>&1; then"
-            + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;"
-            + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;"
+            "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then"
+            + "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;"
+            + "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;"
             + "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;"
             + "  fi;"
             + "fi;"

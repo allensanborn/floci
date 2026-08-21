@@ -492,10 +492,19 @@ public class Ec2ContainerManager {
             // whose install command itself failed (e.g. no network yet, apt lock held) still exits 0
             // by bash convention, so every later step here would silently no-op against a daemon that
             // was never installed while still logging success.
+            // The client package is installed alongside the server because provisioning tools
+            // need scp *on the instance*: Packer's default file transfer for a shell
+            // provisioner uploads the script with scp, and real AMIs carry it. Installing only
+            // openssh-server leaves sftp-server present but /usr/bin/scp absent, so the upload
+            // fails with "SCP failed to start. This usually means that SCP is not properly
+            // installed on the remote system." The guard tests for scp too: keying it on sshd
+            // alone would skip the install entirely on an image that already has the server but
+            // no client. Package names differ -- openssh-clients on rpm distributions,
+            // openssh-client on Debian; apk's openssh already contains both.
             ContainerExecResult install = execInContainerForResult(containerId, new String[]{"sh", "-c",
-                    "if ! command -v sshd >/dev/null 2>&1; then" +
-                            "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server >/dev/null 2>&1;" +
-                            "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null 2>&1;" +
+                    "if ! command -v sshd >/dev/null 2>&1 || ! command -v scp >/dev/null 2>&1; then" +
+                            "  if command -v dnf >/dev/null 2>&1; then dnf install -y openssh-server openssh-clients >/dev/null 2>&1;" +
+                            "  elif command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server openssh-client >/dev/null 2>&1;" +
                             "  elif command -v apk >/dev/null 2>&1; then apk add --no-cache openssh >/dev/null 2>&1;" +
                             "  fi;" +
                             "fi;" +
