@@ -71,16 +71,25 @@ public class AmazonMqService {
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "BrokerName is required", 400);
         }
-        if (!ENGINE_RABBITMQ.equals(params.engineType())) {
+        // EngineType and DeploymentMode are matched case-insensitively. The wire enums are
+        // upper case, but the docs, the console and the Terraform AWS provider all spell
+        // them "RabbitMQ" and "SINGLE_INSTANCE"/"single_instance", and the real API accepts
+        // any casing. An exact-case compare rejected `engine_type = "RabbitMQ"` -- the
+        // spelling every published example uses -- with "Only RABBITMQ EngineType is
+        // supported", i.e. refusing exactly the engine it was being asked for.
+        if (!ENGINE_RABBITMQ.equalsIgnoreCase(params.engineType())) {
             throw new AwsException("BadRequestException",
                     "Only RABBITMQ EngineType is supported", 400);
         }
         String deploymentMode = params.deploymentMode() == null
                 ? DEPLOYMENT_SINGLE_INSTANCE : params.deploymentMode();
-        if (!DEPLOYMENT_SINGLE_INSTANCE.equals(deploymentMode)) {
+        if (!DEPLOYMENT_SINGLE_INSTANCE.equalsIgnoreCase(deploymentMode)) {
             throw new AwsException("BadRequestException",
                     "Only SINGLE_INSTANCE DeploymentMode is supported", 400);
         }
+        // Store the canonical wire casing, not the caller's, so DescribeBroker reads back
+        // the enum value the SDKs expect however the request happened to be spelled.
+        deploymentMode = DEPLOYMENT_SINGLE_INSTANCE;
         // RabbitMQ brokers require exactly one user at creation; that user becomes the
         // broker's RabbitMQ administrator (seeded into the container). This mirrors AWS,
         // which rejects CreateBroker for RabbitMQ unless exactly one user is supplied.
