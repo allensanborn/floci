@@ -59,6 +59,27 @@ import java.util.function.BiPredicate;
  * <p>Security groups and network ACLs are untouched. Docker networks isolate between
  * networks; within one, every container can reach every other on every port. Nothing here
  * makes an assertion that traffic is <em>blocked</em> meaningful.
+ *
+ * <p>Between-VPC isolation is likewise only as good as the daemon underneath. It comes from
+ * Docker's own {@code DOCKER-ISOLATION-STAGE} rules, which drop forwarded traffic between
+ * bridge networks — Floci asks for separate networks and gets whatever the daemon does with
+ * them. <strong>OrbStack does not do that.</strong> Measured on OrbStack 29.4.0, 2026-08-22:
+ * two containers each attached to exactly one Docker network, on different subnets, created
+ * with nothing but {@code docker network create} and {@code docker run --network}, reach each
+ * other's ports in both directions. Marking the networks {@code --internal} does not change
+ * it. That is a property of the host's Docker implementation and there is nothing this class
+ * can do about it, so on such a host the VPC boundary is an addressing boundary only. Do not
+ * read a passing "different VPCs cannot reach each other" test as evidence without checking
+ * which daemon it ran on.
+ *
+ * <h2>Hosts where container IPs are not routable</h2>
+ *
+ * <p>On Docker Desktop for macOS and Windows the containers live behind a VM and none of their
+ * addresses answer from the host. The private address stays correct and reachable
+ * container-to-container, and the guest really holds it, but a host-side client — Terratest,
+ * a shell — cannot dial it. That is the same constraint {@code ContainerNetworkReachability}
+ * detects for the public address on the ec2-public-address-reachability branch, and it is why
+ * SSH keeps its published host port here.
  */
 @ApplicationScoped
 public class VpcNetworkManager {
