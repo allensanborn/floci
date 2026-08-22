@@ -116,6 +116,16 @@ public class KinesisJsonHandler {
         }
         service.createStream(streamName, shardCount, streamMode,
                 optionalMaxRecordSize(request), region);
+        // CreateStream's optional Tags member was being dropped. That is invisible to a
+        // hand-written script but not to Terraform: aws_kinesis_stream sets tags at create
+        // time and then reads them back with ListTagsForStream, so an empty read produces a
+        // permanent "tags will be updated in-place" diff on an unchanged configuration.
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isObject() && !tagsNode.isEmpty()) {
+            Map<String, String> tags = new HashMap<>();
+            tagsNode.fields().forEachRemaining(e -> tags.put(e.getKey(), e.getValue().asText()));
+            service.addTagsToStream(streamName, tags, region);
+        }
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
