@@ -276,7 +276,8 @@ public class VpcNetworkManager {
         }
         int prefix = cfg.fallbackPrefixLength();
         if (declaredPrefix != null && declaredPrefix > prefix) {
-            // Never hand out a block smaller than what was asked for.
+            // A VPC that declared a /24 gets a /24: the substitute should be the size that was
+            // asked for, not a /16 that wastes fifteen sixteenths of the pool per VPC.
             prefix = Math.min(declaredPrefix, 30);
         }
         List<Cidr4> taken = new ArrayList<>(dockerNetworkSubnets(vpcId));
