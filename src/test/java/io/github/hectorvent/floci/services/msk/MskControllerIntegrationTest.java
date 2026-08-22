@@ -133,6 +133,56 @@ class MskControllerIntegrationTest {
             .statusCode(404);
     }
 
+    // An empty base64 blob decodes to "" and means "no property overrides". Absent and
+    // present-but-empty stay distinguishable at the REST layer: a missing member arrives as
+    // null, an empty one as a zero-length String, so only the former is rejected.
+    @Test
+    void createAndUpdateConfigurationAcceptEmptyServerProperties() {
+        String arn = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "empty-props-%s", "kafkaVersions": ["3.6.0"], "serverProperties": ""}
+                """.formatted(UUID.randomUUID().toString().substring(0, 8)))
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(200)
+            .body("state", equalTo("ACTIVE"))
+            .body("latestRevision.revision", equalTo(1))
+            .extract().path("arn");
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"description": "still empty", "serverProperties": ""}
+                """)
+        .when()
+            .put("/v1/configurations/{arn}", arn)
+        .then()
+            .statusCode(200)
+            .body("latestRevision.revision", equalTo(2));
+
+        given()
+        .when()
+            .get("/v1/configurations/{arn}/revisions/{revision}", arn, 1)
+        .then()
+            .statusCode(200)
+            .body("serverProperties", equalTo(""));
+    }
+
+    @Test
+    void createConfigurationRejectsAbsentServerProperties() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {"name": "no-props-config", "kafkaVersions": ["3.6.0"]}
+                """)
+        .when()
+            .post("/v1/configurations")
+        .then()
+            .statusCode(400);
+    }
+
     @Test
     void createConfigurationRejectsNonBase64ServerProperties() {
         given()
