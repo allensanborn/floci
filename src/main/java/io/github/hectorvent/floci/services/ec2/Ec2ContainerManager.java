@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
@@ -71,6 +72,7 @@ public class Ec2ContainerManager {
     private final EmulatorConfig config;
     private final Ec2MetadataServer metadataServer;
     private final Ec2PortForwardManager portForwardManager;
+    private final VpcNetworkManager vpcNetworkManager;
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ec2-container-launcher");
@@ -88,7 +90,8 @@ public class Ec2ContainerManager {
                                PortAllocator portAllocator,
                                EmulatorConfig config,
                                Ec2MetadataServer metadataServer,
-                               Ec2PortForwardManager portForwardManager) {
+                               Ec2PortForwardManager portForwardManager,
+                               VpcNetworkManager vpcNetworkManager) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -99,6 +102,7 @@ public class Ec2ContainerManager {
         this.config = config;
         this.metadataServer = metadataServer;
         this.portForwardManager = portForwardManager;
+        this.vpcNetworkManager = vpcNetworkManager;
     }
 
     @PreDestroy
@@ -177,6 +181,15 @@ public class Ec2ContainerManager {
                 String containerId = lifecycleManager.create(spec);
                 instance.setDockerContainerId(containerId);
 
+                // Join the VPC's Docker network at the address the subnet allocated, before the
+                // container starts, so the guest comes up already holding its private IP. The
+                // default bridge attachment stays: it is what carries the published SSH host
+                // port, which a network mode set at creation time would suppress.
+                String vpcAddress = vpcNetworkManager.attach(region, instance.getVpcId(), instance.getSubnetId(),
+                                containerId, instance.getPrivateIpAddress())
+                        .map(network -> instance.getPrivateIpAddress())
+                        .orElse(null);
+
                 // Start the container
                 lifecycleManager.startCreated(containerId, spec);
 
@@ -200,6 +213,17 @@ public class Ec2ContainerManager {
                 // settings are populated; wait here so IMDS is registered
                 // before link-local metadata validation and UserData run.
                 String containerIp = waitForContainerBridgeIp(containerId, instanceId);
+                if (vpcAddress != null) {
+                    // The VPC address is the one Floci reports and the one peers in the same VPC
+                    // dial. The bridge address still identifies this container to IMDS, because
+                    // the default route — and so the source address of its metadata requests —
+                    // is the bridge.
+                    if (containerIp != null && !containerIp.equals(vpcAddress)) {
+                        instance.setImdsSourceIp(containerIp);
+                        metadataServer.registerContainer(containerIp, instanceId, instance);
+                    }
+                    containerIp = vpcAddress;
+                }
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
                     exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
@@ -414,6 +438,7 @@ public class Ec2ContainerManager {
     public void terminate(Instance instance) {
         String containerId = instance.getDockerContainerId();
         String containerIp = instance.getContainerBridgeIp();
+        String imdsSourceIp = instance.getImdsSourceIp();
         int sshHostPort = instance.getSshHostPort();
         instance.setState(InstanceState.shuttingDown());
         executor.submit(() -> {
@@ -437,6 +462,7 @@ public class Ec2ContainerManager {
                 portAllocator.release(sshHostPort);
             }
             metadataServer.unregisterContainer(containerIp, instance);
+            metadataServer.unregisterContainer(imdsSourceIp, instance);
             instance.setState(InstanceState.terminated());
             instance.setTerminatedAt(System.currentTimeMillis());
         });
