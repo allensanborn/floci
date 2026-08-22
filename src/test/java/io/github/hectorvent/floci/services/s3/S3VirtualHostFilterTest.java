@@ -307,4 +307,165 @@ class S3VirtualHostFilterTest {
         // ...but the s3-website authority survives, so downstream website detection still fires.
         assertEquals("my-bucket.s3-website-us-east-1.localhost:4566", newUri.getAuthority());
     }
+
+    // --- Dotted bucket names: the bucket is everything before the endpoint suffix (#s3-vhost) ---
+
+    @ParameterizedTest
+    @CsvSource({
+            // Single-label bucket — unchanged behaviour
+            "my-bucket.localhost,                       localhost, my-bucket",
+            "my-bucket.localhost:4566,                  localhost, my-bucket",
+            // Dotted bucket: a website bucket named after a domain
+            "www.example.com.localhost,                 localhost, www.example.com",
+            "www.example.com.localhost:4566,            localhost, www.example.com",
+            // Deeply dotted bucket
+            "a.b.c.d.localhost,                         localhost, a.b.c.d",
+            "a.b.c.d.localhost:4611,                    localhost, a.b.c.d",
+            // Dots AND hyphens — the exact shape from the Terraform BucketAlreadyExists report
+            "r5e817e.floci.example.com-logs.localhost,  localhost, r5e817e.floci.example.com-logs",
+            "one.dot-nonexistent.localhost,             localhost, one.dot-nonexistent",
+            "a.b.c-nonexistent.localhost,               localhost, a.b.c-nonexistent",
+            // Dotted bucket against a multi-label configured base hostname
+            "www.example.com.floci.internal,            floci.internal, www.example.com",
+            "www.example.com.floci.default.svc.cluster.local, floci.default.svc.cluster.local, www.example.com",
+            // Dotted bucket, region-qualified vhost form
+            "www.example.com.s3.us-east-1.localhost,    localhost, www.example.com",
+            "www.example.com.s3.us-east-1.localhost:4566, localhost, www.example.com",
+            "www.example.com.s3.amazonaws.com,          localhost, www.example.com",
+            "www.example.com.s3.us-east-1.amazonaws.com, localhost, www.example.com",
+            "www.example.com.s3.dualstack.us-east-1.amazonaws.com, localhost, www.example.com",
+            // Dotted bucket on the wildcard-DNS builtins
+            "www.example.com.localhost.floci.io,        localhost, www.example.com",
+            "www.example.com.s3.localhost.floci.io,     localhost, www.example.com",
+            "www.example.com.s3.us-east-1.localhost.localstack.cloud, localhost, www.example.com",
+            // Dotted bucket on a website endpoint
+            "www.example.com.s3-website-us-east-1.localhost, localhost, www.example.com",
+            "www.example.com.s3-website.localhost,      localhost, www.example.com",
+            // Case-insensitive suffix matching keeps the bucket's own case
+            "www.Example.com.LOCALHOST,                 localhost, www.Example.com",
+    })
+    void extractsDottedBucketNames(String host, String baseHostname, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void headOnDottedBucketIsNotDegradedToPathStyle() {
+        // Regression: extractBucket split at the FIRST dot, so a dotted bucket's remainder
+        // ("floci.example.com-logs.localhost") did not match baseHostname "localhost" and the
+        // request degraded to path-style "/" — where HEAD answers 200. The Terraform AWS
+        // provider HEADs a bucket before creating it and read that 200 as "already exists",
+        // failing with BucketAlreadyExists for a bucket that never existed.
+        assertEquals("floci.example.com-logs", S3VirtualHostFilter.extractBucket(
+                "floci.example.com-logs.localhost", "localhost", DEFAULT_SUFFIXES));
+        assertEquals("floci.example.com-logs", S3VirtualHostFilter.extractBucket(
+                "floci.example.com-logs.localhost:4566", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    // --- The service-endpoint reading always wins over the new suffix matching ---
+
+    @ParameterizedTest
+    @CsvSource({
+            // s3.<endpoint> is Floci's own S3 endpoint, never a bucket named "s3"
+            "s3.localhost,                        localhost",
+            "s3.localhost:4566,                   localhost",
+            "s3.floci.internal,                   floci.internal",
+            // ...including the region-qualified service endpoint, which the guard alone misses
+            "s3.us-east-1.localhost,              localhost",
+            "s3.us-east-1.localhost:4566,         localhost",
+            "s3.eu-west-2.localhost.floci.io,     localhost",
+            "s3.dualstack.us-east-1.amazonaws.com, localhost",
+            "s3.amazonaws.com,                    localhost",
+            "s3.us-east-1.amazonaws.com,          localhost",
+            // Bare website endpoint with no bucket in front
+            "s3-website-us-east-1.localhost,      localhost",
+            // A non-S3 amazonaws.com host is not a bucket
+            "foo.amazonaws.com,                   localhost",
+            "queue.amazonaws.com:443,             localhost",
+            // Dotted hosts that still end in nothing we know
+            "www.example.com.custom.internal,     localhost",
+            "a.b.c.d,                             localhost",
+    })
+    void serviceEndpointsAndUnknownSuffixesStayBucketless(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void longestKnownSuffixWinsSoBucketDoesNotAbsorbTheEndpoint() {
+        // "localhost" and "localhost.floci.io" are both known; the longer one must match,
+        // otherwise the bucket would come out as "my-bucket.localhost".
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.localhost.floci.io", "localhost", DEFAULT_SUFFIXES));
+        assertEquals("www.example.com", S3VirtualHostFilter.extractBucket(
+                "www.example.com.localhost.localstack.cloud", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void dottedBucketsRouteOnConfiguredExtraSuffixes() {
+        Set<String> withExtra = Set.of(
+                "localhost", "localhost.floci.io", "localhost.localstack.cloud", "localhost.example.internal");
+        assertEquals("www.example.com", S3VirtualHostFilter.extractBucket(
+                "www.example.com.localhost.example.internal", "localhost", withExtra));
+        assertEquals("www.example.com", S3VirtualHostFilter.extractBucket(
+                "www.example.com.s3.localhost.example.internal:4566", "localhost", withExtra));
+        assertEquals("www.example.com", S3VirtualHostFilter.extractBucket(
+                "www.example.com.s3.us-east-1.localhost.example.internal", "localhost", withExtra));
+        // Still bucketless for the bare service endpoint on that suffix
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "s3.us-east-1.localhost.example.internal", "localhost", withExtra));
+        // And no accidental match when the suffix is not configured
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "www.example.com.localhost.example.internal", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void ipv4AuthorityIsNeverABucketEvenWithADottedShape() {
+        assertNull(S3VirtualHostFilter.extractBucket("192.168.1.1", "localhost", DEFAULT_SUFFIXES));
+        assertNull(S3VirtualHostFilter.extractBucket("127.0.0.1:4566", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void filterRewritesPathForADottedBucket() {
+        URI requestUri = URI.create("http://www.example.com.localhost:4566/index.html");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getRequestUri()).thenReturn(requestUri);
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getHeaderString("Host")).thenReturn("www.example.com.localhost:4566");
+
+        new S3VirtualHostFilter().filter(ctx);
+
+        ArgumentCaptor<URI> rewritten = ArgumentCaptor.forClass(URI.class);
+        verify(ctx).setRequestUri(rewritten.capture());
+        assertEquals("/www.example.com/index.html", rewritten.getValue().getRawPath());
+    }
+
+    // --- Other services' virtual-host schemes must not be swallowed as dotted buckets ---
+
+    @ParameterizedTest
+    @CsvSource({
+            // API Gateway: <api-id>.execute-api.<region>.<endpoint> and the wildcard-DNS forms
+            "abc123.execute-api.localhost,                       localhost",
+            "abc123.execute-api.localhost:4566,                  localhost",
+            "abc123.execute-api.ap-northeast-2.localhost:4566,   localhost",
+            "abc123.execute-api.localhost.floci.io,              localhost",
+            "abc123.execute-api.localhost.localstack.cloud,      localhost",
+            "AbC123.execute-api.localhost.floci.io,              localhost",
+            "abc123.execute-api.us-east-1.amazonaws.com,         localhost",
+            // Lambda function URLs
+            "url-id.lambda-url.us-east-1.localhost,              localhost",
+            "url-id.lambda-url.localhost:4566,                   localhost",
+            // CloudFront distribution domains routed at the Floci endpoint
+            "e123.cloudfront.localhost,                          localhost",
+    })
+    void otherServicesVirtualHostsAreNotBuckets(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void serviceLabelInFirstPositionKeepsItsPreExistingBucketReading() {
+        // emr-serverless.<endpoint> has no id in front; it was read as a bucket before the
+        // dotted-bucket fix and still is, so this change alters nothing for it.
+        assertEquals("emr-serverless",
+                S3VirtualHostFilter.extractBucket("emr-serverless.localhost", "localhost", DEFAULT_SUFFIXES));
+    }
 }
