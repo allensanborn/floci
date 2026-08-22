@@ -4441,11 +4441,22 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId, String natGatewayId) {
+        createRoute(region, routeTableId, destinationCidrBlock, null, gatewayId, natGatewayId);
+    }
+
+    /**
+     * A route carries exactly one destination. An IPv6 route is recorded under
+     * destinationIpv6CidrBlock rather than left with a null IPv4 destination, so that
+     * matching a route by destination never has to dereference a null.
+     */
+    public void createRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String gatewayId, String natGatewayId) {
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
+            route.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
             route.setNatGatewayId(natGatewayId);
             next.add(route);
             current.setRoutes(next);
@@ -4489,11 +4500,36 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
+        deleteRoute(region, routeTableId, destinationCidrBlock, null);
+    }
+
+    /**
+     * DeleteRoute names its target by exactly one of DestinationCidrBlock or
+     * DestinationIpv6CidrBlock. Matching is null-safe and keyed on whichever one the
+     * request supplied: a table holding an IPv6 route used to make every DeleteRoute on
+     * that table -- including deletes of unrelated IPv4 routes -- fail with a
+     * NullPointerException surfaced as InternalFailure.
+     */
+    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock) {
+        boolean hasIpv4 = destinationCidrBlock != null && !destinationCidrBlock.isBlank();
+        boolean hasIpv6 = destinationIpv6CidrBlock != null && !destinationIpv6CidrBlock.isBlank();
+        if (hasIpv4 == hasIpv6) {
+            throw new AwsException("MissingParameter",
+                    "The request must include exactly one of DestinationCidrBlock or "
+                            + "DestinationIpv6CidrBlock.", 400);
+        }
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
-            next.removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
+            // Deleting a route that is already absent stays a no-op returning success, as
+            // it was before: tightening that into InvalidRoute.NotFound is a separate
+            // decision from fixing the crash, and would change destroy paths this change
+            // has no way to re-verify.
+            next.removeIf(hasIpv4
+                    ? r -> destinationCidrBlock.equals(r.getDestinationCidrBlock())
+                    : r -> destinationIpv6CidrBlock.equals(r.getDestinationIpv6CidrBlock()));
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }

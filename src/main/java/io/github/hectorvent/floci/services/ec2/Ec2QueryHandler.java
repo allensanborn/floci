@@ -2405,9 +2405,10 @@ public class Ec2QueryHandler {
     private Response handleCreateRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
+        String destV6 = p.getFirst("DestinationIpv6CidrBlock");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
-        service.createRoute(region, rtId, dest, gwId, natGwId);
+        service.createRoute(region, rtId, dest, destV6, gwId, natGwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -2440,8 +2441,8 @@ public class Ec2QueryHandler {
 
     private Response handleDeleteRoute(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
-        String dest = p.getFirst("DestinationCidrBlock");
-        service.deleteRoute(region, rtId, dest);
+        service.deleteRoute(region, rtId, p.getFirst("DestinationCidrBlock"),
+                p.getFirst("DestinationIpv6CidrBlock"));
         return booleanResponse("DeleteRoute");
     }
 
@@ -3197,6 +3198,7 @@ public class Ec2QueryHandler {
         for (Route r : rt.getRoutes()) {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
+                    .elem("destinationIpv6CidrBlock", r.getDestinationIpv6CidrBlock())
                     .elem("gatewayId", r.getGatewayId())
                     .elem("natGatewayId", r.getNatGatewayId())
                     .elem("state", r.getState())

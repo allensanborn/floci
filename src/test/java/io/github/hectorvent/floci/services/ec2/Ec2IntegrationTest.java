@@ -3774,6 +3774,89 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(318)
+    void deleteIpv4RouteFromATableThatAlsoHoldsAnIpv6Route() {
+        // An IPv6 route used to be stored with a null IPv4 destination, which made every
+        // later DeleteRoute on the same table dereference null and return InternalFailure
+        // -- including this delete of an unrelated IPv4 route. Terraform hits it on
+        // destroy of any VPC carrying an IPv6 default route.
+        String vpc = newVpc("10.44.0.0/16");
+        String rt = given()
+            .formParam("Action", "CreateRouteTable")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateRouteTableResponse.routeTable.routeTableId");
+
+        given()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationCidrBlock", "0.0.0.0/0")
+            .formParam("GatewayId", "igw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationIpv6CidrBlock", "::/0")
+            .formParam("GatewayId", "igw-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationCidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteRouteResponse.return", equalTo("true"));
+
+        // The IPv6 route survives the IPv4 delete and is described under its own member.
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("RouteTableId.1", rt)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeSet.item.destinationIpv6CidrBlock",
+                    equalTo("::/0"));
+
+        // ...and can then be deleted by its own destination.
+        given()
+            .formParam("Action", "DeleteRoute")
+            .formParam("RouteTableId", rt)
+            .formParam("DestinationIpv6CidrBlock", "::/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    @Test
+    @Order(318)
+    void deleteRouteWithoutADestinationIsRejected() {
+        String vpc = newVpc("10.45.0.0/16");
+        String rt = given()
+            .formParam("Action", "CreateRouteTable")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateRouteTableResponse.routeTable.routeTableId");
+
+        given()
+            .formParam("Action", "DeleteRoute")
+            .formParam("RouteTableId", rt)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400);
+    }
+
+    @Test
     @Order(319)
     void securityGroupRuleDescribableByRuleId() {
         String vpc = newVpc("10.39.0.0/16");

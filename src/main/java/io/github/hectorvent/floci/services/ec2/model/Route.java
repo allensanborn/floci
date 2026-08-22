@@ -8,6 +8,12 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public class Route {
 
     private String destinationCidrBlock;
+    // A route has exactly one destination, and it is IPv6 for a route created with
+    // DestinationIpv6CidrBlock. Keeping it in its own field rather than overloading
+    // destinationCidrBlock is what stops an IPv6 route from being stored with a null
+    // IPv4 destination -- which used to make every later DeleteRoute on the same table
+    // fail with a NullPointerException, including deletes of unrelated IPv4 routes.
+    private String destinationIpv6CidrBlock;
     private String gatewayId;
     private String natGatewayId;
     private String state = "active";
@@ -23,6 +29,11 @@ public class Route {
 
     public String getDestinationCidrBlock() { return destinationCidrBlock; }
     public void setDestinationCidrBlock(String destinationCidrBlock) { this.destinationCidrBlock = destinationCidrBlock; }
+
+    public String getDestinationIpv6CidrBlock() { return destinationIpv6CidrBlock; }
+    public void setDestinationIpv6CidrBlock(String destinationIpv6CidrBlock) {
+        this.destinationIpv6CidrBlock = destinationIpv6CidrBlock;
+    }
 
     public String getGatewayId() { return gatewayId; }
     public void setGatewayId(String gatewayId) { this.gatewayId = gatewayId; }
