@@ -463,6 +463,11 @@ public class Ec2ContainerManager {
             }
             metadataServer.unregisterContainer(containerIp, instance);
             metadataServer.unregisterContainer(imdsSourceIp, instance);
+            // Give the address back only now that the container is gone: releasing it while
+            // Docker still holds the endpoint would hand the same IP to the next launch and
+            // have Docker refuse it.
+            vpcNetworkManager.releasePrivateIp(instance.getRegion(), instance.getSubnetId(),
+                    instance.getPrivateIpAddress());
             instance.setState(InstanceState.terminated());
             instance.setTerminatedAt(System.currentTimeMillis());
         });

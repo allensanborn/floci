@@ -123,6 +123,24 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void aReleasedAddressIsHandedOutAgainRatherThanExhaustingTheSubnet() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
+
+        List<String> allocated = new ArrayList<>();
+        Optional<String> next;
+        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+            allocated.add(next.get());
+        }
+        assertTrue(allocated.size() >= 4, "a /28 should yield several usable addresses");
+        assertTrue(manager.allocatePrivateIp(REGION, "subnet-tiny").isEmpty(), "and then be exhausted");
+
+        manager.releasePrivateIp(REGION, "subnet-tiny", allocated.get(0));
+        assertEquals(allocated.get(0), manager.allocatePrivateIp(REGION, "subnet-tiny").orElseThrow(),
+                "a terminated instance's address must come back into circulation");
+    }
+
+    @Test
     void subnetsInTheSameVpcGetDisjointRangesOnOneNetwork() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");

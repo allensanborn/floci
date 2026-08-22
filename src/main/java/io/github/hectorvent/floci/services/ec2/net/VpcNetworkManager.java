@@ -324,12 +324,20 @@ public class VpcNetworkManager {
         }
         synchronized (subnet) {
             long limit = subnet.effective.size() - 1;
-            while (subnet.nextOffset < limit) {
-                long offset = subnet.nextOffset++;
-                Optional<String> address = subnet.effective.addressAt(offset);
-                if (address.isPresent() && !subnet.leased.contains(address.get())) {
-                    subnet.leased.add(address.get());
-                    return address;
+            // Sweep forward from the last hand-out first, so a fresh subnet allocates in the
+            // readable order .10, .11, .12; only once the range is walked does it come back for
+            // addresses released by terminated instances, which keeps a long-running survey from
+            // exhausting a /24 after 245 launches.
+            for (long pass = 0; pass < 2; pass++) {
+                long from = pass == 0 ? subnet.nextOffset : FIRST_HOST_OFFSET;
+                long to = pass == 0 ? limit : Math.min(subnet.nextOffset, limit);
+                for (long offset = from; offset < to; offset++) {
+                    Optional<String> address = subnet.effective.addressAt(offset);
+                    if (address.isPresent() && !subnet.leased.contains(address.get())) {
+                        subnet.leased.add(address.get());
+                        subnet.nextOffset = offset + 1;
+                        return address;
+                    }
                 }
             }
         }
