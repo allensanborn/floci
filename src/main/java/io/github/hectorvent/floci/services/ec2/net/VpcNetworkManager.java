@@ -346,6 +346,52 @@ public class VpcNetworkManager {
         return Optional.empty();
     }
 
+    /**
+     * Claims one specific address in a subnet's range, rather than picking the next free one.
+     *
+     * <p>This exists for restart. The lease table lives only in memory, so a restarted emulator
+     * rebuilds it empty while the containers of persisted, still-running instances go on holding
+     * the addresses a previous run handed them. Re-reserving those addresses is what stops the
+     * next {@link #allocatePrivateIp} from handing a live container's address to a new instance.
+     *
+     * <p>Refusal is normal and never exceptional: a persisted instance may sit in a subnet whose
+     * effective range has since been substituted, or two persisted instances may claim the same
+     * address. Both return false and leave the caller's other reservations intact — the
+     * alternative is a restart that aborts on inherited state it cannot change.
+     *
+     * @return true when the address is now leased; false when the subnet has no Docker-backed
+     *         range, the address is unparseable or outside that range, or it is already leased
+     */
+    public boolean reservePrivateIp(String region, String subnetId, String address) {
+        if (!enabled() || subnetId == null || address == null) {
+            return false;
+        }
+        SubnetBinding subnet = subnetBinding(region, subnetId);
+        if (subnet == null || subnet.effective == null) {
+            return false;
+        }
+        Optional<Cidr4> parsed = Cidr4.parse(address + "/32");
+        if (parsed.isEmpty() || !subnet.effective.containsAddress(parsed.get().network())) {
+            LOG.warnv("Cannot reserve {0} in subnet {1}: it is outside the subnet''s effective range {2}. "
+                            + "Its holder keeps it, and this manager will not hand it out either, since "
+                            + "it is not an address it allocates from.",
+                    String.valueOf(address), subnetId, String.valueOf(subnet.effective));
+            return false;
+        }
+        synchronized (subnet) {
+            if (!subnet.leased.add(address)) {
+                LOG.warnv("Address {0} in subnet {1} is claimed by more than one instance; the later "
+                        + "claim is ignored.", address, subnetId);
+                return false;
+            }
+            long offset = parsed.get().network() - subnet.effective.network();
+            if (offset >= subnet.nextOffset) {
+                subnet.nextOffset = offset + 1;
+            }
+            return true;
+        }
+    }
+
     public void releasePrivateIp(String region, String subnetId, String address) {
         SubnetBinding subnet = subnetBinding(region, subnetId);
         if (subnet != null && address != null) {
@@ -403,6 +449,35 @@ public class VpcNetworkManager {
                             + "its bridge address and its reported private IP will not be reachable.",
                     containerId, networkName, address, e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Disconnects a container from its VPC network, for a launch that failed after {@link #attach}
+     * succeeded. Docker holds the endpoint — and so the address — until the container is removed
+     * or disconnected, so the lease cannot be returned to the pool before this runs: the next
+     * launch would be handed the same address and Docker would refuse it.
+     *
+     * <p>A container that was never attached, or whose network is already gone, is not an error
+     * here; both are the ordinary shape of a launch that failed early.
+     */
+    public void detach(String region, String vpcId, String containerId) {
+        if (!enabled() || containerId == null) {
+            return;
+        }
+        VpcBinding vpc = bindings.get(key(region, vpcId));
+        if (vpc == null || !vpc.created) {
+            return;
+        }
+        try {
+            dockerClient.disconnectFromNetworkCmd()
+                    .withNetworkId(vpc.networkName)
+                    .withContainerId(containerId)
+                    .withForce(true)
+                    .exec();
+        } catch (Exception e) {
+            LOG.debugv("Could not disconnect {0} from VPC network {1}: {2}",
+                    containerId, vpc.networkName, e.getMessage());
         }
     }
 

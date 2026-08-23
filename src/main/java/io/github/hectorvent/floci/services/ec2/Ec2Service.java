@@ -154,20 +154,29 @@ public class Ec2Service implements ContainerTeardown {
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
     /**
-     * Field-injected rather than passed through the constructors: this class has three of them,
-     * two of which exist so hermetic tests can supply their own storage, and widening all three
-     * to thread one more collaborator through has broken CI here twice before (#2103, #2106).
-     * Those tests leave it null, so every use goes through a null guard.
+     * Null only in the hermetic unit tests, which reach the package-private constructors that do
+     * not take it; CDI always supplies one. Every use goes through a null guard for that reason.
      */
-    @Inject
-    VpcNetworkManager vpcNetworkManager;
+    private final VpcNetworkManager vpcNetworkManager;
+
+    // Package-private for hermetic tests: the same wiring as the CDI constructor below, minus the
+    // Docker-backed VPC networking those tests neither start nor need.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, null);
+    }
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
-                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      VpcNetworkManager vpcNetworkManager) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcNetworkManager,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 storageFactory.create("ec2", "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -223,6 +232,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                null,
                 vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
@@ -231,11 +241,13 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
-    // arity so existing fixtures still resolve it (#2103 and #2106 both broke CI by moving it).
+    // arity so existing fixtures still resolve it (#2103 and #2106 both broke CI by moving it), and
+    // passes a null VpcNetworkManager: those tests never launch a container.
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                Ec2InstanceTypeCatalog instanceTypeCatalog,
+               VpcNetworkManager vpcNetworkManager,
                StorageBackend<String, Vpc> vpcs,
                StorageBackend<String, Subnet> subnets,
                StorageBackend<String, SecurityGroup> securityGroups,
@@ -267,6 +279,7 @@ public class Ec2Service implements ContainerTeardown {
         this.amiImageResolver = amiImageResolver;
         this.imageCatalog = imageCatalog;
         this.instanceTypeCatalog = instanceTypeCatalog;
+        this.vpcNetworkManager = vpcNetworkManager;
         this.vpcs = vpcs;
         this.subnets = subnets;
         this.securityGroups = securityGroups;
@@ -348,6 +361,44 @@ public class Ec2Service implements ContainerTeardown {
         for (String storageKey : subnets.keys()) {
             subnets.get(storageKey).ifPresent(subnet -> vpcNetworkManager.declareSubnet(
                     subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock()));
+        }
+        reserveRestoredPrivateIps();
+    }
+
+    /**
+     * Re-claims the private addresses that persisted, non-terminated instances still hold.
+     *
+     * <p>The lease table is in-memory only, so a restart rebuilds it empty while the containers of
+     * those instances go on holding their addresses. Without this the next RunInstances is handed
+     * {@code .10} again — an address a live container already answers on — and Docker refuses the
+     * attach, leaving the new instance on the bridge with a reported IP that is someone else's.
+     *
+     * <p>Every refusal is tolerated and logged rather than thrown: an address may now fall outside
+     * a subnet whose effective range was substituted this run, and two persisted instances may name
+     * the same address. Startup is not the place to fail over state that is already on disk.
+     */
+    private void reserveRestoredPrivateIps() {
+        int reserved = 0;
+        int skipped = 0;
+        for (String storageKey : instances.keys()) {
+            Instance instance = instances.get(storageKey).orElse(null);
+            if (instance == null || instance.getSubnetId() == null
+                    || instance.getPrivateIpAddress() == null
+                    || instance.getState() == null
+                    || "terminated".equals(instance.getState().getName())) {
+                continue;
+            }
+            if (vpcNetworkManager.reservePrivateIp(instance.getRegion(), instance.getSubnetId(),
+                    instance.getPrivateIpAddress())) {
+                reserved++;
+            }
+            else {
+                skipped++;
+            }
+        }
+        if (reserved > 0 || skipped > 0) {
+            LOG.debugv("Re-reserved {0} private address(es) held by restored instances; {1} could not be "
+                    + "reserved", String.valueOf(reserved), String.valueOf(skipped));
         }
     }
 

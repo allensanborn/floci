@@ -40,12 +40,14 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -53,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -716,6 +719,59 @@ class Ec2ServiceTest {
         assertEquals(50, attached.getEbs().getVolumeSize());
         assertEquals("gp3", attached.getEbs().getVolumeType());
         assertNotNull(attached.getEbs().getSnapshotId());
+    }
+
+    @Test
+    void restoreReReservesThePrivateAddressesOfInstancesThatSurvivedTheRestart() {
+        // The lease table is in-memory, so a restart rebuilds it empty while the containers of
+        // persisted instances still hold their addresses. Without the re-reservation the next
+        // RunInstances is handed an address a live container already answers on.
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        instanceStore.put("us-east-1::i-alive", persistedInstance("i-alive", "10.0.1.10", InstanceState.running()));
+        instanceStore.put("us-east-1::i-gone", persistedInstance("i-gone", "10.0.1.11", InstanceState.terminated()));
+
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        when(vpcNetworks.enabled()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), vpcNetworks);
+
+        service.restoreMetadataRegistrations();
+
+        verify(vpcNetworks).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
+        verify(vpcNetworks, never()).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.11");
+    }
+
+    @Test
+    void restoreSurvivesAnAddressItCannotReserve() {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        instanceStore.put("us-east-1::i-one", persistedInstance("i-one", "10.0.1.10", InstanceState.running()));
+        instanceStore.put("us-east-1::i-two", persistedInstance("i-two", "10.0.1.10", InstanceState.running()));
+
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        when(vpcNetworks.enabled()).thenReturn(true);
+        // Second claim on the same address is refused; startup must not abort over it.
+        when(vpcNetworks.reservePrivateIp(anyString(), anyString(), anyString()))
+                .thenReturn(true).thenReturn(false);
+        Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), vpcNetworks);
+
+        assertDoesNotThrow(service::restoreMetadataRegistrations);
+        verify(vpcNetworks, times(2)).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
+    }
+
+    private static Instance persistedInstance(String instanceId, String privateIp, InstanceState state) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        instance.setRegion("us-east-1");
+        instance.setVpcId("vpc-a");
+        instance.setSubnetId("subnet-a");
+        instance.setPrivateIpAddress(privateIp);
+        instance.setState(state);
+        return instance;
     }
 
     private static String runOne(Ec2Service service, String imageId) {

@@ -51,6 +51,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -396,6 +397,53 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchReturnsTheLeaseWhenTheContainerNeverJoinsTheVpcNetwork() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 2;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerResponse noIp = inspectResponse(null);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(noIp);
+        // attach() returns empty: nothing holds the address, and the instance is about to start
+        // reporting its bridge address instead, so the lease is no longer findable from it.
+
+        Instance instance = leasedInstance("i-noattach");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.vpcNetworkManager, timeout(2000).atLeastOnce())
+                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+    }
+
+    @Test
+    void launchReturnsTheLeaseWhenTheLaunchThrows() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.builder.build()).thenThrow(new IllegalStateException("daemon went away"));
+
+        Instance instance = leasedInstance("i-throws");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        // Detach before release: Docker holds the address while the endpoint stands, so handing it
+        // to the next launch before disconnecting would have the daemon refuse it.
+        verify(harness.vpcNetworkManager, timeout(2000)).detach("us-west-2", "vpc-lease", null);
+        verify(harness.vpcNetworkManager, timeout(2000))
+                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+    }
+
+    private static Instance leasedInstance(String instanceId) {
+        Instance instance = instance(instanceId);
+        instance.setRegion("us-west-2");
+        instance.setVpcId("vpc-lease");
+        instance.setSubnetId("subnet-lease");
+        instance.setPrivateIpAddress("10.0.1.10");
+        return instance;
+    }
+
+    @Test
     void launchMarksInstanceRunningBeforeUserDataCompletes() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 2;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
@@ -595,6 +643,7 @@ class Ec2ContainerManagerTest {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        VpcNetworkManager vpcNetworkManager = mock(VpcNetworkManager.class);
         Ec2ContainerManager manager = new Ec2ContainerManager(
                 containerBuilder,
                 lifecycleManager,
@@ -606,9 +655,9 @@ class Ec2ContainerManagerTest {
                 config,
                 metadataServer,
                 mock(Ec2PortForwardManager.class),
-                mock(VpcNetworkManager.class));
+                vpcNetworkManager);
         return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder,
-                new CopyOnWriteArrayList<>());
+                vpcNetworkManager, new CopyOnWriteArrayList<>());
     }
 
     /**
@@ -656,6 +705,7 @@ class Ec2ContainerManagerTest {
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
                                  ContainerBuilder.Builder builder,
+                                 VpcNetworkManager vpcNetworkManager,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

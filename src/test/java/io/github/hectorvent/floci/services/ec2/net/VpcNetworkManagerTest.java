@@ -162,6 +162,63 @@ class VpcNetworkManagerTest {
                 "a terminated instance's address must come back into circulation");
     }
 
+    // ─── Restart: addresses persisted instances still hold ───────────────────
+
+    @Test
+    void aReservedAddressIsNeverHandedOutAgain() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        // What a restart looks like: the lease table is empty, but a live container holds .10.
+        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.10"));
+
+        for (int i = 0; i < 20; i++) {
+            assertNotEquals("10.0.1.10", manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow(),
+                    "the address a restored instance still holds must not be re-allocated");
+        }
+    }
+
+    @Test
+    void reservingTheSameAddressTwiceRefusesTheSecondClaimWithoutThrowing() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        assertTrue(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.11"));
+        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "10.0.1.11"),
+                "two instances claiming one address is reported, not thrown");
+    }
+
+    @Test
+    void reservingAnAddressOutsideTheSubnetRangeRefusesWithoutThrowing() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+
+        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "172.31.4.9"),
+                "an address from a range this subnet no longer uses cannot be reserved");
+        assertFalse(manager.reservePrivateIp(REGION, "subnet-a", "not-an-address"));
+        assertFalse(manager.reservePrivateIp(REGION, "subnet-unknown", "10.0.1.10"),
+                "a subnet with no Docker-backed range has nothing to reserve in");
+        // None of that poisoned the pool.
+        assertTrue(manager.allocatePrivateIp(REGION, "subnet-a").isPresent());
+    }
+
+    @Test
+    void aReservedAddressComesBackAfterRelease() {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-tiny", "10.0.9.0/28");
+
+        assertTrue(manager.reservePrivateIp(REGION, "subnet-tiny", "10.0.9.10"));
+        manager.releasePrivateIp(REGION, "subnet-tiny", "10.0.9.10");
+
+        List<String> allocated = new ArrayList<>();
+        Optional<String> next;
+        while ((next = manager.allocatePrivateIp(REGION, "subnet-tiny")).isPresent()) {
+            allocated.add(next.get());
+        }
+        assertTrue(allocated.contains("10.0.9.10"),
+                "a terminated restored instance's address must return to circulation");
+    }
+
     @Test
     void subnetsInTheSameVpcGetDisjointRangesOnOneNetwork() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");

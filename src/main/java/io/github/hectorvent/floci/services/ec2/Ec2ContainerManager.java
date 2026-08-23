@@ -135,6 +135,11 @@ public class Ec2ContainerManager {
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
         instance.setState(InstanceState.pending());
 
+        // Captured before anything can overwrite it: on a launch that never attaches to the VPC
+        // network, exposeReachablePrivateAddress replaces the reported private IP with the bridge
+        // one, and the address actually leased would otherwise be unrecoverable on the paths below.
+        String leasedPrivateIp = instance.getPrivateIpAddress();
+
         executor.submit(() -> {
             try {
                 String instanceId = instance.getInstanceId();
@@ -186,9 +191,15 @@ public class Ec2ContainerManager {
                 // default bridge attachment stays: it is what carries the published SSH host
                 // port, which a network mode set at creation time would suppress.
                 String vpcAddress = vpcNetworkManager.attach(region, instance.getVpcId(), instance.getSubnetId(),
-                                containerId, instance.getPrivateIpAddress())
-                        .map(network -> instance.getPrivateIpAddress())
+                                containerId, leasedPrivateIp)
+                        .map(network -> leasedPrivateIp)
                         .orElse(null);
+                if (vpcAddress == null) {
+                    // Nothing holds the address, and moments from now this instance will be
+                    // reporting its bridge address instead — so the lease would no longer be
+                    // findable from the instance at terminate time. Give it back here.
+                    vpcNetworkManager.releasePrivateIp(region, instance.getSubnetId(), leasedPrivateIp);
+                }
 
                 // Start the container
                 lifecycleManager.startCreated(containerId, spec);
@@ -204,7 +215,7 @@ public class Ec2ContainerManager {
 
                 if (!running) {
                     LOG.warnv("EC2 instance {0} container {1} did not reach running state", instanceId, containerId);
-                    instance.setState(InstanceState.terminated());
+                    failLaunch(instance, leasedPrivateIp);
                     return;
                 }
 
@@ -232,7 +243,7 @@ public class Ec2ContainerManager {
                 else {
                     LOG.warnv("EC2 instance {0} container {1} did not receive a usable bridge IP for IMDS",
                             instanceId, containerId);
-                    instance.setState(InstanceState.terminated());
+                    failLaunch(instance, leasedPrivateIp);
                     return;
                 }
 
@@ -275,12 +286,27 @@ public class Ec2ContainerManager {
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                instance.setState(InstanceState.terminated());
+                failLaunch(instance, leasedPrivateIp);
             } catch (Exception e) {
                 LOG.warnv("Failed to launch EC2 instance {0}: {1}", instance.getInstanceId(), e.getMessage());
-                instance.setState(InstanceState.terminated());
+                failLaunch(instance, leasedPrivateIp);
             }
         });
+    }
+
+    /**
+     * Ends a launch that never reached RUNNING.
+     *
+     * <p>The private address was leased before the container existed, and {@link #terminate} — the
+     * only other place it is given back — is not on this path: an instance that fails here is
+     * already terminated, so nothing terminates it again and the lease would be held for the life
+     * of the process. Detaching first is what makes the release safe; Docker keeps the address
+     * reserved while the endpoint stands, and would refuse the next launch handed the same one.
+     */
+    private void failLaunch(Instance instance, String leasedPrivateIp) {
+        vpcNetworkManager.detach(instance.getRegion(), instance.getVpcId(), instance.getDockerContainerId());
+        vpcNetworkManager.releasePrivateIp(instance.getRegion(), instance.getSubnetId(), leasedPrivateIp);
+        instance.setState(InstanceState.terminated());
     }
 
     /**

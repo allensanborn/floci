@@ -138,9 +138,11 @@ class EksServiceTest {
             }
         };
 
+        // No VpcNetworkManager: this fixture never launches a container, so nothing here needs a
+        // Docker-backed VPC network.
         return new Ec2Service(ec2Config, mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
-                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory);
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), storageFactory, null);
     }
 
     private void createTestCluster(String name) {
