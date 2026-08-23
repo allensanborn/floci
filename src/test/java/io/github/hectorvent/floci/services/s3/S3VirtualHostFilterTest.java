@@ -640,4 +640,58 @@ class S3VirtualHostFilterTest {
     void everyPublishedQualifierFormResolvesTheBucket(String host, String expectedBucket) {
         assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
     }
+
+    // --- Regression: the region guard must reject region IDS, not region SHAPES ---
+
+    /**
+     * {@code [a-z]{2}-[a-z-]+-\d+} is the shape of an AWS region id, but it is also the shape of
+     * perfectly ordinary bucket labels. Matching by shape rejected {@code data.my-cd-1} — a legal
+     * bucket — dropped it back to path-style, and restored the exact false "bucket exists" 200
+     * this filter exists to prevent. The guard has to test against the finite list of real region
+     * ids instead.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "data.my-cd-1.localhost,          data.my-cd-1",
+            "data.my-cd-1.localhost:4566,     data.my-cd-1",
+            "reports.eu-team-2.localhost,     reports.eu-team-2",
+            "assets.us-west-9.localhost,      assets.us-west-9",
+            "logs.ap-corp-1.archive.localhost, logs.ap-corp-1.archive",
+            "backup.no-such-region-12.localhost, backup.no-such-region-12",
+    })
+    void regionShapedBucketLabelsThatAreNotRegionIdsStillResolve(String host, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
+    }
+
+    /**
+     * The guard it replaces is still doing its job: a real region id in a non-leading label, with
+     * no S3 qualifier, is another service's regional virtual host. Tightening to real ids must not
+     * weaken this — including for regions outside the set the emulator advertises.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "123456789012.dkr.ecr.us-east-1.localhost,    localhost",
+            "search-x.eu-north-1.es.localhost,            localhost",
+            "abc.iot.me-central-1.localhost,              localhost",
+            "abc.transfer.us-gov-west-1.localhost,        localhost",
+            "abc.service.cn-northwest-1.localhost,        localhost",
+    })
+    void realRegionIdsStillMarkAnotherServicesRegionalHost(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    /**
+     * The residual cost of the region rule, pinned rather than left implicit: a bucket whose name
+     * carries a <em>real</em> region id in a non-leading position is still not reachable in the
+     * unqualified virtual-hosted form. It stays reachable qualified and path-style, and it was
+     * equally unreachable before this filter existed — so the cost is a recoverable one, paid to
+     * avoid an unrecoverable cross-service hijack.
+     */
+    @Test
+    void aBucketNamedAfterARealRegionIsStillTheDocumentedCost() {
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "data.us-east-1.localhost", "localhost", DEFAULT_SUFFIXES));
+        assertEquals("data.us-east-1", S3VirtualHostFilter.extractBucket(
+                "data.us-east-1.s3.localhost", "localhost", DEFAULT_SUFFIXES));
+    }
 }

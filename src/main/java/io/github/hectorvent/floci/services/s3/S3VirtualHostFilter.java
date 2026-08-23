@@ -19,7 +19,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 @Provider
 @PreMatching
@@ -54,12 +53,6 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
             "emr-serverless",   // EmrServerlessRouteFilter: emr-serverless.<host>
             "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
-
-    /**
-     * An AWS region id, matched by shape: {@code {geo}-{direction(s)}-{number}}.
-     */
-    private static final Pattern REGION_LABEL =
-            Pattern.compile("[a-z]{2}-[a-z-]+-\\d+", Pattern.CASE_INSENSITIVE);
 
     /**
      * The label that makes an S3 endpoint host IPv6-capable: {@code s3.dualstack.<region>},
@@ -444,19 +437,38 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
     }
 
     /**
-     * True when an unqualified prefix carries a region-shaped label in a non-leading position —
-     * the shape every <em>other</em> regional service virtual-hosts under:
-     * {@code <acct>.dkr.ecr.<region>}, {@code <domain>.<region>.es}, {@code <id>.iot.<region>}.
-     * A real S3 virtual host always carries an {@code s3} qualifier instead, and when it does the
-     * region is read from there, so a bucket whose own name contains a region stays addressable as
-     * {@code logs.us-east-1.s3.<host>}. One structural rule covers every regional service at once,
-     * where a label denylist would have to enumerate them and would silently hijack the first one
-     * it missed.
+     * True when an unqualified prefix carries an AWS region id in a non-leading label — the shape
+     * every <em>other</em> regional service virtual-hosts under: {@code <acct>.dkr.ecr.<region>},
+     * {@code <domain>.<region>.es}, {@code <id>.iot.<region>}. A real S3 virtual host always
+     * carries an {@code s3} qualifier instead, and when it does the region is read from there, so
+     * a bucket whose own name contains a region stays addressable as {@code logs.us-east-1.s3.<host>}.
+     * One structural rule covers every regional service at once, including services Floci does not
+     * model yet, where a label denylist would have to enumerate them and would silently hijack the
+     * first one it missed.
+     *
+     * <p><strong>Region ids, not a region-shaped pattern.</strong> This used to match
+     * {@code [a-z]{2}-[a-z-]+-\d+}, which is also the shape of ordinary bucket labels:
+     * {@code data.my-cd-1} is a legal bucket, and matching by shape rejected it, dropped it back to
+     * path-style, and restored the false "bucket exists" 200 this filter exists to prevent. The
+     * finite list in {@link AwsRegions#KNOWN_IDS} is what separates "another service's regional
+     * virtual host" from "a bucket whose label happens to look region-shaped".
+     *
+     * <p>Two residual costs, both accepted deliberately:
+     * <ul>
+     *   <li>A bucket whose name contains a <em>real</em> region id in a non-leading position
+     *       ({@code data.us-east-1}) is still not addressable in the unqualified virtual-hosted
+     *       form. It remains addressable qualified ({@code data.us-east-1.s3.<host>}) and
+     *       path-style, and it was equally unaddressable before this filter existed.</li>
+     *   <li>A regional service host in a region AWS launches after {@link AwsRegions#KNOWN_IDS}
+     *       was last updated would be read as a bucket. That is the reason to keep the list
+     *       current; the failure is a wrong route rather than data loss, and the
+     *       {@code NON_S3_SERVICE_LABELS} entries still cover the services Floci itself routes.</li>
+     * </ul>
      */
     private static boolean isForeignRegionalHost(String[] labels) {
         // Index 0 is exempt so a bucket literally named "us-east-1" keeps working.
         for (int i = 1; i < labels.length; i++) {
-            if (REGION_LABEL.matcher(labels[i]).matches()) {
+            if (AwsRegions.isRegionId(labels[i])) {
                 return true;
             }
         }
