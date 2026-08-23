@@ -468,4 +468,77 @@ class S3VirtualHostFilterTest {
         assertEquals("emr-serverless",
                 S3VirtualHostFilter.extractBucket("emr-serverless.localhost", "localhost", DEFAULT_SUFFIXES));
     }
+
+    /**
+     * Every regional AWS service virtual-hosts as {@code <id>.<service>.<region>.<endpoint>}, and
+     * suffix matching reads all of them as a dotted bucket unless something stops it. A label
+     * denylist cannot: it has to name each service, and the first one it misses is silently served
+     * as an S3 bucket. The structural rule is that a real S3 virtual host never puts a bare region
+     * label against the endpoint host — {@code s3}, {@code s3.<region>} or {@code s3-website-<region>}
+     * is always there instead.
+     *
+     * <p>{@code <account>.dkr.ecr.<region>.localhost} is not hypothetical: it is the registry URI
+     * {@code EcrRegistryManager} hands out.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            // ECR registry, as EcrRegistryManager emits it
+            "123456789012.dkr.ecr.us-east-1.localhost,           localhost",
+            "123456789012.dkr.ecr.us-east-1.localhost:5100,      localhost",
+            "123456789012.dkr.ecr.eu-central-1.localhost.floci.io, localhost",
+            // OpenSearch / Elasticsearch domain endpoints
+            "search-mydomain-abc.us-east-1.es.localhost,         localhost",
+            // IoT data endpoints
+            "abc123.iot.us-east-1.localhost,                     localhost",
+            // AppSync
+            "myapp.appsync-api.us-east-1.localhost,              localhost",
+            // Cognito hosted UI
+            "mydomain.auth.eu-west-2.localhost,                  localhost",
+            // A service Floci does not model yet still must not be swallowed
+            "anything.some-future-service.ap-northeast-2.localhost, localhost",
+    })
+    void regionalServiceVirtualHostsAreNotDottedBuckets(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    /**
+     * The other direction: the guard must not cost legal bucket names. {@code my.elb.logs} is
+     * AWS's own load-balancer access-log naming convention, and no filter in this repository
+     * routes {@code *.elb.<endpoint>} or {@code *.mwaa.<endpoint>} by Host, so neither label
+     * belongs in the denylist.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "my.elb.logs.localhost,             my.elb.logs",
+            "my.elb.logs.localhost:4566,        my.elb.logs",
+            "airflow.mwaa.dags.localhost,       airflow.mwaa.dags",
+            "my.elb.logs.s3.us-east-1.localhost, my.elb.logs",
+    })
+    void bucketNamesCarryingServiceWordsStillResolve(String host, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
+    }
+
+    /**
+     * The region rule only applies when no S3 qualifier is present, so a bucket whose own name
+     * ends in a region label is still addressable in the qualified forms.
+     */
+    @Test
+    void aBucketWhoseNameEndsInARegionLabelIsStillAddressableWhenQualified() {
+        assertEquals("logs.us-east-1", S3VirtualHostFilter.extractBucket(
+                "logs.us-east-1.s3.localhost", "localhost", DEFAULT_SUFFIXES));
+        assertEquals("logs.us-east-1", S3VirtualHostFilter.extractBucket(
+                "logs.us-east-1.s3.us-east-1.amazonaws.com", "localhost", DEFAULT_SUFFIXES));
+        // Unqualified, it reads as another service's regional host — the documented trade-off.
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "logs.us-east-1.localhost", "localhost", DEFAULT_SUFFIXES));
+    }
+
+    /** A single-label bucket is unaffected by the region rule, region-shaped or not. */
+    @Test
+    void singleLabelBucketsAreUntouchedByTheRegionRule() {
+        assertEquals("us-east-1", S3VirtualHostFilter.extractBucket(
+                "us-east-1.localhost", "localhost", DEFAULT_SUFFIXES));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
+                "my-bucket.localhost", "localhost", DEFAULT_SUFFIXES));
+    }
 }

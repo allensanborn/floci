@@ -18,6 +18,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Provider
 @PreMatching
@@ -40,14 +41,34 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * Host labels belonging to other AWS services that virtual-host under the same endpoint
      * host as S3. A hostname carrying one of these is that service's, never an S3 bucket
      * whose name happens to contain dots — see {@link #bucketFromPrefix}.
+     *
+     * <p>Every entry names a service that Floci itself routes by {@code Host} in a
+     * <em>regionless</em> form, which {@link #REGION_LABEL} cannot catch. A label is only
+     * justified when some filter in this repository claims that hostname; a speculative entry
+     * costs real bucket names, because {@code my.elb.logs} — AWS's own load-balancer
+     * access-log naming convention — is a perfectly legal bucket.
      */
     private static final Set<String> NON_S3_SERVICE_LABELS = Set.of(
-            "execute-api",      // API Gateway v1/v2 + WebSocket: <api-id>.execute-api.<region>.<host>
-            "lambda-url",       // Lambda function URLs: <url-id>.lambda-url.<region>.<host>
-            "emr-serverless",   // EMR Serverless: emr-serverless.<host>
-            "cloudfront",       // CloudFront distribution domains: <dist-id>.cloudfront.net
-            "mwaa",
-            "elb");
+            "execute-api",      // ApiGatewayExecuteApiHostFilter: <api-id>.execute-api[.<region>].<host>
+            "lambda-url",       // LambdaUrlRoutingFilter: <url-id>.lambda-url.<region>.<host>
+            "emr-serverless",   // EmrServerlessRouteFilter: emr-serverless.<host>
+            "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
+
+    /**
+     * An AWS region id: {@code {geo}-{direction(s)}-{number}} (us-east-1, ap-northeast-2,
+     * us-gov-east-1) — the same shape {@code RegionResolver} matches.
+     *
+     * <p>A hostname that carries a region label in a non-leading position and <em>no</em> S3
+     * qualifier belongs to some other regional service — {@code <acct>.dkr.ecr.<region>.<host>},
+     * {@code <domain>.<region>.es.<host>}, {@code <id>.iot.<region>.<host>} — never to S3. A real
+     * S3 virtual host always carries {@code s3}, {@code s3.<region>} or {@code s3-website-<region>},
+     * and when it does the region is read from there instead, so a bucket whose own name ends in a
+     * region stays addressable in the qualified forms. One structural rule covers every regional
+     * service at once, where a label denylist would have to enumerate them and would silently
+     * hijack the first one it missed.
+     */
+    private static final Pattern REGION_LABEL =
+            Pattern.compile("[a-z]{2}-[a-z-]+-\\d+", Pattern.CASE_INSENSITIVE);
 
     @Inject
     public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
@@ -323,7 +344,20 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             }
         }
         if (qualifier < 0) {
-            return requireQualifier ? null : prefix;
+            if (requireQualifier) {
+                return null;
+            }
+            // No S3 qualifier anywhere, and a region label appears in a non-leading position:
+            // this is another service's regional virtual host, not a dotted bucket. See
+            // REGION_LABEL — this is what keeps <acct>.dkr.ecr.<region>.localhost and
+            // <domain>.<region>.es.localhost from being served as buckets. Index 0 is exempt so
+            // a bucket literally named "us-east-1" keeps working.
+            for (int i = 1; i < labels.length; i++) {
+                if (REGION_LABEL.matcher(labels[i]).matches()) {
+                    return null;
+                }
+            }
+            return prefix;
         }
         if (qualifier == 0) {
             // Bare service endpoint: s3.<host>, s3.<region>.<host>, s3-website-<region>.<host>
