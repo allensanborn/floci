@@ -541,4 +541,27 @@ class S3VirtualHostFilterTest {
         assertEquals("my-bucket", S3VirtualHostFilter.extractBucket(
                 "my-bucket.localhost", "localhost", DEFAULT_SUFFIXES));
     }
+
+    /**
+     * The cost of the four remaining denylist labels, pinned rather than left implicit: a bucket
+     * whose name carries one of them in a non-leading position is not reachable virtual-hosted and
+     * falls back to path-style, which is what it did before this change too.
+     *
+     * <p>That is the deliberate side of the trade. The alternative failure — validating each
+     * service's hostname grammar and letting anything that does not match through — is a silent
+     * cross-service hijack: S3 answering a request meant for API Gateway. A bucket that is
+     * awkward to address virtual-hosted is recoverable by the client; an API that intermittently
+     * returns S3 responses is not. Each label here names a filter in this repository that claims
+     * that hostname, so the set stays small and justified.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "my.execute-api.archive.localhost,   localhost",
+            "my.lambda-url.archive.localhost,    localhost",
+            "my.emr-serverless.archive.localhost, localhost",
+            "my.cloudfront.archive.localhost,    localhost",
+    })
+    void bucketNamesCarryingADenylistedServiceLabelAreDeliberatelyNotReachable(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
 }
