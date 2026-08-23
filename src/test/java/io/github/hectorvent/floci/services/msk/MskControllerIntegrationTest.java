@@ -162,16 +162,20 @@ class MskControllerIntegrationTest {
             .statusCode(200)
             .body("latestRevision.revision", equalTo(2));
 
-        given()
-        .when()
-            .get("/v1/configurations/{arn}/revisions/{revision}", arn, 1)
-        .then()
-            .statusCode(200)
-            .body("serverProperties", equalTo(""));
+        // Both revisions, not just the one create wrote: an empty update has to store ""
+        // rather than silently carry the previous revision's properties forward.
+        for (int revision : new int[] { 1, 2 }) {
+            given()
+            .when()
+                .get("/v1/configurations/{arn}/revisions/{revision}", arn, revision)
+            .then()
+                .statusCode(200)
+                .body("serverProperties", equalTo(""));
+        }
     }
 
     @Test
-    void createConfigurationRejectsAbsentServerProperties() {
+    void createConfigurationRejectsMissingServerProperties() {
         given()
             .contentType("application/json")
             .body("""
