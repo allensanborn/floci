@@ -253,16 +253,67 @@ class Ec2Ipv6RouteTest {
     }
 
     /**
-     * A prefix-list route arrives with neither destination. Storing it would put a route in the
-     * table that nothing can ever address again — AWS answers MissingParameter instead.
+     * A prefix list is the third destination kind, not the absence of one: the CreateRoute
+     * reference says "You must specify either a destination CIDR block or a prefix list ID", and
+     * DestinationPrefixListId is a member of the Route output shape alongside the two CIDR
+     * members. It round-trips and stays addressable, like the other two.
      */
     @Test
     @Order(9)
+    void aPrefixListRouteRoundTripsAndIsDeletable() {
+        String prefixList = "pl-0ipv6route0test0";
+
+        ec2()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationPrefixListId", prefixList)
+            .formParam("GatewayId", INTERNET_GATEWAY)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateRouteResponse.return", equalTo("true"));
+
+        String prefixListNode =
+                ROUTE_SET + ".find { it.destinationPrefixListId == '" + prefixList + "' }";
+        describe()
+            .body(prefixListNode + ".gatewayId", equalTo(INTERNET_GATEWAY))
+            // It carries neither CIDR member: the three destinations are separate members.
+            .body(hasXPath("count(//*[local-name()='item']"
+                    + "[*[local-name()='destinationPrefixListId']='" + prefixList + "']"
+                    + "/*[local-name()='destinationCidrBlock'])", equalTo("0")))
+            .body(hasXPath("count(//*[local-name()='item']"
+                    + "[*[local-name()='destinationPrefixListId']='" + prefixList + "']"
+                    + "/*[local-name()='destinationIpv6CidrBlock'])", equalTo("0")));
+
+        // Addressable again — before it was stored with no destination at all, so nothing could
+        // ever match it, and its null IPv4 destination made every DeleteRoute on the table throw.
+        ec2()
+            .formParam("Action", "DeleteRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationPrefixListId", prefixList)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        describe()
+            .body(hasXPath("count(//*[local-name()='destinationPrefixListId'])", equalTo("0")))
+            .body(hasXPath("count(//*[local-name()='routeSet']/*[local-name()='item'])",
+                    equalTo("1")));
+    }
+
+    /**
+     * Naming no destination at all is the case with no valid reading: nothing could ever address
+     * the route again. AWS documents no operation-specific error here, so the code is chosen from
+     * EC2's common client error codes rather than confirmed against the real service.
+     */
+    @Test
+    @Order(10)
     void createRouteWithNoDestinationIsRejected() {
         ec2()
             .formParam("Action", "CreateRoute")
             .formParam("RouteTableId", routeTableId)
-            .formParam("DestinationPrefixListId", "pl-0ipv6route0test0")
             .formParam("GatewayId", INTERNET_GATEWAY)
         .when()
             .post("/")
@@ -276,9 +327,9 @@ class Ec2Ipv6RouteTest {
                     equalTo("1")));
     }
 
-    /** One destination per route: a request naming both would be addressable two ways. */
+    /** One destination per route: a request naming two would be addressable two ways. */
     @Test
-    @Order(10)
+    @Order(11)
     void createRouteWithBothDestinationsIsRejected() {
         ec2()
             .formParam("Action", "CreateRoute")
@@ -298,7 +349,7 @@ class Ec2Ipv6RouteTest {
      * stored and reported rather than dropped, so the route is not left targetless.
      */
     @Test
-    @Order(11)
+    @Order(12)
     void anEgressOnlyInternetGatewayTargetIsReportedBack() {
         String egressOnlyGateway = "eigw-0ipv6route0test";
 
@@ -315,5 +366,44 @@ class Ec2Ipv6RouteTest {
 
         describe()
             .body(IPV6_NODE + ".egressOnlyInternetGatewayId", equalTo(egressOnlyGateway));
+    }
+
+    /**
+     * An egress-only internet gateway is IPv6-only and is a target in its own right, so combining
+     * it with an IPv4 target would persist a route with two targets and report both back. Only the
+     * newly accepted parameter is validated: CreateRoute has never enforced exclusivity between
+     * GatewayId and NatGatewayId, and starting to would be a behaviour change beyond this fix.
+     */
+    @Test
+    @Order(13)
+    void anEgressOnlyInternetGatewayCannotBeCombinedWithAnotherTarget() {
+        ec2()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationIpv6CidrBlock", "2001:db8:1::/48")
+            .formParam("EgressOnlyInternetGatewayId", "eigw-0ipv6route0test")
+            .formParam("GatewayId", INTERNET_GATEWAY)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+
+        ec2()
+            .formParam("Action", "CreateRoute")
+            .formParam("RouteTableId", routeTableId)
+            .formParam("DestinationIpv6CidrBlock", "2001:db8:1::/48")
+            .formParam("EgressOnlyInternetGatewayId", "eigw-0ipv6route0test")
+            .formParam("NatGatewayId", NAT_GATEWAY)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+
+        // Nothing was persisted by either attempt.
+        describe()
+            .body(hasXPath("count(//*[local-name()='destinationIpv6CidrBlock']"
+                    + "[text()='2001:db8:1::/48'])", equalTo("0")));
     }
 }

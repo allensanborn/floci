@@ -4451,47 +4451,89 @@ public class Ec2Service implements ContainerTeardown {
      * an IPv6 route in the table used to make every DeleteRoute against that table throw, IPv4
      * ones included.
      */
-    private static boolean matchesDestination(Route route, String destinationCidrBlock, String destinationIpv6CidrBlock) {
+    private static boolean matchesDestination(Route route, String destinationCidrBlock,
+                                              String destinationIpv6CidrBlock, String destinationPrefixListId) {
         if (isSet(destinationCidrBlock) && destinationCidrBlock.equals(route.getDestinationCidrBlock())) {
             return true;
         }
-        return isSet(destinationIpv6CidrBlock) && destinationIpv6CidrBlock.equals(route.getDestinationIpv6CidrBlock());
+        if (isSet(destinationIpv6CidrBlock) && destinationIpv6CidrBlock.equals(route.getDestinationIpv6CidrBlock())) {
+            return true;
+        }
+        return isSet(destinationPrefixListId) && destinationPrefixListId.equals(route.getDestinationPrefixListId());
     }
 
     /** The destination naming a route, for error messages. */
-    private static String destinationLabel(String destinationCidrBlock, String destinationIpv6CidrBlock) {
-        return isSet(destinationCidrBlock) ? destinationCidrBlock : destinationIpv6CidrBlock;
+    private static String destinationLabel(String destinationCidrBlock, String destinationIpv6CidrBlock,
+                                           String destinationPrefixListId) {
+        if (isSet(destinationCidrBlock)) {
+            return destinationCidrBlock;
+        }
+        return isSet(destinationIpv6CidrBlock) ? destinationIpv6CidrBlock : destinationPrefixListId;
     }
 
     /**
-     * AWS takes one destination per route: DestinationCidrBlock or DestinationIpv6CidrBlock
-     * (or a prefix list, which this emulator does not model). Neither is a MissingParameter;
-     * both would leave a route reachable under two addresses.
+     * AWS takes one destination per route, and there are three kinds of it: DestinationCidrBlock,
+     * DestinationIpv6CidrBlock and DestinationPrefixListId. The CreateRoute reference is explicit
+     * that a prefix list is a destination in its own right — "You must specify either a destination
+     * CIDR block or a prefix list ID" — and all three are members of the Route output shape, so a
+     * prefix-list route is stored and reported like any other rather than rejected.
+     *
+     * <p>Naming none of them is the case that has no valid reading: the route could never be
+     * addressed again by DeleteRoute or ReplaceRoute, which match on the destination. AWS declares
+     * no operation-specific error for CreateRoute, DeleteRoute or ReplaceRoute — the API reference
+     * Errors section is empty and the service model carries no error shapes — so the code here is
+     * chosen from EC2's common client error codes rather than confirmed against the real service.
+     * MissingParameter ("the request is missing a required parameter") is the closest fit.
      */
-    private static void requireExactlyOneDestination(String action, String destinationCidrBlock, String destinationIpv6CidrBlock) {
-        boolean hasIpv4 = isSet(destinationCidrBlock);
-        boolean hasIpv6 = isSet(destinationIpv6CidrBlock);
-        if (!hasIpv4 && !hasIpv6) {
+    private static void requireExactlyOneDestination(String action, String destinationCidrBlock,
+                                                     String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        int given = (isSet(destinationCidrBlock) ? 1 : 0)
+                + (isSet(destinationIpv6CidrBlock) ? 1 : 0)
+                + (isSet(destinationPrefixListId) ? 1 : 0);
+        if (given == 0) {
             throw new AwsException("MissingParameter",
-                    "The request must include DestinationCidrBlock or DestinationIpv6CidrBlock; "
-                            + "routes are matched on their destination.", 400);
+                    "The request must include DestinationCidrBlock, DestinationIpv6CidrBlock or "
+                            + "DestinationPrefixListId; routes are matched on their destination.", 400);
         }
-        if (hasIpv4 && hasIpv6) {
+        if (given > 1) {
             throw new AwsException("InvalidParameterCombination",
-                    action + " takes one destination: DestinationCidrBlock or DestinationIpv6CidrBlock, not both.", 400);
+                    action + " takes one destination: DestinationCidrBlock, DestinationIpv6CidrBlock or "
+                            + "DestinationPrefixListId, not several.", 400);
+        }
+    }
+
+    /**
+     * An egress-only internet gateway is IPv6-only and is a target in its own right, so it cannot
+     * be combined with the IPv4 targets. Only the newly accepted parameter is validated here:
+     * CreateRoute has never enforced exclusivity between GatewayId and NatGatewayId, and starting
+     * to would be a behaviour change beyond this fix.
+     */
+    private static void requireEgressOnlyGatewayIsTheOnlyTarget(String gatewayId, String natGatewayId,
+                                                                String egressOnlyInternetGatewayId) {
+        if (!isSet(egressOnlyInternetGatewayId)) {
+            return;
+        }
+        if (isSet(gatewayId) || isSet(natGatewayId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "EgressOnlyInternetGatewayId cannot be combined with GatewayId or NatGatewayId; "
+                            + "a route takes one target.", 400);
         }
     }
 
     public void createRoute(String region, String routeTableId, String destinationCidrBlock,
-                            String destinationIpv6CidrBlock, String gatewayId, String natGatewayId,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId,
+                            String gatewayId, String natGatewayId,
                             String egressOnlyInternetGatewayId) {
-        requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock);
+        requireExactlyOneDestination("CreateRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
+        requireEgressOnlyGatewayIsTheOnlyTarget(gatewayId, natGatewayId, egressOnlyInternetGatewayId);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route route = new Route(destinationCidrBlock, gatewayId, "CreateRoute");
             route.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
+            route.setDestinationPrefixListId(destinationPrefixListId);
             route.setNatGatewayId(natGatewayId);
             route.setEgressOnlyInternetGatewayId(egressOnlyInternetGatewayId);
             next.add(route);
@@ -4501,8 +4543,10 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     public void replaceRoute(String region, String routeTableId, String destinationCidrBlock,
-                             String destinationIpv6CidrBlock, String gatewayId, String natGatewayId) {
-        requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock);
+                             String destinationIpv6CidrBlock, String destinationPrefixListId,
+                             String gatewayId, String natGatewayId) {
+        requireExactlyOneDestination("ReplaceRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
         // AWS takes exactly one target. Rejecting both-or-neither also keeps the targets this
         // emulator cannot model (transit gateway, network interface, peering connection, ...) from
         // silently clearing the route and reporting success.
@@ -4518,17 +4562,20 @@ public class Ec2Service implements ContainerTeardown {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
             Route existing = next.stream()
-                    .filter(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock))
+                    .filter(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+                            destinationPrefixListId))
                     .findFirst()
                     .orElseThrow(() -> new AwsException("InvalidRoute.NotFound",
                             "The route identified by "
-                                    + destinationLabel(destinationCidrBlock, destinationIpv6CidrBlock)
+                                    + destinationLabel(destinationCidrBlock, destinationIpv6CidrBlock,
+                                            destinationPrefixListId)
                                     + " does not exist", 400));
 
             // The target the request does not name is cleared rather than carried over from the
             // route being replaced.
             Route replacement = new Route(destinationCidrBlock, hasGateway ? gatewayId : null, existing.getOrigin());
             replacement.setDestinationIpv6CidrBlock(destinationIpv6CidrBlock);
+            replacement.setDestinationPrefixListId(destinationPrefixListId);
             replacement.setNatGatewayId(hasNatGateway ? natGatewayId : null);
             next.set(next.indexOf(existing), replacement);
             current.setRoutes(next);
@@ -4536,13 +4583,16 @@ public class Ec2Service implements ContainerTeardown {
         }
     }
 
-    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock, String destinationIpv6CidrBlock) {
-        requireExactlyOneDestination("DeleteRoute", destinationCidrBlock, destinationIpv6CidrBlock);
+    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        requireExactlyOneDestination("DeleteRoute", destinationCidrBlock, destinationIpv6CidrBlock,
+                destinationPrefixListId);
         ensureDefaultResources(region);
         synchronized (lockFor(key(region, routeTableId))) {
             RouteTable current = getRequiredRouteTable(region, routeTableId);
             List<Route> next = new ArrayList<>(current.getRoutes());
-            next.removeIf(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock));
+            next.removeIf(r -> matchesDestination(r, destinationCidrBlock, destinationIpv6CidrBlock,
+                    destinationPrefixListId));
             current.setRoutes(next);
             routeTables.put(key(region, routeTableId), current);
         }
@@ -4930,6 +4980,9 @@ public class Ec2Service implements ContainerTeardown {
                 case "route.destination-ipv6-cidr-block" -> rt.getRoutes().stream()
                         .anyMatch(r -> r.getDestinationIpv6CidrBlock() != null
                                 && matchesValue(values, r.getDestinationIpv6CidrBlock()));
+                case "route.destination-prefix-list-id" -> rt.getRoutes().stream()
+                        .anyMatch(r -> r.getDestinationPrefixListId() != null
+                                && matchesValue(values, r.getDestinationPrefixListId()));
                 default -> true;
             };
         }

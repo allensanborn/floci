@@ -304,8 +304,8 @@ class Ec2ReplaceRouteIntegrationTest {
     }
 
     /**
-     * A prefix-list ReplaceRoute carries neither DestinationCidrBlock nor DestinationIpv6CidrBlock;
-     * it must not 500. IPv6 destinations are now accepted — see {@code Ec2Ipv6RouteTest}.
+     * A ReplaceRoute naming no destination at all cannot identify a route; it must not 500. All
+     * three destination kinds are now accepted — see {@code Ec2Ipv6RouteTest}.
      */
     @Test
     @Order(7)
@@ -313,7 +313,6 @@ class Ec2ReplaceRouteIntegrationTest {
         given()
             .formParam("Action", "ReplaceRoute")
             .formParam("RouteTableId", routeTableId)
-            .formParam("DestinationPrefixListId", "pl-0replace0route0test")
             .formParam("GatewayId", INTERNET_GATEWAY)
             .header("Authorization", AUTH_HEADER)
         .when()

@@ -815,11 +815,12 @@ public class CloudFormationResourceProvisioner {
         String routeTableId = resolveOptional(props, "RouteTableId", engine);
         String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
         String destinationIpv6Cidr = resolveOptional(props, "DestinationIpv6CidrBlock", engine);
+        String destinationPrefixListId = resolveOptional(props, "DestinationPrefixListId", engine);
         String gatewayId = resolveOptional(props, "GatewayId", engine);
         String natGatewayId = resolveOptional(props, "NatGatewayId", engine);
         String egressOnlyInternetGatewayId = resolveOptional(props, "EgressOnlyInternetGatewayId", engine);
         ec2Service.createRoute(region, routeTableId, destinationCidr, destinationIpv6Cidr,
-                gatewayId, natGatewayId, egressOnlyInternetGatewayId);
+                destinationPrefixListId, gatewayId, natGatewayId, egressOnlyInternetGatewayId);
         r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
     }
 

@@ -9,6 +9,7 @@ public class Route {
 
     private String destinationCidrBlock;
     private String destinationIpv6CidrBlock;
+    private String destinationPrefixListId;
     private String gatewayId;
     private String natGatewayId;
     private String egressOnlyInternetGatewayId;
@@ -28,6 +29,9 @@ public class Route {
 
     public String getDestinationIpv6CidrBlock() { return destinationIpv6CidrBlock; }
     public void setDestinationIpv6CidrBlock(String destinationIpv6CidrBlock) { this.destinationIpv6CidrBlock = destinationIpv6CidrBlock; }
+
+    public String getDestinationPrefixListId() { return destinationPrefixListId; }
+    public void setDestinationPrefixListId(String destinationPrefixListId) { this.destinationPrefixListId = destinationPrefixListId; }
 
     public String getGatewayId() { return gatewayId; }
     public void setGatewayId(String gatewayId) { this.gatewayId = gatewayId; }
