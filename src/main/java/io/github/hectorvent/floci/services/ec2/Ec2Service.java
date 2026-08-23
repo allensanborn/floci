@@ -37,6 +37,7 @@ import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -152,12 +153,30 @@ public class Ec2Service implements ContainerTeardown {
     // subnetId → counter for IP assignment (runtime-only, not persisted)
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
+    /**
+     * Null only in the hermetic unit tests, which reach the package-private constructors that do
+     * not take it; CDI always supplies one. Every use goes through a null guard for that reason.
+     */
+    private final VpcNetworkManager vpcNetworkManager;
+
+    // Package-private for hermetic tests: the same wiring as the CDI constructor below, minus the
+    // Docker-backed VPC networking those tests neither start nor need.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, null);
+    }
+
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
-                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      VpcNetworkManager vpcNetworkManager) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                vpcNetworkManager,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 storageFactory.create("ec2", "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -213,6 +232,7 @@ public class Ec2Service implements ContainerTeardown {
                StorageBackend<String, ManagedPrefixList> managedPrefixLists,
                StorageBackend<String, List<Tag>> tags) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+                null,
                 vpcs, subnets, securityGroups, securityGroupRules, internetGateways, routeTables, keyPairs,
                 addresses, instances, volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
                 natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
@@ -221,11 +241,13 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
-    // arity so existing fixtures still resolve it (#2103 and #2106 both broke CI by moving it).
+    // arity so existing fixtures still resolve it (#2103 and #2106 both broke CI by moving it), and
+    // passes a null VpcNetworkManager: those tests never launch a container.
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                Ec2InstanceTypeCatalog instanceTypeCatalog,
+               VpcNetworkManager vpcNetworkManager,
                StorageBackend<String, Vpc> vpcs,
                StorageBackend<String, Subnet> subnets,
                StorageBackend<String, SecurityGroup> securityGroups,
@@ -257,6 +279,7 @@ public class Ec2Service implements ContainerTeardown {
         this.amiImageResolver = amiImageResolver;
         this.imageCatalog = imageCatalog;
         this.instanceTypeCatalog = instanceTypeCatalog;
+        this.vpcNetworkManager = vpcNetworkManager;
         this.vpcs = vpcs;
         this.subnets = subnets;
         this.securityGroups = securityGroups;
@@ -296,6 +319,8 @@ public class Ec2Service implements ContainerTeardown {
             return;
         }
 
+        restoreVpcNetworks();
+
         int restored = 0;
         for (String key : instances.keys()) {
             Instance instance = instances.get(key).orElse(null);
@@ -313,6 +338,79 @@ public class Ec2Service implements ContainerTeardown {
         }
         if (restored > 0) {
             LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
+        }
+    }
+
+    /**
+     * Rebuilds the in-memory VPC address plan from persisted VPCs and subnets, after clearing
+     * out any Docker networks a previous run of this same emulator left behind.
+     *
+     * <p>Order matters and is the whole point. Orphaned networks still hold their IPAM
+     * reservations, so re-planning first would read a dead run's own bridges as collisions and
+     * quietly substitute a CIDR for every VPC that used to work.
+     */
+    private void restoreVpcNetworks() {
+        if (vpcNetworkManager == null || !vpcNetworkManager.enabled()) {
+            return;
+        }
+        vpcNetworkManager.reconcileOrphans((region, vpcId) -> vpcs.get(key(region, vpcId)).isPresent());
+        for (String storageKey : vpcs.keys()) {
+            vpcs.get(storageKey).ifPresent(vpc ->
+                    vpcNetworkManager.declareVpc(vpc.getRegion(), vpc.getVpcId(), vpc.getCidrBlock()));
+        }
+        for (String storageKey : subnets.keys()) {
+            subnets.get(storageKey).ifPresent(subnet -> vpcNetworkManager.declareSubnet(
+                    subnet.getRegion(), subnet.getVpcId(), subnet.getSubnetId(), subnet.getCidrBlock()));
+        }
+        reserveRestoredPrivateIps();
+    }
+
+    /**
+     * Re-claims the private addresses that persisted, non-terminated instances still hold.
+     *
+     * <p>The lease table is in-memory only, so a restart rebuilds it empty while the containers of
+     * those instances go on holding their addresses. Without this the next RunInstances is handed
+     * {@code .10} again — an address a live container already answers on — and Docker refuses the
+     * attach, leaving the new instance on the bridge with a reported IP that is someone else's.
+     *
+     * <p>Every refusal is tolerated and logged rather than thrown: an address may now fall outside
+     * a subnet whose effective range was substituted this run, and two persisted instances may name
+     * the same address. Startup is not the place to fail over state that is already on disk.
+     */
+    private void reserveRestoredPrivateIps() {
+        int reserved = 0;
+        int skipped = 0;
+        for (String storageKey : instances.keys()) {
+            Instance instance = instances.get(storageKey).orElse(null);
+            if (instance == null || instance.getSubnetId() == null
+                    || instance.getPrivateIpAddress() == null
+                    || instance.getState() == null
+                    || "terminated".equals(instance.getState().getName())) {
+                continue;
+            }
+            if (vpcNetworkManager.reservePrivateIp(instance.getRegion(), instance.getSubnetId(),
+                    instance.getPrivateIpAddress())) {
+                reserved++;
+            }
+            else {
+                skipped++;
+            }
+        }
+        if (reserved > 0 || skipped > 0) {
+            LOG.debugv("Re-reserved {0} private address(es) held by restored instances; {1} could not be "
+                    + "reserved", String.valueOf(reserved), String.valueOf(skipped));
+        }
+    }
+
+    private void declareVpcNetwork(String region, String vpcId, String cidrBlock) {
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.declareVpc(region, vpcId, cidrBlock);
+        }
+    }
+
+    private void declareSubnetNetwork(String region, String vpcId, String subnetId, String cidrBlock) {
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.declareSubnet(region, vpcId, subnetId, cidrBlock);
         }
     }
 
@@ -350,6 +448,7 @@ public class Ec2Service implements ContainerTeardown {
         defaultVpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
         vpcs.put(key(region, vpcId), defaultVpc);
+        declareVpcNetwork(region, vpcId, "172.31.0.0/16");
 
         // Default subnets (a/b/c)
         String[] azSuffixes = {"a", "b", "c"};
@@ -373,6 +472,7 @@ public class Ec2Service implements ContainerTeardown {
             subnet.setRegion(region);
             subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetIds[i]).toString());
             subnets.put(key(region, subnetIds[i]), subnet);
+            declareSubnetNetwork(region, vpcId, subnetIds[i], cidrBlocks[i]);
         }
 
         createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region));
@@ -2317,6 +2417,15 @@ public class Ec2Service implements ContainerTeardown {
     }
 
     private String assignPrivateIp(String region, String subnetId) {
+        // A Docker-backed subnet allocates the real thing: an address on the network the
+        // instance's container will actually hold. Only when there is no such network does
+        // this fall back to the synthesised address below, which nothing can connect to.
+        if (vpcNetworkManager != null) {
+            Optional<String> allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
+            if (allocated.isPresent()) {
+                return allocated.get();
+            }
+        }
         if (subnetId == null) {
             return "172.31.0." + (10 + new Random().nextInt(200));
         }
@@ -2596,6 +2705,7 @@ public class Ec2Service implements ContainerTeardown {
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
         vpcs.put(key(region, vpcId), vpc);
+        declareVpcNetwork(region, vpcId, cidrBlock);
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
         createMainRouteTable(region, vpc, "rtb-" + randomHex(17), "rtbassoc-" + randomHex(17));
@@ -2625,6 +2735,9 @@ public class Ec2Service implements ContainerTeardown {
                     attachment -> vpcId.equals(attachment.getVpcId()),
                     "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
             vpcs.delete(key(region, vpcId));
+        }
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.deleteVpcNetwork(region, vpcId);
         }
     }
 
@@ -2821,6 +2934,7 @@ public class Ec2Service implements ContainerTeardown {
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
         subnets.put(key(region, subnetId), subnet);
+        declareSubnetNetwork(region, vpcId, subnetId, cidrBlock);
 
         // Every subnet starts associated with its VPC's default NACL. ReplaceNetworkAclAssociation
         // later moves it onto a custom NACL, so this association must exist for that lookup to work.
@@ -2855,6 +2969,9 @@ public class Ec2Service implements ContainerTeardown {
                     attachment -> attachment.getSubnetIds().contains(subnetId),
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
             subnets.delete(key(region, subnetId));
+        }
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.forgetSubnet(region, subnetId);
         }
     }
 

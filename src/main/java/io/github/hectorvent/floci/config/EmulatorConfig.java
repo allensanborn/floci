@@ -1725,6 +1725,43 @@ public interface EmulatorConfig {
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();
+
+        /** Docker-network backing for VPCs and subnets. */
+        VpcNetworksConfig vpcNetworks();
+    }
+
+    /**
+     * Backs each VPC with a real Docker network so instances get private addresses drawn from
+     * the CIDR the caller declared, and instances in different VPCs cannot route to each other.
+     */
+    interface VpcNetworksConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Private range that substituted CIDRs are allocated from, used when a declared VPC CIDR
+         * is absent, malformed, outside RFC 1918, or already claimed on the Docker daemon. Must
+         * itself be RFC 1918. The default sits high in 10/8, away from both Docker's default
+         * pools (172.17-172.31, 192.168) and the low 10.x ranges corporate VPNs favour.
+         */
+        @WithDefault("10.240.0.0/12")
+        String fallbackPool();
+
+        /** Prefix length of each block handed out of {@link #fallbackPool}. */
+        @WithDefault("16")
+        int fallbackPrefixLength();
+
+        /**
+         * When true, VPC networks left behind by a previous run of this same Floci instance are
+         * removed at startup. Scoped by the emulator's API port, so instances sharing a Docker
+         * daemon never reconcile each other's networks.
+         */
+        @WithDefault("true")
+        boolean reconcileOnStartup();
+
+        /** Docker network driver for VPC networks. */
+        @WithDefault("bridge")
+        String driver();
     }
 
     interface AppConfigServiceConfig {

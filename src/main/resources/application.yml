@@ -399,6 +399,19 @@ floci:
       socat-image: alpine/socat
       mock: false
       aws-faithful-private-ip: false
+      # Each VPC gets a real Docker network, so an instance's private IP is an address its
+      # container actually holds and instances in different VPCs are on different bridges.
+      vpc-networks:
+        enabled: true                             # FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED
+        # Used only when a declared VPC CIDR cannot be honoured — absent, malformed, outside
+        # RFC 1918, or already claimed on this Docker daemon. Substitutions are logged at WARN;
+        # a reported private IP that does not match the declared CIDR is never silent.
+        fallback-pool: 10.240.0.0/12              # FLOCI_SERVICES_EC2_VPC_NETWORKS_FALLBACK_POOL
+        fallback-prefix-length: 16                # FLOCI_SERVICES_EC2_VPC_NETWORKS_FALLBACK_PREFIX_LENGTH
+        # Remove VPC networks left behind by a previous run of THIS emulator (scoped by API port,
+        # so Floci instances sharing a daemon never reconcile each other's networks).
+        reconcile-on-startup: true                # FLOCI_SERVICES_EC2_VPC_NETWORKS_RECONCILE_ON_STARTUP
+        driver: bridge                            # FLOCI_SERVICES_EC2_VPC_NETWORKS_DRIVER
     ecs:
       enabled: true
       mock: false
