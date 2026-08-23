@@ -548,7 +548,21 @@ public class VpcNetworkManager {
         }
     }
 
-    private void disconnectAll(Network network) {
+    /**
+     * Detaches whatever is still on the network so it can be removed.
+     *
+     * <p>The container map has to be re-read with an inspect: Docker's network <em>list</em>
+     * endpoint leaves it empty, so a crashed run's containers — the exact case this exists for —
+     * are invisible in the listing and the removal then fails with "has active endpoints".
+     */
+    private void disconnectAll(Network listed) {
+        Network network;
+        try {
+            network = dockerClient.inspectNetworkCmd().withNetworkId(listed.getId()).exec();
+        } catch (Exception e) {
+            LOG.debugv("Could not inspect {0} before removal: {1}", listed.getName(), e.getMessage());
+            return;
+        }
         Map<String, Network.ContainerNetworkConfig> containers = network.getContainers();
         if (containers == null) {
             return;
@@ -556,12 +570,12 @@ public class VpcNetworkManager {
         for (String containerId : containers.keySet()) {
             try {
                 dockerClient.disconnectFromNetworkCmd()
-                        .withNetworkId(network.getId())
+                        .withNetworkId(listed.getId())
                         .withContainerId(containerId)
                         .withForce(true)
                         .exec();
             } catch (Exception e) {
-                LOG.debugv("Could not disconnect {0} from {1}: {2}", containerId, network.getName(), e.getMessage());
+                LOG.debugv("Could not disconnect {0} from {1}: {2}", containerId, listed.getName(), e.getMessage());
             }
         }
     }

@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkCmd;
 import com.github.dockerjava.api.command.CreateNetworkResponse;
+import com.github.dockerjava.api.command.DisconnectFromNetworkCmd;
 import com.github.dockerjava.api.command.InspectNetworkCmd;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import com.github.dockerjava.api.command.RemoveNetworkCmd;
@@ -63,9 +64,21 @@ class VpcNetworkManagerTest {
         when(list.exec()).thenAnswer(invocation -> List.copyOf(existingNetworks));
         when(docker.listNetworksCmd()).thenReturn(list);
 
-        InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
-        when(inspect.exec()).thenThrow(new NotFoundException("no such network"));
-        when(docker.inspectNetworkCmd()).thenReturn(inspect);
+        // Inspect resolves against the same fixture list, so a network with live endpoints can be
+        // told apart from one that does not exist yet.
+        when(docker.inspectNetworkCmd()).thenAnswer(listCall -> {
+            InspectNetworkCmd inspect = mock(InspectNetworkCmd.class);
+            String[] requested = new String[1];
+            when(inspect.withNetworkId(anyString())).thenAnswer(call -> {
+                requested[0] = call.getArgument(0);
+                return inspect;
+            });
+            when(inspect.exec()).thenAnswer(call -> existingNetworks.stream()
+                    .filter(n -> n.getId().equals(requested[0]) || n.getName().equals(requested[0]))
+                    .findFirst()
+                    .orElseThrow(() -> new NotFoundException("no such network")));
+            return inspect;
+        });
 
         CreateNetworkCmd create = mock(CreateNetworkCmd.class, RETURNS_SELF);
         when(create.exec()).thenReturn(new CreateNetworkResponse());
@@ -73,6 +86,9 @@ class VpcNetworkManagerTest {
 
         ConnectToNetworkCmd connect = mock(ConnectToNetworkCmd.class, RETURNS_SELF);
         when(docker.connectToNetworkCmd()).thenReturn(connect);
+
+        when(docker.disconnectFromNetworkCmd())
+                .thenReturn(mock(DisconnectFromNetworkCmd.class, RETURNS_SELF));
 
         when(docker.removeNetworkCmd(anyString())).thenAnswer(invocation -> {
             removedNetworks.add(invocation.getArgument(0));
@@ -83,7 +99,13 @@ class VpcNetworkManagerTest {
     }
 
     private void existingNetwork(String name, String subnet, Map<String, String> labels) {
+        existingNetwork(name, subnet, labels, Map.of());
+    }
+
+    private void existingNetwork(String name, String subnet, Map<String, String> labels,
+                                 Map<String, Network.ContainerNetworkConfig> containers) {
         Network network = mock(Network.class);
+        when(network.getContainers()).thenReturn(containers);
         when(network.getName()).thenReturn(name);
         when(network.getId()).thenReturn(name);
         when(network.getLabels()).thenReturn(labels);
@@ -262,6 +284,21 @@ class VpcNetworkManagerTest {
         assertEquals(List.of("floci-vpc-4650-us-east-1-vpc-dead"), removedNetworks,
                 "a live VPC keeps its network, another emulator's networks are never touched, "
                         + "and networks Floci did not create are out of scope entirely");
+    }
+
+    @Test
+    void reconcileDetachesAContainerTheCrashedRunLeftOnTheNetwork() {
+        Map<String, Network.ContainerNetworkConfig> attached =
+                Map.of("container-from-a-dead-run", new Network.ContainerNetworkConfig());
+        existingNetwork("floci-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16",
+                ourLabels("vpc-dead", "4650"), attached);
+
+        manager.reconcileOrphans((region, vpcId) -> false);
+
+        // Without the disconnect Docker refuses removal with "has active endpoints", and the
+        // stale IPAM reservation then pushes the next run's identical CIDR into the fallback pool.
+        verify(docker).disconnectFromNetworkCmd();
+        assertEquals(List.of("floci-vpc-4650-us-east-1-vpc-dead"), removedNetworks);
     }
 
     @Test
