@@ -15,6 +15,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -563,5 +564,80 @@ class S3VirtualHostFilterTest {
     })
     void bucketNamesCarryingADenylistedServiceLabelAreDeliberatelyNotReachable(String host, String baseHostname) {
         assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    // --- Regression: an internal "s3" label must not truncate the bucket ---
+
+    /**
+     * A qualifier is a complete tail, not a label that may appear anywhere.
+     *
+     * <p>Scanning labels one at a time and splitting at the last {@code s3} reads
+     * {@code my.s3.archive.localhost} as the bucket {@code my}: a request for
+     * {@code my.s3.archive} silently reads and writes a <em>different, existing</em> bucket.
+     * That is cross-bucket misrouting — strictly worse than the wrong 200 this filter was
+     * written to fix, because the client gets a plausible success against the wrong data.
+     *
+     * <p>Nothing legal follows {@code s3} in an endpoint host except a region,
+     * {@code dualstack.<region>}, or the end of the name, so an {@code s3} label followed by an
+     * arbitrary label is part of the bucket.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "my.s3.archive.localhost,             my.s3.archive",
+            "my.s3.archive.localhost:4566,        my.s3.archive",
+            "www.s3.example.com.localhost,        www.s3.example.com",
+            "my.s3.archive.localhost.floci.io,    my.s3.archive",
+            // s3-website is a qualifier head too, and gets the same treatment
+            "data.s3-website.archive.localhost,   data.s3-website.archive",
+            // ...and the region-shaped tail is not a region id, so it is bucket text as well
+            "my.s3.not-a-region.localhost,        my.s3.not-a-region",
+    })
+    void anInternalS3LabelDoesNotTruncateTheBucket(String host, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
+    }
+
+    /** The same host, stated as the misrouting it would otherwise be. */
+    @Test
+    void aDottedBucketContainingS3IsNeverResolvedToAShorterBucket() {
+        String bucket = S3VirtualHostFilter.extractBucket(
+                "my.s3.archive.localhost", "localhost", DEFAULT_SUFFIXES);
+        assertNotEquals("my", bucket, "bucket my.s3.archive must not resolve to the bucket my");
+        assertEquals("my.s3.archive", bucket);
+    }
+
+    /**
+     * A real qualifier still splits, including for a dotted bucket that itself contains an
+     * {@code s3} label — {@code my.s3.archive} addressed region-qualified.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "my.s3.localhost,                        my",
+            "my.s3.us-east-1.localhost,              my",
+            "my.s3.archive.s3.localhost,             my.s3.archive",
+            "my.s3.archive.s3.us-east-1.localhost,   my.s3.archive",
+            "my.s3.archive.s3.dualstack.eu-west-1.localhost, my.s3.archive",
+    })
+    void aCompleteQualifierTailStillSplitsTheBucket(String host, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
+    }
+
+    /**
+     * The published S3 endpoint qualifier forms, from the Amazon S3 endpoint tables in the AWS
+     * General Reference. The website endpoint spells its region with a dot in newer regions and a
+     * dash in older ones, and both are in service, so both are accepted.
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "www.example.com.s3-website.eu-west-2.localhost,          www.example.com",
+            "www.example.com.s3-website-eu-west-1.localhost,          www.example.com",
+            "my.bucket.s3-fips.us-east-1.localhost,                   my.bucket",
+            "my.bucket.s3-fips.dualstack.us-east-1.amazonaws.com,     my.bucket",
+            "my.bucket.s3-accelerate.amazonaws.com,                   my.bucket",
+            "my.bucket.s3-accelerate.dualstack.amazonaws.com,         my.bucket",
+            "my.bucket.s3-us-west-2.amazonaws.com,                    my.bucket",
+            "my.bucket.s3.dualstack.ap-northeast-3.amazonaws.com,     my.bucket",
+    })
+    void everyPublishedQualifierFormResolvesTheBucket(String host, String expectedBucket) {
+        assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, "localhost", DEFAULT_SUFFIXES));
     }
 }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontDistributionFilter;
@@ -43,7 +44,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      * whose name happens to contain dots — see {@link #bucketFromPrefix}.
      *
      * <p>Every entry names a service that Floci itself routes by {@code Host} in a
-     * <em>regionless</em> form, which {@link #REGION_LABEL} cannot catch. A label is only
+     * <em>regionless</em> form, which {@link #isForeignRegionalHost} cannot catch. A label is only
      * justified when some filter in this repository claims that hostname; a speculative entry
      * costs real bucket names, because {@code my.elb.logs} — AWS's own load-balancer
      * access-log naming convention — is a perfectly legal bucket.
@@ -55,20 +56,16 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             "cloudfront");      // CloudFrontDistributionFilter: <dist-id>.cloudfront.net
 
     /**
-     * An AWS region id: {@code {geo}-{direction(s)}-{number}} (us-east-1, ap-northeast-2,
-     * us-gov-east-1) — the same shape {@code RegionResolver} matches.
-     *
-     * <p>A hostname that carries a region label in a non-leading position and <em>no</em> S3
-     * qualifier belongs to some other regional service — {@code <acct>.dkr.ecr.<region>.<host>},
-     * {@code <domain>.<region>.es.<host>}, {@code <id>.iot.<region>.<host>} — never to S3. A real
-     * S3 virtual host always carries {@code s3}, {@code s3.<region>} or {@code s3-website-<region>},
-     * and when it does the region is read from there instead, so a bucket whose own name ends in a
-     * region stays addressable in the qualified forms. One structural rule covers every regional
-     * service at once, where a label denylist would have to enumerate them and would silently
-     * hijack the first one it missed.
+     * An AWS region id, matched by shape: {@code {geo}-{direction(s)}-{number}}.
      */
     private static final Pattern REGION_LABEL =
             Pattern.compile("[a-z]{2}-[a-z-]+-\\d+", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * The label that makes an S3 endpoint host IPv6-capable: {@code s3.dualstack.<region>},
+     * {@code s3-fips.dualstack.<region>}, {@code s3-accelerate.dualstack}.
+     */
+    private static final String DUALSTACK = "dualstack";
 
     @Inject
     public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
@@ -195,6 +192,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      *   my-bucket.localhost            -> "my-bucket"
      *   www.example.com.localhost      -> "www.example.com"   (dotted bucket)
      *   my.bucket-logs.localhost:4566  -> "my.bucket-logs"    (dots and hyphens)
+     *   my.s3.archive.localhost        -> "my.s3.archive"    (an s3 label followed by a
+     *                                                         non-qualifier is bucket text)
+     *   data.my-cd-1.localhost         -> "data.my-cd-1"     (region-SHAPED, not a region id)
      *   my-bucket.s3.us-east-1.localhost -> "my-bucket"       (region-qualified)
      *   www.example.com.s3.us-east-1.amazonaws.com -> "www.example.com"
      *   s3.localhost                   -> null  (service endpoint, not a bucket named "s3")
@@ -206,9 +206,11 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
      *   my-bucket.floci.svc.cluster.local -> "my-bucket"
      *   floci.svc.cluster.local           -> null  (no bucket prefix, path-style)
      *
-     * <p>Inherent ambiguity: a bucket whose <em>own</em> name ends in a qualifier label
-     * ({@code foo.s3}) is indistinguishable from a qualified reference to {@code foo} and is
-     * read as the latter. The service endpoint always wins over the bucket reading, so
+     * <p>Inherent ambiguity: a bucket whose <em>own</em> name ends in a complete qualifier
+     * ({@code foo.s3}, {@code foo.s3.us-east-1}) is indistinguishable from a qualified reference
+     * to {@code foo} and is read as the latter. That is the whole of the ambiguity — a bucket
+     * whose name merely <em>contains</em> {@code s3} ({@code my.s3.archive}) is not ambiguous and
+     * is not truncated. The service endpoint always wins over the bucket reading, so
      * {@code s3.localhost} stays bucketless.
      *
      * Returns null if the host does not match a virtual-hosted pattern.
@@ -309,12 +311,20 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     /**
      * Reduces the part of the hostname in front of the endpoint host to a bucket name by
-     * removing a trailing S3 qualifier — {@code s3}, {@code s3.<region>},
-     * {@code s3.dualstack.<region>}, {@code s3-website-<region>} — when one is present.
+     * removing a trailing S3 endpoint qualifier when one is present.
      *
      * <p>Everything before the qualifier is the bucket, so dots inside the bucket name survive.
      * A prefix that <em>is</em> a qualifier ({@code s3}, {@code s3.us-east-1}) is the bucketless
      * service endpoint and yields {@code null}.
+     *
+     * <p><strong>A qualifier is a tail, not a label.</strong> The split point is the first index
+     * from which the remaining labels form a <em>complete</em> qualifier — see
+     * {@link #isS3QualifierTail}. Testing labels one at a time truncates dotted buckets whose name
+     * happens to contain {@code s3}: for {@code my.s3.archive.localhost} a per-label test finds
+     * {@code s3} at index 1 and hands back the bucket {@code my}, so a request for
+     * {@code my.s3.archive} silently reads and writes a different bucket. Nothing legal follows
+     * {@code s3} except a region, {@code dualstack.<region>}, or the end of the prefix, so
+     * {@code s3.archive} is bucket text and the whole prefix is the bucket.
      *
      * @param requireQualifier when true, a prefix with no qualifier is not a bucket at all
      *                         (used for {@code amazonaws.com}, where only s3-qualified hosts count)
@@ -339,23 +349,21 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
         int qualifier = -1;
         for (int i = 0; i < labels.length; i++) {
-            if (isS3QualifierLabel(labels[i])) {
+            if (isS3QualifierTail(labels, i)) {
                 qualifier = i;
+                break;
             }
         }
         if (qualifier < 0) {
             if (requireQualifier) {
                 return null;
             }
-            // No S3 qualifier anywhere, and a region label appears in a non-leading position:
+            // No S3 qualifier anywhere, and an AWS region id appears in a non-leading position:
             // this is another service's regional virtual host, not a dotted bucket. See
-            // REGION_LABEL — this is what keeps <acct>.dkr.ecr.<region>.localhost and
-            // <domain>.<region>.es.localhost from being served as buckets. Index 0 is exempt so
-            // a bucket literally named "us-east-1" keeps working.
-            for (int i = 1; i < labels.length; i++) {
-                if (REGION_LABEL.matcher(labels[i]).matches()) {
-                    return null;
-                }
+            // isForeignRegionalHost — this is what keeps <acct>.dkr.ecr.<region>.localhost and
+            // <domain>.<region>.es.localhost from being served as buckets.
+            if (isForeignRegionalHost(labels)) {
+                return null;
             }
             return prefix;
         }
@@ -366,10 +374,93 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         return String.join(".", Arrays.copyOfRange(labels, 0, qualifier));
     }
 
-    /** True for the labels AWS uses to qualify an S3 endpoint: {@code s3} and {@code s3-website*}. */
-    private static boolean isS3QualifierLabel(String label) {
-        String lower = label.toLowerCase();
-        return "s3".equals(lower) || lower.startsWith("s3-website");
+    /**
+     * True when {@code labels[from..]} is exactly an S3 endpoint qualifier — that is, when the
+     * labels from {@code from} onwards account for the <em>whole</em> remainder of the prefix and
+     * spell one of the endpoint forms AWS actually publishes:
+     *
+     * <pre>
+     *   s3                                s3-fips.&lt;region&gt;
+     *   s3.&lt;region&gt;                       s3-fips.dualstack.&lt;region&gt;
+     *   s3.dualstack.&lt;region&gt;             s3-accelerate
+     *   s3-&lt;region&gt;            (legacy)   s3-accelerate.dualstack
+     *   s3-website                        s3-website.&lt;region&gt;    (newer regions)
+     *                                     s3-website-&lt;region&gt;    (older regions)
+     * </pre>
+     *
+     * <p>Forms taken from the Amazon S3 endpoint tables in the AWS General Reference. Note that
+     * the website endpoint spells its region with a dot in newer regions and a dash in older ones
+     * ({@code s3-website.eu-west-2} vs {@code s3-website-eu-west-1}), so both are accepted.
+     *
+     * <p>The "whole remainder" requirement is the point of this method. It is what makes an
+     * {@code s3} label that is followed by something else — {@code my.s3.archive} — bucket text
+     * rather than a qualifier, and it is what stops the bucket being truncated at it.
+     *
+     * <p>{@code s3-accesspoint} and {@code s3-control} are deliberately absent: those hosts are
+     * prefixed by an access point name or an account id, not a bucket, and {@code filter} already
+     * routes S3 Control away by path.
+     */
+    private static boolean isS3QualifierTail(String[] labels, int from) {
+        int n = labels.length;
+        if (from >= n) {
+            return false;
+        }
+        String head = labels[from].toLowerCase();
+        int i = from + 1;
+
+        // Transfer acceleration is global: it names no region, only an optional dualstack.
+        if ("s3-accelerate".equals(head)) {
+            if (i < n && DUALSTACK.equals(labels[i].toLowerCase())) {
+                i++;
+            }
+            return i == n;
+        }
+
+        // Legacy dash forms carry the region inside the head label, so nothing may follow:
+        // s3-website-us-east-1, s3-us-west-2.
+        if (head.startsWith("s3-website-") && AwsRegions.isRegionId(head.substring("s3-website-".length()))) {
+            return i == n;
+        }
+        if (head.startsWith("s3-") && AwsRegions.isRegionId(head.substring("s3-".length()))) {
+            return i == n;
+        }
+
+        // Dotted forms: <head>[.dualstack][.<region>]
+        if (!"s3".equals(head) && !"s3-fips".equals(head) && !"s3-website".equals(head)) {
+            return false;
+        }
+        boolean dualstack = i < n && DUALSTACK.equals(labels[i].toLowerCase());
+        if (dualstack) {
+            i++;
+        }
+        if (i < n && AwsRegions.isRegionId(labels[i])) {
+            i++;
+        } else if (dualstack) {
+            // "dualstack" only appears in front of a region; a bare s3.dualstack is not an
+            // endpoint, so treat the whole thing as bucket text rather than truncating.
+            return false;
+        }
+        return i == n;
+    }
+
+    /**
+     * True when an unqualified prefix carries a region-shaped label in a non-leading position —
+     * the shape every <em>other</em> regional service virtual-hosts under:
+     * {@code <acct>.dkr.ecr.<region>}, {@code <domain>.<region>.es}, {@code <id>.iot.<region>}.
+     * A real S3 virtual host always carries an {@code s3} qualifier instead, and when it does the
+     * region is read from there, so a bucket whose own name contains a region stays addressable as
+     * {@code logs.us-east-1.s3.<host>}. One structural rule covers every regional service at once,
+     * where a label denylist would have to enumerate them and would silently hijack the first one
+     * it missed.
+     */
+    private static boolean isForeignRegionalHost(String[] labels) {
+        // Index 0 is exempt so a bucket literally named "us-east-1" keeps working.
+        for (int i = 1; i < labels.length; i++) {
+            if (REGION_LABEL.matcher(labels[i]).matches()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
