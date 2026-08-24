@@ -386,7 +386,7 @@ class AutoScalingReconcilerTest {
         ElbV2Service elbV2Service = mock(ElbV2Service.class);
         SsmCommandService ssmCommandService = mock(SsmCommandService.class);
         AutoScalingReconciler reconciler = new AutoScalingReconciler(
-                asgService, ec2Service, elbV2Service, ssmCommandService);
+                asgService, ec2Service, elbV2Service, null, ssmCommandService);
         AutoScalingGroup asg = new AutoScalingGroup();
         asg.setRegion("us-east-1");
         asg.setAutoScalingGroupName("app-asg");

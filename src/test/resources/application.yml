@@ -273,6 +273,9 @@ floci:
       mock: true
     pipes:
       enabled: true
+    elb:
+      enabled: true
+      mock: true
     elbv2:
       enabled: true
       mock: true

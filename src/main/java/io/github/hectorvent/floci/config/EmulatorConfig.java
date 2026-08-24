@@ -659,6 +659,7 @@ public interface EmulatorConfig {
         PipesServiceConfig pipes();
         BedrockAgentCoreControlServiceConfig bedrockAgentCoreControl();
         BedrockAgentCoreServiceConfig bedrockAgentCore();
+        ElbServiceConfig elb();
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
@@ -2077,6 +2078,16 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean validateRuntimeExists();
+    }
+
+    /** Classic (2012-06-01) Elastic Load Balancing — a separate API from {@link ElbV2ServiceConfig}. */
+    interface ElbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, no health check is ever probed and a registered instance is InService at once. */
+        @WithDefault("false")
+        boolean mock();
     }
 
     interface ElbV2ServiceConfig {

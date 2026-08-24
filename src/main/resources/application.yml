@@ -488,6 +488,9 @@ floci:
       keep-running-on-shutdown: false
       dag-sync-interval-seconds: 30
       install-requirements: true
+    elb:
+      enabled: true
+      mock: false
     elbv2:
       enabled: true
       mock: false
