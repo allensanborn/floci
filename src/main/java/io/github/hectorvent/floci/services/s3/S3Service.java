@@ -53,6 +53,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
+    private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
     private static final String SSE_C_ALGORITHM = "AES256";
@@ -2657,6 +2658,13 @@ public class S3Service implements Resettable, ResourceProvider {
             case "authenticated-read" -> objectAclXml(
                     ownerFullControlGrant(),
                     groupGrant(AUTHENTICATED_USERS_GROUP_URI, "READ"));
+            // Standard canned ACL used by S3 server-access-logging (and Terraform's
+            // aws_s3_bucket_acl / access-logging modules) to grant the S3 log-delivery service
+            // group permission to write log objects into this bucket and read their own ACL.
+            case "log-delivery-write" -> objectAclXml(
+                    ownerFullControlGrant(),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "WRITE"),
+                    groupGrant(LOG_DELIVERY_GROUP_URI, "READ_ACP"));
             default -> throw new AwsException("InvalidArgument",
                     "Unsupported x-amz-acl value: " + cannedAcl, 400);
         };
