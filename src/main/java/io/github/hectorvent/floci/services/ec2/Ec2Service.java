@@ -408,6 +408,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (restored > 0) {
             LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
         }
+
+        // Runs after the restore loop, so anything legitimately revived above is already
+        // accounted for and only genuine leftovers are left to collect.
+        containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    /**
+     * Whether a container labelled for (region, instanceId) still backs a live instance record.
+     * False means the record is gone or already terminated, so the container is an orphan.
+     */
+    private boolean instanceContainerStillWanted(String region, String instanceId) {
+        Instance instance = instances.get(key(region, instanceId)).orElse(null);
+        if (instance == null) {
+            return false;
+        }
+        String state = instance.getState() == null ? null : instance.getState().getName();
+        return !"terminated".equals(state) && !"shutting-down".equals(state);
     }
 
     private static boolean needsMetadataRegistration(Instance instance) {
