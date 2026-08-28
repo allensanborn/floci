@@ -159,6 +159,8 @@ public class AutoScalingReconciler {
                 .map(AsgInstance::getInstanceId)
                 .collect(Collectors.toList());
         failActiveSsmInvocations(asg, instanceIds);
+        deregisterFromTargetGroups(asg, instanceIds);
+        deregisterFromClassicLoadBalancers(asg, instanceIds);
         asg.getInstances().removeIf(instance -> instanceIds.contains(instance.getInstanceId()));
         asgService.saveAutoScalingGroup(asg);
         asgService.recordActivity(asg.getRegion(), asg.getAutoScalingGroupName(),
