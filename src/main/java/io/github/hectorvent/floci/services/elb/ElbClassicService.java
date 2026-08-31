@@ -111,8 +111,7 @@ public class ElbClassicService {
             // Listeners is a required member of CreateAccessPointInput, and unlike LoadBalancerName
             // the model gives its member shape required fields — an empty list cannot be honoured.
             throw new AwsException("ValidationError",
-                    "Only one of SubnetIds or AvailabilityZones may be empty; at least one listener "
-                            + "must be specified.", 400);
+                    "At least one listener must be specified.", 400);
         }
         for (ClassicListener listener : listeners) {
             validateListener(listener);
@@ -433,8 +432,10 @@ public class ElbClassicService {
                 .map(Subnet::getVpcId)
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         if (vpcIds.size() > 1) {
+            // CreateLoadBalancer's own Errors table documents InvalidConfigurationRequest at 409,
+            // not 400: a client that retries on 409 but fails hard on 400 needs the real status.
             throw new AwsException("InvalidConfigurationRequest",
-                    "All subnets must belong to the same VPC.", 400);
+                    "All subnets must belong to the same VPC.", 409);
         }
         return vpcIds.isEmpty() ? null : vpcIds.iterator().next();
     }

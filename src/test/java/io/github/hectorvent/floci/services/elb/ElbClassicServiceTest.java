@@ -105,6 +105,40 @@ class ElbClassicServiceTest {
     }
 
     @Test
+    void createRejectsAnEmptyListenerListNamingTheMissingMember() {
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createLoadBalancer(REGION, "my-elb", List.of(),
+                        List.of(), List.of("subnet-a"), List.of("sg-1"), null, Map.of()));
+        assertEquals("ValidationError", e.getErrorCode());
+        assertTrue(e.getMessage().contains("listener"), e.getMessage());
+    }
+
+    /**
+     * CreateLoadBalancer's Errors table documents InvalidConfigurationRequest at HTTP 409, not
+     * 400 — a client that retries on 409 but fails hard on 400 depends on the difference.
+     */
+    @Test
+    void subnetsSpanningTwoVpcsAreRejectedWithTheDocumentedStatus() {
+        when(ec2Service.describeSubnets(anyString(), anyList(), any()))
+                .thenAnswer(invocation -> {
+                    List<String> ids = invocation.getArgument(1);
+                    return ids.stream().map(id -> {
+                        Subnet subnet = new Subnet();
+                        subnet.setSubnetId(id);
+                        subnet.setVpcId("vpc-" + id.charAt(id.length() - 1));
+                        subnet.setAvailabilityZone(REGION + id.charAt(id.length() - 1));
+                        return subnet;
+                    }).toList();
+                });
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createLoadBalancer(REGION, "my-elb", List.of(httpListener()),
+                        List.of(), List.of("subnet-a", "subnet-b"), List.of("sg-1"), null, Map.of()));
+        assertEquals("InvalidConfigurationRequest", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+    }
+
+    @Test
     void createRejectsADuplicateName() {
         create("my-elb");
         AwsException e = assertThrows(AwsException.class, () -> create("my-elb"));
