@@ -76,6 +76,35 @@ class AmazonMqServiceTest {
     }
 
     @Test
+    void createBrokerAcceptsDocumentedEngineTypeCasing() {
+        // "RabbitMQ" is the spelling in the AWS docs, the console and every Terraform
+        // example; the real API matches EngineType case-insensitively.
+        CreateBrokerParams mixedCase = new CreateBrokerParams("orders", "RabbitMQ", null,
+                "SINGLE_INSTANCE", "mq.t3.micro", false, false,
+                List.of(new MqUser("admin", "AdminPass123", true, null)), null);
+        Broker broker = service.createBroker(mixedCase);
+        assertEquals("RABBITMQ", broker.getEngineType(),
+                "the canonical wire casing should be stored whatever casing was requested");
+    }
+
+    @Test
+    void createBrokerAcceptsDeploymentModeCasing() {
+        CreateBrokerParams mixedCase = new CreateBrokerParams("orders", "RABBITMQ", null,
+                "single_instance", "mq.t3.micro", false, false,
+                List.of(new MqUser("admin", "AdminPass123", true, null)), null);
+        Broker broker = service.createBroker(mixedCase);
+        assertEquals("SINGLE_INSTANCE", broker.getDeploymentMode());
+    }
+
+    @Test
+    void createBrokerRejectsAbsentEngineType() {
+        CreateBrokerParams noEngine = new CreateBrokerParams("orders", null, null,
+                "SINGLE_INSTANCE", "mq.t3.micro", false, false,
+                List.of(new MqUser("admin", "AdminPass123", true, null)), null);
+        assertThrows(AwsException.class, () -> service.createBroker(noEngine));
+    }
+
+    @Test
     void createBrokerRejectsNonSingleInstanceDeployment() {
         CreateBrokerParams cluster = new CreateBrokerParams("ha", "RABBITMQ", null,
                 "CLUSTER_MULTI_AZ", "mq.t3.micro", false, false, null, null);
