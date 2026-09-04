@@ -419,7 +419,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * False means the record is gone or already terminated, so the container is an orphan.
      */
     private boolean instanceContainerStillWanted(String region, String instanceId) {
-        Instance instance = instances.get(key(region, instanceId)).orElse(null);
+        Instance instance = findAnyInstance(key(region, instanceId)).orElse(null);
         if (instance == null) {
             return false;
         }
@@ -5218,6 +5218,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             return !accountAware.scanAllAccountEntries(k -> k.endsWith(suffix)).isEmpty();
         }
         return vpcs.keys().stream().anyMatch(k -> k.endsWith(suffix));
+    }
+
+    /**
+     * An instance record from whichever account owns it. The startup sweep runs from
+     * {@code @PostConstruct}, outside any request, where an account-aware backend resolves to the
+     * default account: a record owned by another account would read as absent and its live
+     * container would be destroyed. Read-only, so a cross-account hit stays in its own partition.
+     */
+    private Optional<Instance> findAnyInstance(String storageKey) {
+        if (instances instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Instance> accountAware = (AccountAwareStorageBackend<Instance>) rawAccountAware;
+            return accountAware.findAnyAccount(storageKey);
+        }
+        return instances.get(storageKey);
     }
 
     private Optional<AccountAwareStorageBackend.OwnedEntry<Vpc>> findAnyVpcEntry(String region, String vpcId) {

@@ -171,6 +171,10 @@ floci:
         # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
+        # Sweep EC2 containers left on the daemon by a previous run that died mid-launch or
+        # mid-terminate (SIGKILL, OOM, docker kill), which no surviving record refers to.
+        # Scoped to this deployment's own containers; stopped instances are never swept.
+        reconcile-containers-on-startup: true
       appsync:
         flush-interval-ms: 5000
       rum:

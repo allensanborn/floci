@@ -103,6 +103,19 @@ public class Ec2ContainerManager {
      * Containers created before this label existed carry no owner and are therefore never swept.
      */
     static final String LABEL_OWNER_PORT = "floci_owner_port";
+
+    /**
+     * Identity of the Floci deployment that owns a container, for scoping the startup sweep.
+     * The API port alone collides when two independently namespaced Flocis share a Docker daemon
+     * on the same internal port, and each would then reap the other's live containers. Composing
+     * the documented resource namespace in front of it separates exactly those deployments; an
+     * unnamespaced single Floci keeps the bare port it already stamped.
+     */
+    private String ownerIdentity() {
+        String ns = config.docker() == null || config.docker().resourceNamespace() == null
+                ? "" : config.docker().resourceNamespace().orElse("");
+        return ns.isBlank() ? String.valueOf(config.port()) : ns + "/" + config.port();
+    }
     static final String LABEL_SERVICE = "io.floci.service";
     static final String SERVICE_VALUE = "ec2";
     static final String LABEL_RESOURCE_ID = "io.floci.resource-id";
@@ -364,7 +377,7 @@ public class Ec2ContainerManager {
                         "ec2", instanceId, regionResolver.getAccountId(), region))
                 // Which Floci owns this container, so the startup reconciler cannot reap a
                 // sibling emulator's live instances off a shared daemon. See LABEL_OWNER_PORT.
-                .withLabels(Map.of(LABEL_OWNER_PORT, String.valueOf(config.port())))
+                .withLabels(Map.of(LABEL_OWNER_PORT, ownerIdentity()))
                 // EC2 instances expose IMDS on 169.254.169.254. Floci needs network administration
                 // privileges in the local container to attach that link-local address.
                 .withPrivileged(true)
@@ -621,7 +634,7 @@ public class Ec2ContainerManager {
         if (!config.services().ec2().reconcileContainersOnStartup()) {
             return 0;
         }
-        String owner = String.valueOf(config.port());
+        String owner = ownerIdentity();
         int removed = 0;
         try {
             List<Container> containers = dockerClient.listContainersCmd()

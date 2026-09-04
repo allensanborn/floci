@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -1034,6 +1035,23 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void reconcileOrphanedContainersSparesAnotherNamespacesContainerOnTheSamePort() {
+        // Two Flocis can share a daemon on the same internal port and are separated only by the
+        // resource namespace. Keying ownership on the port alone made each reap the other's live
+        // containers; the owner label carries the namespace so a sibling's container is not ours.
+        LaunchHarness harness = reconcileHarness(true, 4566, "alpha");
+        stubContainerListing(harness.dockerClient,
+                labelled("c-ours", "alpha/4566", "us-east-1", "i-ours"),
+                labelled("c-sibling", "beta/4566", "us-east-1", "i-sibling"));
+
+        int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
+
+        assertEquals(1, removed);
+        verify(harness.lifecycleManager).removeIfExists("c-ours");
+        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+    }
+
+    @Test
     void reconcileOrphanedContainersDoesNothingWhenDisabled() {
         LaunchHarness harness = reconcileHarness(false, 4680);
 
@@ -1063,6 +1081,14 @@ class Ec2ContainerManagerTest {
         LaunchHarness harness = launchHarness();
         when(harness.config.port()).thenReturn(ownerPort);
         when(harness.config.services().ec2().reconcileContainersOnStartup()).thenReturn(reconcileEnabled);
+        return harness;
+    }
+
+    private static LaunchHarness reconcileHarness(boolean reconcileEnabled, int ownerPort, String namespace) {
+        LaunchHarness harness = reconcileHarness(reconcileEnabled, ownerPort);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(docker.resourceNamespace()).thenReturn(Optional.ofNullable(namespace));
+        when(harness.config.docker()).thenReturn(docker);
         return harness;
     }
 
