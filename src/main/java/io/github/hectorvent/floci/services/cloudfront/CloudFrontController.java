@@ -2000,6 +2000,30 @@ public class CloudFrontController {
         xml.raw(xmlFunctionAssociations(dcb.getFunctionAssociations()));
         xml.raw(xmlLambdaFunctionAssociations(dcb.getLambdaFunctionAssociations()));
 
+        // The legacy cache-key members are all "Required: No" on input but present on every real
+        // response, and the Terraform AWS provider's flattenDefaultCacheBehavior reads each one
+        // without a nil check while flattening the read-after-create. TrustedSigners and
+        // ForwardedValues are the sharpest: both are structs the provider dereferences to reach
+        // Quantity / QueryString, so omitting them faults the provider process rather than
+        // failing the apply. MinTTL/DefaultTTL/MaxTTL fail more quietly, as a perpetual diff.
+        //
+        // ForwardedValues is deprecated in favour of CachePolicyId, but CloudFront still reports
+        // it, so it is emitted with the defaults a distribution gets when no cache policy applies.
+        xml.start("TrustedSigners")
+                .elem("Enabled", false)
+                .elem("Quantity", 0)
+                .end("TrustedSigners");
+        xml.elem("SmoothStreaming", false);
+        xml.start("ForwardedValues")
+                .elem("QueryString", false)
+                .start("Cookies").elem("Forward", "none").end("Cookies")
+                .start("Headers").elem("Quantity", 0).end("Headers")
+                .start("QueryStringCacheKeys").elem("Quantity", 0).end("QueryStringCacheKeys")
+                .end("ForwardedValues");
+        xml.elem("MinTTL", dcb.getMinTTL())
+                .elem("DefaultTTL", dcb.getDefaultTTL())
+                .elem("MaxTTL", dcb.getMaxTTL());
+
         xml.end("DefaultCacheBehavior");
         return xml.build();
     }
