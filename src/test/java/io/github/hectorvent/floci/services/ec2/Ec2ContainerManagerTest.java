@@ -16,6 +16,7 @@ import com.github.dockerjava.api.model.StreamType;
 import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -59,6 +60,7 @@ import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -143,7 +145,8 @@ class Ec2ContainerManagerTest {
                 metadataServer,
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
-                mock(ContainerNetworkReachability.class));
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -372,7 +375,8 @@ class Ec2ContainerManagerTest {
                 mock(Ec2MetadataServer.class),
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
-                reachability);
+                reachability,
+                mock(VpcNetworkManager.class));
     }
 
     @Test
@@ -390,6 +394,53 @@ class Ec2ContainerManagerTest {
                 """;
 
         assertTrue(Ec2ContainerManager.userDataShellScripts(userData).isEmpty());
+    }
+
+    @Test
+    void launchReturnsTheLeaseWhenTheContainerNeverJoinsTheVpcNetwork() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 2;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerResponse noIp = inspectResponse(null);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(noIp);
+        // attach() returns empty: nothing holds the address, and the instance is about to start
+        // reporting its bridge address instead, so the lease is no longer findable from it.
+
+        Instance instance = leasedInstance("i-noattach");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.vpcNetworkManager, timeout(2000).atLeastOnce())
+                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+    }
+
+    @Test
+    void launchReturnsTheLeaseWhenTheLaunchThrows() throws Exception {
+        LaunchHarness harness = launchHarness();
+        when(harness.builder.build()).thenThrow(new IllegalStateException("daemon went away"));
+
+        Instance instance = leasedInstance("i-throws");
+
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        // Detach before release: Docker holds the address while the endpoint stands, so handing it
+        // to the next launch before disconnecting would have the daemon refuse it.
+        verify(harness.vpcNetworkManager, timeout(2000)).detach("us-west-2", "vpc-lease", null);
+        verify(harness.vpcNetworkManager, timeout(2000))
+                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+    }
+
+    private static Instance leasedInstance(String instanceId) {
+        Instance instance = instance(instanceId);
+        instance.setRegion("us-west-2");
+        instance.setVpcId("vpc-lease");
+        instance.setSubnetId("subnet-lease");
+        instance.setPrivateIpAddress("10.0.1.10");
+        return instance;
     }
 
     @Test
@@ -940,6 +991,7 @@ class Ec2ContainerManagerTest {
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         Ec2PortForwardManager portForwardManager = mock(Ec2PortForwardManager.class);
+        VpcNetworkManager vpcNetworkManager = mock(VpcNetworkManager.class);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("000000000000");
         Ec2ContainerManager manager = new Ec2ContainerManager(
@@ -954,9 +1006,10 @@ class Ec2ContainerManagerTest {
                 metadataServer,
                 portForwardManager,
                 regionResolver,
-                mock(ContainerNetworkReachability.class));
+                mock(ContainerNetworkReachability.class),
+                vpcNetworkManager);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, metadataServer, logStreamer, builder,
-                portAllocator, portForwardManager, new CopyOnWriteArrayList<>());
+                portAllocator, portForwardManager, vpcNetworkManager, new CopyOnWriteArrayList<>());
     }
 
     /**
@@ -1007,6 +1060,7 @@ class Ec2ContainerManagerTest {
                                  ContainerBuilder.Builder builder,
                                  PortAllocator portAllocator,
                                  Ec2PortForwardManager portForwardManager,
+                                 VpcNetworkManager vpcNetworkManager,
                                  List<String[]> executedCommands) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();

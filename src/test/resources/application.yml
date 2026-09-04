@@ -252,6 +252,10 @@ floci:
       mock: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # see src/main/resources/application.yml
+      # Off explicitly, not merely by implication of mock: true above. Tests must not create or
+      # reconcile Docker networks on whatever daemon CI happens to have.
+      vpc-networks:
+        enabled: false
     ecs:
       enabled: true
       mock: true
