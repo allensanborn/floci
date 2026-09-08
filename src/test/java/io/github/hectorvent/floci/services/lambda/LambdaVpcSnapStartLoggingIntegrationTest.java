@@ -435,6 +435,27 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
             .body("__type", equalTo("ValidationException"));
     }
 
+    /**
+     * The service model gives LogGroup a 1-character minimum, so an empty string is a length
+     * violation on paper. Floci reads it as "not supplied" instead: botocore enforces that
+     * minimum client side, so an empty LogGroup never reaches the wire from an SDK caller and
+     * nobody has observed what AWS answers to one. This pins the leniency rather than a 400 we
+     * would only have inferred.
+     */
+    @Test
+    void blankLogGroupIsReadAsNotSuppliedRatherThanRejected() {
+        createFunction("logging-blank-group-fn", """
+            ,
+                "LoggingConfig": {"LogGroup": ""}""");
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/logging-blank-group-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("LoggingConfig.LogGroup", equalTo("/aws/lambda/logging-blank-group-fn"));
+    }
+
     @Test
     void loggingConfigRejectsLogGroupLongerThanFiveHundredTwelveCharacters() {
         String tooLong = "a".repeat(513);

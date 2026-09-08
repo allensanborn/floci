@@ -2266,6 +2266,16 @@ public class LambdaService implements ResourceProvider {
     /**
      * LogGroup is the one LoggingConfig member with a documented length and character
      * constraint rather than an enum: 1-512 characters, {@code [.\-_/#A-Za-z0-9]+}.
+     *
+     * <p>A blank LogGroup (empty or whitespace-only) is deliberately read as "not supplied"
+     * rather than as a violation of that 1-character minimum, so {@link #applyLoggingConfig}
+     * falls back to the {@code /aws/lambda/} default exactly as it does for an absent member.
+     * The minimum is real in the service model, but botocore enforces it client side, so an
+     * empty LogGroup never reaches the wire from an SDK caller and nobody has observed what
+     * the service itself answers to one. Rejecting it here would be a 400 we inferred rather
+     * than measured; accepting it costs a caller nothing. That leniency is pinned by
+     * {@code LambdaVpcSnapStartLoggingIntegrationTest}, so a later reader who wants the
+     * minimum enforced has to change the decision, not just the guard.
      */
     private static void validateLogGroup(Object value) {
         if (!(value instanceof String group) || group.isBlank()) {
