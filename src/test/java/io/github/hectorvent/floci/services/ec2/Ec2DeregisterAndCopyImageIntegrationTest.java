@@ -5,12 +5,15 @@ import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -20,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
@@ -27,7 +31,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.xml.HasXPath.hasXPath;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,7 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
  */
 @QuarkusTest
-class Ec2DeregisterAndCopyImageTest {
+class Ec2DeregisterAndCopyImageIntegrationTest {
 
     @Inject
     Ec2Service service;
@@ -489,6 +495,98 @@ class Ec2DeregisterAndCopyImageTest {
         }
         pool.shutdown();
         return results;
+    }
+
+    /**
+     * A DeregisterImage landing after a launch's first tombstone check must leave nothing behind.
+     * The rejection used to arrive only once the launch had already persisted its root volume, its
+     * tags, its subnet IP and, worst of the four, the attachment on a caller-supplied ENI. No
+     * reservation was ever returned, so no caller had an id to clean any of it up with, and the
+     * interface stayed "in-use" for good.
+     *
+     * <p>The interleaving is made exact rather than raced for. The test holds the registry lock
+     * the launch has to acquire, which parks the launch at a known point, deregisters the AMI
+     * while it is parked, and only then releases. Every store write on the launch path lives on
+     * the far side of that lock, so a launch parked there has written nothing yet.
+     */
+    @Test
+    void aTombstoneLandingMidLaunchLeavesNoOrphanedResources() throws Exception {
+        Image image = service.registerImage(EAST, uniqueName("floci-midlaunch"), null,
+                "x86_64", "/dev/xvda", null);
+        String subnetId = service.describeSubnets(EAST, List.of(), Map.of()).getFirst().getSubnetId();
+        NetworkInterface eni = service.createNetworkInterface(EAST, subnetId,
+                "mid-launch tombstone probe", null, null, null, null);
+        int volumesBefore = service.describeVolumes(EAST, List.of(), Map.of()).size();
+
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+        try {
+            landATombstoneOnAParkedLaunch(image, subnetId, eni, outcome, volumesBefore);
+        } finally {
+            // @QuarkusTest classes share one application, and a leftover interface here is visible
+            // to every other test in the run. Best effort on purpose: if the invariant above broke
+            // the interface is still attached and undeletable, and the assertion that caught that
+            // is the news, not the failed cleanup.
+            try {
+                service.deleteNetworkInterface(EAST, eni.getNetworkInterfaceId());
+            } catch (AwsException ignored) {
+                // reported by the assertions above
+            }
+        }
+    }
+
+    private void landATombstoneOnAParkedLaunch(Image image, String subnetId, NetworkInterface eni,
+                                               AtomicReference<Throwable> outcome, int volumesBefore)
+            throws Exception {
+        Thread launcher = new Thread(() -> {
+            try {
+                service.runInstances(EAST, image.getImageId(), "t3.micro", 1, 1, null,
+                        List.of(), subnetId, null, List.of(new Tag("Name", "orphan-probe")),
+                        null, null, null, eni.getNetworkInterfaceId(), 0);
+            } catch (Throwable t) {
+                outcome.set(t);
+            }
+        }, "mid-launch-tombstone");
+
+        synchronized (service.imageRegistryLock()) {
+            launcher.start();
+            awaitParkedOnTheRegistryLock(launcher);
+            service.deregisterImage(EAST, image.getImageId(), false);
+        }
+        launcher.join(TimeUnit.SECONDS.toMillis(30));
+        assertFalse(launcher.isAlive(), "the parked launch never finished");
+
+        assertInstanceOf(AwsException.class, outcome.get(), "the launch must be rejected outright");
+        assertEquals("InvalidAMIID.Unavailable", ((AwsException) outcome.get()).getErrorCode());
+
+        assertEquals(volumesBefore, service.describeVolumes(EAST, List.of(), Map.of()).size(),
+                "a rejected launch must not leave its root volume behind");
+        NetworkInterface after = service.describeNetworkInterfaces(EAST,
+                List.of(eni.getNetworkInterfaceId()), Map.of(), 0, null).networkInterfaces().getFirst();
+        assertNull(after.getAttachment(),
+                "a rejected launch must not leave the caller's ENI attached to an instance that does not exist");
+        assertEquals("available", after.getStatus(),
+                "a rejected launch must return the caller's ENI, not strand it in-use");
+    }
+
+    /**
+     * Blocks until the launch thread is waiting to enter the registry-lock section of
+     * {@code runInstances}, which is the only point at which the tombstone can be landed
+     * mid-launch on purpose. Matching on the frame as well as the state keeps a thread blocked
+     * somewhere else from being mistaken for a parked launch, which would deregister too early
+     * and let the launch fail its *first* check instead, proving nothing.
+     */
+    private static void awaitParkedOnTheRegistryLock(Thread thread) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() - deadline < 0) {
+            StackTraceElement[] stack = thread.getStackTrace();
+            if (thread.getState() == Thread.State.BLOCKED && stack.length > 0
+                    && "runInstances".equals(stack[0].getMethodName())
+                    && Ec2Service.class.getName().equals(stack[0].getClassName())) {
+                return;
+            }
+            Thread.sleep(1);
+        }
+        throw new AssertionError("the launch never parked on the image registry lock");
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────

@@ -1064,6 +1064,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      */
     private final Object imageRegistryLock = new Object();
 
+    /**
+     * The monitor guarding the AMI registry against a launch and a deregistration interleaving.
+     * Exposed package-private so a test can hold it and land a tombstone at a chosen point in a
+     * launch, which is the only deterministic way to exercise that race. A method rather than a
+     * field because the injected bean is a client proxy, through which a field read sees null.
+     */
+    Object imageRegistryLock() {
+        return imageRegistryLock;
+    }
+
     private static Object[] newLockStripes() {
         Object[] stripes = new Object[LOCK_STRIPES];
         for (int i = 0; i < stripes.length; i++) {
@@ -2406,112 +2416,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
         List<Instance> launched = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            String instanceId = "i-" + randomHex(17);
-            String privateIp = suppliedEni != null
-                    ? suppliedEni.getPrivateIpAddress()
-                    : assignPrivateIp(region, finalSubnetId);
-
-            Instance inst = new Instance();
-            inst.setInstanceId(instanceId);
-            inst.setImageId(imageId);
-            inst.setState(InstanceState.pending());
-            inst.setInstanceType(effectiveInstanceType);
-            inst.setPlacement(new Placement(az));
-            inst.setSubnetId(finalSubnetId);
-            inst.setVpcId(vpcId);
-            // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
-            // override wins in both directions; the subnet's MapPublicIpOnLaunch
-            // attribute is only the default when the launch does not specify it.
-            inst.setAssociatePublicIp(associatePublicIp != null
-                    ? associatePublicIp
-                    : subnet != null && subnet.isMapPublicIpOnLaunch());
-            inst.setPrivateIpAddress(privateIp);
-            inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
-            inst.setKeyName(keyName);
-            inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
-            inst.setArchitecture(architecture);
-            inst.setLaunchTime(Instant.now());
-            inst.setAmiLaunchIndex(i);
-            inst.setClientToken(clientToken);
-            inst.setRegion(region);
-            inst.setUserData(userData);
-            inst.setIamInstanceProfileArn(iamInstanceProfileArn);
-            inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
-            if (instanceTags != null && !instanceTags.isEmpty()) {
-                inst.setTags(new ArrayList<>(instanceTags));
-                tags.put(instanceId, new ArrayList<>(instanceTags));
-            }
-
-            // Network interface, either the caller-supplied standalone ENI (override-default-eni,
-            // floci-kt9) or a freshly-minted implicit primary interface.
-            InstanceNetworkInterface eni = new InstanceNetworkInterface();
-            eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
-            eni.setSubnetId(finalSubnetId);
-            eni.setVpcId(vpcId);
-            eni.setOwnerId(accountId);
-            eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
-            eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
-            eni.setPrivateIpAddress(privateIp);
-            eni.setPrivateDnsName(inst.getPrivateDnsName());
-            eni.setGroups(new ArrayList<>(sgIdentifiers));
-            eni.setAttachmentId("eni-attach-" + randomHex(17));
-            eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
-            if (inst.getLaunchTime() != null) {
-                eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-            }
-            inst.getNetworkInterfaces().add(eni);
-            if (suppliedEni != null) {
-                // The standalone record stays authoritative rather than being folded into the
-                // instance: AWS defaults deleteOnTermination to false for an interface the caller
-                // created and handed to a launch, so it outlives the instance and returns to
-                // "available" on termination instead of vanishing with it. Double-counting is
-                // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
-                // id the standalone store owns.
-                NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
-                launchAttachment.setAttachmentId(eni.getAttachmentId());
-                launchAttachment.setDeviceIndex(eni.getDeviceIndex());
-                launchAttachment.setStatus("attached");
-                launchAttachment.setInstanceId(instanceId);
-                launchAttachment.setInstanceOwnerId(accountId);
-                launchAttachment.setAttachTime(eni.getAttachTime());
-                launchAttachment.setDeleteOnTermination(false);
-                suppliedEni.setAttachment(launchAttachment);
-                suppliedEni.setStatus("in-use");
-                networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
-            }
-
-            // Root EBS volume
-            String rootVolId = "vol-" + randomHex(17);
-            inst.setRootVolumeId(rootVolId);
-            Volume rootVol = new Volume();
-            rootVol.setVolumeId(rootVolId);
-            rootVol.setAvailabilityZone(az);
-            rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
-            rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
-            rootVol.setState("in-use");
-            rootVol.setRegion(region);
-            rootVol.setCreateTime(Instant.now());
-            VolumeAttachment att = new VolumeAttachment();
-            att.setVolumeId(rootVolId);
-            att.setInstanceId(instanceId);
-            att.setDevice(inst.getRootDeviceName());
-            att.setState("attached");
-            att.setDeleteOnTermination(true);
-            att.setAttachTime(Instant.now());
-            rootVol.getAttachments().add(att);
-            volumes.put(key(region, rootVolId), rootVol);
-
-            launched.add(inst);
-            reservation.getInstances().add(inst);
-        }
-
-        // Resolving the AMI and publishing the instances that depend on it is one step. A
-        // DeregisterImage releases the captured layer only when no live instance resolves to it,
-        // so a launch that had resolved the layer but not yet stored its instance would otherwise
-        // have that layer removed underneath it and start a container from a reference that no
-        // longer exists. Re-checking the tombstone here is part of the same invariant: a launch
-        // that loses the race must be rejected, not quietly demoted to the ancestor image.
+        // Resolving the AMI, building the instances that depend on it and publishing them is one
+        // step. A DeregisterImage releases the captured layer only when no live instance resolves
+        // to it, so a launch that had resolved the layer but not yet stored its instance would
+        // otherwise have that layer removed underneath it and start a container from a reference
+        // that no longer exists. Re-checking the tombstone here is part of the same invariant: a
+        // launch that loses the race must be rejected, not quietly demoted to the ancestor image.
+        //
+        // Everything the launch persists lives inside this block, because the check is only
+        // meaningful if nothing has been written before it. A tombstone landing mid-launch used to
+        // leave the rejected launch's root volumes, tags, subnet IP and caller-supplied ENI
+        // attachment behind, since the reservation was never returned and nothing rolled them
+        // back. Building under the lock costs nothing that rollback would not cost more: the work
+        // is in-memory record construction, and the slow part, the container launch, still runs
+        // outside.
         ResolvedAmiImage dockerImage = null;
         synchronized (imageRegistryLock) {
             requireNotDeregistered(region, imageId);
@@ -2527,8 +2445,105 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                             dockerImage.cloudInit(), dockerImage.dockerPlatform());
                 }
             }
-            for (Instance inst : launched) {
-                instances.put(key(region, inst.getInstanceId()), inst);
+            for (int i = 0; i < count; i++) {
+                String instanceId = "i-" + randomHex(17);
+                String privateIp = suppliedEni != null
+                        ? suppliedEni.getPrivateIpAddress()
+                        : assignPrivateIp(region, finalSubnetId);
+
+                Instance inst = new Instance();
+                inst.setInstanceId(instanceId);
+                inst.setImageId(imageId);
+                inst.setState(InstanceState.pending());
+                inst.setInstanceType(effectiveInstanceType);
+                inst.setPlacement(new Placement(az));
+                inst.setSubnetId(finalSubnetId);
+                inst.setVpcId(vpcId);
+                // AWS precedence (#1984): the launch-time AssociatePublicIpAddress
+                // override wins in both directions; the subnet's MapPublicIpOnLaunch
+                // attribute is only the default when the launch does not specify it.
+                inst.setAssociatePublicIp(associatePublicIp != null
+                        ? associatePublicIp
+                        : subnet != null && subnet.isMapPublicIpOnLaunch());
+                inst.setPrivateIpAddress(privateIp);
+                inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
+                inst.setKeyName(keyName);
+                inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
+                inst.setArchitecture(architecture);
+                inst.setLaunchTime(Instant.now());
+                inst.setAmiLaunchIndex(i);
+                inst.setClientToken(clientToken);
+                inst.setRegion(region);
+                inst.setUserData(userData);
+                inst.setIamInstanceProfileArn(iamInstanceProfileArn);
+                inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(launchMetadataOptions, null));
+                if (instanceTags != null && !instanceTags.isEmpty()) {
+                    inst.setTags(new ArrayList<>(instanceTags));
+                    tags.put(instanceId, new ArrayList<>(instanceTags));
+                }
+
+                // Network interface, either the caller-supplied standalone ENI (override-default-eni,
+                // floci-kt9) or a freshly-minted implicit primary interface.
+                InstanceNetworkInterface eni = new InstanceNetworkInterface();
+                eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
+                eni.setSubnetId(finalSubnetId);
+                eni.setVpcId(vpcId);
+                eni.setOwnerId(accountId);
+                eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
+                eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
+                eni.setPrivateIpAddress(privateIp);
+                eni.setPrivateDnsName(inst.getPrivateDnsName());
+                eni.setGroups(new ArrayList<>(sgIdentifiers));
+                eni.setAttachmentId("eni-attach-" + randomHex(17));
+                eni.setDeviceIndex(suppliedEni != null ? networkInterfaceDeviceIndex : 0);
+                if (inst.getLaunchTime() != null) {
+                    eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+                }
+                inst.getNetworkInterfaces().add(eni);
+                if (suppliedEni != null) {
+                    // The standalone record stays authoritative rather than being folded into the
+                    // instance: AWS defaults deleteOnTermination to false for an interface the caller
+                    // created and handed to a launch, so it outlives the instance and returns to
+                    // "available" on termination instead of vanishing with it. Double-counting is
+                    // avoided in describeNetworkInterfaces, which skips the instance-side copy of any
+                    // id the standalone store owns.
+                    NetworkInterfaceAttachment launchAttachment = new NetworkInterfaceAttachment();
+                    launchAttachment.setAttachmentId(eni.getAttachmentId());
+                    launchAttachment.setDeviceIndex(eni.getDeviceIndex());
+                    launchAttachment.setStatus("attached");
+                    launchAttachment.setInstanceId(instanceId);
+                    launchAttachment.setInstanceOwnerId(accountId);
+                    launchAttachment.setAttachTime(eni.getAttachTime());
+                    launchAttachment.setDeleteOnTermination(false);
+                    suppliedEni.setAttachment(launchAttachment);
+                    suppliedEni.setStatus("in-use");
+                    networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
+                }
+
+                // Root EBS volume
+                String rootVolId = "vol-" + randomHex(17);
+                inst.setRootVolumeId(rootVolId);
+                Volume rootVol = new Volume();
+                rootVol.setVolumeId(rootVolId);
+                rootVol.setAvailabilityZone(az);
+                rootVol.setVolumeType(DEFAULT_ROOT_VOLUME_TYPE);
+                rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+                rootVol.setState("in-use");
+                rootVol.setRegion(region);
+                rootVol.setCreateTime(Instant.now());
+                VolumeAttachment att = new VolumeAttachment();
+                att.setVolumeId(rootVolId);
+                att.setInstanceId(instanceId);
+                att.setDevice(inst.getRootDeviceName());
+                att.setState("attached");
+                att.setDeleteOnTermination(true);
+                att.setAttachTime(Instant.now());
+                rootVol.getAttachments().add(att);
+                volumes.put(key(region, rootVolId), rootVol);
+
+                instances.put(key(region, instanceId), inst);
+                launched.add(inst);
+                reservation.getInstances().add(inst);
             }
         }
 
