@@ -2763,6 +2763,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
+    /**
+     * Set the monitoring state of each named instance, in the order given.
+     *
+     * <p>Every id is resolved through {@link #getRequiredInstance}, so naming an instance that
+     * does not exist in this region raises {@code InvalidInstanceID.NotFound} exactly as the
+     * other instance operations do. Echoing an unknown id back with a 200 would be worse than
+     * not implementing the action at all: the caller is told its request took effect on an
+     * instance that is not there.
+     *
+     * <p>The state is stored on the instance rather than only echoed, so a following
+     * DescribeInstances reports it. Instance already carries a {@code monitoring} member and
+     * DescribeInstances already emits it, so echoing without storing left MonitorInstances
+     * saying "enabled" while every subsequent read still said "disabled".
+     *
+     * @return the ids that were changed, in request order
+     */
+    public List<String> setInstanceMonitoring(String region, List<String> instanceIds, boolean enabled) {
+        ensureDefaultResources(region);
+        List<String> changed = new ArrayList<>();
+        for (String id : instanceIds) {
+            Instance inst = getRequiredInstance(region, id);
+            inst.setMonitoring(enabled ? "enabled" : "disabled");
+            instances.put(key(region, id), inst);
+            changed.add(id);
+        }
+        return changed;
+    }
+
     public List<Map<String, String>> stopInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
