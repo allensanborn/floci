@@ -58,6 +58,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -973,7 +975,7 @@ class Ec2ServiceTest {
 
     @Test
     void createImageRebootsTheSourceInstanceUnlessNoRebootIsSet() {
-        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        Ec2ContainerManager containerManager = capturingContainerManager();
         Ec2Service service = liveService(containerManager, mock(AmiImageResolver.class));
         String instanceId = runOne(service, "ami-src");
 
@@ -988,7 +990,8 @@ class Ec2ServiceTest {
     @Test
     void runInstancesOnACreatedImageResolvesTheSourceGuest() {
         AmiImageResolver resolver = mock(AmiImageResolver.class);
-        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver);
+        when(resolver.resolveImage("ami-src")).thenReturn(ResolvedAmiImage.minimal("guest:latest"));
+        Ec2Service service = liveService(capturingContainerManager(), resolver);
         String instanceId = runOne(service, "ami-src");
 
         String createdAmi = service.createImage("us-east-1", instanceId, "captured", null, true)
@@ -1019,7 +1022,7 @@ class Ec2ServiceTest {
         when(resolver.resolveImage("ami-arm-source"))
                 .thenReturn(new ResolvedAmiImage("arm-image", ResolvedAmiImage.DEFAULT_RUNTIME, false,
                         "linux/arm64"));
-        Ec2Service service = liveService(mock(Ec2ContainerManager.class), resolver, catalog);
+        Ec2Service service = liveService(capturingContainerManager(), resolver, catalog);
         Reservation sourceReservation = service.runInstances("us-east-1", "ami-arm-source", "t4g.medium",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
 
@@ -1065,7 +1068,7 @@ class Ec2ServiceTest {
         source.rootDeviceType = "ebs";
         source.rootDeviceName = "/dev/xvda";
         when(catalog.findByIdOrAlias("ami-src")).thenReturn(Optional.of(source));
-        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class), catalog);
+        Ec2Service service = liveService(capturingContainerManager(), mock(AmiImageResolver.class), catalog);
         String instanceId = runOne(service, "ami-src");
 
         Image image = service.createImage("us-east-1", instanceId, "captured", null, true);
@@ -1089,7 +1092,7 @@ class Ec2ServiceTest {
 
     @Test
     void createImageTakesItsOwnSnapshotRatherThanTheSourceAmisOne() {
-        Ec2Service service = liveService(mock(Ec2ContainerManager.class), mock(AmiImageResolver.class));
+        Ec2Service service = liveService(capturingContainerManager(), mock(AmiImageResolver.class));
         Image source = service.registerImage("us-east-1", "source-image", null, null, "/dev/sda1",
                 List.of(blockDeviceMapping("snap-source", 16)));
 
@@ -1138,6 +1141,19 @@ class Ec2ServiceTest {
     }
 
     /** mock=false so the container-manager and resolver interactions actually happen. */
+    /**
+     * A container manager whose commit succeeds. Outside mock mode CreateImage captures the
+     * source instance's file system and rejects the call when it cannot, so a bare mock (whose
+     * launch never gives the instance a container) would fail every CreateImage here for a
+     * reason none of these tests are about.
+     */
+    private static Ec2ContainerManager capturingContainerManager() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        when(containerManager.commitInstance(any(Instance.class), anyString()))
+                .thenReturn("floci-ami/test-capture:latest");
+        return containerManager;
+    }
+
     private static Ec2Service liveService(Ec2ContainerManager containerManager, AmiImageResolver resolver) {
         return liveService(containerManager, resolver, mock(Ec2ImageCatalog.class));
     }

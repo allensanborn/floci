@@ -957,15 +957,24 @@ public class Ec2ContainerManager {
         return containerId != null && lifecycleManager.isContainerRunning(containerId);
     }
 
+    /** Signals that an instance's file system could not be captured as a Docker image. */
+    public static class CaptureFailedException extends RuntimeException {
+        public CaptureFailedException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     /**
      * Captures an instance's file system as a new Docker image, so that an AMI created from it
      * carries what was provisioned rather than pointing back at the base image.
      *
-     * <p>Returns the image reference, or null when there is nothing to capture (no container).
-     * A failure here is reported as null rather than thrown: CreateImage still produces a valid
-     * AMI record, it simply falls back to the ancestor image, which is the previous behaviour.
+     * <p>Returns the image reference, or null when the instance has no container to capture.
+     * A commit that is attempted and fails throws instead of returning null: an AMI with no
+     * captured file system launches its ancestor, so reporting the failure as "no capture" would
+     * hand back an available AMI whose contents are silently not what was asked for.
      *
      * @param tag repository:tag to commit to, unique per AMI
+     * @throws CaptureFailedException if the commit was attempted and did not succeed
      */
     public String commitInstance(Instance instance, String tag) {
         String containerId = instance.getDockerContainerId();
@@ -987,26 +996,34 @@ public class Ec2ContainerManager {
         } catch (Exception e) {
             LOG.warnv("Could not capture EC2 instance {0} as an image: {1}",
                     instance.getInstanceId(), e.getMessage());
-            return null;
+            throw new CaptureFailedException("could not commit container " + containerId
+                    + " of instance " + instance.getInstanceId() + ": " + e.getMessage(), e);
         }
     }
 
     /**
      * Removes an image previously produced by {@link #commitInstance}. Called when the AMI that
      * owns it is deregistered, so captures do not accumulate on disk indefinitely.
+     *
+     * @return true when the layer is known to be gone, either removed now or already absent;
+     *         false when the daemon refused, in which case the caller must keep the reference
+     *         so the layer can still be found and removed later
      */
-    public void removeCommittedImage(String tag) {
+    public boolean removeCommittedImage(String tag) {
         if (tag == null) {
-            return;
+            return true;
         }
         try {
             dockerClient.removeImageCmd(tag).withForce(true).exec();
             LOG.infov("Removed captured Docker image {0}", tag);
+            return true;
         } catch (NotFoundException e) {
             // Already gone: deregistering twice, or the daemon was pruned. Not an error.
             LOG.debugv("Captured Docker image {0} was already absent", tag);
+            return true;
         } catch (Exception e) {
             LOG.warnv("Could not remove captured Docker image {0}: {1}", tag, e.getMessage());
+            return false;
         }
     }
 

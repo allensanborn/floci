@@ -17,7 +17,10 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -102,17 +105,22 @@ class Ec2CreateImageCaptureTest {
     }
 
     @Test
-    void aFailedCaptureReportsNullRatherThanFailingCreateImage() {
-        // CreateImage must still return a usable AMI if the daemon refuses the commit: the AMI
-        // then falls back to its ancestor, which is exactly the old behaviour. Throwing here
-        // would turn a degraded capture into a failed API call.
+    void aFailedCaptureThrowsRatherThanReportingNothingToCapture() {
+        // Reporting a refused commit the same way as "there was nothing to commit" hands back an
+        // AMI that is immediately available and boots the ancestor, so a Packer build succeeds
+        // and produces the empty artifact this capture exists to prevent. CreateImage turns this
+        // into a failed call.
         DockerClient dockerClient = mock(DockerClient.class);
         CommitCmd commit = mock(CommitCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
         when(dockerClient.commitCmd(CONTAINER_ID)).thenReturn(commit);
         when(commit.exec()).thenThrow(new RuntimeException("daemon is unavailable"));
 
-        assertNull(managerWith(dockerClient)
-                .commitInstance(instance(CONTAINER_ID), "floci-ami/ami-123:latest"));
+        Ec2ContainerManager.CaptureFailedException failure = assertThrows(
+                Ec2ContainerManager.CaptureFailedException.class,
+                () -> managerWith(dockerClient)
+                        .commitInstance(instance(CONTAINER_ID), "floci-ami/ami-123:latest"));
+
+        assertTrue(failure.getMessage().contains("daemon is unavailable"));
     }
 
     @Test
@@ -121,7 +129,7 @@ class Ec2CreateImageCaptureTest {
         RemoveImageCmd remove = mock(RemoveImageCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
         when(dockerClient.removeImageCmd("floci-ami/ami-123:latest")).thenReturn(remove);
 
-        managerWith(dockerClient).removeCommittedImage("floci-ami/ami-123:latest");
+        assertTrue(managerWith(dockerClient).removeCommittedImage("floci-ami/ami-123:latest"));
 
         verify(remove).withForce(true);
         verify(remove).exec();
@@ -135,14 +143,26 @@ class Ec2CreateImageCaptureTest {
         when(dockerClient.removeImageCmd("floci-ami/ami-gone:latest")).thenReturn(remove);
         when(remove.exec()).thenThrow(new NotFoundException("no such image"));
 
-        managerWith(dockerClient).removeCommittedImage("floci-ami/ami-gone:latest");
+        assertTrue(managerWith(dockerClient).removeCommittedImage("floci-ami/ami-gone:latest"));
+    }
+
+    @Test
+    void aRemovalTheDaemonRefusesIsReportedAsNotRemoved() {
+        // The caller clears the AMI's reference to the layer on the strength of this answer, and
+        // nothing can rediscover the tag afterwards, so a refusal must not read as a removal.
+        DockerClient dockerClient = mock(DockerClient.class);
+        RemoveImageCmd remove = mock(RemoveImageCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.removeImageCmd("floci-ami/ami-busy:latest")).thenReturn(remove);
+        when(remove.exec()).thenThrow(new RuntimeException("conflict: image is in use"));
+
+        assertFalse(managerWith(dockerClient).removeCommittedImage("floci-ami/ami-busy:latest"));
     }
 
     @Test
     void removeCommittedImageIgnoresAnAmiThatWasNeverCaptured() {
         DockerClient dockerClient = mock(DockerClient.class);
 
-        managerWith(dockerClient).removeCommittedImage(null);
+        assertTrue(managerWith(dockerClient).removeCommittedImage(null));
 
         verify(dockerClient, never()).removeImageCmd(org.mockito.ArgumentMatchers.anyString());
     }
