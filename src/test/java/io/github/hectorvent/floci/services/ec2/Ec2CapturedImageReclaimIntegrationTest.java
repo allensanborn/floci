@@ -49,8 +49,8 @@ import static org.mockito.Mockito.when;
  * reaches the store -- a hand-built fixture silently tests nothing.
  */
 @QuarkusTest
-@TestProfile(Ec2CapturedImageReclaimTest.ContainerBackedEc2.class)
-class Ec2CapturedImageReclaimTest {
+@TestProfile(Ec2CapturedImageReclaimIntegrationTest.ContainerBackedEc2.class)
+class Ec2CapturedImageReclaimIntegrationTest {
 
     /**
      * The shared test configuration runs EC2 in mock mode, which skips container work entirely --
