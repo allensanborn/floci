@@ -308,6 +308,59 @@ class Ec2CapturedImageReclaimIntegrationTest {
         verify(containerManager, never()).removeCommittedImage(tag);
     }
 
+    /**
+     * Reproduces what production termination actually does to the store: the container manager
+     * flips the instance to {@code shutting-down} synchronously and only reaches
+     * {@code terminated} once its asynchronous teardown finishes. The default stub in this class
+     * terminates immediately, which hides every ordering question about a batch.
+     */
+    private void terminationLeavesInstancesShuttingDown() {
+        doAnswer(invocation -> {
+            invocation.<Instance>getArgument(0).setState(InstanceState.shuttingDown());
+            return null;
+        }).when(containerManager).terminate(any(Instance.class));
+    }
+
+    @Test
+    void terminatingAWholeBatchOfDependentsReleasesTheCapture() {
+        // Every instance in one TerminateInstances request goes away together, so none of them
+        // can pin the capture. Counting the siblings as live leaves the layer on disk forever:
+        // the reclaim runs only from termination and deregistration, deregistration is rejected
+        // the second time, and nothing revisits the batch after its teardown completes.
+        String tag = "floci-ami/ami-batch:latest";
+        Image image = captureAmi("batch-terminated", tag);
+        terminationLeavesInstancesShuttingDown();
+        Instance first = launch(image.getImageId());
+        Instance second = launch(image.getImageId());
+        service.deregisterImage(REGION, image.getImageId(), false);
+        verify(containerManager, never()).removeCommittedImage(tag);
+
+        service.terminateInstances(REGION,
+                List.of(first.getInstanceId(), second.getInstanceId()));
+
+        verify(containerManager).removeCommittedImage(tag);
+    }
+
+    @Test
+    void aBatchReclaimTheDaemonRefusesEarlyIsRetriedLaterInTheSameBatch() {
+        // With the whole batch excluded the reclaim is attempted on the first instance, while the
+        // other containers may still exist and Docker may refuse to delete the layer. The
+        // reference is only cleared on success, so the attempt has to come round again as the
+        // rest of the batch is processed.
+        String tag = "floci-ami/ami-batch-retry:latest";
+        Image image = captureAmi("batch-retry", tag);
+        terminationLeavesInstancesShuttingDown();
+        Instance first = launch(image.getImageId());
+        Instance second = launch(image.getImageId());
+        service.deregisterImage(REGION, image.getImageId(), false);
+        when(containerManager.removeCommittedImage(tag)).thenReturn(false, true);
+
+        service.terminateInstances(REGION,
+                List.of(first.getInstanceId(), second.getInstanceId()));
+
+        verify(containerManager, times(2)).removeCommittedImage(tag);
+    }
+
     @Test
     void terminatingAnInstanceOfAStillRegisteredAmiKeepsTheCapture() {
         // The AMI can still be launched again; its capture is not garbage.
