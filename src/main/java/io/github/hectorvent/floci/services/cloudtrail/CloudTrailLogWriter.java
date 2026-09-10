@@ -1,9 +1,10 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
-import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -48,10 +49,10 @@ import java.util.zip.GZIPOutputStream;
 public class CloudTrailLogWriter {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailLogWriter.class);
+    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
 
     private static final DateTimeFormatter PATH_DATE = DateTimeFormatter.ofPattern("yyyy/MM/dd");
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'");
-    static final int MAX_RECORDS_PER_LOG_FILE = 1_000;
     private static final String FILENAME_RAND_ALPHABET =
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -96,7 +97,7 @@ public class CloudTrailLogWriter {
     void stop(@Observes ShutdownEvent event) {
         if (executor != null) {
             // Best-effort final flush so shutdown doesn't lose buffered events.
-            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed — some records may be lost"); }
+            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed: some records may be lost"); }
             executor.shutdownNow();
             executor = null;
         }
@@ -161,9 +162,9 @@ public class CloudTrailLogWriter {
     private int flushTrail(CloudTrailService.TrailKey key) {
         Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
         if (trail == null) {
-            // Trail was deleted while records were pending. Drop only the
-            // records that existed when this flush cycle started.
-            return cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE).size();
+            // Trail was deleted while records were pending: drop them.
+            cloudTrailService.discardPendingRecords(key);
+            return 0;
         }
 
         List<ObjectNode> records = cloudTrailService.drainPendingRecords(key, MAX_RECORDS_PER_LOG_FILE);
@@ -186,19 +187,30 @@ public class CloudTrailLogWriter {
         } catch (RuntimeException e) {
             // Re-queue so records survive the failed flush and are retried next cycle.
             cloudTrailService.requeueRecords(key, records);
+            try {
+                cloudTrailService.recordDeliveryFailure(key, deliveryError(e));
+            } catch (RuntimeException statusError) {
+                LOG.warnv(statusError, "CloudTrail delivery failure status update failed for trail {0}", key.trailName());
+            }
             LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
                     key.trailName(), records.size());
             throw e;
         }
+        try {
+            cloudTrailService.recordDeliverySuccess(key, System.currentTimeMillis());
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail delivery success status update failed for trail {0}", key.trailName());
+        }
+        cloudTrailService.completeDelivery(key);
 
-        // The write above already succeeded and durably delivered the records —
+        // The write above already succeeded and durably delivered the records:
         // from here on, records must never be re-queued. Doing so on a failure
         // in this block would deliver the same batch to S3 again next flush.
         try {
             // This write goes straight to S3Service, bypassing the HTTP-facing
             // S3Controller that normally emits data events for API-driven puts.
             // Any trail whose selector matches its own destination bucket must
-            // still see its own deliveries — that's the real circular-logging
+            // still see its own deliveries: that is the real circular-logging
             // behavior (issue #1192 / PR #1194) this emulator exists to prove.
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
                     .region(key.eventRegion())
@@ -221,19 +233,25 @@ public class CloudTrailLogWriter {
         return records.size();
     }
 
+    private String deliveryError(RuntimeException e) {
+        String message = e.getMessage() == null ? "" : ": " + e.getMessage();
+        if (e instanceof AwsException awsException) {
+            return awsException.getErrorCode() + message;
+        }
+        return e.getClass().getSimpleName() + message;
+    }
+
     private byte[] serializeAndGzip(List<ObjectNode> records) {
+        ObjectNode envelope = mapper.createObjectNode();
+        ArrayNode arr = envelope.putArray("Records");
+        for (ObjectNode r : records) {
+            arr.add(r);
+        }
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] json = mapper.writeValueAsBytes(envelope);
+            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
             try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
-                try (JsonGenerator generator = mapper.getFactory().createGenerator(gz)) {
-                    generator.writeStartObject();
-                    generator.writeArrayFieldStart("Records");
-                    for (ObjectNode record : records) {
-                        generator.writeTree(record);
-                    }
-                    generator.writeEndArray();
-                    generator.writeEndObject();
-                }
+                gz.write(json);
             }
             return baos.toByteArray();
         } catch (Exception e) {

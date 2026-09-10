@@ -54,12 +54,32 @@ public final class CfnRollback {
     public static final String RULE_TARGETS_SNAPSHOT_ATTR = "__FlociRuleTargetsSnapshot";
 
     /**
+     * Holds the configuration a Batch entity carried before the in-place update in flight changed
+     * it, in the request shape its update call takes, so a failed stack update can put it back.
+     * Written by {@code BatchCfnProvisioner} before its update call and spent by its
+     * {@code rollbackUpdate}. Carries the resource type because one provisioner serves three, and
+     * the rollback hook is handed the stack resource alone: a compute environment is restored
+     * through UpdateComputeEnvironment and a job queue through UpdateJobQueue, and a job
+     * definition instead names the revision the failed update registered so it can be
+     * deregistered.
+     */
+    public static final String BATCH_UPDATE_SNAPSHOT_ATTR = "__FlociBatchUpdateSnapshot";
+
+    /**
      * Holds the settings an event invoke configuration carried before an in-place update changed
      * them, in the request shape a put takes, so a failed stack update can put them back. Written
      * by {@code LambdaEventInvokeConfigCfnProvisioner} before its update call and spent by its
      * {@code rollbackUpdate}.
      */
     public static final String EVENT_INVOKE_CONFIG_SNAPSHOT_ATTR = "__FlociEventInvokeConfigSnapshot";
+
+    /**
+     * Holds the body and tags a dashboard carried before an in-place update changed them, or the
+     * fact that it did not exist, so a failed stack update can put it back. Written by
+     * {@code CloudWatchDashboardCfnProvisioner} before its first mutating call and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
     /**
      * Holds the pipe a rename displaced: the name it still lives under, the region that addresses

@@ -37,14 +37,17 @@ public class BedrockAgentCoreIdentityController {
     private static final Logger LOG = Logger.getLogger(BedrockAgentCoreIdentityController.class);
 
     private final BedrockAgentCoreIdentityService service;
+    private final BedrockAgentCoreCredentialProviderService credentialProviderService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public BedrockAgentCoreIdentityController(BedrockAgentCoreIdentityService service,
+                                              BedrockAgentCoreCredentialProviderService credentialProviderService,
                                               RegionResolver regionResolver,
                                               ObjectMapper objectMapper) {
         this.service = service;
+        this.credentialProviderService = credentialProviderService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -128,6 +131,169 @@ public class BedrockAgentCoreIdentityController {
         }
     }
 
+    @POST
+    @Path("/CreateApiKeyCredentialProvider")
+    public Response createApiKeyCredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode item = credentialProviderService.createApiKey(object(body), region);
+            ObjectNode out = item.deepCopy();
+            out.remove(List.of("createdTime", "lastUpdatedTime", "tags"));
+            return Response.status(201).entity(out).build();
+        } catch (Exception e) {
+            return error(e, "creating API key credential provider");
+        }
+    }
+
+    @POST
+    @Path("/GetApiKeyCredentialProvider")
+    public Response getApiKeyCredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            ObjectNode out = credentialProviderService.getApiKey(text(req, "name"), region);
+            out.remove("tags");
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "getting API key credential provider");
+        }
+    }
+
+    @POST
+    @Path("/ListApiKeyCredentialProviders")
+    public Response listApiKeyCredentialProviders(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            Integer maxResults = req.hasNonNull("maxResults") ? req.get("maxResults").asInt() : null;
+            String nextToken = text(req, "nextToken");
+            PaginatedResult<ObjectNode> result = credentialProviderService.listApiKeys(maxResults, nextToken, region);
+            ObjectNode out = objectMapper.createObjectNode();
+            ArrayNode providers = out.putArray("credentialProviders");
+            for (ObjectNode item : result.items()) {
+                ObjectNode summary = providers.addObject();
+                summary.put("name", item.path("name").asText());
+                summary.put("credentialProviderArn", item.path("credentialProviderArn").asText());
+                summary.put("createdTime", item.path("createdTime").asLong());
+                summary.put("lastUpdatedTime", item.path("lastUpdatedTime").asLong());
+            }
+            if (result.nextToken() != null) {
+                out.put("nextToken", result.nextToken());
+            }
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "listing API key credential providers");
+        }
+    }
+
+    @POST
+    @Path("/UpdateApiKeyCredentialProvider")
+    public Response updateApiKeyCredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode out = credentialProviderService.updateApiKey(object(body), region);
+            out.remove("tags");
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "updating API key credential provider");
+        }
+    }
+
+    @POST
+    @Path("/DeleteApiKeyCredentialProvider")
+    public Response deleteApiKeyCredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            credentialProviderService.deleteApiKey(text(req, "name"), region);
+            return Response.noContent().build();
+        } catch (Exception e) {
+            return error(e, "deleting API key credential provider");
+        }
+    }
+
+    @POST
+    @Path("/CreateOauth2CredentialProvider")
+    public Response createOauth2CredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode item = credentialProviderService.createOauth2(object(body), region);
+            ObjectNode out = item.deepCopy();
+            out.remove(List.of("createdTime", "lastUpdatedTime", "credentialProviderVendor", "tags"));
+            return Response.status(201).entity(out).build();
+        } catch (Exception e) {
+            return error(e, "creating OAuth2 credential provider");
+        }
+    }
+
+    @POST
+    @Path("/GetOauth2CredentialProvider")
+    public Response getOauth2CredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            ObjectNode out = credentialProviderService.getOauth2(text(req, "name"), region);
+            out.remove("tags");
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "getting OAuth2 credential provider");
+        }
+    }
+
+    @POST
+    @Path("/ListOauth2CredentialProviders")
+    public Response listOauth2CredentialProviders(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            Integer maxResults = req.hasNonNull("maxResults") ? req.get("maxResults").asInt() : null;
+            String nextToken = text(req, "nextToken");
+            PaginatedResult<ObjectNode> result = credentialProviderService.listOauth2(maxResults, nextToken, region);
+            ObjectNode out = objectMapper.createObjectNode();
+            ArrayNode providers = out.putArray("credentialProviders");
+            for (ObjectNode item : result.items()) {
+                ObjectNode summary = providers.addObject();
+                summary.put("name", item.path("name").asText());
+                summary.put("credentialProviderArn", item.path("credentialProviderArn").asText());
+                summary.put("credentialProviderVendor", item.path("credentialProviderVendor").asText());
+                summary.put("createdTime", item.path("createdTime").asLong());
+                summary.put("lastUpdatedTime", item.path("lastUpdatedTime").asLong());
+            }
+            if (result.nextToken() != null) {
+                out.put("nextToken", result.nextToken());
+            }
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "listing OAuth2 credential providers");
+        }
+    }
+
+    @POST
+    @Path("/UpdateOauth2CredentialProvider")
+    public Response updateOauth2CredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode out = credentialProviderService.updateOauth2(object(body), region);
+            out.remove("tags");
+            return Response.ok(out).build();
+        } catch (Exception e) {
+            return error(e, "updating OAuth2 credential provider");
+        }
+    }
+
+    @POST
+    @Path("/DeleteOauth2CredentialProvider")
+    public Response deleteOauth2CredentialProvider(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            ObjectNode req = object(body);
+            credentialProviderService.deleteOauth2(text(req, "name"), region);
+            return Response.noContent().build();
+        } catch (Exception e) {
+            return error(e, "deleting OAuth2 credential provider");
+        }
+    }
+
     private ObjectNode identityNode(WorkloadIdentity identity, boolean full) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("name", identity.getName());
@@ -149,6 +315,14 @@ public class BedrockAgentCoreIdentityController {
             // unlike the runtime timestamps which are ISO-8601 strings.
             node.put(field, instant.getEpochSecond());
         }
+    }
+
+    private ObjectNode object(String body) throws Exception {
+        JsonNode request = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
+        if (!request.isObject()) {
+            throw new AwsException("ValidationException", "request body must be a JSON object", 400);
+        }
+        return (ObjectNode) request;
     }
 
     private static String text(JsonNode node, String field) {

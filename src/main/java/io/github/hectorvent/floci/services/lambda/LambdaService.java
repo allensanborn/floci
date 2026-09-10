@@ -2773,30 +2773,6 @@ public class LambdaService implements ResourceProvider {
                 }
             }
 
-            // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
-            if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
-                String handlerFile = resolveHandlerFilePath(fn);
-                boolean pythonRuntime = fn.getRuntime().startsWith("python");
-                boolean found;
-                try (var walk = Files.walk(codePath)) {
-                    found = walk
-                            .filter(Files::isRegularFile)
-                            .anyMatch(p -> {
-                                String relative = codePath.relativize(p).toString();
-                                String withoutExt = relative.contains(".")
-                                        ? relative.substring(0, relative.lastIndexOf('.'))
-                                        : relative;
-                                String normalized = withoutExt.replace('\\', '/');
-                                return normalized.equals(handlerFile)
-                                        || (pythonRuntime && normalized.equals(handlerFile + "/__init__"));
-                            });
-                }
-                if (!found) {
-                    throw new AwsException("InvalidParameterValueException",
-                            "Handler file '" + handlerFile + "' not found in deployment package", 400);
-                }
-            }
-
             // Deploy succeeded: keep the exact package so GetFunction can serve
             // a real Code.Location.
             storeDeploymentPackage(fn, zipBytes, region);
@@ -2893,22 +2869,6 @@ public class LambdaService implements ResourceProvider {
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
         extractZipCodeBytes(fn, obj.getData(), region);
-    }
-
-    private String resolveHandlerFilePath(LambdaFunction fn) {
-        String handler = fn.getHandler();
-        int lastDot = handler.lastIndexOf('.');
-        String modulePath = lastDot >= 0 ? handler.substring(0, lastDot) : handler;
-        if (fn.getRuntime().startsWith("python")) {
-            return modulePath.replace('.', '/');
-        }
-        // A file-based handler may be given with a leading "./" (e.g.
-        // "./v1/lambda-handlers/entry.handler"); deployment-package entries are stored without
-        // it, so normalize the prefix away before matching.
-        if (modulePath.startsWith("./")) {
-            modulePath = modulePath.substring(2);
-        }
-        return modulePath;
     }
 
     private void applyHotReload(LambdaFunction fn, String hostPath) {

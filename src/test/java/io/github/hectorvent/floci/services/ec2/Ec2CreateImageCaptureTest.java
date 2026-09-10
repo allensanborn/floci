@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.Test;
 
@@ -54,7 +55,8 @@ class Ec2CreateImageCaptureTest {
                 mock(Ec2MetadataServer.class),
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),
-                mock(ContainerNetworkReachability.class));
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class));
     }
 
     private static Instance instance(String containerId) {

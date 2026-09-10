@@ -4,33 +4,78 @@
 **Endpoint:** `http://localhost:4566/runtimes/...`
 
 Emulates the Amazon Bedrock AgentCore **control plane** (`bedrock-agentcore-control`)
-as a stateful runtime registry. No real agent execution — runtimes reach `READY`
-immediately and hold metadata only. See
-[the design note](../design/bedrock-agentcore.md) for scope and the roadmap covering
-endpoints, the `InvokeAgentRuntime` data-plane stub, tagging, workload identity, and
-gateway/memory primitives.
+as a stateful local registry across runtimes, endpoints, gateways, memories, browser/code-interpreter
+resources, credential providers, gateway rules, and resource policies. No real agent execution:
+runtimes reach `READY` immediately and hold metadata only. See
+[the design note](../design/bedrock-agentcore.md) for scope and protocol details.
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateAgentRuntime` | Register an agent runtime; returns an id, versioned ARN, and workload identity |
-| `GetAgentRuntime` | Get a runtime, optionally a specific `version` |
 | `ListAgentRuntimes` | List runtimes (paginated) |
+| `GetAgentRuntime` | Get a runtime, optionally a specific `version` |
 | `UpdateAgentRuntime` | Update a runtime; appends a new immutable version |
 | `ListAgentRuntimeVersions` | List a runtime's versions (paginated) |
 | `DeleteAgentRuntime` | Delete a runtime |
-| `CreateAgentRuntimeEndpoint` | Create a named endpoint (qualifier) targeting a version |
-| `GetAgentRuntimeEndpoint` | Get an endpoint |
-| `UpdateAgentRuntimeEndpoint` | Retarget an endpoint's version / update its description |
-| `ListAgentRuntimeEndpoints` | List a runtime's endpoints (paginated) |
-| `DeleteAgentRuntimeEndpoint` | Delete an endpoint |
-| `InvokeAgentRuntime` *(data plane)* | Invoke a runtime; returns a fixed canned response |
-| `TagResource` / `UntagResource` / `ListTagsForResource` | Tag runtimes, gateways, and memory resources via the shared `/tags/{arn}` route |
-| `CreateWorkloadIdentity` / `GetWorkloadIdentity` / `UpdateWorkloadIdentity` / `DeleteWorkloadIdentity` / `ListWorkloadIdentities` | Manage workload identities (`POST /identities/<Op>`) |
-| `CreateGateway` / `GetGateway` / `UpdateGateway` / `DeleteGateway` / `ListGateways` | Manage gateways (metadata only) |
-| `CreateGatewayTarget` / `GetGatewayTarget` / `UpdateGatewayTarget` / `DeleteGatewayTarget` / `ListGatewayTargets` | Manage gateway targets |
-| `CreateMemory` / `GetMemory` / `UpdateMemory` / `DeleteMemory` / `ListMemories` | Manage memory resources (metadata only) |
+| `CreateAgentRuntimeEndpoint` | Creates a named runtime endpoint targeting an agent runtime version |
+| `GetAgentRuntimeEndpoint` | Returns a runtime endpoint |
+| `UpdateAgentRuntimeEndpoint` | Updates the target version or description of a runtime endpoint |
+| `DeleteAgentRuntimeEndpoint` | Deletes a runtime endpoint |
+| `ListAgentRuntimeEndpoints` | Lists runtime endpoints for an agent runtime |
+| `CreateWorkloadIdentity` | Creates a workload identity |
+| `GetWorkloadIdentity` | Returns a workload identity |
+| `UpdateWorkloadIdentity` | Updates a workload identity |
+| `DeleteWorkloadIdentity` | Deletes a workload identity |
+| `ListWorkloadIdentities` | Lists workload identities |
+| `CreateApiKeyCredentialProvider` | Creates an API key credential provider |
+| `GetApiKeyCredentialProvider` | Returns an API key credential provider |
+| `ListApiKeyCredentialProviders` | Lists API key credential providers |
+| `UpdateApiKeyCredentialProvider` | Updates an API key credential provider |
+| `DeleteApiKeyCredentialProvider` | Deletes an API key credential provider |
+| `CreateOauth2CredentialProvider` | Creates an OAuth2 credential provider |
+| `GetOauth2CredentialProvider` | Returns an OAuth2 credential provider |
+| `ListOauth2CredentialProviders` | Lists OAuth2 credential providers |
+| `UpdateOauth2CredentialProvider` | Updates an OAuth2 credential provider |
+| `DeleteOauth2CredentialProvider` | Deletes an OAuth2 credential provider |
+| `CreateGateway` | Creates a gateway |
+| `GetGateway` | Returns a gateway |
+| `UpdateGateway` | Updates a gateway |
+| `DeleteGateway` | Deletes a gateway |
+| `ListGateways` | Lists gateways |
+| `CreateGatewayTarget` | Creates a target on a gateway |
+| `GetGatewayTarget` | Returns a gateway target |
+| `UpdateGatewayTarget` | Updates a gateway target |
+| `DeleteGatewayTarget` | Deletes a gateway target |
+| `ListGatewayTargets` | Lists targets on a gateway |
+| `CreateMemory` | Creates a memory resource |
+| `GetMemory` | Returns a memory resource |
+| `UpdateMemory` | Updates a memory resource |
+| `DeleteMemory` | Deletes a memory resource |
+| `ListMemories` | Lists memory resources |
+| `CreateBrowser` | Creates a custom browser |
+| `GetCodeInterpreter` | Returns a custom or system code interpreter |
+| `DeleteCodeInterpreter` | Deletes a custom code interpreter |
+| `ListCodeInterpreters` | Lists custom and system code interpreters |
+| `CreateCodeInterpreter` | Creates a custom code interpreter |
+| `CreateBrowserProfile` | Creates a browser profile |
+| `ListBrowserProfiles` | Lists browser profiles |
+| `DeleteBrowserProfile` | Deletes a browser profile |
+| `GetBrowserProfile` | Returns a browser profile |
+| `GetBrowser` | Returns a custom or system browser |
+| `DeleteBrowser` | Deletes a custom browser |
+| `ListBrowsers` | Lists custom and system browsers |
+| `CreateGatewayRule` | Creates a gateway rule |
+| `GetGatewayRule` | Returns a gateway rule |
+| `ListGatewayRules` | Lists rules on a gateway |
+| `UpdateGatewayRule` | Updates a gateway rule |
+| `DeleteGatewayRule` | Deletes a gateway rule |
+| `GetResourcePolicy` | Returns the policy attached to an AgentCore resource |
+| `PutResourcePolicy` | Creates or replaces a policy on an AgentCore resource |
+| `DeleteResourcePolicy` | Deletes the policy attached to an AgentCore resource |
+<!-- floci:actions:end -->
 
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
 is associated with an auto-created, resolvable workload identity.

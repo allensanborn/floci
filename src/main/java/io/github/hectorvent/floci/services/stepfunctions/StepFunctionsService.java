@@ -37,11 +37,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.function.IntConsumer;
 
 @ApplicationScoped
 public class StepFunctionsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
+    private static final int HISTORY_PERSIST_CHECKPOINT = 100;
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
     // Account-aware: the startup sweep has no request context and must reach every account.
@@ -70,7 +72,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     // AWS-observed, it is simply the one this code commits to.
     private static final List<String> JSONPATH_ONLY_FIELDS = List.of(
             "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath",
-            "MaxConcurrencyPath");
+            "MaxConcurrencyPath", "ErrorPath", "CausePath");
     // Fields that are valid only in JSONata mode. Validated against real AWS: a JSONPath state
     // carrying any of them returns SCHEMA_VALIDATION_FAILED. Assign is deliberately absent: AWS
     // accepts it on a JSONPath state, so it belongs to neither list. A List for the same reason as
@@ -577,9 +579,11 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             exec.setName(execName);
             exec.setInput(input);
             exec.setStatus("RUNNING");
-            executionStore.put(arn, exec);
-
-            history = new ExecutionHistory();
+            history = new ExecutionHistory(eventCount -> {
+                if (eventCount % HISTORY_PERSIST_CHECKPOINT == 0) {
+                    executionStore.put(arn, exec);
+                }
+            });
             var startEvent = new HistoryEvent();
             startEvent.setId(1L);
             startEvent.setPreviousEventId(0L);
@@ -587,7 +591,9 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             startEvent.setDetails(Map.of("input", input != null ? input : "{}",
                                          "roleArn", sm.getRoleArn() != null ? sm.getRoleArn() : "",
                                          "inputDetails", Map.of("truncated", false)));
+            exec.setHistory(history);
             history.add(startEvent);
+            executionStore.put(arn, exec);
             historyCache.put(arn, history);
         }
 
@@ -794,18 +800,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if (cause != null) {
             details.put("cause", cause);
         }
-        // An execution can outlive its history: the executions are stored, the histories are held in
-        // memory only, so a restart in persistent mode brings a RUNNING execution back with nothing
-        // behind it. The abort still gets recorded, against a history that starts here.
-        historyCache.computeIfAbsent(arn, key -> new ExecutionHistory())
-                .sealWith("ExecutionAborted", details);
+        // A restart can leave a RUNNING execution without its worker and token future. Preserve all
+        // persisted events, then append the terminal event that explains the deterministic recovery.
+        ExecutionHistory history = historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, false));
+        exec.setHistory(history);
+        history.sealWith("ExecutionAborted", details);
         return true;
     }
 
     public List<HistoryEvent> getExecutionHistory(String arn) {
-        describeExecution(arn);
-        ExecutionHistory history = historyCache.get(arn);
-        return history != null ? history : Collections.emptyList();
+        Execution exec = describeExecution(arn);
+        return historyCache.computeIfAbsent(arn,
+                key -> new ExecutionHistory(exec.getHistory(), () -> { }, isTerminal(exec.getStatus())));
+    }
+
+    private static boolean isTerminal(String status) {
+        return !"RUNNING".equals(status);
     }
 
     /**
@@ -821,14 +832,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
 
         private static final long serialVersionUID = 1L;
 
+        private final IntConsumer onAppend;
         private boolean sealed;
+
+        ExecutionHistory() {
+            this(eventCount -> { });
+        }
+
+        ExecutionHistory(Runnable onAppend) {
+            this(eventCount -> onAppend.run());
+        }
+
+        ExecutionHistory(IntConsumer onAppend) {
+            this.onAppend = onAppend;
+        }
+
+        ExecutionHistory(List<HistoryEvent> events, Runnable onAppend, boolean sealed) {
+            super(events != null ? events : List.of());
+            this.onAppend = eventCount -> onAppend.run();
+            this.sealed = sealed;
+        }
 
         @Override
         public synchronized boolean add(HistoryEvent event) {
             if (sealed) {
                 return false;
             }
-            return super.add(event);
+            boolean added = super.add(event);
+            if (added) {
+                onAppend.accept(size());
+            }
+            return added;
         }
 
         /** Appends the terminal event, numbered from the end of the history, and takes no more. */
@@ -1938,6 +1972,10 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             }
         }
 
+        if ("Fail".equals(stateType)) {
+            validateFailErrorAndCauseFields(statePath, stateDef, errors);
+        }
+
         if ("Map".equals(stateType)) {
             validateMapConcurrency(statePath, stateDef, stateIsJsonata, errors);
             if (stateDef.has("ItemReader")) {
@@ -2087,6 +2125,37 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         // are always walked for reachability regardless of whether they have a terminal state.
         validateReachability(statesPath, states, subWorkflow.path("StartAt").asText(null),
                 subWorkflowPath + "/StartAt", errors);
+    }
+
+    /**
+     * A Fail state resolves its {@code Error} either from the literal {@code Error} field or
+     * dynamically from {@code ErrorPath}, never both; the same holds for {@code Cause} and
+     * {@code CausePath}. Real AWS refuses a definition that specifies both at CreateStateMachine.
+     */
+    private static void validateFailErrorAndCauseFields(String statePath, JsonNode stateDef, List<String> errors) {
+        if (stateDef.has("Error") && stateDef.has("ErrorPath")) {
+            errors.add("A Fail state cannot include both field 'Error' and 'ErrorPath' at " + statePath);
+        }
+        if (stateDef.has("Cause") && stateDef.has("CausePath")) {
+            errors.add("A Fail state cannot include both field 'Cause' and 'CausePath' at " + statePath);
+        }
+        validateFailPathFieldIsString(statePath, stateDef, "ErrorPath", errors);
+        validateFailPathFieldIsString(statePath, stateDef, "CausePath", errors);
+    }
+
+    /**
+     * {@code ErrorPath}/{@code CausePath} are reference paths or {@code States.*} intrinsics,
+     * always given as a JSON string; a non-string value (a number, object, array, or boolean)
+     * is a definition error AWS rejects at {@code CreateStateMachine}, not something that should
+     * reach execution and fail there instead.
+     */
+    private static void validateFailPathFieldIsString(String statePath, JsonNode stateDef, String field,
+                                                       List<String> errors) {
+        JsonNode value = stateDef.get(field);
+        if (value != null && !value.isTextual()) {
+            errors.add(EXPLICIT_LOCATION_MARKER + "Expected value of type [STRING]"
+                    + MARKER_PAYLOAD_SEPARATOR + statePath + "/" + field);
+        }
     }
 
     private void validateMapConcurrency(String statePath, JsonNode stateDef,

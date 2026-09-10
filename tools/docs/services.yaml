@@ -30,6 +30,32 @@ services:
     doc: docs/services/athena.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/athena/AthenaJsonHandler.java, mode: switch }
+  - service: bedrock-agentcore-control
+    doc: docs/services/bedrock-agentcore.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreControlController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreIdentityController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreGatewayController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreMemoryController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreToolsController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreGatewayRuleController.java, mode: rest }
+      - { path: src/main/java/io/github/hectorvent/floci/services/bedrockagentcorecontrol/BedrockAgentCoreResourcePolicyController.java, mode: rest }
+    rename_actions:
+      CreateEndpoint: CreateAgentRuntimeEndpoint
+      GetEndpoint: GetAgentRuntimeEndpoint
+      UpdateEndpoint: UpdateAgentRuntimeEndpoint
+      DeleteEndpoint: DeleteAgentRuntimeEndpoint
+      ListEndpoints: ListAgentRuntimeEndpoints
+      Create: CreateWorkloadIdentity
+      Get: GetWorkloadIdentity
+      Update: UpdateWorkloadIdentity
+      Delete: DeleteWorkloadIdentity
+      List: ListWorkloadIdentities
+      CreateTarget: CreateGatewayTarget
+      GetTarget: GetGatewayTarget
+      UpdateTarget: UpdateGatewayTarget
+      DeleteTarget: DeleteGatewayTarget
+      ListTargets: ListGatewayTargets
   - service: cloudformation
     doc: docs/services/cloudformation.md
     sources:

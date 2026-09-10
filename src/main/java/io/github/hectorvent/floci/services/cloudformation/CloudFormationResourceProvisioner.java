@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
-import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
@@ -41,10 +40,16 @@ import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -188,9 +193,6 @@ public class CloudFormationResourceProvisioner {
             "AWS::ApiGatewayV2::Stage",
             "AWS::AutoScaling::AutoScalingGroup",
             "AWS::AutoScaling::LaunchConfiguration",
-            "AWS::Batch::ComputeEnvironment",
-            "AWS::Batch::JobDefinition",
-            "AWS::Batch::JobQueue",
             "AWS::CloudFormation::CustomResource",
             "AWS::CloudFront::Distribution",
             "AWS::DynamoDB::GlobalTable",
@@ -240,7 +242,6 @@ public class CloudFormationResourceProvisioner {
     private final CustomResourceResponseStore customResourceResponseStore;
     private final ContainerReachableEndpoint reachableEndpoint;
     private final StepFunctionsService stepFunctionsService;
-    private final BatchService batchService;
     private final Ec2Service ec2Service;
     private final RdsService rdsService;
     private final EksService eksService;
@@ -269,7 +270,6 @@ public class CloudFormationResourceProvisioner {
                                              CustomResourceResponseStore customResourceResponseStore,
                                              ContainerReachableEndpoint reachableEndpoint,
                                              StepFunctionsService stepFunctionsService,
-                                             BatchService batchService,
                                              Ec2Service ec2Service,
                                              RdsService rdsService,
                                              EksService eksService,
@@ -296,7 +296,6 @@ public class CloudFormationResourceProvisioner {
         this.customResourceResponseStore = customResourceResponseStore;
         this.reachableEndpoint = reachableEndpoint;
         this.stepFunctionsService = stepFunctionsService;
-        this.batchService = batchService;
         this.ec2Service = ec2Service;
         this.rdsService = rdsService;
         this.eksService = eksService;
@@ -385,12 +384,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::CloudFormation::CustomResource" ->
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "Custom::DynamoDBReplica" -> provisionDynamoDbReplica(resource, properties, engine, region);
-                case "AWS::Batch::ComputeEnvironment" ->
-                        provisionBatchComputeEnvironment(resource, properties, engine, region, stackName);
-                case "AWS::Batch::JobQueue" ->
-                        provisionBatchJobQueue(resource, properties, engine, region, stackName);
-                case "AWS::Batch::JobDefinition" ->
-                        provisionBatchJobDefinition(resource, properties, engine, region, stackName);
                 // EC2 networking. These delegate to Ec2Service so the resources actually exist
                 // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
                 // fake physical id. Topological ordering guarantees parents are provisioned first.
@@ -702,7 +695,13 @@ public class CloudFormationResourceProvisioner {
             description = "Managed by CloudFormation";
         }
         String vpcId = resolveOptional(props, "VpcId", engine);
-        var sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        // provision() re-runs for every resource on every update. Re-creating an unchanged group
+        // would mint a new group id (and collide on the name whenever the VPC id is stable), so
+        // reuse the group this resource already points at.
+        var reconciled = existingSecurityGroupToReconcile(r.getPhysicalId(), groupName, description, vpcId, region);
+        final SecurityGroup sg = reconciled != null
+                ? reconciled
+                : ec2Service.createSecurityGroup(region, groupName, description, vpcId);
         // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
         r.setPhysicalId(sg.getGroupId());
         r.getAttributes().put("GroupId", sg.getGroupId());
@@ -713,17 +712,24 @@ public class CloudFormationResourceProvisioner {
         // Inline rule properties — previously dropped, leaving the group empty. The mapping is
         // shared with the standalone SecurityGroupIngress/Egress resource types, which live in
         // Ec2SecurityGroupRuleCfnProvisioner; this arm joins them when it is extracted.
+        // Authorize appends without a duplicate check, so re-running this on a reused group would
+        // stack another copy of every inline rule on each update. Only authorize what the group
+        // does not already carry.
+        //
+        // Deliberately additive: a rule dropped from the template is not revoked here. Revoking
+        // the difference would mean revoking permissions this resource cannot prove it owns - a
+        // group can also carry rules from standalone AWS::EC2::SecurityGroupIngress/Egress
+        // resources, and clearing them on an unrelated update would close ports another stack
+        // resource is responsible for. Removing a rule the template no longer declares needs the
+        // provisioner to record what it authorized; noted as a follow-up.
+        var peerGroupId = peerGroupIdResolver(region, sg.getVpcId());
         if (props != null && props.has("SecurityGroupIngress")) {
-            for (JsonNode rule : props.get("SecurityGroupIngress")) {
-                ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(),
-                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
-            }
+            authorizeMissing(props.get("SecurityGroupIngress"), sg.getIpPermissions(), engine, peerGroupId,
+                    perms -> ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), perms));
         }
         if (props != null && props.has("SecurityGroupEgress")) {
-            for (JsonNode rule : props.get("SecurityGroupEgress")) {
-                ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(),
-                        List.of(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine)));
-            }
+            authorizeMissing(props.get("SecurityGroupEgress"), sg.getIpPermissionsEgress(), engine, peerGroupId,
+                    perms -> ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), perms));
         }
     }
 
@@ -1205,6 +1211,120 @@ public class CloudFormationResourceProvisioner {
         }
         r.setPhysicalId(group.getDbClusterParameterGroupName());
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
+    }
+
+    /** The VPC a security group would land in for this template value: the default when omitted. */
+    private String effectiveVpcId(String vpcId, String region) {
+        return vpcId != null && !vpcId.isEmpty() ? vpcId : String.valueOf(ec2Service.resolveDefaultVpcId(region));
+    }
+
+    /**
+     * Authorizes each declared rule that the group does not already carry, one call per rule so a
+     * rejected rule cannot take its siblings down with it.
+     */
+    private void authorizeMissing(JsonNode declared, List<IpPermission> existing,
+                                  CloudFormationTemplateEngine engine,
+                                  java.util.function.UnaryOperator<String> peerGroupId,
+                                  java.util.function.Consumer<List<IpPermission>> authorize) {
+        Set<String> present = existing.stream()
+                .map(p -> permissionKey(p, peerGroupId))
+                .collect(java.util.stream.Collectors.toSet());
+        for (JsonNode rule : declared) {
+            IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
+            if (present.add(permissionKey(perm, peerGroupId))) {
+                authorize.accept(List.of(perm));
+            }
+        }
+    }
+
+    /**
+     * Resolves a peer group's name to its id, the same lookup {@code Ec2Service} performs when it
+     * stores an authorized rule. Group names are unique per VPC rather than per region, so the
+     * search is confined to the group being authorized. A name matching nothing there stays a
+     * name, which is also what the service does.
+     */
+    private java.util.function.UnaryOperator<String> peerGroupIdResolver(String region, String vpcId) {
+        return groupName -> ec2Service.describeSecurityGroups(region, List.of(), List.of(groupName), Map.of())
+                .stream()
+                .filter(peer -> Objects.equals(vpcId, peer.getVpcId()))
+                .map(SecurityGroup::getGroupId)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(groupName);
+    }
+
+    /**
+     * Identity of a permission for duplicate detection. {@link IpPermission} and the range types
+     * it holds define no {@code equals}, so compare a canonical rendering instead. Descriptions
+     * are left out: AWS treats a rule differing only by description as the same rule.
+     */
+    private static String permissionKey(IpPermission p, java.util.function.UnaryOperator<String> peerGroupId) {
+        return String.join("|",
+                String.valueOf(p.getIpProtocol()),
+                String.valueOf(p.getFromPort()),
+                String.valueOf(p.getToPort()),
+                p.getIpRanges().stream().map(IpRange::getCidrIp).filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getUserIdGroupPairs().stream()
+                        .map(g -> peerIdentity(g, peerGroupId))
+                        .filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")),
+                p.getPrefixListIds().stream().map(PrefixListId::getPrefixListId)
+                        .filter(Objects::nonNull).sorted()
+                        .collect(java.util.stream.Collectors.joining(",")));
+    }
+
+    /**
+     * How a peer group is identified when two permissions are compared: its id whenever one can be
+     * had. A stored pair already carries one, because authorize resolves the name as it records the
+     * rule, while a pair straight from the template carries only the name it was declared with.
+     * Keying a resolved id against an unresolved name never matches, which re-authorized a rule
+     * naming its peer through {@code SourceSecurityGroupName} on every single update.
+     */
+    private static String peerIdentity(UserIdGroupPair pair,
+                                       java.util.function.UnaryOperator<String> peerGroupId) {
+        if (pair.getGroupId() != null) {
+            return pair.getGroupId();
+        }
+        return pair.getGroupName() == null ? null : peerGroupId.apply(pair.getGroupName());
+    }
+
+    /**
+     * The security group this stack resource already points at, when an UpdateStack re-invocation
+     * left it unchanged. Unlike most resources the physical id here is the group <em>id</em>, not
+     * the name, so the rename check compares the stored group's name against the template's.
+     *
+     * <p>Returns {@code null} for a fresh create, a group deleted out of band, or any change AWS
+     * treats as a replacement: GroupName, GroupDescription and VpcId are all immutable on a
+     * security group, so a template that changes one wants a new group, not an edit to this one.
+     * The caller then creates.
+     */
+    private SecurityGroup existingSecurityGroupToReconcile(String priorPhysicalId, String groupName,
+                                                           String description, String vpcId, String region) {
+        if (priorPhysicalId == null || priorPhysicalId.isBlank()) {
+            return null;
+        }
+        try {
+            return ec2Service.describeSecurityGroups(region, List.of(priorPhysicalId), List.of(), Map.of())
+                    .stream()
+                    .filter(existing -> groupName == null || groupName.equals(existing.getGroupName()))
+                    .filter(existing -> description == null || description.equals(existing.getDescription()))
+                    // Compare the VpcId the template would actually get, not the raw property.
+                    // createSecurityGroup resolves an omitted VpcId to the region's default VPC,
+                    // so the stored group always has one: comparing against a null property would
+                    // either force a replacement on every update, or - the bug - let a template
+                    // that drops VpcId keep a group sitting in the explicit VPC it named before.
+                    .filter(existing -> effectiveVpcId(vpcId, region).equals(existing.getVpcId()))
+                    .findFirst()
+                    .orElse(null);
+        } catch (AwsException notFound) {
+            // Expected when the group was deleted out of band since the prior update.
+            LOG.debugv(notFound, "No existing security group {0} found on file, falling back to create",
+                    priorPhysicalId);
+            return null;
+        }
     }
 
     /**
@@ -3271,158 +3391,6 @@ public class CloudFormationResourceProvisioner {
         return password;
     }
 
-
-    // ── Batch ────────────────────────────────────────────────────────────────
-
-    private void provisionBatchComputeEnvironment(StackResource r, JsonNode props,
-                                                  CloudFormationTemplateEngine engine,
-                                                  String region, String stackName) {
-        String name = resolveOptional(props, "ComputeEnvironmentName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("computeEnvironmentName", name);
-        putResolvedText(req, "type", props, "Type", engine);
-        putResolvedText(req, "state", props, "State", engine);
-        putResolvedText(req, "serviceRole", props, "ServiceRole", engine);
-        putResolvedObject(req, "computeResources", props, "ComputeResources", engine);
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.createComputeEnvironment(req, region);
-        String arn = response.path("computeEnvironmentArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("ComputeEnvironmentArn", arn);
-        r.getAttributes().put("ComputeEnvironmentName", name);
-    }
-
-    private void provisionBatchJobQueue(StackResource r, JsonNode props,
-                                        CloudFormationTemplateEngine engine,
-                                        String region, String stackName) {
-        String name = resolveOptional(props, "JobQueueName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobQueueName", name);
-        String priority = resolveOptional(props, "Priority", engine);
-        req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
-        putResolvedText(req, "state", props, "State", engine);
-        putResolvedText(req, "jobQueueType", props, "JobQueueType", engine);
-        req.set("computeEnvironmentOrder", batchComputeEnvironmentOrder(props, engine));
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.createJobQueue(req, region);
-        String arn = response.path("jobQueueArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("JobQueueArn", arn);
-        r.getAttributes().put("JobQueueName", name);
-    }
-
-    private void provisionBatchJobDefinition(StackResource r, JsonNode props,
-                                             CloudFormationTemplateEngine engine,
-                                             String region, String stackName) {
-        String name = resolveOptional(props, "JobDefinitionName", engine);
-        if (name == null || name.isBlank()) {
-            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
-        }
-
-        ObjectNode req = JsonNodeFactory.instance.objectNode();
-        req.put("jobDefinitionName", name);
-        req.put("type", resolveOrDefault(props, "Type", engine, "container"));
-        putResolvedArray(req, "platformCapabilities", props, "PlatformCapabilities", engine);
-        if (props != null && props.has("ContainerProperties")) {
-            req.set("containerProperties", batchContainerProperties(
-                    engine.resolveNode(props.get("ContainerProperties")), engine));
-        }
-        putStringMapFromObject(req, "parameters", props, "Parameters", engine);
-        if (props != null && props.has("RetryStrategy")) {
-            req.set("retryStrategy", batchRetryStrategy(engine.resolveNode(props.get("RetryStrategy"))));
-        }
-        if (props != null && props.has("Timeout")) {
-            ObjectNode timeout = JsonNodeFactory.instance.objectNode();
-            JsonNode resolved = engine.resolveNode(props.get("Timeout"));
-            if (resolved.has("AttemptDurationSeconds")) {
-                timeout.set("attemptDurationSeconds", resolved.get("AttemptDurationSeconds"));
-            }
-            req.set("timeout", timeout);
-        }
-        putTagsObject(req, props, engine);
-
-        ObjectNode response = batchService.registerJobDefinition(req, region);
-        String arn = response.path("jobDefinitionArn").asText();
-        r.setPhysicalId(arn);
-        r.getAttributes().put("Arn", arn);
-        r.getAttributes().put("JobDefinitionArn", arn);
-        r.getAttributes().put("JobDefinitionName", name);
-        r.getAttributes().put("Revision", response.path("revision").asText());
-    }
-
-    private ArrayNode batchComputeEnvironmentOrder(JsonNode props, CloudFormationTemplateEngine engine) {
-        ArrayNode out = JsonNodeFactory.instance.arrayNode();
-        if (props == null || !props.has("ComputeEnvironmentOrder")) {
-            return out;
-        }
-        JsonNode resolved = engine.resolveNode(props.get("ComputeEnvironmentOrder"));
-        if (!resolved.isArray()) {
-            return out;
-        }
-        for (JsonNode item : resolved) {
-            ObjectNode order = out.addObject();
-            order.put("order", item.path("Order").asInt());
-            order.put("computeEnvironment", item.path("ComputeEnvironment").asText(null));
-        }
-        return out;
-    }
-
-    private ObjectNode batchContainerProperties(JsonNode resolved, CloudFormationTemplateEngine engine) {
-        ObjectNode container = JsonNodeFactory.instance.objectNode();
-        if (resolved == null || !resolved.isObject()) {
-            return container;
-        }
-        copyIfPresent(container, "image", resolved, "Image");
-        copyIfPresent(container, "command", resolved, "Command");
-        copyIfPresent(container, "jobRoleArn", resolved, "JobRoleArn");
-        copyIfPresent(container, "executionRoleArn", resolved, "ExecutionRoleArn");
-        copyIfPresent(container, "logConfiguration", resolved, "LogConfiguration");
-        copyIfPresent(container, "networkConfiguration", resolved, "NetworkConfiguration");
-        copyIfPresent(container, "ephemeralStorage", resolved, "EphemeralStorage");
-        if (resolved.has("ResourceRequirements") && resolved.get("ResourceRequirements").isArray()) {
-            ArrayNode resources = container.putArray("resourceRequirements");
-            for (JsonNode item : resolved.get("ResourceRequirements")) {
-                ObjectNode requirement = resources.addObject();
-                requirement.put("type", item.path("Type").asText(null));
-                requirement.put("value", item.path("Value").asText(null));
-            }
-        }
-        if (resolved.has("Environment") && resolved.get("Environment").isArray()) {
-            ArrayNode env = container.putArray("environment");
-            for (JsonNode item : resolved.get("Environment")) {
-                ObjectNode entry = env.addObject();
-                entry.put("name", item.path("Name").asText(null));
-                entry.put("value", item.path("Value").asText(null));
-            }
-        }
-        return container;
-    }
-
-    private ObjectNode batchRetryStrategy(JsonNode resolved) {
-        ObjectNode retry = JsonNodeFactory.instance.objectNode();
-        if (resolved == null || !resolved.isObject()) {
-            return retry;
-        }
-        if (resolved.has("Attempts")) {
-            retry.set("attempts", resolved.get("Attempts"));
-        }
-        if (resolved.has("EvaluateOnExit")) {
-            retry.set("evaluateOnExit", resolved.get("EvaluateOnExit"));
-        }
-        return retry;
-    }
 
     private void putResolvedText(ObjectNode req, String target, JsonNode props, String source,
                                  CloudFormationTemplateEngine engine) {

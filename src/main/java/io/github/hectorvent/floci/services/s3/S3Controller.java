@@ -42,7 +42,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
-import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -59,7 +58,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
@@ -83,16 +81,7 @@ public class S3Controller {
     private static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
-    private static final XMLInputFactory NOTIFICATION_XML_FACTORY;
-
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-
-    static {
-        NOTIFICATION_XML_FACTORY = XMLInputFactory.newInstance();
-        NOTIFICATION_XML_FACTORY.setProperty(XMLInputFactory.IS_NAMESPACE_AWARE, true);
-        NOTIFICATION_XML_FACTORY.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, false);
-        NOTIFICATION_XML_FACTORY.setProperty(XMLInputFactory.SUPPORT_DTD, false);
-    }
 
     private final S3Service s3Service;
     private final S3SelectService s3SelectService;
@@ -804,6 +793,7 @@ public class S3Controller {
             String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
             String serverSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
+            String sseKmsKeyId = httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id");
             String sseCustomerAlgorithm = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm");
             String sseCustomerKey = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key");
             String sseCustomerKeyMd5 = httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5");
@@ -819,6 +809,7 @@ public class S3Controller {
                             .withContentDisposition(contentDisposition)
                             .withCacheControl(cacheControl)
                             .withServerSideEncryption(serverSideEncryption)
+                            .withSseKmsKeyId(sseKmsKeyId)
                             .withSseCustomerAlgorithm(sseCustomerAlgorithm)
                             .withSseCustomerKey(sseCustomerKey)
                             .withSseCustomerKeyMd5(sseCustomerKeyMd5)
@@ -1325,6 +1316,7 @@ public class S3Controller {
                         httpHeaders.getHeaderString("Content-Disposition"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption"),
                         httpHeaders.getHeaderString("x-amz-acl"),
+                        httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"),
@@ -1374,7 +1366,8 @@ public class S3Controller {
                 String checksumType = httpHeaders.getHeaderString("x-amz-checksum-type");
                 S3Checksum expectedChecksum = extractChecksumFromHeaders(httpHeaders);
                 S3Object obj = s3Service.completeMultipartUpload(bucket, key, uploadId, partNumbers,
-                        completedPartChecksums(completedParts), checksumType, expectedChecksum);
+                        completedPartETags(completedParts), completedPartChecksums(completedParts), checksumType,
+                        expectedChecksum);
                 String baseUrl = uriInfo.getBaseUri().toString();
                 if (baseUrl.endsWith("/")) {
                     baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -1394,6 +1387,12 @@ public class S3Controller {
                 var resp = Response.ok(xml);
                 if (obj.getVersionId() != null) {
                     resp.header("x-amz-version-id", obj.getVersionId());
+                }
+                if (obj.getServerSideEncryption() != null) {
+                    resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+                }
+                if (obj.getSseKmsKeyId() != null) {
+                    resp.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
                 }
                 appendSseCustomerHeaders(resp, obj);
                 return resp.build();
@@ -1541,7 +1540,7 @@ public class S3Controller {
         return Response.ok(xml.build()).build();
     }
 
-    private record CompletedPart(int partNumber, S3Checksum checksum) {}
+    private record CompletedPart(int partNumber, String eTag, S3Checksum checksum) {}
 
     private List<CompletedPart> parseCompleteMultipartBody(String xml) {
         List<Map<String, String>> parts = XmlParser.extractGroups(xml, "Part");
@@ -1556,11 +1555,12 @@ public class S3Controller {
             } catch (NumberFormatException e) {
                 throw malformedCompleteMultipartXml();
             }
+            String eTag = part.getOrDefault("ETag", "").trim();
             S3Checksum checksum = new S3Checksum();
             for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
                 checksum.setValueFor(algorithm, part.get("Checksum" + algorithm.name()));
             }
-            completedParts.add(new CompletedPart(partNumber, checksum.hasAnyValue() ? checksum : null));
+            completedParts.add(new CompletedPart(partNumber, eTag, checksum.hasAnyValue() ? checksum : null));
         }
         return completedParts;
     }
@@ -1577,6 +1577,14 @@ public class S3Controller {
             }
         }
         return checksums;
+    }
+
+    private Map<Integer, String> completedPartETags(List<CompletedPart> parts) {
+        Map<Integer, String> eTags = new HashMap<>();
+        for (CompletedPart part : parts) {
+            eTags.put(part.partNumber(), part.eTag());
+        }
+        return eTags;
     }
 
     // --- Versioning Operations ---
@@ -1751,7 +1759,7 @@ public class S3Controller {
             return result;
         }
         try {
-            XMLStreamReader reader = NOTIFICATION_XML_FACTORY.createXMLStreamReader(new StringReader(xml));
+            XMLStreamReader reader = XmlParser.newStreamReader(xml);
             while (reader.hasNext()) {
                 int event = reader.next();
                 if (event == XMLStreamConstants.START_ELEMENT && groupElement.equals(reader.getLocalName())) {
@@ -2223,6 +2231,9 @@ public class S3Controller {
         if (obj.getServerSideEncryption() != null) {
             resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
         }
+        if (obj.getSseKmsKeyId() != null) {
+            resp.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
@@ -2250,6 +2261,9 @@ public class S3Controller {
         }
         if (obj.getServerSideEncryption() != null) {
             resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+        }
+        if (obj.getSseKmsKeyId() != null) {
+            resp.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
         }
         appendSseCustomerHeaders(resp, obj);
         if (overrides.contentLanguage() != null) {
@@ -2311,6 +2325,7 @@ public class S3Controller {
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         String copyServerSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
+        String copySseKmsKeyId = httpHeaders.getHeaderString("x-amz-server-side-encryption-aws-kms-key-id");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
         String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
         String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
@@ -2330,6 +2345,7 @@ public class S3Controller {
                         .withContentDisposition(copyContentDisposition)
                         .withCacheControl(copyCacheControl)
                         .withServerSideEncryption(copyServerSideEncryption)
+                        .withSseKmsKeyId(copySseKmsKeyId)
                         .withSseCustomerAlgorithm(httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"))
                         .withSseCustomerKey(httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"))
                         .withSseCustomerKeyMd5(httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"))
@@ -2351,6 +2367,12 @@ public class S3Controller {
         appendChecksumElements(xmlBuilder, copy.getChecksum());
         String xml = xmlBuilder.end("CopyObjectResult").build();
         Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
+        if (copy.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", copy.getServerSideEncryption());
+        }
+        if (copy.getSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", copy.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(response, copy);
         return response.build();
     }
@@ -2369,6 +2391,11 @@ public class S3Controller {
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
                 sseCustomerHeaders(httpHeaders));
+        // The destination multipart upload's own SSE settings (captured at
+        // CreateMultipartUpload), not anything from this request's headers.
+        // UploadPartCopy doesn't take server-side-encryption headers itself,
+        // parts always inherit the upload they belong to.
+        MultipartUpload destinationUpload = s3Service.listParts(destBucket, destKey, uploadId);
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyPartResult", AwsNamespaces.S3)
@@ -2377,6 +2404,12 @@ public class S3Controller {
                 .end("CopyPartResult")
                 .build();
         Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
+        if (destinationUpload.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", destinationUpload.getServerSideEncryption());
+        }
+        if (destinationUpload.getSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", destinationUpload.getSseKmsKeyId());
+        }
         appendSseCustomerHeaders(response,
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                 httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
