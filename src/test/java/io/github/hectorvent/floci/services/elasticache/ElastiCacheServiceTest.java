@@ -917,8 +917,15 @@ class ElastiCacheServiceTest {
 
     private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequest(
             String clusterId, String engine, Integer numCacheNodes) {
+        return cacheClusterRequest(clusterId, engine, numCacheNodes, AuthMode.NO_AUTH, null, null);
+    }
+
+    private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequest(
+            String clusterId, String engine, Integer numCacheNodes, AuthMode authMode,
+            String authToken, String parameterGroupName) {
         return new ElastiCacheService.CreateCacheClusterRequest(clusterId, engine, null, null,
-                numCacheNodes, null, AuthMode.NO_AUTH, null, null, null, "us-east-1", Map.of());
+                numCacheNodes, null, authMode, authToken, parameterGroupName, null,
+                null, null, null, null, null, null, null, null, "us-east-1", Map.of());
     }
 
     @Test
@@ -968,7 +975,9 @@ class ElastiCacheServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createCacheCluster(cacheClusterRequest("dupe", "redis", 1)));
-        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        // botocore elasticache/2015-02-02 codes this CacheClusterAlreadyExists: the Fault suffix
+        // is the shape name, not the wire code, and an SDK matches on the code.
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
     }
 
     @Test
@@ -999,9 +1008,8 @@ class ElastiCacheServiceTest {
     @Test
     void aCacheClusterHoldsItsParameterGroupAgainstDeletion() {
         service.createCacheParameterGroup("cc-pg", "redis7", "in use", Map.of());
-        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
-                "cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, "cc-pg", null,
-                "us-east-1", Map.of()));
+        service.createCacheCluster(
+                cacheClusterRequest("cc", "redis", 1, AuthMode.NO_AUTH, null, "cc-pg"));
 
         assertEquals("InvalidCacheParameterGroupState",
                 assertThrows(AwsException.class, () -> service.deleteCacheParameterGroup("cc-pg"))
@@ -1010,13 +1018,154 @@ class ElastiCacheServiceTest {
 
     @Test
     void anAuthTokenOnACacheClusterIsValidatedAgainstThatClusterAlone() {
-        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
-                "auth-cc", "redis", null, null, 1, null, AuthMode.PASSWORD, "s3cret-token", null,
-                null, "us-east-1", Map.of()));
+        service.createCacheCluster(
+                cacheClusterRequest("auth-cc", "redis", 1, AuthMode.PASSWORD, "s3cret-token", null));
 
         assertTrue(service.validateCacheClusterPassword("auth-cc", null, "s3cret-token"));
         assertFalse(service.validateCacheClusterPassword("auth-cc", null, "wrong"));
         assertFalse(service.validateCacheClusterPassword("other-cc", null, "s3cret-token"));
+    }
+
+    @Test
+    void aCacheClusterCannotTakeTheIdOfALiveReplicationGroup() {
+        // Not a cosmetic clash. Both name their container valkey-<id> and register their proxy
+        // under the id, so letting this through would have ElastiCacheContainerManager.start
+        // removeIfExists the group's running container and the proxy registry overwrite its
+        // entry, leaving a listener bound that nothing can stop.
+        service.createReplicationGroup("shared", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(cacheClusterRequest("shared", "redis", 1)));
+
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
+        // the live group kept its container and its proxy: nothing was started or removed for the
+        // refused request
+        verify(containerManager, never()).tryStart(eq("shared"), anyString());
+        verify(containerManager, never()).stopByGroupId("shared");
+        verify(proxyManager, times(1)).startProxy(eq("shared"), any(), anyInt(), anyString(), anyInt(), any());
+        assertEquals("shared", service.getReplicationGroup("shared").getReplicationGroupId());
+    }
+
+    @Test
+    void aReplicationGroupCannotTakeTheIdOfALiveCacheCluster() {
+        service.createCacheCluster(cacheClusterRequest("shared", "redis", 1));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup("shared", "d", AuthMode.NO_AUTH, null, "us-east-1"));
+
+        assertEquals("ReplicationGroupAlreadyExistsFault", ex.getErrorCode());
+        verify(containerManager, times(1)).tryStart(eq("shared"), anyString());
+        verify(containerManager, never()).stopByGroupId("shared");
+        assertEquals("shared", service.findCacheClusters("shared").getFirst().getCacheClusterId());
+    }
+
+    @Test
+    void twoConcurrentCreatesOfOneIdCannotBothProvisionIt() throws Exception {
+        // The stored-record check alone cannot separate them: neither create has stored anything
+        // while the other is inside tryStart, so both would pass it, and the loser's rollback
+        // would stopByGroupId the winner's container out from under it.
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.tryStart(eq("raced"), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "raced", "localhost", 6379);
+        });
+
+        Thread winner = new Thread(() -> service.createCacheCluster(cacheClusterRequest("raced", "redis", 1)));
+        winner.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(cacheClusterRequest("raced", "redis", 1)));
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
+        // the loser must not have reached for the container the winner is still starting
+        verify(containerManager, never()).stopByGroupId("raced");
+
+        releaseLatch.countDown();
+        winner.join(5000);
+        assertEquals("raced", service.findCacheClusters("raced").getFirst().getCacheClusterId());
+        verify(containerManager, times(1)).tryStart(eq("raced"), anyString());
+    }
+
+    @Test
+    void aReplicationGroupCreateIsBlockedByAnInFlightCacheClusterCreateOfThatId() throws Exception {
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.tryStart(eq("raced"), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "raced", "localhost", 6379);
+        });
+
+        Thread cacheCluster = new Thread(() -> service.createCacheCluster(cacheClusterRequest("raced", "redis", 1)));
+        cacheCluster.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
+
+        assertEquals("ReplicationGroupAlreadyExistsFault",
+                assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                        "raced", "d", AuthMode.NO_AUTH, null, "us-east-1")).getErrorCode());
+        verify(containerManager, never()).stopByGroupId("raced");
+
+        releaseLatch.countDown();
+        cacheCluster.join(5000);
+    }
+
+    @Test
+    void theOptionalMembersARequestCarriesAreStoredAndTheRestDefaulted() {
+        // Every one of these is an optional aws_elasticache_cluster argument. Dropping any of them
+        // reads back as unset on the next plan, which is a diff terraform can never settle.
+        CacheCluster cluster = service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "settings-cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null, null,
+                5, "03:00-05:00", "Tue:04:00-Tue:05:00", "us-east-1b", List.of("sg-123"),
+                "ipv4", "ipv4", true, "us-east-1", Map.of()));
+
+        assertEquals(5, cluster.getSnapshotRetentionLimit());
+        assertEquals("03:00-05:00", cluster.getSnapshotWindow());
+        assertEquals("tue:04:00-tue:05:00", cluster.getPreferredMaintenanceWindow());
+        assertEquals("us-east-1b", cluster.getPreferredAvailabilityZone());
+        assertEquals(List.of("sg-123"), cluster.getSecurityGroupIds());
+        assertTrue(cluster.isAtRestEncryptionEnabled());
+
+        // and a request that carries none of them still reads back concrete values, not zeroes
+        CacheCluster bare = service.createCacheCluster(cacheClusterRequest("bare-cc", "redis", 1));
+        assertEquals(0, bare.getSnapshotRetentionLimit());
+        assertEquals("00:00-01:00", bare.getSnapshotWindow());
+        assertEquals("mon:00:00-mon:03:00", bare.getPreferredMaintenanceWindow());
+        assertEquals("us-east-1a", bare.getPreferredAvailabilityZone());
+        assertEquals("ipv4", bare.getNetworkType());
+        assertEquals("ipv4", bare.getIpDiscovery());
+        assertFalse(bare.isAtRestEncryptionEnabled());
+    }
+
+    @Test
+    void theSnapshotMembersTakeTheReplicationGroupsChecks() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                        "bad-cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null, null,
+                        99, null, null, null, null, null, null, null, "us-east-1", Map.of())));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Retention limit must be between 0 and 35"), ex.getMessage());
+
+        assertEquals("InvalidParameterValue",
+                assertThrows(AwsException.class,
+                        () -> service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                                "bad-cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null, null,
+                                null, null, "notaday:04:00-notaday:05:00", null, null, null, null, null,
+                                "us-east-1", Map.of()))).getErrorCode());
+
+        // a refused request provisions nothing
+        verify(containerManager, never()).tryStart(eq("bad-cc"), anyString());
+        assertTrue(service.findCacheClusters("bad-cc").isEmpty());
+    }
+
+    @Test
+    void aStandaloneClusterIsListedAsAnExplorerResource() {
+        service.createCacheCluster(cacheClusterRequest("explorer-cc", "redis", 1));
+
+        assertTrue(service.getResources().stream().anyMatch(r ->
+                        "arn:aws:elasticache:us-east-1:000000000000:cluster:explorer-cc".equals(r.arn())),
+                "the standalone cluster must appear in the resource explorer alongside groups");
     }
 
     @Test

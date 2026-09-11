@@ -51,6 +51,18 @@ reports its node's address under `CacheNodes` when the request sets `ShowCacheNo
 clusters are not re-provisioned after a Floci restart, the same as cluster-mode-disabled
 replication groups.
 
+An id is taken for both kinds at once: a cache cluster and a replication group cannot share one,
+because Floci names both their containers `valkey-<id>` and keys both their proxies by it. The
+second create is refused rather than allowed to remove the first's container.
+
+`SnapshotRetentionLimit`, `SnapshotWindow`, `PreferredMaintenanceWindow`,
+`PreferredAvailabilityZone`, `SecurityGroupIds`, `NetworkType`, `IpDiscovery` and
+`AtRestEncryptionEnabled` are kept and echoed by `DescribeCacheClusters`, with the same defaults
+and the same validation the replication group applies, since every one is an optional
+`aws_elasticache_cluster` argument that would otherwise read back unset and leave a permanent
+plan diff. `NotificationConfiguration` and `LogDeliveryConfigurations` are **not** modelled: a
+request may send them, and the describe will not report them back.
+
 ### Cluster Mode
 
 `CreateReplicationGroup` provisions a real sharded Valkey cluster when the request asks for one:

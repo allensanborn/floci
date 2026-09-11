@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -342,10 +343,18 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("AuthToken"),
                             params.getFirst("CacheParameterGroupName"),
                             params.getFirst("CacheSubnetGroupName"),
+                            optionalInt(params.getFirst("SnapshotRetentionLimit")),
+                            params.getFirst("SnapshotWindow"),
+                            params.getFirst("PreferredMaintenanceWindow"),
+                            params.getFirst("PreferredAvailabilityZone"),
+                            parseSecurityGroupIds(params),
+                            params.getFirst("NetworkType"),
+                            params.getFirst("IpDiscovery"),
+                            boolParam(params, "AtRestEncryptionEnabled"),
                             region,
                             parseTags(params)));
             return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC,
-                    cacheClusterXml(cluster, true))).build();
+                    cacheClusterXml(cluster, false))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
@@ -459,7 +468,7 @@ public class ElastiCacheQueryHandler {
                     ? memcachedService.deleteCacheCluster(clusterId)
                     : service.deleteCacheCluster(clusterId);
             return Response.ok(AwsQueryResponse.envelope("DeleteCacheCluster", AwsNamespaces.EC,
-                    cacheClusterXml(cluster, true))).build();
+                    cacheClusterXml(cluster, false))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
@@ -550,6 +559,21 @@ public class ElastiCacheQueryHandler {
             }
         }
         return subnetIds;
+    }
+
+    /** Reads the SecurityGroupIds list under every spelling the Query protocol sends it in. */
+    private static List<String> parseSecurityGroupIds(MultivaluedMap<String, String> params) {
+        List<String> securityGroupIds = new ArrayList<>();
+        for (String prefix : List.of("SecurityGroupIds.SecurityGroupId", "SecurityGroupIds.member")) {
+            for (int i = 1; ; i++) {
+                String securityGroupId = params.getFirst(prefix + "." + i);
+                if (securityGroupId == null) {
+                    break;
+                }
+                securityGroupIds.add(securityGroupId);
+            }
+        }
+        return securityGroupIds;
     }
 
 private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> params) {
@@ -658,11 +682,20 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 tags = group.getTags();
             }
             if ("cluster".equals(arn[5])) {
-                // Only standalone redis/valkey clusters carry tags; a Memcached id or a
-                // replication-group member reports none, as it did before.
-                tags = service.findCacheClusters(arn[6]).stream().findFirst()
-                        .map(CacheCluster::getTags)
-                        .orElse(Map.of());
+                CacheCluster cluster = service.findCacheClusters(arn[6]).stream().findFirst().orElse(null);
+                if (cluster != null) {
+                    // Same shape as the replicationgroup arm: the store keys clusters by id
+                    // alone, so the record found must also be the one this ARN names.
+                    if (cluster.getArn() != null && !cluster.getArn().equalsIgnoreCase(resourceName)) {
+                        throw new AwsException("CacheClusterNotFound",
+                                "Cache cluster " + arn[6] + " not found.", 404);
+                    }
+                    tags = cluster.getTags();
+                } else if (service.listMemberCacheClusters(arn[6]).isEmpty()) {
+                    // Memcached clusters and replication group members carry no tags, but they do
+                    // exist. Only an id no source knows is a not-found.
+                    memcachedService.getCacheCluster(arn[6]);
+                }
             }
             if ("subnetgroup".equals(arn[5])) {
                 tags = service.describeCacheSubnetGroups(arn[6]).getFirst().getTags();
@@ -799,7 +832,35 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         xml.elem("NumCacheNodes", (long) c.getNumCacheNodes())
            .elem("AutoMinorVersionUpgrade", true)
            .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
-           .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH);
+           .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+           .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
+           .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
+           .elem("SnapshotWindow", c.getSnapshotWindow() != null
+                   ? c.getSnapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW)
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
+        if (c.getCacheClusterCreateTime() != null) {
+            xml.elem("CacheClusterCreateTime", c.getCacheClusterCreateTime().toString());
+        }
+        if (c.getPreferredAvailabilityZone() != null) {
+            xml.elem("PreferredAvailabilityZone", c.getPreferredAvailabilityZone());
+        }
+        if (c.getNetworkType() != null) {
+            xml.elem("NetworkType", c.getNetworkType());
+        }
+        if (c.getIpDiscovery() != null) {
+            xml.elem("IpDiscovery", c.getIpDiscovery());
+        }
+        if (!c.getSecurityGroupIds().isEmpty()) {
+            xml.start("SecurityGroups");
+            for (String securityGroupId : c.getSecurityGroupIds()) {
+                xml.start("member")
+                   .elem("SecurityGroupId", securityGroupId)
+                   .elem("Status", "active")
+                   .end("member");
+            }
+            xml.end("SecurityGroups");
+        }
         if (c.getCacheNodeType() != null) {
             xml.elem("CacheNodeType", c.getCacheNodeType());
         }

@@ -66,6 +66,9 @@ class ElastiCacheRedisClusterIntegrationTest {
             .formParam("EngineVersion", "7.1")
             .formParam("NumCacheNodes", "1")
             .formParam("CacheNodeType", "cache.t4g.micro")
+            .formParam("SnapshotRetentionLimit", "5")
+            .formParam("SnapshotWindow", "03:00-05:00")
+            .formParam("PreferredMaintenanceWindow", "tue:04:00-tue:05:00")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -99,6 +102,14 @@ class ElastiCacheRedisClusterIntegrationTest {
                             equalTo("cache.t4g.micro"))
                     .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.CacheNodes.CacheNode.Endpoint.Address",
                             notNullValue())
+                    // read back exactly as sent: an optional argument that comes back unset is a
+                    // terraform diff that never settles
+                    .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.SnapshotRetentionLimit",
+                            equalTo("5"))
+                    .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.SnapshotWindow",
+                            equalTo("03:00-05:00"))
+                    .body("DescribeCacheClustersResponse.DescribeCacheClustersResult.CacheClusters.CacheCluster.PreferredMaintenanceWindow",
+                            equalTo("tue:04:00-tue:05:00"))
                 .extract()
                     .xmlPath();
 
