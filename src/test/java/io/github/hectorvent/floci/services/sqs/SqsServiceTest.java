@@ -32,7 +32,7 @@ class SqsServiceTest {
     @BeforeEach
     void setUp() {
         clock = new MutableClock();
-        sqsService = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL, clock);
+        sqsService = new SqsService(new InMemoryStorage<>(), 30, 262144, BASE_URL, clock);
     }
 
     @Test
@@ -56,6 +56,106 @@ class SqsServiceTest {
         Queue queue = sqsService.createQueue("test-queue",
                 Map.of("VisibilityTimeout", "60"), "eu-west-1");
         assertEquals("60", queue.getAttributes().get("VisibilityTimeout"));
+    }
+
+    @Test
+    void getQueueAttributes_defaultsMatchAws() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("defaults-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("262144", attrs.get("MaximumMessageSize"),
+                "MaximumMessageSize must default to the AWS value of 262144 bytes");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "A queue without a KMS key reports SSE-SQS enabled");
+        assertEquals("30", attrs.get("VisibilityTimeout"));
+        assertEquals("345600", attrs.get("MessageRetentionPeriod"));
+        assertEquals("0", attrs.get("DelaySeconds"));
+        assertEquals("0", attrs.get("ReceiveMessageWaitTimeSeconds"));
+        assertNotNull(attrs.get("QueueArn"));
+        assertNotNull(attrs.get("CreatedTimestamp"));
+        assertNotNull(attrs.get("LastModifiedTimestamp"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessages"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertNotNull(attrs.get("ApproximateNumberOfMessagesDelayed"));
+        assertFalse(attrs.containsKey("Policy"), "Policy is only returned once set");
+        assertFalse(attrs.containsKey("RedrivePolicy"), "RedrivePolicy is only returned once set");
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenKmsKeyIsSet() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A KMS master key takes over from SSE-SQS");
+    }
+
+    @Test
+    void getQueueAttributes_selectsSqsManagedSseEnabledByName() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-named-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("SqsManagedSseEnabled"), region);
+        assertEquals(Map.of("SqsManagedSseEnabled", "true"), attrs);
+    }
+
+    @Test
+    void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
+        for (String invalid : List.of("262145", "1023", "0", "-1", "abc")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> sqsService.createQueue("range-queue-" + invalid,
+                            Map.of("MaximumMessageSize", invalid), "eu-west-1"),
+                    "MaximumMessageSize " + invalid + " must be rejected");
+            assertEquals("InvalidAttributeValue", ex.getErrorCode());
+            assertTrue(ex.getMessage().contains("MaximumMessageSize"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void createQueue_acceptsMaximumMessageSizeRangeBounds() {
+        String region = "eu-west-1";
+        for (String valid : List.of("1024", "262144")) {
+            Queue queue = sqsService.createQueue("bounds-queue-" + valid,
+                    Map.of("MaximumMessageSize", valid), region);
+            assertEquals(valid,
+                    sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                            .get("MaximumMessageSize"));
+        }
+    }
+
+    @Test
+    void setQueueAttributes_rejectsMaximumMessageSizeOutsideAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-range-queue", null, region);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(),
+                        Map.of("MaximumMessageSize", "262145"), region));
+        assertEquals("InvalidAttributeValue", ex.getErrorCode());
+        assertEquals("262144",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A rejected SetQueueAttributes must leave the stored value untouched");
+    }
+
+    @Test
+    void setQueueAttributes_acceptsMaximumMessageSizeWithinAwsRange() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("set-valid-range-queue", null, region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(),
+                Map.of("MaximumMessageSize", "2048"), region);
+
+        assertEquals("2048",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "x".repeat(3000), 0, region));
+        assertTrue(ex.getMessage().contains("2048"), ex.getMessage());
     }
 
     @Test
@@ -525,7 +625,7 @@ class SqsServiceTest {
         String region = "eu-west-1";
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"), region);
 
@@ -581,7 +681,7 @@ class SqsServiceTest {
         final var dedupStore = new InMemoryStorage<String, Map<String, Long>>();
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), dedupStore,
-                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-store-clear.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
@@ -601,8 +701,8 @@ class SqsServiceTest {
     void sendMessage_usesQueueMaximumMessageSizeAttribute() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("big-queue",
-                Map.of("MaximumMessageSize", "524288"), region);
-        String body = "x".repeat(300_000);
+                Map.of("MaximumMessageSize", "131072"), region);
+        String body = "x".repeat(100_000);
 
         assertDoesNotThrow(() -> sqsService.sendMessage(queue.getQueueUrl(), body, 0, region),
                 "Body within the queue's MaximumMessageSize must be accepted");
@@ -1056,16 +1156,16 @@ class SqsServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_100_000));
         assertEquals("BatchRequestTooLong", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("1048576"));
+        assertTrue(ex.getMessage().contains("262144"));
     }
 
     @Test
     void validateBatchPayloadSize_respectsCustomMaximumMessageSize() {
         Queue queue = sqsService.createQueue("batch-q",
-                Map.of("MaximumMessageSize", "1048576"), "us-east-1");
-        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_000_000);
+                Map.of("MaximumMessageSize", "131072"), "us-east-1");
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 131_072);
         AwsException ex = assertThrows(AwsException.class, () ->
-                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_577));
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 131_073));
         assertEquals("BatchRequestTooLong", ex.getErrorCode());
     }
 
@@ -1085,7 +1185,7 @@ class SqsServiceTest {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
         final var queue = service.createQueue("sns-dedup-delegate.fifo", Map.of("FifoQueue", "true"),region);
         service.purgeQueue(queue.getQueueUrl(), region);
         verify(sns).clearFifoDeduplicationCacheForSqsQueueSubscriptions(

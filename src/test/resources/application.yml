@@ -118,7 +118,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30
-      max-message-size: 1048576
+      max-message-size: 262144
     s3:
       enabled: true
       enforce-auth: false

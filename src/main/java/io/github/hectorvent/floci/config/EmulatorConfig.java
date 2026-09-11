@@ -1070,7 +1070,7 @@ public interface EmulatorConfig {
         @WithDefault("30")
         int defaultVisibilityTimeout();
 
-        @WithDefault("1048576")
+        @WithDefault("262144")
         int maxMessageSize();
 
         @WithDefault("false")
