@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.elasticache.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -22,6 +24,14 @@ public class CacheCluster {
     private String cacheSubnetGroupName;
     private AuthMode authMode;
     private String authToken;
+    private int snapshotRetentionLimit;
+    private String snapshotWindow;
+    private String preferredMaintenanceWindow;
+    private String preferredAvailabilityZone;
+    private String networkType;
+    private String ipDiscovery;
+    private boolean atRestEncryptionEnabled;
+    private List<String> securityGroupIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
 
     // Transient — not persisted, restored on container restart
@@ -80,6 +90,30 @@ public class CacheCluster {
 
     public String getAuthToken() { return authToken; }
     public void setAuthToken(String authToken) { this.authToken = authToken; }
+
+    public int getSnapshotRetentionLimit() { return snapshotRetentionLimit; }
+    public void setSnapshotRetentionLimit(int snapshotRetentionLimit) { this.snapshotRetentionLimit = snapshotRetentionLimit; }
+
+    public String getSnapshotWindow() { return snapshotWindow; }
+    public void setSnapshotWindow(String snapshotWindow) { this.snapshotWindow = snapshotWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) { this.preferredMaintenanceWindow = preferredMaintenanceWindow; }
+
+    public String getPreferredAvailabilityZone() { return preferredAvailabilityZone; }
+    public void setPreferredAvailabilityZone(String preferredAvailabilityZone) { this.preferredAvailabilityZone = preferredAvailabilityZone; }
+
+    public String getNetworkType() { return networkType; }
+    public void setNetworkType(String networkType) { this.networkType = networkType; }
+
+    public String getIpDiscovery() { return ipDiscovery; }
+    public void setIpDiscovery(String ipDiscovery) { this.ipDiscovery = ipDiscovery; }
+
+    public boolean isAtRestEncryptionEnabled() { return atRestEncryptionEnabled; }
+    public void setAtRestEncryptionEnabled(boolean atRestEncryptionEnabled) { this.atRestEncryptionEnabled = atRestEncryptionEnabled; }
+
+    public List<String> getSecurityGroupIds() { return securityGroupIds; }
+    public void setSecurityGroupIds(List<String> securityGroupIds) { this.securityGroupIds = securityGroupIds == null ? new ArrayList<>() : securityGroupIds; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }

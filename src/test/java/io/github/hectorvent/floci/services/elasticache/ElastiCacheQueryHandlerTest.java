@@ -433,6 +433,13 @@ class ElastiCacheQueryHandlerTest {
         cluster.setCacheNodeType("cache.t4g.micro");
         cluster.setAuthMode(AuthMode.NO_AUTH);
         cluster.setArn("arn:aws:elasticache:us-east-1:000000000000:cluster:" + id);
+        cluster.setSnapshotRetentionLimit(5);
+        cluster.setSnapshotWindow("03:00-05:00");
+        cluster.setPreferredMaintenanceWindow("tue:04:00-tue:05:00");
+        cluster.setPreferredAvailabilityZone("us-east-1b");
+        cluster.setNetworkType("ipv4");
+        cluster.setIpDiscovery("ipv4");
+        cluster.setSecurityGroupIds(new java.util.ArrayList<>(List.of("sg-123")));
         return cluster;
     }
 
@@ -464,6 +471,41 @@ class ElastiCacheQueryHandlerTest {
         assertTrue(body.contains("<Engine>redis</Engine>"), body);
         assertTrue(body.contains("<NumCacheNodes>1</NumCacheNodes>"), body);
         assertTrue(body.contains("<CacheNodeType>cache.t4g.micro</CacheNodeType>"), body);
+        // AWS reports CacheNodes only on a describe that asked for node info
+        assertFalse(body.contains("<CacheNodes>"), body);
+    }
+
+    @Test
+    void createCacheCluster_passesEveryOptionalMemberTheRequestCarries() {
+        // Each of these is an optional aws_elasticache_cluster argument: one dropped here reads
+        // back as unset on the next plan and terraform can never settle the diff.
+        ArgumentCaptor<ElastiCacheService.CreateCacheClusterRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateCacheClusterRequest.class);
+        when(service.createCacheCluster(captor.capture())).thenReturn(redisCacheCluster("tf-redis"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("CacheClusterId", "tf-redis");
+        p.add("Engine", "redis");
+        p.add("SnapshotRetentionLimit", "5");
+        p.add("SnapshotWindow", "03:00-05:00");
+        p.add("PreferredMaintenanceWindow", "tue:04:00-tue:05:00");
+        p.add("PreferredAvailabilityZone", "us-east-1b");
+        p.add("SecurityGroupIds.member.1", "sg-123");
+        p.add("NetworkType", "ipv4");
+        p.add("IpDiscovery", "ipv4");
+        p.add("AtRestEncryptionEnabled", "true");
+
+        assertEquals(200, handler.handle("CreateCacheCluster", p, "us-east-1").getStatus());
+
+        ElastiCacheService.CreateCacheClusterRequest request = captor.getValue();
+        assertEquals(5, request.snapshotRetentionLimit());
+        assertEquals("03:00-05:00", request.snapshotWindow());
+        assertEquals("tue:04:00-tue:05:00", request.preferredMaintenanceWindow());
+        assertEquals("us-east-1b", request.preferredAvailabilityZone());
+        assertEquals(List.of("sg-123"), request.securityGroupIds());
+        assertEquals("ipv4", request.networkType());
+        assertEquals("ipv4", request.ipDiscovery());
+        assertEquals(Boolean.TRUE, request.atRestEncryptionEnabled());
     }
 
     @Test
@@ -518,6 +560,15 @@ class ElastiCacheQueryHandlerTest {
         assertTrue(body.contains("<CacheNodeId>0001</CacheNodeId>"), body);
         assertTrue(body.contains("<Endpoint><Address>localhost</Address><Port>6379</Port></Endpoint>"), body);
         assertFalse(body.contains("<ConfigurationEndpoint>"), body);
+        // the optional members are echoed, so a terraform re-plan has nothing to change
+        assertTrue(body.contains("<SnapshotRetentionLimit>5</SnapshotRetentionLimit>"), body);
+        assertTrue(body.contains("<SnapshotWindow>03:00-05:00</SnapshotWindow>"), body);
+        assertTrue(body.contains("<PreferredMaintenanceWindow>tue:04:00-tue:05:00</PreferredMaintenanceWindow>"), body);
+        assertTrue(body.contains("<PreferredAvailabilityZone>us-east-1b</PreferredAvailabilityZone>"), body);
+        assertTrue(body.contains("<SecurityGroupId>sg-123</SecurityGroupId>"), body);
+        assertTrue(body.contains("<NetworkType>ipv4</NetworkType>"), body);
+        assertTrue(body.contains("<IpDiscovery>ipv4</IpDiscovery>"), body);
+        assertTrue(body.contains("<CacheClusterCreateTime>"), body);
         // the Memcached store is not consulted for an id another source answered for, so its
         // not-found fault cannot turn a hit into a 404
         verify(memcachedService, never()).listCacheClusters(anyString());
@@ -561,5 +612,54 @@ class ElastiCacheQueryHandlerTest {
         String body = (String) handler.handle("ListTagsForResource", p, "us-east-1").getEntity();
         assertTrue(body.contains("<Key>Name</Key>"), body);
         assertTrue(body.contains("<Value>cache</Value>"), body);
+    }
+
+    @Test
+    void listTagsForResource_clusterArnOfAnUnknownIdIsNotFound() {
+        when(service.findCacheClusters("absent")).thenReturn(List.of());
+        when(memcachedService.getCacheCluster("absent")).thenThrow(
+                new AwsException("CacheClusterNotFound", "Cache cluster absent not found.", 404));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:cluster:absent");
+
+        Response response = handler.handle("ListTagsForResource", p, "us-east-1");
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("CacheClusterNotFound"));
+    }
+
+    @Test
+    void listTagsForResource_clusterArnFromAnotherRegionIsNotThisCluster() {
+        // the store keys clusters by id alone, so a same-named cluster created under another
+        // region is not the one this ARN names
+        CacheCluster elsewhere = redisCacheCluster("tf-redis");
+        elsewhere.setArn("arn:aws:elasticache:eu-west-1:000000000000:cluster:tf-redis");
+        elsewhere.setTags(new java.util.LinkedHashMap<>(Map.of("Name", "west")));
+        when(service.findCacheClusters("tf-redis")).thenReturn(List.of(elsewhere));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:cluster:tf-redis");
+
+        Response response = handler.handle("ListTagsForResource", p, "us-east-1");
+        assertEquals(404, response.getStatus(), (String) response.getEntity());
+        assertFalse(((String) response.getEntity()).contains("west"));
+    }
+
+    @Test
+    void listTagsForResource_memcachedClusterArnStillAnswersWithNoTags() {
+        // Memcached clusters carry no tags but they do exist: this must not become a 404.
+        when(service.findCacheClusters("mc")).thenReturn(List.of());
+        when(service.listMemberCacheClusters("mc")).thenReturn(List.of());
+        when(memcachedService.getCacheCluster("mc")).thenReturn(new CacheCluster(
+                "mc", CacheClusterStatus.AVAILABLE, "memcached", "1.6.22",
+                new Endpoint("localhost", 11211), Instant.now()));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("ResourceName", "arn:aws:elasticache:us-east-1:000000000000:cluster:mc");
+
+        Response response = handler.handle("ListTagsForResource", p, "us-east-1");
+        assertEquals(200, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<TagList></TagList>"),
+                (String) response.getEntity());
     }
 }

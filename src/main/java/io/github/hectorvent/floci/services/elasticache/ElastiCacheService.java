@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -71,7 +72,13 @@ public class ElastiCacheService implements ResourceProvider {
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
-    private final Set<String> provisioningGroupIds = ConcurrentHashMap.newKeySet();
+    /**
+     * Ids claimed by in-flight creates, for replication groups and standalone cache clusters
+     * alike. One set, because the two share a namespace in floci whatever AWS does with them:
+     * both name their container {@code valkey-<id>} and register their proxy under the id, so a
+     * second create of a live id would remove the first's container and orphan its listener.
+     */
+    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
     /**
      * Parameter groups claimed by in-flight creates, keyed by account and name (see
@@ -163,13 +170,14 @@ public class ElastiCacheService implements ResourceProvider {
         // DeleteCacheParameterGroup sees the dependency before the stored-groups scan can.
         String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
-            if (groups.get(groupId).isPresent()) {
+            // A standalone cache cluster of that id counts as taken: see provisioningIds.
+            if (groups.get(groupId).isPresent() || cacheClusters.get(groupId).isPresent()) {
                 throw new AwsException("ReplicationGroupAlreadyExistsFault",
                         "Replication group " + groupId + " already exists.", 400);
             }
             // Claim the id for the whole provisioning attempt so a concurrent create can't race
             // ahead and be stopped by this request's handle-less rollback fallback.
-            if (!provisioningGroupIds.add(groupId)) {
+            if (!provisioningIds.add(groupId)) {
                 throw new AwsException("ReplicationGroupAlreadyExistsFault",
                         "Replication group " + groupId + " is already being created.", 400);
             }
@@ -180,7 +188,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 return provisionSingleNodeGroup(request, resolvedSettings);
             } finally {
-                provisioningGroupIds.remove(groupId);
+                provisioningIds.remove(groupId);
             }
         } finally {
             releaseParameterGroup(parameterGroupReservation);
@@ -724,6 +732,14 @@ public class ElastiCacheService implements ResourceProvider {
             String authToken,
             String cacheParameterGroupName,
             String cacheSubnetGroupName,
+            Integer snapshotRetentionLimit,
+            String snapshotWindow,
+            String preferredMaintenanceWindow,
+            String preferredAvailabilityZone,
+            List<String> securityGroupIds,
+            String networkType,
+            String ipDiscovery,
+            Boolean atRestEncryptionEnabled,
             String region,
             Map<String, String> tags) {
     }
@@ -735,16 +751,40 @@ public class ElastiCacheService implements ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "NumCacheNodes should be 1 if engine is " + engine, 400);
         }
+        // The snapshot members take the replication group's checks, so one request worded one way
+        // is refused the same way whichever action carries it.
+        cacheClusterSettings(request).validate();
+        if (request.preferredMaintenanceWindow() != null && !request.preferredMaintenanceWindow().isBlank()) {
+            BackupWindows.parseMaintenanceWindow(request.preferredMaintenanceWindow());
+        }
         String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
-            if (cacheClusters.get(clusterId).isPresent()) {
-                throw new AwsException("CacheClusterAlreadyExistsFault",
+            // A replication group of that id counts as taken: see provisioningIds.
+            if (cacheClusters.get(clusterId).isPresent() || groups.get(clusterId).isPresent()) {
+                throw new AwsException("CacheClusterAlreadyExists",
                         "Cache cluster " + clusterId + " already exists.", 400);
             }
-            return provisionCacheCluster(request, engine);
+            if (!provisioningIds.add(clusterId)) {
+                throw new AwsException("CacheClusterAlreadyExists",
+                        "Cache cluster " + clusterId + " is already being created.", 400);
+            }
+            try {
+                return provisionCacheCluster(request, engine);
+            } finally {
+                provisioningIds.remove(clusterId);
+            }
         } finally {
             releaseParameterGroup(parameterGroupReservation);
         }
+    }
+
+    /**
+     * The request's snapshot members as the replication group models them, so both actions share
+     * one set of checks and one set of defaults.
+     */
+    private static ReplicationGroupSettings cacheClusterSettings(CreateCacheClusterRequest request) {
+        return new ReplicationGroupSettings(request.atRestEncryptionEnabled(), null,
+                request.snapshotRetentionLimit(), request.snapshotWindow());
     }
 
     /**
@@ -782,6 +822,7 @@ public class ElastiCacheService implements ResourceProvider {
             cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
             cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
             cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+            applyCacheClusterSettings(cluster, request);
             if (request.tags() != null && !request.tags().isEmpty()) {
                 cluster.setTags(new LinkedHashMap<>(request.tags()));
             }
@@ -811,6 +852,34 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Cache cluster {0} provisioning failed, rolling back: {1}", clusterId, e.getMessage());
             rollbackCacheCluster(clusterId, handle, proxyPort);
             throw e;
+        }
+    }
+
+    /**
+     * The optional members a request may carry, stored so a describe can echo them. Every one is
+     * an optional {@code aws_elasticache_cluster} argument: dropping any of them would read back
+     * as unset on the next plan, which is a diff terraform can never settle.
+     */
+    private void applyCacheClusterSettings(CacheCluster cluster, CreateCacheClusterRequest request) {
+        cluster.setSnapshotRetentionLimit(request.snapshotRetentionLimit() != null
+                ? request.snapshotRetentionLimit() : 0);
+        cluster.setSnapshotWindow(request.snapshotWindow() != null && !request.snapshotWindow().isBlank()
+                ? request.snapshotWindow() : ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
+        cluster.setPreferredMaintenanceWindow(request.preferredMaintenanceWindow() != null
+                && !request.preferredMaintenanceWindow().isBlank()
+                ? BackupWindows.lowerCase(request.preferredMaintenanceWindow())
+                : BackupWindows.DEFAULT_MAINTENANCE_WINDOW);
+        cluster.setPreferredAvailabilityZone(request.preferredAvailabilityZone() != null
+                && !request.preferredAvailabilityZone().isBlank()
+                ? request.preferredAvailabilityZone()
+                : regionResolver.getRegion() + "a");
+        cluster.setNetworkType(request.networkType() != null && !request.networkType().isBlank()
+                ? request.networkType() : "ipv4");
+        cluster.setIpDiscovery(request.ipDiscovery() != null && !request.ipDiscovery().isBlank()
+                ? request.ipDiscovery() : "ipv4");
+        cluster.setAtRestEncryptionEnabled(Boolean.TRUE.equals(request.atRestEncryptionEnabled()));
+        if (request.securityGroupIds() != null && !request.securityGroupIds().isEmpty()) {
+            cluster.setSecurityGroupIds(new ArrayList<>(request.securityGroupIds()));
         }
     }
 
@@ -1481,6 +1550,18 @@ public class ElastiCacheService implements ResourceProvider {
                     group.getArn(), "elasticache:cluster", "elasticache",
                     parsed.region(), parsed.accountId(),
                     group.getCreatedAt() != null ? group.getCreatedAt() : Instant.now(),
+                    Map.of()));
+        }
+        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
+            if (cluster.getArn() == null) {
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(cluster.getArn());
+            resources.add(new ExplorerResource(
+                    cluster.getArn(), "elasticache:cluster", "elasticache",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCacheClusterCreateTime() != null
+                            ? cluster.getCacheClusterCreateTime() : Instant.now(),
                     Map.of()));
         }
         return resources;
