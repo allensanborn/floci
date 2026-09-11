@@ -96,7 +96,7 @@ aws sqs set-queue-attributes \
 
 `GetQueueAttributes` with `--attribute-names All` returns the set AWS returns for a standard queue: `QueueArn`, `CreatedTimestamp`, `LastModifiedTimestamp`, `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible`, `ApproximateNumberOfMessagesDelayed`, `VisibilityTimeout`, `MaximumMessageSize`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds` and `SqsManagedSseEnabled`. `Policy`, `RedrivePolicy` and `KmsMasterKeyId` appear only once set, and FIFO queues also report `FifoQueue` and `ContentBasedDeduplication`.
 
-`MaximumMessageSize` defaults to `262144` bytes, the AWS default and maximum. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 262144 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it.
+`MaximumMessageSize` defaults to `262144` bytes, the AWS default and maximum. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 262144 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 262144 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `262144` explicitly.
 
 `SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set.
 

@@ -129,6 +129,29 @@ class SqsServiceTest {
     }
 
     @Test
+    void getQueueAttributes_clampsAStoredMaximumMessageSizeAboveTheCeiling() {
+        String region = "us-east-1";
+        var store = new InMemoryStorage<String, Queue>();
+        var service = new SqsService(store, 30, 262144, BASE_URL, clock);
+        Queue queue = service.createQueue("legacy-size-queue", null, region);
+
+        // A queue persisted by a build that allowed 1 MB, which no validation path can produce.
+        String storageKey = store.keys().iterator().next();
+        Queue stored = store.get(storageKey).orElseThrow();
+        stored.getAttributes().put("MaximumMessageSize", "1048576");
+        store.put(storageKey, stored);
+
+        assertEquals("262144",
+                service.getQueueAttributes(queue.getQueueUrl(), List.of("MaximumMessageSize"), region)
+                        .get("MaximumMessageSize"),
+                "A stored value above the ceiling must be reported as the size actually enforced");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.sendMessage(queue.getQueueUrl(), "x".repeat(300_000), 0, region),
+                "The reported size and the enforced size have to agree");
+        assertTrue(ex.getMessage().contains("262144"), ex.getMessage());
+    }
+
+    @Test
     void setQueueAttributes_rejectsMaximumMessageSizeOutsideAwsRange() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("set-range-queue", null, region);

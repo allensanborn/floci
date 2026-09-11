@@ -1436,6 +1436,11 @@ public class SnsService implements Resettable, ResourceProvider {
                         sub.getProtocol(), sub.getEndpoint());
             }
         } catch (Exception e) {
+            // Delivery failures are per-subscriber and never reported to the publisher, which
+            // matches AWS. The case that surprises people: SNS accepts a publish up to
+            // MAX_PUBLISH_SIZE and SQS accepts a message up to the same 262144 bytes, so a
+            // non-raw sqs subscriber whose envelope pushes the body past that limit lands here
+            // and the message is dropped. SnsSqsFanoutMessageSizeTest pins that boundary.
             LOG.warnv("Failed to deliver SNS message to {0}: {1}", sub.getEndpoint(), e.getMessage());
         }
     }

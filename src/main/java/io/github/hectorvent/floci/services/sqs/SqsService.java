@@ -503,7 +503,11 @@ public class SqsService implements Resettable, ResourceProvider {
             attrs.putIfAbsent("SqsManagedSseEnabled", "true");
         }
         attrs.putIfAbsent("VisibilityTimeout", String.valueOf(defaultVisibilityTimeout));
-        attrs.putIfAbsent("MaximumMessageSize", String.valueOf(maxMessageSize));
+        // Report the size that SendMessage actually enforces. A queue stored before the
+        // range existed can carry a value above the ceiling, and advertising it would
+        // promise a payload the send path then rejects.
+        attrs.put("MaximumMessageSize",
+                String.valueOf(parseMaxMessageSize(attrs.get("MaximumMessageSize"))));
         attrs.putIfAbsent("DelaySeconds", "0");
         attrs.putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         attrs.putIfAbsent("MessageRetentionPeriod", "345600");
@@ -674,7 +678,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
         try {
             return Math.min(maxAllowedMessageSize,
-                    Math.max(MIN_MAXIMUM_MESSAGE_SIZE, Integer.parseInt(value)));
+                    Math.max(MIN_MAXIMUM_MESSAGE_SIZE, Integer.parseInt(value.trim())));
         } catch (NumberFormatException ignored) {
             return maxMessageSize;
         }
@@ -706,9 +710,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private AwsException invalidMaximumMessageSize() {
         return new AwsException("InvalidAttributeValue",
-                "Invalid value for the parameter MaximumMessageSize. "
-                        + "Must be between " + MIN_MAXIMUM_MESSAGE_SIZE + " and "
-                        + maxAllowedMessageSize + " bytes.", 400);
+                "Invalid value for the parameter MaximumMessageSize.", 400);
     }
 
     private static boolean hasKmsMasterKey(Map<String, String> attributes) {
