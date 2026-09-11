@@ -15,6 +15,7 @@ import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -301,6 +302,117 @@ public class RedshiftOperationsTest {
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "DeleteClusterSubnetGroup")
             .formParam("ClusterSubnetGroupName", "subnet-group-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(5)
+    void testSnapshotCopyGrantLifecycle() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+            .formParam("KmsKeyId", "key-abc")
+            .formParam("Tags.Tag.1.Key", "env")
+            .formParam("Tags.Tag.1.Value", "test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(containsString("<KmsKeyId>key-abc</KmsKeyId>"))
+            .body(containsString("<Key>env</Key>"));
+
+        // A grant created without KmsKeyId gets the account's AWS-managed Redshift key.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-2")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<KmsKeyId>arn:aws:kms:us-east-1:"))
+            .body(containsString(":alias/aws/redshift</KmsKeyId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("SnapshotCopyGrantAlreadyExistsFault"));
+
+        // Name filter selects one grant, and omitting it returns both.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(not(containsString("<SnapshotCopyGrantName>copy-grant-2</SnapshotCopyGrantName>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-1</SnapshotCopyGrantName>"))
+            .body(containsString("<SnapshotCopyGrantName>copy-grant-2</SnapshotCopyGrantName>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("SnapshotCopyGrantNotFoundFault"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("SnapshotCopyGrantNotFoundFault"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "copy-grant-2")
         .when()
             .post("/")
         .then()

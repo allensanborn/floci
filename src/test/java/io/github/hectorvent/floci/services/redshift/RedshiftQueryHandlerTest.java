@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -351,6 +352,121 @@ class RedshiftQueryHandlerTest {
                 AwsException.class,
                 () -> handler.handle("ModifyCluster", params));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrant() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotCopyGrantName", "grant-1");
+        params.putSingle("KmsKeyId", "key-abc");
+
+        when(service.createSnapshotCopyGrant(eq("grant-1"), eq("key-abc"), any()))
+                .thenReturn(new SnapshotCopyGrant("grant-1", "key-abc"));
+
+        Response response = handler.handle("CreateSnapshotCopyGrant", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<CreateSnapshotCopyGrantResult>"));
+        assertTrue(xml.contains("<SnapshotCopyGrantName>grant-1</SnapshotCopyGrantName>"));
+        assertTrue(xml.contains("<KmsKeyId>key-abc</KmsKeyId>"));
+        assertTrue(xml.contains("<RequestId>test-req-id</RequestId>"));
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantAcceptsNamedMemberTags() {
+        // Real Redshift SDK sends "Tags.Tag.N.Key/.Value" on CreateSnapshotCopyGrant.
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotCopyGrantName", "grant-1");
+        params.putSingle("Tags.Tag.1.Key", "env");
+        params.putSingle("Tags.Tag.1.Value", "prod");
+
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("grant-1", "key-abc");
+        grant.setTags(Map.of("env", "prod"));
+        when(service.createSnapshotCopyGrant(any(), any(), any())).thenReturn(grant);
+
+        Response response = handler.handle("CreateSnapshotCopyGrant", params);
+        assertEquals(200, response.getStatus());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(service).createSnapshotCopyGrant(eq("grant-1"), isNull(), captor.capture());
+        assertEquals(Map.of("env", "prod"), captor.getValue());
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<Key>env</Key>"));
+        assertTrue(xml.contains("<Value>prod</Value>"));
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantRequiresName() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("KmsKeyId", "key-abc");
+
+        AwsException ex = assertThrows(
+                AwsException.class,
+                () -> handler.handle("CreateSnapshotCopyGrant", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrants() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotCopyGrantName", "grant-1");
+
+        when(service.describeSnapshotCopyGrants("grant-1"))
+                .thenReturn(List.of(new SnapshotCopyGrant("grant-1", "key-abc")));
+
+        Response response = handler.handle("DescribeSnapshotCopyGrants", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<SnapshotCopyGrants>"));
+        assertTrue(xml.contains("<SnapshotCopyGrantName>grant-1</SnapshotCopyGrantName>"));
+        assertTrue(xml.contains("</SnapshotCopyGrants>"));
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsWithoutNameListsAll() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+
+        when(service.describeSnapshotCopyGrants(isNull())).thenReturn(List.of(
+                new SnapshotCopyGrant("grant-a", "key-a"),
+                new SnapshotCopyGrant("grant-b", "key-b")));
+
+        Response response = handler.handle("DescribeSnapshotCopyGrants", params);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<SnapshotCopyGrantName>grant-a</SnapshotCopyGrantName>"));
+        assertTrue(xml.contains("<SnapshotCopyGrantName>grant-b</SnapshotCopyGrantName>"));
+    }
+
+    @Test
+    void testDeleteSnapshotCopyGrant() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotCopyGrantName", "grant-1");
+
+        when(service.deleteSnapshotCopyGrant("grant-1"))
+                .thenReturn(new SnapshotCopyGrant("grant-1", "key-abc"));
+
+        Response response = handler.handle("DeleteSnapshotCopyGrant", params);
+
+        assertEquals(200, response.getStatus());
+        verify(service).deleteSnapshotCopyGrant("grant-1");
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<DeleteSnapshotCopyGrantResponse>"));
+    }
+
+    @Test
+    void testDeleteSnapshotCopyGrantRequiresName() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+
+        AwsException ex = assertThrows(
+                AwsException.class,
+                () -> handler.handle("DeleteSnapshotCopyGrant", params));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        verify(service, never()).deleteSnapshotCopyGrant(any());
     }
 
     @Test

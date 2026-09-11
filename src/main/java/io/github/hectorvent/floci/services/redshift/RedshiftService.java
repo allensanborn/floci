@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -46,6 +47,7 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
+    private final AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrants;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -62,6 +64,7 @@ public class RedshiftService {
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("redshift", "redshift-subnet-groups.json", new TypeReference<Map<String, ClusterSubnetGroup>>() {});
+        this.snapshotCopyGrants = storageFactory.create("redshift", "redshift-snapshot-copy-grants.json", new TypeReference<Map<String, SnapshotCopyGrant>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -694,6 +697,51 @@ public class RedshiftService {
         return group;
     }
 
+    // ── Snapshot Copy Grant Operations ───────────────────────────────────────
+
+    /**
+     * AWS-managed Redshift key an account gets when CreateSnapshotCopyGrant omits KmsKeyId.
+     * Floci has no per-account default key, so the alias ARN stands in for it: the value only
+     * has to round-trip through Describe, which is what Terraform reads back.
+     */
+    private String defaultSnapshotCopyGrantKey() {
+        return regionResolver.buildArn("kms", regionResolver.getRegion(), "alias/aws/redshift");
+    }
+
+    public SnapshotCopyGrant createSnapshotCopyGrant(String name, String kmsKeyId, Map<String, String> tags) {
+        if (snapshotCopyGrants.get(name).isPresent()) {
+            throw new AwsException("SnapshotCopyGrantAlreadyExistsFault",
+                    "Snapshot copy grant " + name + " already exists", 400);
+        }
+        String effectiveKey = (kmsKeyId != null && !kmsKeyId.isBlank()) ? kmsKeyId : defaultSnapshotCopyGrantKey();
+        SnapshotCopyGrant grant = new SnapshotCopyGrant(name, effectiveKey);
+        if (tags != null && !tags.isEmpty()) {
+            grant.setTags(new LinkedHashMap<>(tags));
+        }
+        snapshotCopyGrants.put(name, grant);
+        snapshotCopyGrants.flush();
+        return grant;
+    }
+
+    public List<SnapshotCopyGrant> describeSnapshotCopyGrants(String name) {
+        if (name != null && !name.isBlank()) {
+            SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
+                    .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
+                            "Snapshot copy grant " + name + " not found", 404));
+            return List.of(grant);
+        }
+        return snapshotCopyGrants.scan(k -> true);
+    }
+
+    public SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {
+        SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
+                .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
+                        "Snapshot copy grant " + name + " not found", 404));
+        snapshotCopyGrants.delete(name);
+        snapshotCopyGrants.flush();
+        return grant;
+    }
+
     // ── Tagging Operations ───────────────────────────────────────────────────
 
     /** A resolved tag target: its current tags plus a sink that persists an updated map. */
@@ -750,6 +798,12 @@ public class RedshiftService {
                         "subnetgroup", g.getTags(), tagKeysFilter);
             }
         }
+        if (resourceType == null || "snapshotcopygrant".equalsIgnoreCase(resourceType)) {
+            for (SnapshotCopyGrant g : snapshotCopyGrants.scan(k -> true)) {
+                addTaggedResources(result, snapshotCopyGrantArn(g.getSnapshotCopyGrantName()),
+                        "snapshotcopygrant", g.getTags(), tagKeysFilter);
+            }
+        }
         return result;
     }
 
@@ -787,12 +841,17 @@ public class RedshiftService {
         return regionResolver.buildArn("redshift", regionResolver.getRegion(), "subnetgroup:" + name);
     }
 
+    private String snapshotCopyGrantArn(String name) {
+        return regionResolver.buildArn("redshift", regionResolver.getRegion(), "snapshotcopygrant:" + name);
+    }
+
     /**
      * Resolves a tagging ResourceName to its backing resource.
      *
      * Redshift ARNs have the shape {@code arn:aws:redshift:<region>:<account>:<type>:<id>},
      * where {@code <type>} is one of {@code cluster}, {@code snapshot} (id shape
-     * {@code <clusterId>/<snapshotId>}), or {@code parametergroup}. Unlike RDS's tag
+     * {@code <clusterId>/<snapshotId>}), {@code parametergroup}, {@code subnetgroup} or
+     * {@code snapshotcopygrant}. Unlike RDS's tag
      * resolution, there is no bare-name fallback — Redshift tagging is new, so there is no
      * existing caller to stay backward compatible with.
      */
@@ -856,6 +915,15 @@ public class RedshiftService {
                     group.setTags(updated);
                     subnetGroups.put(id, group);
                     subnetGroups.flush();
+                });
+            }
+            case "snapshotcopygrant" -> {
+                SnapshotCopyGrant grant = snapshotCopyGrants.get(id)
+                        .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault", "Snapshot copy grant " + id + " not found", 404));
+                yield new TagHandle(grant.getTags(), updated -> {
+                    grant.setTags(updated);
+                    snapshotCopyGrants.put(id, grant);
+                    snapshotCopyGrants.flush();
                 });
             }
             default -> throw new AwsException("InvalidParameterValue",

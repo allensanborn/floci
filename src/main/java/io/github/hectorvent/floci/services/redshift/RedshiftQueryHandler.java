@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -372,6 +373,60 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "CreateSnapshotCopyGrant" -> {
+            String name = params.getFirst("SnapshotCopyGrantName");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "SnapshotCopyGrantName is required", 400);
+            }
+            String kmsKeyId = params.getFirst("KmsKeyId");
+            SnapshotCopyGrant grant = service.createSnapshotCopyGrant(name, kmsKeyId, parseTags(params));
+            String xml = new XmlBuilder()
+                    .start("CreateSnapshotCopyGrantResponse")
+                      .start("CreateSnapshotCopyGrantResult")
+                        .raw(buildSnapshotCopyGrantXml(grant))
+                      .end("CreateSnapshotCopyGrantResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CreateSnapshotCopyGrantResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeSnapshotCopyGrants" -> {
+            String name = params.getFirst("SnapshotCopyGrantName");
+            List<SnapshotCopyGrant> grants = service.describeSnapshotCopyGrants(name);
+            XmlBuilder xmlBuilder = new XmlBuilder()
+                    .start("DescribeSnapshotCopyGrantsResponse")
+                      .start("DescribeSnapshotCopyGrantsResult")
+                        .start("SnapshotCopyGrants");
+            for (SnapshotCopyGrant grant : grants) {
+                xmlBuilder.raw(buildSnapshotCopyGrantXml(grant));
+            }
+            String xml = xmlBuilder
+                        .end("SnapshotCopyGrants")
+                      .end("DescribeSnapshotCopyGrantsResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeSnapshotCopyGrantsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DeleteSnapshotCopyGrant" -> {
+            String name = params.getFirst("SnapshotCopyGrantName");
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "SnapshotCopyGrantName is required", 400);
+            }
+            service.deleteSnapshotCopyGrant(name);
+            String xml = new XmlBuilder()
+                    .start("DeleteSnapshotCopyGrantResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteSnapshotCopyGrantResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "ModifyCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
@@ -515,6 +570,26 @@ public class RedshiftQueryHandler {
             builder.start("Subnet").elem("SubnetIdentifier", subnetId).end("Subnet");
         }
         return builder.end("Subnets").end("ClusterSubnetGroup").build();
+    }
+
+    private String buildSnapshotCopyGrantXml(SnapshotCopyGrant grant) {
+        XmlBuilder builder = new XmlBuilder()
+            .start("SnapshotCopyGrant")
+            .elem("SnapshotCopyGrantName", grant.getSnapshotCopyGrantName())
+            .elem("KmsKeyId", grant.getKmsKeyId());
+
+        if (grant.getTags() != null && !grant.getTags().isEmpty()) {
+            builder.start("Tags");
+            for (Map.Entry<String, String> tag : grant.getTags().entrySet()) {
+                builder.start("Tag")
+                    .elem("Key", tag.getKey())
+                    .elem("Value", tag.getValue())
+                  .end("Tag");
+            }
+            builder.end("Tags");
+        }
+
+        return builder.end("SnapshotCopyGrant").build();
     }
 
     private String buildParameterXml(Parameter param) {
