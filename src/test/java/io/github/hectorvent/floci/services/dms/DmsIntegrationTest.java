@@ -8,17 +8,20 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class DmsIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "AmazonDMSv20160101.";
+    private static final String ACCOUNT_ID = "723679240095";
     private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/dms/aws4_request";
+            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/dms/aws4_request";
     private static final String SUBNET_A = "subnet-default-us-east-1-a";
     private static final String SUBNET_B = "subnet-default-us-east-1-b";
 
@@ -159,6 +162,85 @@ class DmsIntegrationTest {
         .then()
                 .statusCode(404)
                 .body("__type", equalTo("UnknownOperationException"));
+    }
+
+    @Test
+    void tagsSurviveCreateAndAreReadableThroughListTagsForResource() {
+        dms("CreateReplicationSubnetGroup")
+                .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-tagged\","
+                        + "\"ReplicationSubnetGroupDescription\":\"terraform managed\","
+                        + "\"SubnetIds\":[\"" + SUBNET_A + "\",\"" + SUBNET_B + "\"],"
+                        + "\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        dms("ListTagsForResource")
+                .body("{\"ResourceArn\":\"" + arn("tf-tagged") + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("TagList", hasSize(1))
+                .body("TagList[0].Key", equalTo("env"))
+                .body("TagList[0].Value", equalTo("test"))
+                .body("TagList[0].ResourceArn", nullValue());
+
+        dms("AddTagsToResource")
+                .body("{\"ResourceArn\":\"" + arn("tf-tagged") + "\","
+                        + "\"Tags\":[{\"Key\":\"owner\",\"Value\":\"data\"}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        dms("ListTagsForResource")
+                .body("{\"ResourceArn\":\"" + arn("tf-tagged") + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("TagList.Key", containsInAnyOrder("env", "owner"));
+
+        dms("RemoveTagsFromResource")
+                .body("{\"ResourceArn\":\"" + arn("tf-tagged") + "\",\"TagKeys\":[\"env\"]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        dms("ListTagsForResource")
+                .body("{\"ResourceArnList\":[\"" + arn("tf-tagged") + "\"]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("TagList", hasSize(1))
+                .body("TagList[0].Key", equalTo("owner"))
+                .body("TagList[0].ResourceArn", equalTo(arn("tf-tagged")));
+
+        dms("DeleteReplicationSubnetGroup")
+                .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-tagged\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void listTagsForAnUnknownArnFaults() {
+        dms("ListTagsForResource")
+                .body("{\"ResourceArn\":\"" + arn("tf-never-created") + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+    }
+
+    private static String arn(String identifier) {
+        return "arn:aws:dms:us-east-1:" + ACCOUNT_ID + ":subgrp:" + identifier;
     }
 
     private static String createBody(String identifier) {

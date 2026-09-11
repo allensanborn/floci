@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,7 @@ public class ReplicationSubnetGroup {
     private List<String> subnetIds = new ArrayList<>();
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private List<String> supportedNetworkTypes = new ArrayList<>();
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public ReplicationSubnetGroup() {
     }
@@ -81,5 +83,13 @@ public class ReplicationSubnetGroup {
         this.supportedNetworkTypes = supportedNetworkTypes != null
                 ? new ArrayList<>(supportedNetworkTypes)
                 : new ArrayList<>();
+    }
+
+    public Map<String, String> getTags() {
+        return Collections.unmodifiableMap(new LinkedHashMap<>(tags));
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>();
     }
 }
