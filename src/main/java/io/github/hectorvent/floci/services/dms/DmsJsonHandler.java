@@ -87,6 +87,9 @@ public class DmsJsonHandler {
         });
         ArrayNode networkTypes = node.putArray("SupportedNetworkTypes");
         group.getSupportedNetworkTypes().forEach(networkTypes::add);
+        // Always false: a read-only group is one DMS manages for a zero-ETL integration, which
+        // Floci does not emulate, so every group here is caller-owned and modifiable.
+        node.put("IsReadOnly", false);
         return node;
     }
 }

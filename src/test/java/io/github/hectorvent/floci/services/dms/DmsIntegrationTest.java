@@ -60,7 +60,8 @@ class DmsIntegrationTest {
                 .body("ReplicationSubnetGroups[0].Subnets.find { it.SubnetIdentifier == '"
                         + SUBNET_B + "' }.SubnetAvailabilityZone.Name", equalTo("us-east-1b"))
                 .body("ReplicationSubnetGroups[0].Subnets.SubnetStatus", everyItem(equalTo("Active")))
-                .body("ReplicationSubnetGroups[0].SupportedNetworkTypes", contains("IPV4"));
+                .body("ReplicationSubnetGroups[0].SupportedNetworkTypes", contains("IPV4"))
+                .body("ReplicationSubnetGroups[0].IsReadOnly", equalTo(false));
 
         dms("DeleteReplicationSubnetGroup")
                 .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-lifecycle\"}")
