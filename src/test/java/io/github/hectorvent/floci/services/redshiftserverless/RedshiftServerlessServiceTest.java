@@ -19,7 +19,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RedshiftServerlessServiceTest {
@@ -27,18 +30,24 @@ class RedshiftServerlessServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
 
     private RedshiftServerlessService service;
+    private AccountAwareStorageBackend<Namespace> store;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
-        AccountAwareStorageBackend<Namespace> store = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        // A spy, not a plain in-memory backend: the in-memory store hands back the same object
+        // reference a mutation already changed, so only an explicit write assertion can tell a
+        // service that persists its change from one that merely mutated a shared instance. That
+        // distinction is invisible under "memory" mode and load-bearing under "hybrid" and "wal".
+        store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-namespaces.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) store);
 
         RegionResolver regionResolver = mock(RegionResolver.class);
-        when(regionResolver.buildArn(eq("redshift-serverless"), eq(REGION), any(String.class)))
-                .thenAnswer(invocation -> "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT_ID + ":"
+        when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class)))
+                .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
+                        + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
         service = new RedshiftServerlessService(storageFactory, regionResolver);
     }
@@ -127,6 +136,82 @@ class RedshiftServerlessServiceTest {
         create("reset-ns");
         service.clear();
         assertTrue(service.listNamespaces(REGION, null, null).items().isEmpty());
+    }
+
+    @Test
+    void tagsSuppliedAtCreateAreReadableThroughListTagsForResource() {
+        Namespace created = service.createNamespace("tagged-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), REGION);
+
+        assertEquals(Map.of("env", "dev"),
+                service.listTagsForResource(created.getNamespaceArn(), REGION));
+    }
+
+    @Test
+    void tagResourceMergesAndUntagResourceRemovesByKey() {
+        Namespace created = service.createNamespace("merge-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), REGION);
+        String arn = created.getNamespaceArn();
+
+        service.tagResource(arn, Map.of("team", "data"), REGION);
+        assertEquals(Map.of("env", "dev", "team", "data"), service.listTagsForResource(arn, REGION),
+                "TagResource must merge: the pre-existing env tag has to survive a call that does not mention it");
+
+        service.tagResource(arn, Map.of("env", "prod"), REGION);
+        assertEquals(Map.of("env", "prod", "team", "data"), service.listTagsForResource(arn, REGION));
+
+        service.untagResource(arn, List.of("env"), REGION);
+        assertEquals(Map.of("team", "data"), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
+    void taggingAnUnknownArnIsResourceNotFoundEvenWhenOtherNamespacesExist() {
+        create("decoy-ns");
+        create("second-decoy-ns");
+        String absent = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID
+                + ":namespace/00000000-0000-0000-0000-000000000000";
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.listTagsForResource(absent, REGION)).getErrorCode());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.tagResource(absent, Map.of("a", "b"), REGION)).getErrorCode());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.untagResource(absent, List.of("a"), REGION)).getErrorCode());
+    }
+
+    @Test
+    void tagsSurviveAnUnrelatedNamespaceUpdate() {
+        Namespace created = service.createNamespace("keep-tags-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), REGION);
+
+        service.updateNamespace("keep-tags-ns", null, "custom-key", null, null, null, REGION);
+
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(created.getNamespaceArn(), REGION));
+    }
+
+    @Test
+    void anArnFromAnotherRegionIsNotTaggableFromThisOne() {
+        Namespace elsewhere = service.createNamespace("west-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), "us-west-2");
+
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.listTagsForResource(elsewhere.getNamespaceArn(), REGION)).getErrorCode());
+        assertEquals(Map.of("env", "dev"),
+                service.listTagsForResource(elsewhere.getNamespaceArn(), "us-west-2"));
+    }
+
+    @Test
+    void tagMutationsAreWrittenBackToStorage() {
+        Namespace created = service.createNamespace("persist-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), REGION);
+        String arn = created.getNamespaceArn();
+
+        clearInvocations(store);
+        service.tagResource(arn, Map.of("team", "data"), REGION);
+        verify(store).put(eq(REGION + "::persist-ns"), any(Namespace.class));
+
+        clearInvocations(store);
+        service.untagResource(arn, List.of("team"), REGION);
+        verify(store).put(eq(REGION + "::persist-ns"), any(Namespace.class));
     }
 
     private Namespace create(String namespaceName) {

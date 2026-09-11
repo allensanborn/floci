@@ -111,6 +111,45 @@ public class RedshiftServerlessService implements Resettable {
         return namespace;
     }
 
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        return new LinkedHashMap<>(resolveByArn(resourceArn, region).getTags());
+    }
+
+    public synchronized Map<String, String> tagResource(String resourceArn, Map<String, String> tags, String region) {
+        Namespace namespace = resolveByArn(resourceArn, region);
+        if (tags != null) {
+            namespace.getTags().putAll(tags);
+        }
+        namespaces.put(storageKey(region, namespace.getNamespaceName()), namespace);
+        return new LinkedHashMap<>(namespace.getTags());
+    }
+
+    public synchronized Map<String, String> untagResource(String resourceArn, List<String> tagKeys, String region) {
+        Namespace namespace = resolveByArn(resourceArn, region);
+        if (tagKeys == null) {
+            throw validation("tagKeys is required.");
+        }
+        tagKeys.forEach(namespace.getTags()::remove);
+        namespaces.put(storageKey(region, namespace.getNamespaceName()), namespace);
+        return new LinkedHashMap<>(namespace.getTags());
+    }
+
+    /**
+     * Redshift Serverless tags whatever the ARN names, so the lookup is by ARN rather than by
+     * namespace name. Only namespaces are taggable in Floci, so any other Redshift Serverless ARN
+     * resolves to nothing and is reported as absent rather than as an unsupported resource type.
+     */
+    private Namespace resolveByArn(String resourceArn, String region) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw validation("resourceArn is required.");
+        }
+        return namespaces.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(namespace -> resourceArn.equals(namespace.getNamespaceArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The resource " + resourceArn + " was not found.", 404));
+    }
+
     @Override
     public void clear() {
         namespaces.clear();

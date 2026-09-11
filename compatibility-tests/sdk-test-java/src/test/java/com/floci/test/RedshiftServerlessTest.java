@@ -8,9 +8,11 @@ import software.amazon.awssdk.services.redshiftserverless.model.ConflictExceptio
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
 import software.amazon.awssdk.services.redshiftserverless.model.NamespaceStatus;
 import software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftserverless.model.Tag;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Redshift Serverless namespace lifecycle")
@@ -47,6 +49,18 @@ class RedshiftServerlessTest {
                                 .namespaceName(namespaceName)
                                 .adminUsername("admin")))
                         .isInstanceOf(ConflictException.class);
+
+                String arn = created.namespaceArn();
+                client.tagResource(request -> request.resourceArn(arn)
+                        .tags(Tag.builder().key("env").value("dev").build()));
+                assertThat(client.listTagsForResource(request -> request.resourceArn(arn)).tags())
+                        .extracting(Tag::key, Tag::value)
+                        .contains(tuple("env", "dev"));
+
+                client.untagResource(request -> request.resourceArn(arn).tagKeys("env"));
+                assertThat(client.listTagsForResource(request -> request.resourceArn(arn)).tags())
+                        .extracting(Tag::key)
+                        .doesNotContain("env");
             } finally {
                 deleteBestEffort(client, namespaceName);
             }

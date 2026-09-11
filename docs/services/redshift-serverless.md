@@ -17,18 +17,22 @@ For the upstream API shape, see the [Amazon Redshift Serverless API Reference](h
 | `ListNamespaces` | Page through the namespaces in the account and Region |
 | `UpdateNamespace` | Apply the supplied fields to an existing namespace and return it |
 | `DeleteNamespace` | Remove a namespace and return it with `status` `DELETING` |
+| `ListTagsForResource` | Return the tags on the namespace named by `resourceArn` |
+| `TagResource` | Merge tags into the namespace named by `resourceArn` |
+| `UntagResource` | Remove tags by key from the namespace named by `resourceArn` |
 <!-- floci:actions:end -->
 
 Namespace state is account and Region scoped and persisted through `StorageFactory`.
 
 ## Compatibility Notes
 
-- **Namespaces only.** Workgroups, snapshots, recovery points, usage limits, endpoint access, and the tagging operations are not emulated. A namespace has no compute attached and no endpoint to connect to, so the Redshift Data API still rejects `WorkgroupName`.
+- **Namespaces only.** Workgroups, snapshots, recovery points, usage limits, and endpoint access are not emulated. A namespace has no compute attached and no endpoint to connect to, so the Redshift Data API still rejects `WorkgroupName`.
 - **`adminUserPassword` is accepted and never returned**, matching AWS. No secret is created for `manageAdminPassword`.
 - **Defaults follow AWS.** `dbName` defaults to `dev`, `kmsKeyId` to `AWS_OWNED_KMS_KEY`, `logExports` to an empty list, and `status` to `AVAILABLE` immediately: there is no `MODIFYING` or `CREATING` phase to poll through.
 - **`namespaceId` is a generated UUID** and `namespaceArn` is `arn:aws:redshift-serverless:<region>:<account>:namespace/<namespaceId>`.
 - **`DeleteNamespace` returns the deleted namespace with `status` `DELETING`** and removes it in the same call, so the next `GetNamespace` returns `ResourceNotFoundException`.
 - **`UpdateNamespace` applies only the fields present in the request.** An omitted field keeps its stored value; an explicitly empty `iamRoles` or `logExports` array clears it.
+- **Tagging is keyed by `resourceArn`, not by namespace name**, and the namespace is the only taggable Redshift Serverless resource in Floci. `TagResource` merges into the existing tags rather than replacing them, `UntagResource` removes by key, and any ARN that does not name a known namespace in the caller's Region returns `ResourceNotFoundException`. Tags supplied to `CreateNamespace` are readable through `ListTagsForResource` and survive an `UpdateNamespace`.
 
 ## AWS-compatible failures
 
