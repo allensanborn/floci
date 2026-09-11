@@ -66,7 +66,7 @@ public class ElastiCacheQueryHandler {
             case "DescribeUsers"              -> handleDescribeUsers(params);
             case "ModifyUser"                 -> handleModifyUser(params);
             case "DeleteUser"                 -> handleDeleteUser(params);
-            case "CreateCacheCluster"         -> handleCreateCacheCluster(params);
+            case "CreateCacheCluster"         -> handleCreateCacheCluster(params, region);
             case "DescribeCacheClusters"      -> handleDescribeCacheClusters(params);
             case "DeleteCacheCluster"         -> handleDeleteCacheCluster(params);
             case "CreateCacheSubnetGroup"     -> handleCreateCacheSubnetGroup(params);
@@ -312,9 +312,9 @@ public class ElastiCacheQueryHandler {
         }
     }
 
-    // ── Cache Clusters (Memcached) ────────────────────────────────────────────
+    // ── Cache Clusters (Memcached, and single-node Redis/Valkey) ──────────────
 
-    private Response handleCreateCacheCluster(MultivaluedMap<String, String> params) {
+    private Response handleCreateCacheCluster(MultivaluedMap<String, String> params, String region) {
         String clusterId = params.getFirst("CacheClusterId");
         String engine = params.getFirst("Engine");
 
@@ -322,33 +322,62 @@ public class ElastiCacheQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue",
                     "CacheClusterId is required.", AwsNamespaces.EC, 400);
         }
-        if (!"memcached".equalsIgnoreCase(engine)) {
+        if (!"memcached".equalsIgnoreCase(engine) && !"redis".equalsIgnoreCase(engine)
+                && !"valkey".equalsIgnoreCase(engine)) {
             return AwsQueryResponse.error("InvalidParameterValue",
-                    "Engine must be 'memcached'. For Redis/Valkey use CreateReplicationGroup.", AwsNamespaces.EC, 400);
+                    "Engine must be 'memcached', 'redis' or 'valkey'.", AwsNamespaces.EC, 400);
         }
 
         try {
-            CacheCluster cluster = memcachedService.createCacheCluster(clusterId);
-            return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC, cacheClusterXml(cluster))).build();
+            CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
+                    ? memcachedService.createCacheCluster(clusterId)
+                    : service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                            clusterId,
+                            engine,
+                            params.getFirst("EngineVersion"),
+                            params.getFirst("CacheNodeType"),
+                            intParam(params, "NumCacheNodes"),
+                            intParam(params, "Port"),
+                            cacheClusterAuthMode(params),
+                            params.getFirst("AuthToken"),
+                            params.getFirst("CacheParameterGroupName"),
+                            params.getFirst("CacheSubnetGroupName"),
+                            region,
+                            parseTags(params)));
+            return Response.ok(AwsQueryResponse.envelope("CreateCacheCluster", AwsNamespaces.EC,
+                    cacheClusterXml(cluster, true))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
     }
 
+    /** Read exactly as CreateReplicationGroup reads it, so both actions agree about one request. */
+    private static AuthMode cacheClusterAuthMode(MultivaluedMap<String, String> params) {
+        String authToken = params.getFirst("AuthToken");
+        if (authToken != null && !authToken.isBlank()) {
+            return AuthMode.PASSWORD;
+        }
+        if ("true".equalsIgnoreCase(params.getFirst("TransitEncryptionEnabled"))) {
+            return AuthMode.IAM;
+        }
+        return AuthMode.NO_AUTH;
+    }
+
     private Response handleDescribeCacheClusters(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("CacheClusterId");
         boolean showNodeInfo = "true".equalsIgnoreCase(params.getFirst("ShowCacheNodeInfo"));
+        boolean filtered = filterId != null && !filterId.isBlank();
         try {
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
-            Collection<CacheCluster> clusterList;
-            if (filterId != null && !filterId.isBlank() && !members.isEmpty()) {
-                clusterList = List.of();
-            } else {
-                clusterList = memcachedService.listCacheClusters(filterId);
+            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId));
+            // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
+            // which is the right answer only once no other source has answered.
+            if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
+                clusterList.addAll(memcachedService.listCacheClusters(filterId));
             }
             var xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {
-                xml.raw(cacheClusterXml(c));
+                xml.raw(cacheClusterXml(c, showNodeInfo));
             }
             for (ElastiCacheService.MemberCacheCluster member : members) {
                 xml.raw(memberCacheClusterXml(member, showNodeInfo));
@@ -424,8 +453,13 @@ public class ElastiCacheQueryHandler {
                     "CacheClusterId is required.", AwsNamespaces.EC, 400);
         }
         try {
-            CacheCluster cluster = memcachedService.deleteCacheCluster(clusterId);
-            return Response.ok(AwsQueryResponse.envelope("DeleteCacheCluster", AwsNamespaces.EC, cacheClusterXml(cluster))).build();
+            // Standalone redis/valkey clusters are stored apart from Memcached ones, so the id is
+            // looked for there first and the Memcached delete keeps raising the not-found fault.
+            CacheCluster cluster = service.findCacheClusters(clusterId).isEmpty()
+                    ? memcachedService.deleteCacheCluster(clusterId)
+                    : service.deleteCacheCluster(clusterId);
+            return Response.ok(AwsQueryResponse.envelope("DeleteCacheCluster", AwsNamespaces.EC,
+                    cacheClusterXml(cluster, true))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
@@ -623,6 +657,13 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 }
                 tags = group.getTags();
             }
+            if ("cluster".equals(arn[5])) {
+                // Only standalone redis/valkey clusters carry tags; a Memcached id or a
+                // replication-group member reports none, as it did before.
+                tags = service.findCacheClusters(arn[6]).stream().findFirst()
+                        .map(CacheCluster::getTags)
+                        .orElse(Map.of());
+            }
             if ("subnetgroup".equals(arn[5])) {
                 tags = service.describeCacheSubnetGroups(arn[6]).getFirst().getTags();
             }
@@ -729,7 +770,15 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
 
     // ── XML helpers ───────────────────────────────────────────────────────────
 
-    private String cacheClusterXml(CacheCluster c) {
+    /**
+     * A cache cluster as its engine has AWS report it. Memcached carries a ConfigurationEndpoint,
+     * the address of its node-discovery endpoint; a single-node redis or valkey cluster has none,
+     * and its endpoint is the node's, reported under CacheNodes when the request asks for node
+     * info. terraform-provider-aws reads {@code port} from whichever of the two is present, so a
+     * redis cluster answering with a ConfigurationEndpoint instead would report itself as the
+     * wrong thing.
+     */
+    private String cacheClusterXml(CacheCluster c, boolean showNodeInfo) {
         Endpoint ep = c.getConfigurationEndpoint();
         var xml = new XmlBuilder()
                 .start("CacheCluster")
@@ -737,11 +786,46 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().name().toLowerCase())
                   .elem("Engine", c.getEngine())
                   .elem("EngineVersion", c.getEngineVersion());
-        if (ep != null) {
-            xml.start("ConfigurationEndpoint")
-               .elem("Address", ep.address())
-               .elem("Port", (long) ep.port())
-               .end("ConfigurationEndpoint");
+        if ("memcached".equals(c.getEngine())) {
+            if (ep != null) {
+                xml.start("ConfigurationEndpoint")
+                   .elem("Address", ep.address())
+                   .elem("Port", (long) ep.port())
+                   .end("ConfigurationEndpoint");
+            }
+            return xml.end("CacheCluster").build();
+        }
+
+        xml.elem("NumCacheNodes", (long) c.getNumCacheNodes())
+           .elem("AutoMinorVersionUpgrade", true)
+           .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
+           .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH);
+        if (c.getCacheNodeType() != null) {
+            xml.elem("CacheNodeType", c.getCacheNodeType());
+        }
+        if (c.getCacheParameterGroupName() != null) {
+            xml.start("CacheParameterGroup")
+               .elem("CacheParameterGroupName", c.getCacheParameterGroupName())
+               .elem("ParameterApplyStatus", "in-sync")
+               .end("CacheParameterGroup");
+        }
+        if (c.getCacheSubnetGroupName() != null) {
+            xml.elem("CacheSubnetGroupName", c.getCacheSubnetGroupName());
+        }
+        if (c.getArn() != null) {
+            xml.elem("ARN", c.getArn());
+        }
+        if (showNodeInfo && ep != null) {
+            xml.start("CacheNodes")
+               .start("CacheNode")
+                 .elem("CacheNodeId", "0001")
+                 .elem("CacheNodeStatus", "available")
+                 .start("Endpoint")
+                   .elem("Address", ep.address())
+                   .elem("Port", (long) ep.port())
+                 .end("Endpoint")
+               .end("CacheNode")
+               .end("CacheNodes");
         }
         return xml.end("CacheCluster").build();
     }

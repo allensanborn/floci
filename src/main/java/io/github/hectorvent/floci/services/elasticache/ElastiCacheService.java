@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheCont
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
+import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
 import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
@@ -57,6 +59,7 @@ public class ElastiCacheService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
 
     private final StorageBackend<String, ReplicationGroup> groups;
+    private final StorageBackend<String, CacheCluster> cacheClusters;
     private final StorageBackend<String, ElastiCacheUser> users;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
@@ -97,6 +100,8 @@ public class ElastiCacheService implements ResourceProvider {
         this.regionResolver = regionResolver;
         this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
                 new TypeReference<Map<String, ReplicationGroup>>() {});
+        this.cacheClusters = storageFactory.create("elasticache", "elasticache-redis-clusters.json",
+                new TypeReference<Map<String, CacheCluster>>() {});
         this.users = storageFactory.create("elasticache", "elasticache-users.json",
                 new TypeReference<Map<String, ElastiCacheUser>>() {});
         this.parameterGroups = storageFactory.create("elasticache", "elasticache-parameter-groups.json",
@@ -376,7 +381,7 @@ public class ElastiCacheService implements ResourceProvider {
                 : defaultEngineForImage());
         group.setEngineVersion(request.engineVersion() != null && !request.engineVersion().isBlank()
                 ? request.engineVersion()
-                : ("valkey".equals(group.getEngine()) ? "8.1" : "7.1"));
+                : defaultEngineVersion(group.getEngine()));
         group.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
                 ? request.cacheNodeType()
                 : "cache.t4g.micro");
@@ -389,6 +394,10 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.tags() != null && !request.tags().isEmpty()) {
             group.setTags(new LinkedHashMap<>(request.tags()));
         }
+    }
+
+    private static String defaultEngineVersion(String engine) {
+        return "valkey".equals(engine) ? "8.1" : "7.1";
     }
 
     private String defaultEngineForImage() {
@@ -693,6 +702,192 @@ public class ElastiCacheService implements ResourceProvider {
             groups.delete(groupId);
             LOG.infov("Replication group {0} deleted", groupId);
         }
+    }
+
+    // ── Cache Clusters (single-node Redis/Valkey) ─────────────────────────────
+
+    /**
+     * The CreateCacheCluster parameters floci models for a standalone redis or valkey cluster.
+     * AWS accepts that action for redis and valkey as well as memcached, as long as the cluster
+     * has exactly one node, and terraform's {@code aws_elasticache_cluster} with
+     * {@code engine = "redis"} emits precisely that call: no replication group is involved, so
+     * these clusters are stored on their own and never appear in DescribeReplicationGroups.
+     */
+    public record CreateCacheClusterRequest(
+            String cacheClusterId,
+            String engine,
+            String engineVersion,
+            String cacheNodeType,
+            Integer numCacheNodes,
+            Integer port,
+            AuthMode authMode,
+            String authToken,
+            String cacheParameterGroupName,
+            String cacheSubnetGroupName,
+            String region,
+            Map<String, String> tags) {
+    }
+
+    public CacheCluster createCacheCluster(CreateCacheClusterRequest request) {
+        String clusterId = request.cacheClusterId();
+        String engine = normalizeEngine(request.engine());
+        if (request.numCacheNodes() != null && request.numCacheNodes() != 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "NumCacheNodes should be 1 if engine is " + engine, 400);
+        }
+        String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
+        try {
+            if (cacheClusters.get(clusterId).isPresent()) {
+                throw new AwsException("CacheClusterAlreadyExistsFault",
+                        "Cache cluster " + clusterId + " already exists.", 400);
+            }
+            return provisionCacheCluster(request, engine);
+        } finally {
+            releaseParameterGroup(parameterGroupReservation);
+        }
+    }
+
+    /**
+     * Provisions the cluster exactly as {@link #provisionSingleNodeGroup} provisions a
+     * cluster-mode-disabled replication group: the same Valkey container, fronted by the same
+     * auth proxy on a port from the same range, so the endpoint a describe reports answers RESP.
+     */
+    private CacheCluster provisionCacheCluster(CreateCacheClusterRequest request, String engine) {
+        String clusterId = request.cacheClusterId();
+        AuthMode authMode = request.authMode() != null ? request.authMode() : AuthMode.NO_AUTH;
+        int proxyPort = allocateProxyPort(request.port());
+        String image = config.services().elasticache().defaultImage();
+
+        LOG.infov("Creating single-node {0} cache cluster {1} with authMode={2} on proxy port {3}",
+                engine, clusterId, authMode, String.valueOf(proxyPort));
+
+        ElastiCacheContainerHandle handle = null;
+        try {
+            // As for a replication group, the record is metadata: it reaches 'available' even
+            // when no Docker daemon is reachable, and only connecting to the cache needs the
+            // container.
+            handle = containerManager.tryStart(clusterId, image);
+
+            CacheCluster cluster = new CacheCluster(clusterId, CacheClusterStatus.AVAILABLE, engine,
+                    request.engineVersion() != null && !request.engineVersion().isBlank()
+                            ? request.engineVersion()
+                            : defaultEngineVersion(engine),
+                    new Endpoint(resolveEndpointHost(), proxyPort), Instant.now());
+            cluster.setNumCacheNodes(1);
+            cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
+                    ? request.cacheNodeType()
+                    : "cache.t4g.micro");
+            cluster.setAuthMode(authMode);
+            cluster.setAuthToken(request.authToken());
+            cluster.setArn(regionResolver.buildArn("elasticache", request.region(), "cluster:" + clusterId));
+            cluster.setCacheParameterGroupName(request.cacheParameterGroupName());
+            cluster.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+            if (request.tags() != null && !request.tags().isEmpty()) {
+                cluster.setTags(new LinkedHashMap<>(request.tags()));
+            }
+            if (handle != null) {
+                cluster.setContainerId(handle.getContainerId());
+                cluster.setContainerHost(handle.getHost());
+                cluster.setContainerPort(handle.getPort());
+            }
+
+            synchronized (lockFor("cc:" + clusterId)) {
+                cacheClusters.put(clusterId, cluster);
+                if (handle != null) {
+                    proxyManager.startProxy(clusterId, authMode, proxyPort,
+                            handle.getHost(), handle.getPort(),
+                            (username, password) -> validateCacheClusterPassword(clusterId, username, password));
+                } else {
+                    LOG.warnv("Cache cluster {0} created without a backing cache container: no "
+                            + "Docker daemon is reachable. Metadata operations work; connections to "
+                            + "the cache do not until a daemon appears.", clusterId);
+                }
+            }
+
+            LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
+                    cluster.getConfigurationEndpoint().address(), String.valueOf(proxyPort));
+            return cluster;
+        } catch (RuntimeException e) {
+            LOG.warnv("Cache cluster {0} provisioning failed, rolling back: {1}", clusterId, e.getMessage());
+            rollbackCacheCluster(clusterId, handle, proxyPort);
+            throw e;
+        }
+    }
+
+    private void rollbackCacheCluster(String clusterId, ElastiCacheContainerHandle handle, int proxyPort) {
+        try {
+            if (handle != null) {
+                proxyManager.stopProxy(clusterId);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping proxy for cache cluster {0}: {1}", clusterId, e.getMessage());
+        }
+        try {
+            if (handle != null) {
+                containerManager.stop(handle);
+            } else {
+                // No handle: a readiness timeout throws before start() can return one.
+                containerManager.stopByGroupId(clusterId);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
+        } finally {
+            cacheClusters.delete(clusterId);
+            releaseProxyPort(proxyPort);
+        }
+    }
+
+    /**
+     * The standalone cluster by that id, or all of them. Reports no match as an empty list rather
+     * than a fault: DescribeCacheClusters answers from three sources, and only the last one to
+     * find nothing can say the id does not exist.
+     */
+    public List<CacheCluster> findCacheClusters(String filterClusterId) {
+        if (filterClusterId != null && !filterClusterId.isBlank()) {
+            return cacheClusters.get(filterClusterId).map(List::of).orElseGet(List::of);
+        }
+        return cacheClusters.scan(k -> true);
+    }
+
+    public CacheCluster deleteCacheCluster(String clusterId) {
+        synchronized (lockFor("cc:" + clusterId)) {
+            CacheCluster cluster = cacheClusters.get(clusterId).orElseThrow(() ->
+                    new AwsException("CacheClusterNotFound",
+                            "Cache cluster " + clusterId + " not found.", 404));
+
+            cluster.setCacheClusterStatus(CacheClusterStatus.DELETING);
+            cacheClusters.put(clusterId, cluster);
+
+            proxyManager.stopProxy(clusterId);
+            if (cluster.getContainerId() != null) {
+                containerManager.stop(new ElastiCacheContainerHandle(cluster.getContainerId(), clusterId,
+                        cluster.getContainerHost(), cluster.getContainerPort()));
+            } else {
+                // Transient container fields are lost across a Floci restart; the deterministic
+                // container name still finds the cluster's container.
+                containerManager.stopByGroupId(clusterId);
+            }
+            if (cluster.getConfigurationEndpoint() != null) {
+                releaseProxyPort(cluster.getConfigurationEndpoint().port());
+            }
+
+            cacheClusters.delete(clusterId);
+            LOG.infov("Cache cluster {0} deleted", clusterId);
+            return cluster;
+        }
+    }
+
+    /**
+     * A standalone cluster's AUTH token, checked the same way {@link #validatePassword} checks a
+     * replication group's: only the single-argument AUTH form, since a cluster created this way
+     * carries no user list.
+     */
+    public boolean validateCacheClusterPassword(String clusterId, String username, String password) {
+        CacheCluster cluster = cacheClusters.get(clusterId).orElse(null);
+        if (cluster == null || cluster.getAuthToken() == null) {
+            return false;
+        }
+        return (username == null || username.isEmpty()) && cluster.getAuthToken().equals(password);
     }
 
     /**
@@ -1263,13 +1458,15 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Whether a stored replication group still references the parameter group by that name, or a
-     * create that named it is still provisioning and about to store one.
+     * Whether a stored replication group or cache cluster still references the parameter group by
+     * that name, or a create that named it is still provisioning and about to store one.
      */
     private boolean isParameterGroupInUse(String name) {
         return reservedParameterGroups.containsKey(parameterGroupReservationKey(name))
                 || groups.scan(key -> true).stream()
-                        .anyMatch(group -> name.equals(group.getCacheParameterGroupName()));
+                        .anyMatch(group -> name.equals(group.getCacheParameterGroupName()))
+                || cacheClusters.scan(key -> true).stream()
+                        .anyMatch(cluster -> name.equals(cluster.getCacheParameterGroupName()));
     }
 
     @Override
