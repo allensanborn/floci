@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
+    private AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrantBackend;
     private RedshiftContainerManager cm;
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
@@ -57,6 +59,7 @@ class RedshiftServiceTest {
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
+        snapshotCopyGrantBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
@@ -81,6 +84,7 @@ class RedshiftServiceTest {
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
+        when(sf.<SnapshotCopyGrant>create(eq("redshift"), eq("redshift-snapshot-copy-grants.json"), any())).thenReturn(snapshotCopyGrantBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
@@ -1095,6 +1099,110 @@ class RedshiftServiceTest {
         when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrant() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of());
+
+        assertEquals("my-grant", grant.getSnapshotCopyGrantName());
+        assertEquals("key-abc", grant.getKmsKeyId());
+        verify(snapshotCopyGrantBackend).put(eq("my-grant"), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).flush();
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantDefaultsKmsKeyId() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", null, Map.of());
+
+        assertEquals("arn:aws:kms:us-east-1:111111111111:alias/aws/redshift", grant.getKmsKeyId());
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantStoresTags() {
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"), grant.getTags());
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantAlreadyExists() {
+        when(snapshotCopyGrantBackend.get("existing")).thenReturn(Optional.of(new SnapshotCopyGrant()));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createSnapshotCopyGrant("existing", "key-abc", Map.of()));
+        assertEquals("SnapshotCopyGrantAlreadyExistsFault", ex.getErrorCode());
+        verify(snapshotCopyGrantBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsByName() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants("my-grant");
+
+        assertEquals(1, list.size());
+        assertEquals("my-grant", list.get(0).getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend, never()).scan(any());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsReturnsAllWhenNameOmitted() {
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(List.of(
+                new SnapshotCopyGrant("grant-a", "key-a"),
+                new SnapshotCopyGrant("grant-b", "key-b")));
+
+        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants(null);
+
+        assertEquals(2, list.size());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsNotFound() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.describeSnapshotCopyGrants("missing"));
+        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+    }
+
+    @Test
+    void testDeleteSnapshotCopyGrant() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        SnapshotCopyGrant deleted = service.deleteSnapshotCopyGrant("my-grant");
+
+        assertEquals("my-grant", deleted.getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend).delete("my-grant");
+        verify(snapshotCopyGrantBackend).flush();
+    }
+
+    @Test
+    void testDeleteSnapshotCopyGrantNotFound() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshotCopyGrant("missing"));
+        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        verify(snapshotCopyGrantBackend, never()).delete(any());
+    }
+
+    @Test
+    void testCreateTagsOnSnapshotCopyGrant() {
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant",
+                Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"),
+                service.listTagsForResource("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant"));
     }
 
     private static String extractResourceId(String arn) {

@@ -29,13 +29,16 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
 | `ModifyClusterParameterGroup` | Update parameter values on a group |
 | `DeleteClusterParameterGroup` | Remove a parameter group |
-| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group or parameter group |
+| `CreateTags` | Add or overwrite tags on a cluster, snapshot, subnet group, parameter group or snapshot copy grant |
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
+| `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key |
+| `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name |
+| `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
 | `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
 | `RebootCluster` | Restart a cluster's container |
 <!-- floci:actions:end -->
