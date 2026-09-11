@@ -14,6 +14,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +30,15 @@ import java.util.Map;
 public class RedshiftServerlessJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessJsonHandler.class);
+
+    /**
+     * Every timestamp member in the Redshift Serverless model carries
+     * {@code TimestampFormatTrait(ISO_8601)}, which overrides the epoch-seconds default that
+     * awsJson1.1 would otherwise apply. Emitting a number here is accepted by the CLI, because
+     * botocore coerces it, but strict SDKs reject the response outright.
+     */
+    private static final DateTimeFormatter CREATION_DATE_FORMAT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private final RedshiftServerlessService service;
     private final ObjectMapper objectMapper;
@@ -161,7 +172,7 @@ public class RedshiftServerlessJsonHandler {
             node.put("defaultIamRoleArn", namespace.getDefaultIamRoleArn());
         }
         if (namespace.getCreationDate() != null) {
-            node.put("creationDate", namespace.getCreationDate().toEpochMilli() / 1000.0);
+            node.put("creationDate", CREATION_DATE_FORMAT.format(namespace.getCreationDate()));
         }
         ArrayNode iamRoles = node.putArray("iamRoles");
         namespace.getIamRoles().forEach(iamRoles::add);

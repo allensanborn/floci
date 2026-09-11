@@ -9,7 +9,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
-import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -42,7 +41,8 @@ class RedshiftServerlessIntegrationTest {
                 .body("namespace.status", equalTo("AVAILABLE"))
                 .body("namespace.adminUsername", equalTo("admin"))
                 .body("namespace.logExports.size()", equalTo(0))
-                .body("namespace.creationDate", notNullValue())
+                .body("namespace.creationDate", matchesPattern(
+                        "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z"))
                 .body("namespace.adminUserPassword", nullValue());
 
         call("GetNamespace", "{\"namespaceName\":\"defaults-ns\"}")
