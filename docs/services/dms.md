@@ -1,0 +1,54 @@
+# AWS Database Migration Service (DMS)
+
+**Protocol:** AWS JSON 1.1  
+**Signing name:** `dms`
+
+Floci emulates the replication subnet group lifecycle, which is what
+`aws_dms_replication_subnet_group` needs to plan and apply. Subnets are resolved against
+the emulated EC2 service, so the VPC and Availability Zones a group reports are the ones
+those subnets actually have.
+
+## Supported Actions
+
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateReplicationSubnetGroup` | Creates a replication subnet group from existing EC2 subnets. |
+| `DescribeReplicationSubnetGroups` | Lists replication subnet groups, optionally filtered by identifier. |
+| `DeleteReplicationSubnetGroup` | Deletes the specified replication subnet group. |
+<!-- floci:actions:end -->
+
+## Behaviour
+
+- The identifier is stored as a lowercase string, as AWS does, so a group created as
+  `MyGroup` is described and deleted as `mygroup`.
+- `ReplicationSubnetGroupIdentifier` must not be `default` and is limited to 255
+  alphanumeric characters, periods, underscores, or hyphens.
+- A group must cover at least two Availability Zones. Fewer returns
+  `ReplicationSubnetGroupDoesNotCoverEnoughAZs`, as AWS does.
+- Subnets must exist and must all belong to one VPC. Otherwise `InvalidSubnet`.
+- `SubnetGroupStatus` is immediately `Complete`, every subnet reports `Active`, and
+  `SupportedNetworkTypes` is `["IPV4"]`.
+- `DescribeReplicationSubnetGroups` supports the `replication-subnet-group-id` filter.
+  A filter naming a group that does not exist returns `ResourceNotFoundFault`, which is
+  how Terraform detects a group deleted outside its state.
+- Groups are scoped per account and Region and persist through `StorageFactory`.
+
+## Limitations
+
+- **Only the subnet group lifecycle is implemented.** Replication instances, endpoints,
+  and replication tasks return `UnknownOperationException`.
+- **No tagging actions.** `Tags` on `CreateReplicationSubnetGroup` are accepted and
+  ignored, and `AddTagsToResource`, `ListTagsForResource`, and `RemoveTagsFromResource`
+  are not implemented.
+- **No `ModifyReplicationSubnetGroup`.** A subnet change has to be a delete and recreate.
+- **`DescribeReplicationSubnetGroups` does not paginate.** `MaxRecords` and `Marker` are
+  ignored and every matching group is returned in one response, with no `Marker` set.
+
+See the [AWS DMS API Reference](https://docs.aws.amazon.com/dms/latest/APIReference/Welcome.html).
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_DMS_ENABLED` | `true` | Enable or disable DMS |
