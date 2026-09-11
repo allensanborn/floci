@@ -123,6 +123,46 @@ class RedshiftServerlessIntegrationTest {
                 .body("__type", equalTo("ValidationException"));
     }
 
+    @Test
+    void tagsCreatedWithTheNamespaceAreReadableAndEditable() {
+        String arn = call("CreateNamespace", """
+                {"namespaceName":"tagged-ns","adminUsername":"admin","tags":[{"key":"env","value":"dev"}]}
+                """)
+                .statusCode(200)
+                .extract().jsonPath().getString("namespace.namespaceArn");
+
+        call("ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
+                .statusCode(200)
+                .body("tags.size()", equalTo(1))
+                .body("tags[0].key", equalTo("env"))
+                .body("tags[0].value", equalTo("dev"));
+
+        call("TagResource", "{\"resourceArn\":\"" + arn + "\",\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .statusCode(200);
+        call("ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
+                .statusCode(200)
+                .body("tags.key", hasItem("team"))
+                .body("tags.key", hasItem("env"));
+
+        call("UntagResource", "{\"resourceArn\":\"" + arn + "\",\"tagKeys\":[\"env\"]}")
+                .statusCode(200);
+        call("ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
+                .statusCode(200)
+                .body("tags.size()", equalTo(1))
+                .body("tags[0].key", equalTo("team"));
+
+        call("DeleteNamespace", "{\"namespaceName\":\"tagged-ns\"}").statusCode(200);
+    }
+
+    @Test
+    void taggingAnUnknownArnReturnsResourceNotFound() {
+        String absent = "arn:aws:redshift-serverless:us-east-1:000000000000:"
+                + "namespace/00000000-0000-0000-0000-000000000000";
+        call("ListTagsForResource", "{\"resourceArn\":\"" + absent + "\"}")
+                .statusCode(404)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
     private static io.restassured.response.ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)

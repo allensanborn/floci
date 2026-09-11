@@ -47,6 +47,9 @@ public class RedshiftServerlessJsonHandler {
                 case "ListNamespaces" -> handleListNamespaces(request, region);
                 case "UpdateNamespace" -> handleUpdateNamespace(request, region);
                 case "DeleteNamespace" -> handleDeleteNamespace(request, region);
+                case "ListTagsForResource" -> handleListTagsForResource(request, region);
+                case "TagResource" -> handleTagResource(request, region);
+                case "UntagResource" -> handleUntagResource(request, region);
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",
                                 "Operation " + action + " is not supported."))
@@ -104,6 +107,33 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleDeleteNamespace(JsonNode request, String region) {
         return namespaceResponse(service.deleteNamespace(text(request, "namespaceName"), region));
+    }
+
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        Map<String, String> tags = service.listTagsForResource(text(request, "resourceArn"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("tags", tagListNode(tags));
+        return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request, String region) {
+        service.tagResource(text(request, "resourceArn"), parseTagList(request.path("tags")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request, String region) {
+        service.untagResource(text(request, "resourceArn"), parseStringList(request.path("tagKeys")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ArrayNode tagListNode(Map<String, String> tags) {
+        ArrayNode node = objectMapper.createArrayNode();
+        tags.forEach((key, value) -> {
+            ObjectNode tag = node.addObject();
+            tag.put("key", key);
+            tag.put("value", value);
+        });
+        return node;
     }
 
     private Response namespaceResponse(Namespace namespace) {
