@@ -30,8 +30,9 @@ those subnets actually have.
 - A group must cover at least two Availability Zones. Fewer returns
   `ReplicationSubnetGroupDoesNotCoverEnoughAZs`, as AWS does.
 - Subnets must exist and must all belong to one VPC. Otherwise `InvalidSubnet`.
-- `SubnetGroupStatus` is immediately `Complete`, every subnet reports `Active`, and
-  `SupportedNetworkTypes` is `["IPV4"]`.
+- `SubnetGroupStatus` is immediately `Complete`, every subnet reports `Active`,
+  `SupportedNetworkTypes` is `["IPV4"]`, and `IsReadOnly` is always `false`: a read-only
+  group is one DMS manages for a zero-ETL integration, which Floci does not emulate.
 - `DescribeReplicationSubnetGroups` supports the `replication-subnet-group-id` filter.
   A filter naming a group that does not exist returns `ResourceNotFoundFault`, which is
   how Terraform detects a group deleted outside its state.
@@ -52,8 +53,9 @@ back the same way.
   AWS documents it on.
 - Tag keys are 1 to 128 characters, values at most 256, and neither may start with `aws:`
   or `dms:`.
-- An ARN that is unparseable, names a different DMS resource type, names another account,
-  or names a group that does not exist returns `ResourceNotFoundFault`.
+- An ARN that is unparseable, names a different DMS resource type, names another account
+  or Region, or names a group that does not exist returns `ResourceNotFoundFault`. Tagging
+  is not a cross-account or cross-Region operation on AWS and is not one here either.
 - Deleting a group deletes its tags with it.
 
 ## Limitations

@@ -99,6 +99,20 @@ class DmsServiceTest {
     }
 
     @Test
+    void createRejectsTwoSubnetsSharingOneAvailabilityZone() {
+        AwsException tooFewZones = assertThrows(AwsException.class, () -> service.createReplicationSubnetGroup(
+                createRequest("same-az", "example", "subnet-a", "subnet-a2"), REGION));
+        assertEquals("ReplicationSubnetGroupDoesNotCoverEnoughAZs", tooFewZones.getErrorCode());
+    }
+
+    @Test
+    void createRejectsASubnetWithNoAvailabilityZone() {
+        AwsException noZone = assertThrows(AwsException.class, () -> service.createReplicationSubnetGroup(
+                createRequest("no-az", "example", "subnet-a", "subnet-no-az"), REGION));
+        assertEquals("InvalidSubnet", noZone.getErrorCode());
+    }
+
+    @Test
     void createRejectsSubnetsSpanningVpcs() {
         AwsException crossVpc = assertThrows(AwsException.class, () -> service.createReplicationSubnetGroup(
                 createRequest("cross-vpc", "example", "subnet-a", "subnet-other-vpc"), REGION));
@@ -245,6 +259,20 @@ class DmsServiceTest {
     }
 
     @Test
+    void tagOperationsOnAnotherRegionsArnFault() {
+        ObjectNode request = createRequest("other-region", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.put("ResourceArn", "arn:aws:dms:eu-west-1:" + ACCOUNT_ID + ":subgrp:other-region");
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(listRequest, REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
     void tagOperationsOnANonSubnetGroupArnFault() {
         ObjectNode listRequest = mapper.createObjectNode();
         listRequest.put("ResourceArn", "arn:aws:dms:" + REGION + ":" + ACCOUNT_ID + ":rep:Example");
@@ -327,6 +355,8 @@ class DmsServiceTest {
         return switch (subnetId) {
             case "subnet-a" -> subnet(subnetId, VPC_ID, "us-east-1a");
             case "subnet-b" -> subnet(subnetId, VPC_ID, "us-east-1b");
+            case "subnet-a2" -> subnet(subnetId, VPC_ID, "us-east-1a");
+            case "subnet-no-az" -> subnet(subnetId, VPC_ID, null);
             case "subnet-other-vpc" -> subnet(subnetId, "vpc-0other", "us-east-1b");
             default -> null;
         };

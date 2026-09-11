@@ -146,7 +146,12 @@ public class DmsService implements Resettable {
         // that follows a create returns the same subnet ordering every time.
         Map<String, String> availabilityZones = new LinkedHashMap<>();
         for (String subnetId : requested) {
-            availabilityZones.put(subnetId, resolved.get(subnetId).getAvailabilityZone());
+            String availabilityZone = resolved.get(subnetId).getAvailabilityZone();
+            if (availabilityZone == null) {
+                throw new AwsException("InvalidSubnet",
+                        "Subnet " + subnetId + " has no Availability Zone.", 400);
+            }
+            availabilityZones.put(subnetId, availabilityZone);
         }
 
         String vpcId = resolved.get(requested.getFirst()).getVpcId();
@@ -270,11 +275,14 @@ public class DmsService implements Resettable {
      * DescribeReplicationSubnetGroups does not return an ARN, so Terraform builds
      * {@code arn:aws:dms:<region>:<account>:subgrp:<id>} itself and tags against that. Anything
      * that is not such an ARN names no DMS resource Floci holds, which is a ResourceNotFoundFault
-     * rather than a parameter error. An ARN naming another account is treated the same way:
-     * storage is scoped to the caller, so resolving it would otherwise reach the caller's own
-     * group of that name.
+     * rather than a parameter error.
+     *
+     * <p>An ARN naming another account or another Region is treated the same way. Tagging is not a
+     * cross-account or cross-Region operation on AWS, and here it cannot be one either: storage is
+     * scoped to the caller's account and keyed by the caller's Region, so honouring a foreign ARN
+     * would silently reach the caller's own group of that name instead of the one named.
      */
-    private String subnetGroupKeyForArn(String resourceArn, String fallbackRegion) {
+    private String subnetGroupKeyForArn(String resourceArn, String callerRegion) {
         AwsArnUtils.Arn arn;
         try {
             arn = AwsArnUtils.parse(resourceArn);
@@ -289,8 +297,10 @@ public class DmsService implements Resettable {
         if (!arn.accountId().isBlank() && !arn.accountId().equals(regionResolver.getAccountId())) {
             throw notFoundForArn(resourceArn);
         }
-        String region = arn.region() == null || arn.region().isBlank() ? fallbackRegion : arn.region();
-        return storageKey(region, resource[1].toLowerCase(Locale.ROOT));
+        if (arn.region() != null && !arn.region().isBlank() && !arn.region().equals(callerRegion)) {
+            throw notFoundForArn(resourceArn);
+        }
+        return storageKey(callerRegion, resource[1].toLowerCase(Locale.ROOT));
     }
 
     private static List<String> arnList(JsonNode request) {
