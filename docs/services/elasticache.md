@@ -20,9 +20,9 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DescribeUsers` | List ElastiCache users |
 | `ModifyUser` | Update user access strings |
 | `DeleteUser` | Remove an ElastiCache user |
-| `CreateCacheCluster` | - |
-| `DescribeCacheClusters` | - |
-| `DeleteCacheCluster` | - |
+| `CreateCacheCluster` | Start a Memcached cluster, or a single-node Redis/Valkey one (`NumCacheNodes` must be 1) |
+| `DescribeCacheClusters` | List cache clusters: Memcached, single-node Redis/Valkey, and replication group members |
+| `DeleteCacheCluster` | Stop and remove a cache cluster |
 | `CreateCacheSubnetGroup` | Create a cache subnet group |
 | `DescribeCacheSubnetGroups` | List cache subnet groups |
 | `ModifyCacheSubnetGroup` | Replace a group's description or subnets |
@@ -34,6 +34,22 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | `DeleteCacheParameterGroup` | Delete a cache parameter group |
 | `ListTagsForResource` | Tags on a parameter group ARN |
 <!-- floci:actions:end -->
+
+### Single-node Redis/Valkey clusters
+
+`CreateCacheCluster` serves three engines. `Engine=memcached` starts a Memcached container and
+reports its node-discovery `ConfigurationEndpoint`. `Engine=redis` or `Engine=valkey` starts a
+single-node cluster with no replication group: the same Valkey container and auth proxy a
+cluster-mode-disabled replication group gets, on a port from the same proxy range, which defaults
+to 6379. AWS allows only one node in that shape, so `NumCacheNodes` greater than 1 is refused with
+`InvalidParameterValue`, as it is on a live account.
+
+This is the call `aws_elasticache_cluster` with `engine = "redis"` emits, which is why it is not
+interchangeable with `CreateReplicationGroup`: a single-node cluster created this way never appears
+in `DescribeReplicationGroups`. Following AWS, it carries no `ConfigurationEndpoint` either, and
+reports its node's address under `CacheNodes` when the request sets `ShowCacheNodeInfo`. These
+clusters are not re-provisioned after a Floci restart, the same as cluster-mode-disabled
+replication groups.
 
 ### Cluster Mode
 

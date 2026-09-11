@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.elasticache.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class CacheCluster {
@@ -13,6 +15,14 @@ public class CacheCluster {
     private String engineVersion;
     private Endpoint configurationEndpoint;
     private Instant cacheClusterCreateTime;
+    private String cacheNodeType;
+    private int numCacheNodes;
+    private String arn;
+    private String cacheParameterGroupName;
+    private String cacheSubnetGroupName;
+    private AuthMode authMode;
+    private String authToken;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     // Transient — not persisted, restored on container restart
     private transient String containerId;
@@ -49,6 +59,30 @@ public class CacheCluster {
 
     public Instant getCacheClusterCreateTime() { return cacheClusterCreateTime; }
     public void setCacheClusterCreateTime(Instant cacheClusterCreateTime) { this.cacheClusterCreateTime = cacheClusterCreateTime; }
+
+    public String getCacheNodeType() { return cacheNodeType; }
+    public void setCacheNodeType(String cacheNodeType) { this.cacheNodeType = cacheNodeType; }
+
+    public int getNumCacheNodes() { return numCacheNodes; }
+    public void setNumCacheNodes(int numCacheNodes) { this.numCacheNodes = numCacheNodes; }
+
+    public String getArn() { return arn; }
+    public void setArn(String arn) { this.arn = arn; }
+
+    public String getCacheParameterGroupName() { return cacheParameterGroupName; }
+    public void setCacheParameterGroupName(String cacheParameterGroupName) { this.cacheParameterGroupName = cacheParameterGroupName; }
+
+    public String getCacheSubnetGroupName() { return cacheSubnetGroupName; }
+    public void setCacheSubnetGroupName(String cacheSubnetGroupName) { this.cacheSubnetGroupName = cacheSubnetGroupName; }
+
+    public AuthMode getAuthMode() { return authMode; }
+    public void setAuthMode(AuthMode authMode) { this.authMode = authMode; }
+
+    public String getAuthToken() { return authToken; }
+    public void setAuthToken(String authToken) { this.authToken = authToken; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }
 
     public String getContainerId() { return containerId; }
     public void setContainerId(String containerId) { this.containerId = containerId; }

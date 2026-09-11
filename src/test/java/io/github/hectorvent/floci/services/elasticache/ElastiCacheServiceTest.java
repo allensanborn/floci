@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheCont
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
+import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
+import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
@@ -909,5 +911,126 @@ class ElastiCacheServiceTest {
 
         service.deleteCacheParameterGroup("custom-pg");
         assertTrue(service.findParameterGroup("custom-pg").isEmpty());
+    }
+
+    // ── CreateCacheCluster: single-node redis/valkey ──────────────────────────
+
+    private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequest(
+            String clusterId, String engine, Integer numCacheNodes) {
+        return new ElastiCacheService.CreateCacheClusterRequest(clusterId, engine, null, null,
+                numCacheNodes, null, AuthMode.NO_AUTH, null, null, null, "us-east-1", Map.of());
+    }
+
+    @Test
+    void singleNodeRedisClusterIsBackedByAValkeyContainerBehindAProxy() {
+        // The point of the path: terraform's aws_elasticache_cluster with engine "redis" sends
+        // this call, and the endpoint it reads back has to answer. That means a container and a
+        // proxy on the port the describe reports, not a metadata-only record.
+        CacheCluster cluster = service.createCacheCluster(cacheClusterRequest("tf-redis", "redis", 1));
+
+        assertEquals("redis", cluster.getEngine());
+        assertEquals("7.1", cluster.getEngineVersion());
+        assertEquals("cache.t4g.micro", cluster.getCacheNodeType());
+        assertEquals(1, cluster.getNumCacheNodes());
+        assertEquals(CacheClusterStatus.AVAILABLE, cluster.getCacheClusterStatus());
+        assertEquals("localhost", cluster.getConfigurationEndpoint().address());
+        assertEquals(16379, cluster.getConfigurationEndpoint().port());
+        assertEquals("arn:aws:elasticache:us-east-1:000000000000:cluster:tf-redis", cluster.getArn());
+
+        verify(containerManager).tryStart(eq("tf-redis"), eq("valkey/valkey:8"));
+        verify(proxyManager).startProxy(eq("tf-redis"), eq(AuthMode.NO_AUTH), eq(16379),
+                eq("localhost"), eq(6379), any());
+
+        // read back through a separate call, not the create's own return value
+        assertEquals("tf-redis", service.findCacheClusters("tf-redis").getFirst().getCacheClusterId());
+    }
+
+    @Test
+    void valkeyCacheClusterTakesTheValkeyEngineVersionDefault() {
+        assertEquals("8.1", service.createCacheCluster(cacheClusterRequest("tf-valkey", "valkey", null))
+                .getEngineVersion());
+    }
+
+    @Test
+    void redisCacheClusterWithMoreThanOneNodeIsRefusedAsOnAws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(cacheClusterRequest("too-big", "redis", 2)));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("NumCacheNodes should be 1 if engine is redis", ex.getMessage());
+        verify(containerManager, never()).tryStart(eq("too-big"), anyString());
+        assertTrue(service.findCacheClusters("too-big").isEmpty());
+    }
+
+    @Test
+    void duplicateCacheClusterIdIsRefused() {
+        service.createCacheCluster(cacheClusterRequest("dupe", "redis", 1));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(cacheClusterRequest("dupe", "redis", 1)));
+        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+    }
+
+    @Test
+    void deletingACacheClusterStopsItsProxyAndContainerAndFreesThePort() {
+        service.createCacheCluster(cacheClusterRequest("cc", "redis", 1));
+
+        service.deleteCacheCluster("cc");
+
+        verify(proxyManager).stopProxy("cc");
+        verify(containerManager).stop(any());
+        assertTrue(service.findCacheClusters("cc").isEmpty());
+        assertEquals("CacheClusterNotFound",
+                assertThrows(AwsException.class, () -> service.deleteCacheCluster("cc")).getErrorCode());
+
+        // the freed proxy port goes to the next cluster rather than being leaked
+        assertEquals(16379, service.createCacheCluster(cacheClusterRequest("cc2", "redis", 1))
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void aCacheClusterAndAReplicationGroupNeverShareAProxyPort() {
+        service.createReplicationGroup("grp", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        assertEquals(16380, service.createCacheCluster(cacheClusterRequest("cc", "redis", 1))
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void aCacheClusterHoldsItsParameterGroupAgainstDeletion() {
+        service.createCacheParameterGroup("cc-pg", "redis7", "in use", Map.of());
+        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, "cc-pg", null,
+                "us-east-1", Map.of()));
+
+        assertEquals("InvalidCacheParameterGroupState",
+                assertThrows(AwsException.class, () -> service.deleteCacheParameterGroup("cc-pg"))
+                        .getErrorCode());
+    }
+
+    @Test
+    void anAuthTokenOnACacheClusterIsValidatedAgainstThatClusterAlone() {
+        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "auth-cc", "redis", null, null, 1, null, AuthMode.PASSWORD, "s3cret-token", null,
+                null, "us-east-1", Map.of()));
+
+        assertTrue(service.validateCacheClusterPassword("auth-cc", null, "s3cret-token"));
+        assertFalse(service.validateCacheClusterPassword("auth-cc", null, "wrong"));
+        assertFalse(service.validateCacheClusterPassword("other-cc", null, "s3cret-token"));
+    }
+
+    @Test
+    void aCacheClusterCreatedWithoutDockerStillReachesAvailable() {
+        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+
+        CacheCluster cluster = service.createCacheCluster(cacheClusterRequest("no-docker", "redis", 1));
+
+        assertEquals(CacheClusterStatus.AVAILABLE, cluster.getCacheClusterStatus());
+        verify(proxyManager, never()).startProxy(eq("no-docker"), any(), anyInt(), anyString(), anyInt(), any());
+
+        // delete must not reach for a container that was never created
+        service.deleteCacheCluster("no-docker");
+        verify(containerManager, never()).stop(any());
+        verify(containerManager).stopByGroupId("no-docker");
     }
 }
