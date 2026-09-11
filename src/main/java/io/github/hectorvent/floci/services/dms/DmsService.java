@@ -2,11 +2,14 @@ package io.github.hectorvent.floci.services.dms;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
+import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -20,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -28,15 +32,19 @@ public class DmsService implements Resettable {
     private static final Pattern SUBNET_GROUP_IDENTIFIER = Pattern.compile("[A-Za-z0-9._-]+");
     private static final String SUBNET_GROUP_ID_FILTER = "replication-subnet-group-id";
     private static final int MINIMUM_AVAILABILITY_ZONES = 2;
+    private static final String SUBNET_GROUP_ARN_RESOURCE_TYPE = "subgrp";
+    private static final Set<String> RESERVED_TAG_PREFIXES = Set.of("aws:", "dms:");
 
     private final AccountAwareStorageBackend<ReplicationSubnetGroup> subnetGroups;
     private final Ec2Service ec2Service;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public DmsService(StorageFactory storageFactory, Ec2Service ec2Service) {
+    public DmsService(StorageFactory storageFactory, Ec2Service ec2Service, RegionResolver regionResolver) {
         this.subnetGroups = storageFactory.create("dms", "dms-replication-subnet-groups.json",
                 new TypeReference<Map<String, ReplicationSubnetGroup>>() {});
         this.ec2Service = ec2Service;
+        this.regionResolver = regionResolver;
     }
 
     public synchronized ReplicationSubnetGroup createReplicationSubnetGroup(JsonNode request, String region) {
@@ -53,6 +61,7 @@ public class DmsService implements Resettable {
         }
 
         ReplicationSubnetGroup group = buildSubnetGroup(identifier, description, subnetIds, region);
+        group.setTags(readTags(request.get("Tags")));
         subnetGroups.put(storageKey(region, identifier), group);
         return group;
     }
@@ -77,6 +86,43 @@ public class DmsService implements Resettable {
             throw notFound(identifier);
         }
         subnetGroups.delete(key);
+    }
+
+    public List<ResourceTag> listTagsForResource(JsonNode request, String region) {
+        List<String> arnList = arnList(request);
+        if (!arnList.isEmpty()) {
+            List<ResourceTag> tags = new ArrayList<>();
+            for (String arn : arnList) {
+                resolveByArn(arn, region).getTags()
+                        .forEach((key, value) -> tags.add(new ResourceTag(arn, key, value)));
+            }
+            return tags;
+        }
+        String resourceArn = requireResourceArn(request);
+        return resolveByArn(resourceArn, region).getTags().entrySet().stream()
+                .map(entry -> new ResourceTag(null, entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
+    public synchronized void addTagsToResource(JsonNode request, String region) {
+        String resourceArn = requireResourceArn(request);
+        JsonNode tagsNode = request == null ? null : request.get("Tags");
+        if (tagsNode == null || !tagsNode.isArray()) {
+            throw invalidParameter("The parameter Tags must be provided.");
+        }
+        Map<String, String> added = readTags(tagsNode);
+        updateTags(resourceArn, region, tags -> tags.putAll(added));
+    }
+
+    public synchronized void removeTagsFromResource(JsonNode request, String region) {
+        String resourceArn = requireResourceArn(request);
+        JsonNode keysNode = request == null ? null : request.get("TagKeys");
+        if (keysNode == null || !keysNode.isArray()) {
+            throw invalidParameter("The parameter TagKeys must be provided.");
+        }
+        List<String> keys = new ArrayList<>();
+        keysNode.forEach(key -> keys.add(key.asText()));
+        updateTags(resourceArn, region, tags -> keys.forEach(tags::remove));
     }
 
     @Override
@@ -203,5 +249,99 @@ public class DmsService implements Resettable {
 
     private static String storageKey(String region, String identifier) {
         return region + "::" + identifier;
+    }
+
+    private void updateTags(String resourceArn, String region,
+                            Consumer<Map<String, String>> mutation) {
+        String key = subnetGroupKeyForArn(resourceArn, region);
+        ReplicationSubnetGroup group = subnetGroups.get(key).orElseThrow(() -> notFoundForArn(resourceArn));
+        Map<String, String> tags = new LinkedHashMap<>(group.getTags());
+        mutation.accept(tags);
+        group.setTags(tags);
+        subnetGroups.put(key, group);
+    }
+
+    private ReplicationSubnetGroup resolveByArn(String resourceArn, String region) {
+        return subnetGroups.get(subnetGroupKeyForArn(resourceArn, region))
+                .orElseThrow(() -> notFoundForArn(resourceArn));
+    }
+
+    /**
+     * DescribeReplicationSubnetGroups does not return an ARN, so Terraform builds
+     * {@code arn:aws:dms:<region>:<account>:subgrp:<id>} itself and tags against that. Anything
+     * that is not such an ARN names no DMS resource Floci holds, which is a ResourceNotFoundFault
+     * rather than a parameter error. An ARN naming another account is treated the same way:
+     * storage is scoped to the caller, so resolving it would otherwise reach the caller's own
+     * group of that name.
+     */
+    private String subnetGroupKeyForArn(String resourceArn, String fallbackRegion) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceArn);
+        } catch (IllegalArgumentException e) {
+            throw notFoundForArn(resourceArn);
+        }
+        String[] resource = arn.resource().split(":", 2);
+        if (!"dms".equals(arn.service()) || resource.length != 2
+                || !SUBNET_GROUP_ARN_RESOURCE_TYPE.equals(resource[0]) || resource[1].isBlank()) {
+            throw notFoundForArn(resourceArn);
+        }
+        if (!arn.accountId().isBlank() && !arn.accountId().equals(regionResolver.getAccountId())) {
+            throw notFoundForArn(resourceArn);
+        }
+        String region = arn.region() == null || arn.region().isBlank() ? fallbackRegion : arn.region();
+        return storageKey(region, resource[1].toLowerCase(Locale.ROOT));
+    }
+
+    private static List<String> arnList(JsonNode request) {
+        JsonNode node = request == null ? null : request.get("ResourceArnList");
+        if (node == null || !node.isArray() || node.isEmpty()) {
+            return List.of();
+        }
+        List<String> arns = new ArrayList<>();
+        node.forEach(element -> arns.add(element.asText()));
+        return arns;
+    }
+
+    private static String requireResourceArn(JsonNode request) {
+        String resourceArn = text(request, "ResourceArn");
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw invalidParameter("The parameter ResourceArn must be provided and must not be blank.");
+        }
+        return resourceArn;
+    }
+
+    private static Map<String, String> readTags(JsonNode node) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (node == null || node.isNull()) {
+            return tags;
+        }
+        if (!node.isArray()) {
+            throw invalidParameter("Tags must be a list of Key and Value pairs.");
+        }
+        node.forEach(element -> {
+            String key = text(element, "Key");
+            JsonNode value = element.get("Value");
+            if (key == null || key.isEmpty() || key.length() > 128 || isReserved(key)) {
+                throw invalidParameter("Tag keys must be 1-128 characters and must not start with"
+                        + " \"aws:\" or \"dms:\".");
+            }
+            String tagValue = value == null || value.isNull() ? "" : value.asText();
+            if (tagValue.length() > 256 || isReserved(tagValue)) {
+                throw invalidParameter("Tag values must be at most 256 characters and must not start"
+                        + " with \"aws:\" or \"dms:\".");
+            }
+            tags.put(key, tagValue);
+        });
+        return tags;
+    }
+
+    private static boolean isReserved(String value) {
+        return RESERVED_TAG_PREFIXES.stream().anyMatch(value::startsWith);
+    }
+
+    private static AwsException notFoundForArn(String resourceArn) {
+        return new AwsException("ResourceNotFoundFault",
+                "Resource " + resourceArn + " not found.", 400);
     }
 }

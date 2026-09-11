@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
+import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,7 +50,9 @@ class DmsServiceTest {
             List<String> requested = invocation.getArgument(1);
             return requested.stream().map(DmsServiceTest::subnet).filter(java.util.Objects::nonNull).toList();
         });
-        service = new DmsService(storageFactory, ec2Service);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        service = new DmsService(storageFactory, ec2Service, regionResolver);
     }
 
     @Test
@@ -153,6 +157,144 @@ class DmsServiceTest {
         service.clear();
 
         assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).isEmpty());
+    }
+
+    @Test
+    void createStoresTagsReadableThroughListTagsForResource() {
+        ObjectNode request = createRequest("tagged", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test", "team", "platform");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        assertEquals(Map.of("env", "test", "team", "platform"), tagsOf("tagged"));
+    }
+
+    @Test
+    void addTagsMergesWithExistingTagsAndOverwritesByKey() {
+        ObjectNode request = createRequest("merge-me", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode addRequest = mapper.createObjectNode();
+        addRequest.put("ResourceArn", arn("merge-me"));
+        tagList(addRequest.putArray("Tags"), "env", "prod", "owner", "data");
+        service.addTagsToResource(addRequest, REGION);
+
+        assertEquals(Map.of("env", "prod", "owner", "data"), tagsOf("merge-me"));
+    }
+
+    @Test
+    void removeTagsDropsOnlyTheNamedKeys() {
+        ObjectNode request = createRequest("trim-me", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test", "owner", "data");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode removeRequest = mapper.createObjectNode();
+        removeRequest.put("ResourceArn", arn("trim-me"));
+        removeRequest.putArray("TagKeys").add("env").add("absent-key");
+        service.removeTagsFromResource(removeRequest, REGION);
+
+        assertEquals(Map.of("owner", "data"), tagsOf("trim-me"));
+    }
+
+    @Test
+    void listTagsByArnListCarriesTheOwningArnOnEachTag() {
+        ObjectNode request = createRequest("arn-list", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.putArray("ResourceArnList").add(arn("arn-list"));
+        List<ResourceTag> tags = service.listTagsForResource(listRequest, REGION);
+
+        assertEquals(List.of(new ResourceTag(arn("arn-list"), "env", "test")), tags);
+    }
+
+    @Test
+    void listTagsBySingleArnOmitsTheArnOnEachTag() {
+        ObjectNode request = createRequest("single-arn", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        assertEquals(List.of(new ResourceTag(null, "env", "test")),
+                service.listTagsForResource(arnRequest("single-arn"), REGION));
+    }
+
+    @Test
+    void tagOperationsOnAnUnknownArnFault() {
+        String missing = "arn:aws:dms:" + REGION + ":" + ACCOUNT_ID + ":subgrp:not-there";
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.put("ResourceArn", missing);
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(listRequest, REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsOnAnotherAccountsArnFault() {
+        ObjectNode request = createRequest("other-account", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.put("ResourceArn", "arn:aws:dms:" + REGION + ":999999999999:subgrp:other-account");
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(listRequest, REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsOnANonSubnetGroupArnFault() {
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.put("ResourceArn", "arn:aws:dms:" + REGION + ":" + ACCOUNT_ID + ":rep:Example");
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(listRequest, REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
+    void reservedTagKeyPrefixesAreRejected() {
+        ObjectNode request = createRequest("reserved-tag", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "aws:created-by", "someone");
+
+        AwsException reserved = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("InvalidParameterValueException", reserved.getErrorCode());
+    }
+
+    @Test
+    void deletingAGroupDropsItsTags() {
+        ObjectNode request = createRequest("tags-die", "example", "subnet-a", "subnet-b");
+        tagList(request.putArray("Tags"), "env", "test");
+        service.createReplicationSubnetGroup(request, REGION);
+        service.deleteReplicationSubnetGroup(identifierRequest("tags-die"), REGION);
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(arnRequest("tags-die"), REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    private Map<String, String> tagsOf(String identifier) {
+        return service.listTagsForResource(arnRequest(identifier), REGION).stream()
+                .collect(java.util.stream.Collectors.toMap(ResourceTag::key, ResourceTag::value));
+    }
+
+    private ObjectNode arnRequest(String identifier) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("ResourceArn", arn(identifier));
+        return request;
+    }
+
+    private String arn(String identifier) {
+        return "arn:aws:dms:" + REGION + ":" + ACCOUNT_ID + ":subgrp:" + identifier;
+    }
+
+    private static void tagList(ArrayNode tags, String... keysAndValues) {
+        for (int i = 0; i < keysAndValues.length; i += 2) {
+            tags.addObject().put("Key", keysAndValues[i]).put("Value", keysAndValues[i + 1]);
+        }
     }
 
     private ObjectNode createRequest(String identifier, String description, String... subnetIds) {

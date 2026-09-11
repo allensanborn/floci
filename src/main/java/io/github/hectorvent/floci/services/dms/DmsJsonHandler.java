@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
+import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -42,8 +43,32 @@ public class DmsJsonHandler {
                 service.deleteReplicationSubnetGroup(request, region);
                 yield Response.ok(objectMapper.createObjectNode()).build();
             }
+            case "ListTagsForResource" -> {
+                ObjectNode response = objectMapper.createObjectNode();
+                ArrayNode tagList = response.putArray("TagList");
+                service.listTagsForResource(request, region).forEach(tag -> tagList.add(tagNode(tag)));
+                yield Response.ok(response).build();
+            }
+            case "AddTagsToResource" -> {
+                service.addTagsToResource(request, region);
+                yield Response.ok(objectMapper.createObjectNode()).build();
+            }
+            case "RemoveTagsFromResource" -> {
+                service.removeTagsFromResource(request, region);
+                yield Response.ok(objectMapper.createObjectNode()).build();
+            }
             default -> null;
         };
+    }
+
+    private ObjectNode tagNode(ResourceTag tag) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Key", tag.key());
+        node.put("Value", tag.value());
+        if (tag.resourceArn() != null) {
+            node.put("ResourceArn", tag.resourceArn());
+        }
+        return node;
     }
 
     private ObjectNode subnetGroup(ReplicationSubnetGroup group) {

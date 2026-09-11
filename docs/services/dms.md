@@ -16,6 +16,9 @@ those subnets actually have.
 | `CreateReplicationSubnetGroup` | Creates a replication subnet group from existing EC2 subnets. |
 | `DescribeReplicationSubnetGroups` | Lists replication subnet groups, optionally filtered by identifier. |
 | `DeleteReplicationSubnetGroup` | Deletes the specified replication subnet group. |
+| `ListTagsForResource` | Lists the tags on one or more DMS resource ARNs. |
+| `AddTagsToResource` | Merges tags into the resource, overwriting by key. |
+| `RemoveTagsFromResource` | Removes the named tag keys from the resource. |
 <!-- floci:actions:end -->
 
 ## Behaviour
@@ -34,13 +37,32 @@ those subnets actually have.
   how Terraform detects a group deleted outside its state.
 - Groups are scoped per account and Region and persist through `StorageFactory`.
 
+### Tagging
+
+`Tags` on `CreateReplicationSubnetGroup` are stored with the group, and the tagging trio
+works against the group's ARN, which is
+`arn:aws:dms:<region>:<account>:subgrp:<identifier>`. DMS does not return that ARN from
+`DescribeReplicationSubnetGroups`, so Terraform builds it client side and Floci parses it
+back the same way.
+
+- `AddTagsToResource` merges by key, so re-tagging an existing key overwrites its value.
+- `RemoveTagsFromResource` removes the named keys and ignores keys that are not present.
+- `ListTagsForResource` accepts either `ResourceArn` or `ResourceArnList`. Each returned
+  tag carries its `ResourceArn` only for the `ResourceArnList` form, which is the form
+  AWS documents it on.
+- Tag keys are 1 to 128 characters, values at most 256, and neither may start with `aws:`
+  or `dms:`.
+- An ARN that is unparseable, names a different DMS resource type, names another account,
+  or names a group that does not exist returns `ResourceNotFoundFault`.
+- Deleting a group deletes its tags with it.
+
 ## Limitations
 
 - **Only the subnet group lifecycle is implemented.** Replication instances, endpoints,
   and replication tasks return `UnknownOperationException`.
-- **No tagging actions.** `Tags` on `CreateReplicationSubnetGroup` are accepted and
-  ignored, and `AddTagsToResource`, `ListTagsForResource`, and `RemoveTagsFromResource`
-  are not implemented.
+- **Tagging covers replication subnet groups only.** The tagging trio is implemented, but
+  a `ResourceArn` naming a replication instance, endpoint, or task returns
+  `ResourceNotFoundFault` because Floci holds no such resource.
 - **No `ModifyReplicationSubnetGroup`.** A subnet change has to be a delete and recreate.
 - **`DescribeReplicationSubnetGroups` does not paginate.** `MaxRecords` and `Marker` are
   ignored and every matching group is returned in one response, with no `Marker` set.
