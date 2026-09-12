@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -31,6 +32,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -1146,7 +1148,7 @@ class RedshiftServiceTest {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
 
-        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants("my-grant");
+        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants("my-grant", null, null).items();
 
         assertEquals(1, list.size());
         assertEquals("my-grant", list.get(0).getSnapshotCopyGrantName());
@@ -1159,17 +1161,87 @@ class RedshiftServiceTest {
                 new SnapshotCopyGrant("grant-a", "key-a"),
                 new SnapshotCopyGrant("grant-b", "key-b")));
 
-        List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants(null);
+        PaginatedResult<SnapshotCopyGrant> page = service.describeSnapshotCopyGrants(null, null, null);
 
-        assertEquals(2, list.size());
+        assertEquals(2, page.items().size());
+        assertNull(page.nextToken());
     }
 
     @Test
     void testDescribeSnapshotCopyGrantsNotFound() {
         when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
 
-        AwsException ex = assertThrows(AwsException.class, () -> service.describeSnapshotCopyGrants("missing"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants("missing", null, null));
         assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsPagesInNameOrder() {
+        // 25 grants created out of order: paging must follow name order, not insertion order.
+        List<SnapshotCopyGrant> stored = new ArrayList<>();
+        for (int i = 25; i >= 1; i--) {
+            stored.add(new SnapshotCopyGrant(String.format("grant-%02d", i), "key-" + i));
+        }
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(stored);
+
+        PaginatedResult<SnapshotCopyGrant> first = service.describeSnapshotCopyGrants(null, 20, null);
+
+        assertEquals(20, first.items().size());
+        assertEquals("grant-01", first.items().get(0).getSnapshotCopyGrantName());
+        assertEquals("grant-20", first.items().get(19).getSnapshotCopyGrantName());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<SnapshotCopyGrant> second =
+                service.describeSnapshotCopyGrants(null, 20, first.nextToken());
+
+        assertEquals(5, second.items().size());
+        assertEquals("grant-21", second.items().get(0).getSnapshotCopyGrantName());
+        assertEquals("grant-25", second.items().get(4).getSnapshotCopyGrantName());
+        assertNull(second.nextToken(), "last page must not carry a marker");
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsOmitsMarkerWhenPageExactlyFits() {
+        List<SnapshotCopyGrant> stored = new ArrayList<>();
+        for (int i = 1; i <= 20; i++) {
+            stored.add(new SnapshotCopyGrant(String.format("grant-%02d", i), "key-" + i));
+        }
+        when(snapshotCopyGrantBackend.scan(any())).thenReturn(stored);
+
+        PaginatedResult<SnapshotCopyGrant> page = service.describeSnapshotCopyGrants(null, 20, null);
+
+        assertEquals(20, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsRejectsMaxRecordsBelowMinimum() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants(null, 19, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        verify(snapshotCopyGrantBackend, never()).scan(any());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsRejectsMaxRecordsAboveMaximum() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeSnapshotCopyGrants(null, 101, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void testDescribeSnapshotCopyGrantsAcceptsMarkerAlongsideName() {
+        // AWS documents the two as mutually exclusive but models no error, so Floci filters
+        // by name and then paginates rather than rejecting the pair.
+        SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
+        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+
+        PaginatedResult<SnapshotCopyGrant> page =
+                service.describeSnapshotCopyGrants("my-grant", null, null);
+
+        assertEquals(1, page.items().size());
+        assertNull(page.nextToken());
     }
 
     @Test

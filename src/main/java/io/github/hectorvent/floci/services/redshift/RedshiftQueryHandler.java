@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
@@ -394,12 +395,19 @@ public class RedshiftQueryHandler {
         }
         case "DescribeSnapshotCopyGrants" -> {
             String name = params.getFirst("SnapshotCopyGrantName");
-            List<SnapshotCopyGrant> grants = service.describeSnapshotCopyGrants(name);
+            Integer maxRecords = parseOptionalInteger(params, "MaxRecords");
+            String marker = params.getFirst("Marker");
+            PaginatedResult<SnapshotCopyGrant> page = service.describeSnapshotCopyGrants(name, maxRecords, marker);
             XmlBuilder xmlBuilder = new XmlBuilder()
                     .start("DescribeSnapshotCopyGrantsResponse")
-                      .start("DescribeSnapshotCopyGrantsResult")
-                        .start("SnapshotCopyGrants");
-            for (SnapshotCopyGrant grant : grants) {
+                      .start("DescribeSnapshotCopyGrantsResult");
+            // AWS returns Marker only while further pages remain, and a paginating client
+            // stops when it is absent.
+            if (page.nextToken() != null) {
+                xmlBuilder.elem("Marker", page.nextToken());
+            }
+            xmlBuilder.start("SnapshotCopyGrants");
+            for (SnapshotCopyGrant grant : page.items()) {
                 xmlBuilder.raw(buildSnapshotCopyGrantXml(grant));
             }
             String xml = xmlBuilder

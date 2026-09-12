@@ -37,7 +37,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key |
-| `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name |
+| `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
 | `ModifyCluster` | Update node type, parameter group, security groups, or the master password |
 | `RebootCluster` | Restart a cluster's container |

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerH
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,11 +12,15 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -27,6 +32,11 @@ public class RedshiftOperationsTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260822/us-east-1/redshift/aws4_request";
+
+    private static final String GRANT_NAMES_PATH = "DescribeSnapshotCopyGrantsResponse"
+            + ".DescribeSnapshotCopyGrantsResult.SnapshotCopyGrants.SnapshotCopyGrant.SnapshotCopyGrantName";
+    private static final String MARKER_PATH =
+            "DescribeSnapshotCopyGrantsResponse.DescribeSnapshotCopyGrantsResult.Marker";
 
     @InjectMock
     RedshiftContainerManager containerManager;
@@ -417,6 +427,95 @@ public class RedshiftOperationsTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(6)
+    void testSnapshotCopyGrantPagination() {
+        // AWS constrains MaxRecords to 20-100, so a two-page walk needs more than 20 grants.
+        int total = 21;
+        for (int i = 1; i <= total; i++) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", String.format("pg-grant-%02d", i))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
+
+        String firstPage = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "20")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        List<String> firstNames = new XmlPath(firstPage).getList(GRANT_NAMES_PATH);
+        String marker = new XmlPath(firstPage).getString(MARKER_PATH);
+        assertEquals(20, firstNames.size());
+        assertEquals("pg-grant-01", firstNames.get(0));
+        assertEquals("pg-grant-20", firstNames.get(19));
+        assertNotNull(marker);
+        assertFalse(marker.isBlank(), "a non-final page must carry a Marker");
+
+        String secondPage = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "20")
+            .formParam("Marker", marker)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        List<String> secondNames = new XmlPath(secondPage).getList(GRANT_NAMES_PATH);
+        assertEquals(List.of("pg-grant-21"), secondNames);
+        // Asserted on the raw body: an absent GPath node can read back as "" rather than null.
+        assertFalse(secondPage.contains("<Marker>"), "the final page must not carry a Marker");
+
+        // Out-of-range MaxRecords is rejected rather than silently clamped.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "19")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("MaxRecords", "101")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+
+        for (int i = 1; i <= total; i++) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "DeleteSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", String.format("pg-grant-%02d", i))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+        }
     }
 
     @Test
