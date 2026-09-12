@@ -117,6 +117,28 @@ class AwsConfigServiceAggregationAuthorizationTest {
     }
 
     @Test
+    void deleteClearsTagsEvenWhenTheAuthorizationIsAlreadyGone() {
+        AwsConfigService service = service();
+        String arn = service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null)
+                .aggregationAuthorizationArn();
+
+        // An interrupted delete leaves the entry removed but its tags behind. Reproduce that
+        // state, then retry the delete: the retry must still reach the tags.
+        service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
+        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+        assertTrue(authorizations(service, REGION).isEmpty(), "precondition: the entry is gone");
+
+        service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
+
+        assertTrue(service.listTagsForResource(arn).isEmpty(),
+                "a retried delete must clear tags an interrupted attempt left on the ARN");
+        assertEquals(arn,
+                service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null)
+                        .aggregationAuthorizationArn(),
+                "put reuses the same deterministic ARN, which is why the stale tags mattered");
+    }
+
+    @Test
     void tagsSuppliedOnPutAreReadableThroughListTagsForResource() {
         AwsConfigService service = service();
 

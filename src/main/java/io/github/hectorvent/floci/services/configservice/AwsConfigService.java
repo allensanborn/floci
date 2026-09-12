@@ -898,8 +898,7 @@ public class AwsConfigService {
         String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
         AggregationAuthorization existing = store.get(key);
         AggregationAuthorization authorization = existing != null ? existing : new AggregationAuthorization(
-                AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
-                        "aggregation-authorization/" + authorizedAccountId + "/" + authorizedAwsRegion).toString(),
+                aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion),
                 authorizedAccountId, authorizedAwsRegion, now());
         store.put(key, authorization);
         persistRegion(aggregationAuthorizations, region);
@@ -921,7 +920,13 @@ public class AwsConfigService {
     }
 
     /** The Config model declares no "not found" error for this operation, so deleting an
-     *  authorization that is not there succeeds. Only the parameters are validated. */
+     *  authorization that is not there succeeds. Only the parameters are validated.
+     *
+     *  <p>The ARN is derived from the key rather than read off the removed entry, and its tags are
+     *  dropped whether or not an entry was there. Put reuses that same deterministic ARN, so a
+     *  delete that removed the authorization but did not reach the tags would otherwise leave them
+     *  to resurface on the next put, and the retry that should clean them up would find the
+     *  authorization already gone. */
     public void deleteAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion) {
         requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
@@ -929,8 +934,14 @@ public class AwsConfigService {
         AggregationAuthorization removed = store.remove(authorizationKey(authorizedAccountId, authorizedAwsRegion));
         if (removed != null) {
             persistRegion(aggregationAuthorizations, region);
-            tags.remove(removed.aggregationAuthorizationArn());
         }
+        tags.remove(aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion));
+    }
+
+    private String aggregationAuthorizationArn(String region, String authorizedAccountId,
+            String authorizedAwsRegion) {
+        return AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                "aggregation-authorization/" + authorizedAccountId + "/" + authorizedAwsRegion).toString();
     }
 
     private void requireAuthorizationKey(String authorizedAccountId, String authorizedAwsRegion) {
