@@ -36,6 +36,11 @@ those subnets actually have.
 - `DescribeReplicationSubnetGroups` supports the `replication-subnet-group-id` filter.
   A filter naming a group that does not exist returns `ResourceNotFoundFault`, which is
   how Terraform detects a group deleted outside its state.
+- A member of the wrong JSON type returns `SerializationException`, as AWS does, rather than
+  being coerced. That covers a `Tags` entry whose `Value` is an object, a filter whose
+  `Values` is not a list, a non-string element in `ResourceArnList`, `SubnetIds` or
+  `TagKeys`, and a non-string identifier. An absent member is still a parameter error,
+  not a serialization one.
 - Groups are scoped per account and Region and persist through `StorageFactory`.
 
 ### Tagging

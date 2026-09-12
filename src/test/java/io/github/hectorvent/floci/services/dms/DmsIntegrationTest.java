@@ -155,6 +155,29 @@ class DmsIntegrationTest {
     }
 
     @Test
+    void aTagValueOfTheWrongTypeIsASerializationErrorOnTheWire() {
+        dms("CreateReplicationSubnetGroup")
+                .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-object-tag\","
+                        + "\"ReplicationSubnetGroupDescription\":\"terraform managed\","
+                        + "\"SubnetIds\":[\"" + SUBNET_A + "\",\"" + SUBNET_B + "\"],"
+                        + "\"Tags\":[{\"Key\":\"env\",\"Value\":{\"nested\":1}}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+
+        dms("DescribeReplicationSubnetGroups")
+                .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\","
+                        + "\"Values\":[\"tf-object-tag\"]}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+    }
+
+    @Test
     void unsupportedDmsActionReportsUnknownOperation() {
         dms("CreateReplicationInstance")
                 .body("{}")

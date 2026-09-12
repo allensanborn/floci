@@ -107,7 +107,7 @@ public class DmsService implements Resettable {
     public synchronized void addTagsToResource(JsonNode request, String region) {
         String resourceArn = requireResourceArn(request);
         JsonNode tagsNode = request == null ? null : request.get("Tags");
-        if (tagsNode == null || !tagsNode.isArray()) {
+        if (tagsNode == null || tagsNode.isNull()) {
             throw invalidParameter("The parameter Tags must be provided.");
         }
         Map<String, String> added = readTags(tagsNode);
@@ -117,11 +117,10 @@ public class DmsService implements Resettable {
     public synchronized void removeTagsFromResource(JsonNode request, String region) {
         String resourceArn = requireResourceArn(request);
         JsonNode keysNode = request == null ? null : request.get("TagKeys");
-        if (keysNode == null || !keysNode.isArray()) {
+        if (keysNode == null || keysNode.isNull()) {
             throw invalidParameter("The parameter TagKeys must be provided.");
         }
-        List<String> keys = new ArrayList<>();
-        keysNode.forEach(key -> keys.add(key.asText()));
+        List<String> keys = stringList(keysNode, "TagKeys");
         updateTags(resourceArn, region, tags -> keys.forEach(tags::remove));
     }
 
@@ -205,35 +204,51 @@ public class DmsService implements Resettable {
 
     private static List<String> requireSubnetIds(JsonNode request) {
         JsonNode node = request == null ? null : request.get("SubnetIds");
-        if (node == null || !node.isArray() || node.isEmpty()) {
+        if (node == null || node.isNull()) {
             throw invalidParameter("The parameter SubnetIds must be provided and must not be empty.");
         }
-        List<String> subnetIds = new ArrayList<>();
-        node.forEach(element -> {
-            if (!element.isTextual() || element.textValue().isBlank()) {
-                throw invalidParameter("The parameter SubnetIds must contain subnet identifiers.");
-            }
-            subnetIds.add(element.textValue());
-        });
+        if (!node.isArray()) {
+            throw serialization("SubnetIds must be a list of strings.");
+        }
+        if (node.isEmpty()) {
+            throw invalidParameter("The parameter SubnetIds must be provided and must not be empty.");
+        }
+        List<String> subnetIds = stringList(node, "SubnetIds");
+        if (subnetIds.stream().anyMatch(String::isBlank)) {
+            throw invalidParameter("The parameter SubnetIds must contain subnet identifiers.");
+        }
         return subnetIds;
     }
 
     private static List<String> identifierFilters(JsonNode request) {
         JsonNode filters = request == null ? null : request.get("Filters");
-        if (filters == null || !filters.isArray()) {
+        if (filters == null || filters.isNull()) {
             return List.of();
+        }
+        if (!filters.isArray()) {
+            throw serialization("Filters must be a list of Name and Values pairs.");
         }
         List<String> identifiers = new ArrayList<>();
         for (JsonNode filter : filters) {
+            if (!filter.isObject()) {
+                throw serialization("Filters must be a list of Name and Values pairs.");
+            }
             String name = text(filter, "Name");
             if (!SUBNET_GROUP_ID_FILTER.equals(name)) {
                 throw invalidParameter("Invalid filter: " + name + ".");
             }
             JsonNode values = filter.get("Values");
-            if (values == null || !values.isArray() || values.isEmpty()) {
+            if (values == null || values.isNull()) {
                 throw invalidParameter("The filter " + SUBNET_GROUP_ID_FILTER + " must have values.");
             }
-            values.forEach(value -> identifiers.add(value.asText().toLowerCase(Locale.ROOT)));
+            if (!values.isArray()) {
+                throw serialization("Filter Values must be a list of strings.");
+            }
+            if (values.isEmpty()) {
+                throw invalidParameter("The filter " + SUBNET_GROUP_ID_FILTER + " must have values.");
+            }
+            stringList(values, "Filter Values")
+                    .forEach(value -> identifiers.add(value.toLowerCase(Locale.ROOT)));
         }
         return identifiers;
     }
@@ -247,9 +262,39 @@ public class DmsService implements Resettable {
         return new AwsException("InvalidParameterValueException", message, 400);
     }
 
+    /**
+     * Reads a string member. Absent or explicitly null yields null; a member of any other JSON type
+     * is a SerializationException, which is what AWS returns when a json-1.1 member will not
+     * deserialize to its modelled type. Coercing it instead (asText on an object yields "") would
+     * silently store a wrong value.
+     */
     private static String text(JsonNode request, String field) {
         JsonNode node = request == null ? null : request.get(field);
-        return node != null && node.isTextual() ? node.textValue() : null;
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            throw serialization(field + " must be a string.");
+        }
+        return node.textValue();
+    }
+
+    private static List<String> stringList(JsonNode array, String field) {
+        if (!array.isArray()) {
+            throw serialization(field + " must be a list of strings.");
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode element : array) {
+            if (!element.isTextual()) {
+                throw serialization(field + " must be a list of strings.");
+            }
+            values.add(element.textValue());
+        }
+        return values;
+    }
+
+    private static AwsException serialization(String message) {
+        return new AwsException("SerializationException", message, 400);
     }
 
     private static String storageKey(String region, String identifier) {
@@ -305,12 +350,13 @@ public class DmsService implements Resettable {
 
     private static List<String> arnList(JsonNode request) {
         JsonNode node = request == null ? null : request.get("ResourceArnList");
-        if (node == null || !node.isArray() || node.isEmpty()) {
+        if (node == null || node.isNull()) {
             return List.of();
         }
-        List<String> arns = new ArrayList<>();
-        node.forEach(element -> arns.add(element.asText()));
-        return arns;
+        if (!node.isArray()) {
+            throw serialization("ResourceArnList must be a list of strings.");
+        }
+        return stringList(node, "ResourceArnList");
     }
 
     private static String requireResourceArn(JsonNode request) {
@@ -327,22 +373,25 @@ public class DmsService implements Resettable {
             return tags;
         }
         if (!node.isArray()) {
-            throw invalidParameter("Tags must be a list of Key and Value pairs.");
+            throw serialization("Tags must be a list of Key and Value pairs.");
         }
-        node.forEach(element -> {
+        for (JsonNode element : node) {
+            if (!element.isObject()) {
+                throw serialization("Tags must be a list of Key and Value pairs.");
+            }
             String key = text(element, "Key");
-            JsonNode value = element.get("Value");
+            String value = text(element, "Value");
             if (key == null || key.isEmpty() || key.length() > 128 || isReserved(key)) {
                 throw invalidParameter("Tag keys must be 1-128 characters and must not start with"
                         + " \"aws:\" or \"dms:\".");
             }
-            String tagValue = value == null || value.isNull() ? "" : value.asText();
+            String tagValue = value == null ? "" : value;
             if (tagValue.length() > 256 || isReserved(tagValue)) {
                 throw invalidParameter("Tag values must be at most 256 characters and must not start"
                         + " with \"aws:\" or \"dms:\".");
             }
             tags.put(key, tagValue);
-        });
+        }
         return tags;
     }
 
