@@ -61,6 +61,13 @@ public class ElastiCacheService implements ResourceProvider {
 
     private final StorageBackend<String, ReplicationGroup> groups;
     private final StorageBackend<String, CacheCluster> cacheClusters;
+    /**
+     * The Memcached cluster store, the one {@link ElastiCacheMemcachedService} writes.
+     * {@link StorageFactory#create} keys backends by file path and hands the second caller the
+     * first caller's instance, so this is that store rather than a copy of it: a cache cluster id
+     * is one namespace whatever engine claims it, and only a reader of both can say it is free.
+     */
+    private final StorageBackend<String, CacheCluster> memcachedClusters;
     private final StorageBackend<String, ElastiCacheUser> users;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
@@ -79,6 +86,13 @@ public class ElastiCacheService implements ResourceProvider {
      * second create of a live id would remove the first's container and orphan its listener.
      */
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
+    /**
+     * Standalone cache clusters whose advertised port this process holds in {@link #usedPorts}.
+     * A record restored from disk whose port was already taken keeps advertising it but does not
+     * own it, and a delete that released it anyway would hand a live cluster's port to the next
+     * create.
+     */
+    private final Set<String> clustersHoldingTheirPort = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
     /**
      * Parameter groups claimed by in-flight creates, keyed by account and name (see
@@ -108,6 +122,8 @@ public class ElastiCacheService implements ResourceProvider {
         this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
                 new TypeReference<Map<String, ReplicationGroup>>() {});
         this.cacheClusters = storageFactory.create("elasticache", "elasticache-redis-clusters.json",
+                new TypeReference<Map<String, CacheCluster>>() {});
+        this.memcachedClusters = storageFactory.create("elasticache", "elasticache-cache-clusters.json",
                 new TypeReference<Map<String, CacheCluster>>() {});
         this.users = storageFactory.create("elasticache", "elasticache-users.json",
                 new TypeReference<Map<String, ElastiCacheUser>>() {});
@@ -527,9 +543,15 @@ public class ElastiCacheService implements ResourceProvider {
      * services that restore persisted runtime. Only topology survives a restart — containers,
      * proxies and port reservations are process-local — so each group is re-provisioned from
      * its persisted node list, and a group whose data plane cannot come back is reported
-     * {@code create-failed} instead of available. Cluster-mode-disabled groups are deliberately
-     * out of scope: they keep their pre-existing behaviour of reporting available after a
-     * restart without a restored runtime.
+     * {@code create-failed} instead of available. Cluster-mode-disabled groups and standalone
+     * cache clusters are deliberately out of scope for the data plane: they keep their
+     * pre-existing behaviour of reporting available after a restart without a restored runtime.
+     *
+     * <p>Their <em>ports</em> are not out of scope, though. Every record that survived the
+     * restart still advertises the port it was given, so every one of those ports is reserved
+     * first, before any request can be served. Without that a create would be handed a port a
+     * live record already publishes, and the two would then contend over one reservation: the
+     * first delete frees it and the third create takes it again.
      *
      * <p>Container restarts and cluster formation can take a readiness timeout and a formation
      * timeout per group, so the data-plane work runs in the background and must not delay
@@ -538,6 +560,7 @@ public class ElastiCacheService implements ResourceProvider {
      * {@code available} or {@code create-failed} as their restoration finishes.
      */
     public CompletableFuture<Void> restorePersistedRuntime() {
+        reservePersistedPorts();
         List<ReplicationGroup> toRestore = new ArrayList<>();
         for (ReplicationGroup group : groups.scan(k -> true)) {
             if (!group.isClusterEnabled() || group.getClusterNodes().isEmpty()
@@ -567,6 +590,46 @@ public class ElastiCacheService implements ResourceProvider {
         LOG.infov("Restoring {0} cluster-mode replication group(s) in the background",
                 String.valueOf(toRestore.size()));
         return CompletableFuture.runAsync(() -> toRestore.forEach(this::restoreClusterModeGroup));
+    }
+
+    /**
+     * Reserves the port every record that is not re-provisioned still advertises: standalone
+     * cache clusters, and cluster-mode-disabled replication groups. Cluster-mode groups reserve
+     * theirs as they are restored, so they are left to that pass.
+     *
+     * <p>A port already taken is reported and left alone rather than substituted. The record
+     * cannot be moved to another port without changing the endpoint a client has already been
+     * told, so the honest outcome is a cluster whose advertised port belongs to someone else,
+     * said out loud, and a delete that knows not to free it.
+     */
+    private void reservePersistedPorts() {
+        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
+            Endpoint endpoint = cluster.getConfigurationEndpoint();
+            if (endpoint == null || endpoint.port() <= 0
+                    || cluster.getCacheClusterStatus() == CacheClusterStatus.DELETING) {
+                continue;
+            }
+            if (usedPorts.add(endpoint.port())) {
+                clustersHoldingTheirPort.add(cluster.getCacheClusterId());
+            } else {
+                LOG.warnv("Cache cluster {0} came back advertising port {1}, which is already in "
+                        + "use. Its endpoint is not served by this cluster.",
+                        cluster.getCacheClusterId(), String.valueOf(endpoint.port()));
+            }
+        }
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (group.isClusterEnabled() && !group.getClusterNodes().isEmpty()) {
+                continue;
+            }
+            if (group.getProxyPort() <= 0 || group.getStatus() == ReplicationGroupStatus.DELETING) {
+                continue;
+            }
+            if (!usedPorts.add(group.getProxyPort())) {
+                LOG.warnv("Replication group {0} came back advertising port {1}, which is already "
+                        + "in use. Its endpoint is not served by this group.",
+                        group.getReplicationGroupId(), String.valueOf(group.getProxyPort()));
+            }
+        }
     }
 
     private void restoreClusterModeGroup(ReplicationGroup group) {
@@ -757,10 +820,10 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.preferredMaintenanceWindow() != null && !request.preferredMaintenanceWindow().isBlank()) {
             BackupWindows.parseMaintenanceWindow(request.preferredMaintenanceWindow());
         }
+        requireCacheSubnetGroup(request.cacheSubnetGroupName());
         String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
-            // A replication group of that id counts as taken: see provisioningIds.
-            if (cacheClusters.get(clusterId).isPresent() || groups.get(clusterId).isPresent()) {
+            if (cacheClusterIdTaken(clusterId)) {
                 throw new AwsException("CacheClusterAlreadyExists",
                         "Cache cluster " + clusterId + " already exists.", 400);
             }
@@ -775,6 +838,34 @@ public class ElastiCacheService implements ResourceProvider {
             }
         } finally {
             releaseParameterGroup(parameterGroupReservation);
+        }
+    }
+
+    /**
+     * Whether any of the three stores already answers for that id. A Memcached cluster of the
+     * same name is only a describe that reports one id twice, but a replication group is worse:
+     * see provisioningIds for what its container and proxy would lose.
+     */
+    private boolean cacheClusterIdTaken(String clusterId) {
+        return cacheClusters.get(clusterId).isPresent()
+                || groups.get(clusterId).isPresent()
+                || memcachedClusters.get(clusterId).isPresent();
+    }
+
+    /**
+     * A named subnet group must exist. Storing a name nothing resolves would have the describe
+     * report a group a caller cannot look up, and AWS refuses the create instead.
+     *
+     * <p>{@code CreateReplicationGroup} does not make this check, so a replication group can
+     * still be created against a subnet group that is not there.
+     */
+    private void requireCacheSubnetGroup(String name) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        if (subnetGroups.get(name).isEmpty()) {
+            throw new AwsException("CacheSubnetGroupNotFoundFault",
+                    "Cache subnet group " + name + " not found.", 400);
         }
     }
 
@@ -845,6 +936,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
             }
 
+            clustersHoldingTheirPort.add(clusterId);
             LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
                     cluster.getConfigurationEndpoint().address(), String.valueOf(proxyPort));
             return cluster;
@@ -902,6 +994,7 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
         } finally {
             cacheClusters.delete(clusterId);
+            clustersHoldingTheirPort.remove(clusterId);
             releaseProxyPort(proxyPort);
         }
     }
@@ -936,7 +1029,10 @@ public class ElastiCacheService implements ResourceProvider {
                 // container name still finds the cluster's container.
                 containerManager.stopByGroupId(clusterId);
             }
-            if (cluster.getConfigurationEndpoint() != null) {
+            // Only a port this process reserved for this record: a restored cluster whose port
+            // was already taken advertises one it does not own, and freeing it would hand the
+            // holder's port to the next create.
+            if (cluster.getConfigurationEndpoint() != null && clustersHoldingTheirPort.remove(clusterId)) {
                 releaseProxyPort(cluster.getConfigurationEndpoint().port());
             }
 
