@@ -4,7 +4,7 @@ resource "aws_elasticache_cluster" "single_node" {
   engine_version       = "7.1"
   node_type            = "cache.t4g.micro"
   num_cache_nodes      = 1
-  port                 = 6379
+  port                 = 6395
   parameter_group_name = "default.redis7"
 
   snapshot_retention_limit = 5

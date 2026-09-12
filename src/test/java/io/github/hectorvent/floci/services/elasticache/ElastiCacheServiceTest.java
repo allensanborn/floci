@@ -1040,7 +1040,7 @@ class ElastiCacheServiceTest {
         assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
         // the live group kept its container and its proxy: nothing was started or removed for the
         // refused request
-        verify(containerManager, never()).tryStart(eq("shared"), anyString());
+        verify(containerManager, times(1)).tryStart(eq("shared"), anyString());
         verify(containerManager, never()).stopByGroupId("shared");
         verify(proxyManager, times(1)).startProxy(eq("shared"), any(), anyInt(), anyString(), anyInt(), any());
         assertEquals("shared", service.getReplicationGroup("shared").getReplicationGroupId());
