@@ -80,35 +80,40 @@ public class RedshiftServerlessService implements Resettable {
                 100, 100, "ValidationException");
     }
 
+    /**
+     * Builds the new state on a copy and stores that, rather than mutating the stored instance.
+     * Reads do not take the monitor this method holds, so an in-place mutation lets a concurrent
+     * GetNamespace or ListNamespaces observe a torn object: some fields updated, some not.
+     */
     public synchronized Namespace updateNamespace(String namespaceName, String adminUsername, String kmsKeyId,
                                                   String defaultIamRoleArn, List<String> iamRoles,
                                                   List<String> logExports, String region) {
         String key = storageKey(region, namespaceName);
-        Namespace namespace = getNamespace(namespaceName, region);
+        Namespace updated = new Namespace(getNamespace(namespaceName, region));
         if (adminUsername != null) {
-            namespace.setAdminUsername(adminUsername);
+            updated.setAdminUsername(adminUsername);
         }
         if (kmsKeyId != null && !kmsKeyId.isBlank()) {
-            namespace.setKmsKeyId(kmsKeyId);
+            updated.setKmsKeyId(kmsKeyId);
         }
         if (defaultIamRoleArn != null) {
-            namespace.setDefaultIamRoleArn(defaultIamRoleArn);
+            updated.setDefaultIamRoleArn(defaultIamRoleArn);
         }
         if (iamRoles != null) {
-            namespace.setIamRoles(copyOf(iamRoles));
+            updated.setIamRoles(copyOf(iamRoles));
         }
         if (logExports != null) {
-            namespace.setLogExports(validateLogExports(logExports));
+            updated.setLogExports(validateLogExports(logExports));
         }
-        namespaces.put(key, namespace);
-        return namespace;
+        namespaces.put(key, updated);
+        return updated;
     }
 
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {
-        Namespace namespace = getNamespace(namespaceName, region);
+        Namespace deleted = new Namespace(getNamespace(namespaceName, region));
         namespaces.delete(storageKey(region, namespaceName));
-        namespace.setStatus("DELETING");
-        return namespace;
+        deleted.setStatus("DELETING");
+        return deleted;
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
@@ -116,22 +121,23 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     public synchronized Map<String, String> tagResource(String resourceArn, Map<String, String> tags, String region) {
-        Namespace namespace = resolveByArn(resourceArn, region);
+        Namespace updated = new Namespace(resolveByArn(resourceArn, region));
         if (tags != null) {
-            namespace.getTags().putAll(tags);
+            updated.getTags().putAll(tags);
         }
-        namespaces.put(storageKey(region, namespace.getNamespaceName()), namespace);
-        return new LinkedHashMap<>(namespace.getTags());
+        namespaces.put(storageKey(region, updated.getNamespaceName()), updated);
+        return new LinkedHashMap<>(updated.getTags());
     }
 
     public synchronized Map<String, String> untagResource(String resourceArn, List<String> tagKeys, String region) {
-        Namespace namespace = resolveByArn(resourceArn, region);
+        Namespace resolved = resolveByArn(resourceArn, region);
         if (tagKeys == null) {
             throw validation("tagKeys is required.");
         }
-        tagKeys.forEach(namespace.getTags()::remove);
-        namespaces.put(storageKey(region, namespace.getNamespaceName()), namespace);
-        return new LinkedHashMap<>(namespace.getTags());
+        Namespace updated = new Namespace(resolved);
+        tagKeys.forEach(updated.getTags()::remove);
+        namespaces.put(storageKey(region, updated.getNamespaceName()), updated);
+        return new LinkedHashMap<>(updated.getTags());
     }
 
     /**
