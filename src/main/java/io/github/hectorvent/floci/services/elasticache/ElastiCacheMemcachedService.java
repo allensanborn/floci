@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemc
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
+import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,6 +30,14 @@ public class ElastiCacheMemcachedService {
     private static final int BACKEND_PORT = 11211;
 
     private final StorageBackend<String, CacheCluster> clusters;
+    /**
+     * The two stores {@link ElastiCacheService} writes, read here for the id check alone.
+     * {@link StorageFactory#create} keys backends by file path and hands back the instance that
+     * service already holds, so these are those stores rather than copies: a cache cluster id is
+     * one namespace whatever engine claims it.
+     */
+    private final StorageBackend<String, CacheCluster> redisClusters;
+    private final StorageBackend<String, ReplicationGroup> groups;
     private final ElastiCacheMemcachedContainerManager containerManager;
     private final EmulatorConfig config;
 
@@ -40,10 +49,18 @@ public class ElastiCacheMemcachedService {
         this.config = config;
         this.clusters = storageFactory.create("elasticache", "elasticache-cache-clusters.json",
                 new TypeReference<Map<String, CacheCluster>>() {});
+        this.redisClusters = storageFactory.create("elasticache", "elasticache-redis-clusters.json",
+                new TypeReference<Map<String, CacheCluster>>() {});
+        this.groups = storageFactory.create("elasticache", "elasticache-groups.json",
+                new TypeReference<Map<String, ReplicationGroup>>() {});
     }
 
     public CacheCluster createCacheCluster(String clusterId) {
-        if (clusters.get(clusterId).isPresent()) {
+        // Every store that answers DescribeCacheClusters, not just this one: two records sharing
+        // an id would have one describe report it twice, each with a different engine.
+        if (clusters.get(clusterId).isPresent()
+                || redisClusters.get(clusterId).isPresent()
+                || groups.get(clusterId).isPresent()) {
             throw new AwsException("CacheClusterAlreadyExistsFault",
                     "Cache cluster " + clusterId + " already exists.", 400);
         }

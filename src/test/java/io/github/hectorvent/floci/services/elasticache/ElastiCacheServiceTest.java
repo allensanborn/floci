@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -14,11 +15,13 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
+import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFormation;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
+import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -26,6 +29,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -60,12 +64,15 @@ class ElastiCacheServiceTest {
     private ElastiCacheProxyManager proxyManager;
     private EmulatorConfig config;
     private ValkeyClusterFormation clusterFormation;
+    private StorageFactory storageFactory;
+    private ElastiCacheMemcachedContainerManager memcachedContainerManager;
+    private Ec2Service ec2Service;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheContainerManager.class);
         proxyManager = mock(ElastiCacheProxyManager.class);
-        StorageFactory storageFactory = mock(StorageFactory.class);
+        storageFactory = mock(StorageFactory.class);
         config = mock(EmulatorConfig.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
@@ -75,13 +82,21 @@ class ElastiCacheServiceTest {
         when(ecConfig.proxyBasePort()).thenReturn(16379);
         when(ecConfig.proxyMaxPort()).thenReturn(16399);
         when(ecConfig.defaultImage()).thenReturn("valkey/valkey:8");
+        when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        // Keyed by file name, as the real StorageFactory is: it hands the second caller of a path
+        // the first caller's backend, which is what lets the two services share one id namespace.
+        Map<String, AccountAwareStorageBackend<?>> backendsByFile = new ConcurrentHashMap<>();
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                backendsByFile.computeIfAbsent(inv.getArgument(1),
+                        file -> AccountAwareStorageBackend.inMemory("000000000000")));
+        memcachedContainerManager = mock(ElastiCacheMemcachedContainerManager.class);
+        when(memcachedContainerManager.tryStart(anyString(), anyString())).thenReturn(null);
         when(containerManager.tryStart(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
-        Ec2Service ec2Service = org.mockito.Mockito.mock(Ec2Service.class);
+        ec2Service = org.mockito.Mockito.mock(Ec2Service.class);
         kmsService = org.mockito.Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(
                 new AwsException("NotFoundException", "Key not found", 404));
@@ -1166,6 +1181,140 @@ class ElastiCacheServiceTest {
         assertTrue(service.getResources().stream().anyMatch(r ->
                         "arn:aws:elasticache:us-east-1:000000000000:cluster:explorer-cc".equals(r.arn())),
                 "the standalone cluster must appear in the resource explorer alongside groups");
+    }
+
+    /** A second service over the same stores: what a restart leaves behind, minus the runtime. */
+    private ElastiCacheService serviceAfterRestart() {
+        return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
+                storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
+                kmsService);
+    }
+
+    private ElastiCacheMemcachedService memcachedService() {
+        return new ElastiCacheMemcachedService(memcachedContainerManager, storageFactory, config);
+    }
+
+    @Test
+    void aPersistedClusterKeepsItsPortAcrossARestart() {
+        // Before this, nothing re-added the port to usedPorts on startup: the restored cluster
+        // went on advertising 16379 while the next create was handed the same 16379, and the
+        // first delete then freed the second cluster's reservation.
+        assertEquals(16379, service.createCacheCluster(cacheClusterRequest("persisted", "redis", 1))
+                .getConfigurationEndpoint().port());
+
+        ElastiCacheService restarted = serviceAfterRestart();
+        restarted.restorePersistedRuntime().join();
+
+        assertEquals(16380, restarted.createCacheCluster(cacheClusterRequest("after", "redis", 1))
+                .getConfigurationEndpoint().port());
+        assertEquals(16379, restarted.findCacheClusters("persisted").getFirst()
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void deletingARestoredClusterFreesThePortItActuallyHolds() {
+        service.createCacheCluster(cacheClusterRequest("persisted", "redis", 1));
+        ElastiCacheService restarted = serviceAfterRestart();
+        restarted.restorePersistedRuntime().join();
+        restarted.createCacheCluster(cacheClusterRequest("after", "redis", 1));
+
+        restarted.deleteCacheCluster("persisted");
+
+        // 16379 is free again because that record owned it; 16380 is still the other cluster's
+        assertEquals(16379, restarted.createCacheCluster(cacheClusterRequest("third", "redis", 1))
+                .getConfigurationEndpoint().port());
+        assertEquals(16380, restarted.findCacheClusters("after").getFirst()
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void deletingARecordThatNeverHeldItsPortDoesNotFreeTheHoldersPort() {
+        // Two records advertising one port: only one can hold it. Here the holder is the created
+        // cluster and the other record never reserved anything, so its delete must leave the
+        // reservation alone rather than hand a live cluster's port to the next create.
+        service.createCacheCluster(cacheClusterRequest("holder", "redis", 1));
+        AccountAwareStorageBackend<CacheCluster> store = storageFactory.create("elasticache",
+                "elasticache-redis-clusters.json", new TypeReference<Map<String, CacheCluster>>() {});
+        store.put("squatter", new CacheCluster("squatter", CacheClusterStatus.AVAILABLE, "redis",
+                "7.1", new Endpoint("localhost", 16379), Instant.now()));
+
+        service.deleteCacheCluster("squatter");
+
+        assertEquals(16380, service.createCacheCluster(cacheClusterRequest("next", "redis", 1))
+                        .getConfigurationEndpoint().port(),
+                "16379 is still held by the cluster that actually reserved it");
+    }
+
+    @Test
+    void aPersistedReplicationGroupAlsoKeepsItsPortAcrossARestart() {
+        service.createReplicationGroup("grp", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        ElastiCacheService restarted = serviceAfterRestart();
+        restarted.restorePersistedRuntime().join();
+
+        assertEquals(16380, restarted.createCacheCluster(cacheClusterRequest("after", "redis", 1))
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void aCacheClusterCannotTakeTheIdOfAMemcachedCluster() {
+        // One namespace: DescribeCacheClusters answers from every store, so two records sharing
+        // an id would have it reported twice, each with a different engine.
+        memcachedService().createCacheCluster("shared-id");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(cacheClusterRequest("shared-id", "redis", 1)));
+
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
+        verify(containerManager, never()).tryStart(eq("shared-id"), anyString());
+    }
+
+    @Test
+    void aMemcachedClusterCannotTakeTheIdOfARedisClusterOrAGroup() {
+        ElastiCacheMemcachedService memcached = memcachedService();
+        service.createCacheCluster(cacheClusterRequest("redis-id", "redis", 1));
+        service.createReplicationGroup("group-id", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        assertEquals("CacheClusterAlreadyExistsFault",
+                assertThrows(AwsException.class, () -> memcached.createCacheCluster("redis-id"))
+                        .getErrorCode());
+        assertEquals("CacheClusterAlreadyExistsFault",
+                assertThrows(AwsException.class, () -> memcached.createCacheCluster("group-id"))
+                        .getErrorCode());
+        verify(memcachedContainerManager, never()).tryStart(eq("redis-id"), anyString());
+        verify(memcachedContainerManager, never()).tryStart(eq("group-id"), anyString());
+    }
+
+    @Test
+    void anUnknownCacheSubnetGroupIsRefused() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                        "sng-cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null,
+                        "no-such-group", null, null, null, null, null, null, null, null,
+                        "us-east-1", Map.of())));
+
+        assertEquals("CacheSubnetGroupNotFoundFault", ex.getErrorCode());
+        // and nothing was provisioned against the name that does not resolve
+        verify(containerManager, never()).tryStart(eq("sng-cc"), anyString());
+        assertTrue(service.findCacheClusters("sng-cc").isEmpty());
+    }
+
+    @Test
+    void aKnownCacheSubnetGroupIsAcceptedAndReported() {
+        io.github.hectorvent.floci.services.ec2.model.Subnet subnet =
+                new io.github.hectorvent.floci.services.ec2.model.Subnet();
+        subnet.setSubnetId("subnet-1");
+        subnet.setVpcId("vpc-1");
+        subnet.setAvailabilityZone("us-east-1a");
+        when(ec2Service.describeSubnets(anyString(), any(), any())).thenReturn(List.of(subnet));
+        service.createCacheSubnetGroup("real-group", "d", List.of("subnet-1"), Map.of());
+
+        CacheCluster cluster = service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "sng-cc", "redis", null, null, 1, null, AuthMode.NO_AUTH, null, null,
+                "real-group", null, null, null, null, null, null, null, null,
+                "us-east-1", Map.of()));
+
+        assertEquals("real-group", cluster.getCacheSubnetGroupName());
     }
 
     @Test
