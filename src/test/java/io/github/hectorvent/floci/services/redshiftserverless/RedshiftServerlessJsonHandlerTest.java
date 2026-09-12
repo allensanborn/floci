@@ -26,8 +26,8 @@ import static org.mockito.Mockito.when;
 /**
  * Covers the wire layer the service tests cannot reach: how values are shaped on the way out.
  * The timestamp case is a regression guard. {@code creationDate} was first emitted as
- * epoch seconds, the awsJson1.1 default, but every timestamp member in the Redshift Serverless
- * model carries {@code TimestampFormatTrait(ISO_8601)}. The AWS CLI accepted the number because
+ * epoch seconds, the awsJson1.1 default, but {@code Namespace.creationDate} carries
+ * {@code TimestampFormatTrait(ISO_8601)} (other members of this model vary; check each). The AWS CLI accepted the number because
  * botocore coerces it, so an integration test asserting only "not null" stayed green while
  * strict SDKs rejected the response.
  */
