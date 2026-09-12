@@ -148,8 +148,10 @@ ln -s AGENTS.md COPILOT.md
    epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per member,
    and a mismatch is invisible to the AWS CLI because botocore coerces the value, while strict
    SDKs (Go, Java) reject the whole response. `javap -c` on the SDK model class shows the
-   traits attached to each `SdkField`. Every timestamp in Redshift Serverless, for instance,
-   is `ISO_8601`, not epoch seconds
+   traits attached to each `SdkField`. In Redshift Serverless, for instance,
+   `Namespace.creationDate` is `ISO_8601` while roughly half the model's other timestamp
+   members carry no trait and use the epoch default — the trait is per member, so check each
+   one you emit
 10. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
 11. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
 12. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
