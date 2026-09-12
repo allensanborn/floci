@@ -410,8 +410,6 @@ public class SqsService implements Resettable, ResourceProvider {
         queue.getAttributes().putIfAbsent("DelaySeconds", "0");
         queue.getAttributes().putIfAbsent("ReceiveMessageWaitTimeSeconds", "0");
         queue.getAttributes().putIfAbsent("MessageRetentionPeriod", "345600");
-        queue.getAttributes().putIfAbsent("SqsManagedSseEnabled",
-                String.valueOf(!hasKmsMasterKey(queue.getAttributes())));
         if (queue.isFifo()) {
             if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
                 queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
@@ -495,8 +493,11 @@ public class SqsService implements Resettable, ResourceProvider {
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
-        // Server-side encryption with SQS-managed keys is on unless a KMS key takes over,
-        // and queues persisted before this attribute existed still have to report it.
+        // Derived at read time and never stored, so it cannot go stale behind a
+        // KmsMasterKeyId that was later cleared. A KMS key always wins; otherwise an
+        // explicit SqsManagedSseEnabled stands, and a queue with neither reports the AWS
+        // default. What AWS does with a queue whose KMS key is cleared is not documented
+        // crisply, so reverting to the default is a choice, not a copied behaviour.
         if (hasKmsMasterKey(attrs)) {
             attrs.put("SqsManagedSseEnabled", "false");
         } else {

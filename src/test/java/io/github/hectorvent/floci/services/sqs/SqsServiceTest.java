@@ -95,6 +95,47 @@ class SqsServiceTest {
     }
 
     @Test
+    void getQueueAttributes_sqsManagedSseDisabledWhenQueueIsCreatedWithAKmsKey() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-at-create-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+    }
+
+    @Test
+    void getQueueAttributes_sqsManagedSseReturnsToTheDefaultWhenTheKmsKeyIsCleared() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("kms-cleared-queue",
+                Map.of("KmsMasterKeyId", "alias/aws/sqs"), region);
+        assertEquals("false",
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region)
+                        .get("SqsManagedSseEnabled"));
+
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("KmsMasterKeyId", ""), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertFalse(attrs.containsKey("KmsMasterKeyId"), "An empty value clears the attribute");
+        assertEquals("true", attrs.get("SqsManagedSseEnabled"),
+                "Nothing derived from the KMS key may outlive it");
+    }
+
+    @Test
+    void getQueueAttributes_explicitSqsManagedSseFalseSurvivesAnUnrelatedUpdate() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sse-off-queue",
+                Map.of("SqsManagedSseEnabled", "false"), region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", "5"), region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("false", attrs.get("SqsManagedSseEnabled"),
+                "A value the user set is intent, not derived state, and has to survive");
+        assertEquals("5", attrs.get("DelaySeconds"));
+    }
+
+    @Test
     void getQueueAttributes_selectsSqsManagedSseEnabledByName() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("sse-named-queue", null, region);

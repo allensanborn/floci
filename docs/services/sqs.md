@@ -98,7 +98,7 @@ aws sqs set-queue-attributes \
 
 `MaximumMessageSize` defaults to `262144` bytes, the AWS default and maximum. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 262144 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 262144 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `262144` explicitly.
 
-`SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set.
+`SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one.
 
 ## Configuration
 
