@@ -645,6 +645,7 @@ public interface EmulatorConfig {
         RedshiftServiceConfig redshift();
         RdsDataServiceConfig rdsData();
         RedshiftDataServiceConfig redshiftData();
+        RedshiftServerlessServiceConfig redshiftServerless();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
         EmrServiceConfig emr();
@@ -1341,6 +1342,11 @@ public interface EmulatorConfig {
 
         @WithDefault("24")
         int resultTtlHours();
+    }
+
+    interface RedshiftServerlessServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface NeptuneServiceConfig {
