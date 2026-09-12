@@ -12,7 +12,7 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 | Action | Description |
 | --- | --- |
 | `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
-| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled` (output-only on real AWS's CreateCacheCluster; accepted here leniently and echoed), `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow` and `Tags` are kept and returned, with the group `ARN` |
+| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow` and `Tags` are kept and returned, with the group `ARN` |
 | `DescribeReplicationGroups` | List clusters and their connection info |
 | `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
