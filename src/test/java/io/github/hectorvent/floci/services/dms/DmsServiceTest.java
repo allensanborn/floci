@@ -304,6 +304,97 @@ class DmsServiceTest {
         assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
     }
 
+    @Test
+    void createRejectsATagValueThatIsNotAString() {
+        ObjectNode request = createRequest("object-tag-value", "example", "subnet-a", "subnet-b");
+        request.putArray("Tags").addObject().put("Key", "env").putObject("Value").put("nested", 1);
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void createRejectsATagsMemberThatIsNotAList() {
+        ObjectNode request = createRequest("scalar-tags", "example", "subnet-a", "subnet-b");
+        request.put("Tags", "env=test");
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void createRejectsASubnetIdThatIsNotAString() {
+        ObjectNode request = identifierRequest("numeric-subnet");
+        request.put("ReplicationSubnetGroupDescription", "example");
+        request.putArray("SubnetIds").add("subnet-a").add(42);
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void describeRejectsFilterValuesThatAreNotAList() {
+        ObjectNode request = mapper.createObjectNode();
+        ObjectNode filter = request.putArray("Filters").addObject();
+        filter.put("Name", "replication-subnet-group-id");
+        filter.put("Values", "tf-example");
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void describeRejectsAFilterValueThatIsNotAString() {
+        ObjectNode request = mapper.createObjectNode();
+        ObjectNode filter = request.putArray("Filters").addObject();
+        filter.put("Name", "replication-subnet-group-id");
+        filter.putArray("Values").addObject().put("Value", "tf-example");
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void listTagsRejectsAnArnListElementThatIsNotAString() {
+        ObjectNode request = mapper.createObjectNode();
+        request.putArray("ResourceArnList").addObject().put("ResourceArn", arn("whatever"));
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void removeTagsRejectsATagKeyThatIsNotAString() {
+        ObjectNode request = createRequest("bad-tag-keys", "example", "subnet-a", "subnet-b");
+        service.createReplicationSubnetGroup(request, REGION);
+
+        ObjectNode removeRequest = mapper.createObjectNode();
+        removeRequest.put("ResourceArn", arn("bad-tag-keys"));
+        removeRequest.putArray("TagKeys").add(7);
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.removeTagsFromResource(removeRequest, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void createRejectsAnIdentifierThatIsNotAString() {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("ReplicationSubnetGroupIdentifier", 12345);
+        request.put("ReplicationSubnetGroupDescription", "example");
+        request.putArray("SubnetIds").add("subnet-a").add("subnet-b");
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
     private Map<String, String> tagsOf(String identifier) {
         return service.listTagsForResource(arnRequest(identifier), REGION).stream()
                 .collect(java.util.stream.Collectors.toMap(ResourceTag::key, ResourceTag::value));
