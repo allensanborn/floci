@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -723,14 +725,40 @@ public class RedshiftService {
         return grant;
     }
 
-    public List<SnapshotCopyGrant> describeSnapshotCopyGrants(String name) {
+    /** Default and maximum page size AWS documents for DescribeSnapshotCopyGrants. */
+    private static final int SNAPSHOT_COPY_GRANT_PAGE_DEFAULT = 100;
+    private static final int SNAPSHOT_COPY_GRANT_PAGE_MAX = 100;
+    private static final int SNAPSHOT_COPY_GRANT_PAGE_MIN = 20;
+
+    /**
+     * Pages grants by name, which is their primary key, so the order is stable across calls
+     * and a marker stays resumable when grants are created or deleted between pages.
+     *
+     * <p>AWS documents SnapshotCopyGrantName and Marker as mutually exclusive, but models no
+     * error for sending both, so this filters first and then paginates rather than rejecting
+     * the combination: a name matches at most one grant, which fits in any page.
+     */
+    public PaginatedResult<SnapshotCopyGrant> describeSnapshotCopyGrants(String name, Integer maxRecords, String marker) {
+        if (maxRecords != null
+                && (maxRecords < SNAPSHOT_COPY_GRANT_PAGE_MIN || maxRecords > SNAPSHOT_COPY_GRANT_PAGE_MAX)) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + SNAPSHOT_COPY_GRANT_PAGE_MIN
+                            + " and " + SNAPSHOT_COPY_GRANT_PAGE_MAX + ".", 400);
+        }
+
+        List<SnapshotCopyGrant> matching;
         if (name != null && !name.isBlank()) {
             SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
                     .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
                             "Snapshot copy grant " + name + " not found", 404));
-            return List.of(grant);
+            matching = List.of(grant);
+        } else {
+            matching = snapshotCopyGrants.scan(k -> true);
         }
-        return snapshotCopyGrants.scan(k -> true);
+
+        return Pagination.paginate(matching, SnapshotCopyGrant::getSnapshotCopyGrantName,
+                maxRecords, marker, SNAPSHOT_COPY_GRANT_PAGE_DEFAULT, SNAPSHOT_COPY_GRANT_PAGE_MAX,
+                "InvalidParameterValue");
     }
 
     public SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {

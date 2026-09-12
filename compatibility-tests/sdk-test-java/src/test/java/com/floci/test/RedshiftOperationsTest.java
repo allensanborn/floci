@@ -400,6 +400,38 @@ class RedshiftOperationsTest {
                 .isInstanceOf(SnapshotCopyGrantNotFoundException.class);
     }
 
+    @Test
+    @Order(5)
+    void testSnapshotCopyGrantPaginator() {
+        String prefix = TestFixtures.uniqueName("rs-page-grant");
+        int total = 21;
+        for (int i = 1; i <= total; i++) {
+            String name = String.format("%s-%02d", prefix, i);
+            client.createSnapshotCopyGrant(CreateSnapshotCopyGrantRequest.builder()
+                    .snapshotCopyGrantName(name)
+                    .build());
+            snapshotCopyGrantsToCleanup.add(name);
+        }
+
+        // MaxRecords below the number of grants forces the SDK's paginator to follow a
+        // Marker, which is the only way to prove the continuation token round-trips.
+        int pages = 0;
+        List<String> paged = new ArrayList<>();
+        for (DescribeSnapshotCopyGrantsResponse page : client.describeSnapshotCopyGrantsPaginator(
+                DescribeSnapshotCopyGrantsRequest.builder().maxRecords(20).build())) {
+            pages++;
+            page.snapshotCopyGrants().stream()
+                    .map(SnapshotCopyGrant::snapshotCopyGrantName)
+                    .filter(name -> name.startsWith(prefix))
+                    .forEach(paged::add);
+        }
+
+        assertThat(pages).isGreaterThan(1);
+        assertThat(paged).hasSize(total);
+        assertThat(paged).doesNotHaveDuplicates();
+        assertThat(paged).isSorted();
+    }
+
     private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
         SQLException last = null;
