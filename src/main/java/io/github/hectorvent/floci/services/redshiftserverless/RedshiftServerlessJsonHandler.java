@@ -82,9 +82,9 @@ public class RedshiftServerlessJsonHandler {
                 text(request, "dbName"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
-                parseStringList(request.path("iamRoles")),
-                parseStringList(request.path("logExports")),
-                parseTagList(request.path("tags")),
+                parseStringList(request.path("iamRoles"), "iamRoles"),
+                parseStringList(request.path("logExports"), "logExports"),
+                parseTagList(request.path("tags"), "tags"),
                 region);
         return namespaceResponse(namespace);
     }
@@ -111,8 +111,8 @@ public class RedshiftServerlessJsonHandler {
                 text(request, "adminUsername"),
                 text(request, "kmsKeyId"),
                 text(request, "defaultIamRoleArn"),
-                parseStringList(request.path("iamRoles")),
-                parseStringList(request.path("logExports")),
+                parseStringList(request.path("iamRoles"), "iamRoles"),
+                parseStringList(request.path("logExports"), "logExports"),
                 region);
         return namespaceResponse(namespace);
     }
@@ -129,12 +129,12 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleTagResource(JsonNode request, String region) {
-        service.tagResource(text(request, "resourceArn"), parseTagList(request.path("tags")), region);
+        service.tagResource(text(request, "resourceArn"), parseTagList(request.path("tags"), "tags"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
-        service.untagResource(text(request, "resourceArn"), parseStringList(request.path("tagKeys")), region);
+        service.untagResource(text(request, "resourceArn"), parseStringList(request.path("tagKeys"), "tagKeys"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -188,32 +188,56 @@ public class RedshiftServerlessJsonHandler {
             return null;
         }
         if (!node.isNumber()) {
-            throw new AwsException("ValidationException", "maxResults must be an integer.", 400);
+            throw validation("maxResults must be an integer.");
         }
         return node.asInt();
     }
 
-    private List<String> parseStringList(JsonNode node) {
-        if (node == null || !node.isArray()) {
+    /**
+     * Absent means absent and wrong means wrong: only a missing or null member returns null, so
+     * that callers can distinguish "omitted, keep the stored value" from "supplied". Treating a
+     * present member of the wrong type as absent would let a malformed UpdateNamespace silently
+     * keep the old roles instead of reporting the request as invalid.
+     */
+    private List<String> parseStringList(JsonNode node, String field) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
             return null;
         }
+        if (!node.isArray()) {
+            throw validation(field + " must be an array of strings.");
+        }
         List<String> list = new ArrayList<>();
-        node.forEach(element -> list.add(element.asText()));
+        for (JsonNode element : node) {
+            if (!element.isTextual()) {
+                throw validation(field + " must contain only strings.");
+            }
+            list.add(element.textValue());
+        }
         return list;
     }
 
-    private Map<String, String> parseTagList(JsonNode tagsNode) {
-        if (tagsNode == null || !tagsNode.isArray()) {
+    private Map<String, String> parseTagList(JsonNode tagsNode, String field) {
+        if (tagsNode == null || tagsNode.isMissingNode() || tagsNode.isNull()) {
             return null;
+        }
+        if (!tagsNode.isArray()) {
+            throw validation(field + " must be an array of tags.");
         }
         Map<String, String> tags = new LinkedHashMap<>();
         for (JsonNode tag : tagsNode) {
+            if (!tag.isObject()) {
+                throw validation(field + " must contain only tag objects.");
+            }
             String key = tag.path("key").asText(null);
             if (key != null) {
                 tags.put(key, tag.path("value").asText(null));
             }
         }
         return tags;
+    }
+
+    private static AwsException validation(String message) {
+        return new AwsException("ValidationException", message, 400);
     }
 
     private static String text(JsonNode request, String field) {

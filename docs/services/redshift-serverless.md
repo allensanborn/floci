@@ -33,7 +33,7 @@ Namespace state is account and Region scoped and persisted through `StorageFacto
   epoch-seconds number that awsJson1.1 uses by default. `Namespace.creationDate` carries
   `TimestampFormatTrait(ISO_8601)` in the API model, and strict SDKs reject a number here even
   though the AWS CLI accepts one. (Not a model-wide rule: roughly half the model's timestamp
-  members carry no format trait and use the epoch default — check each member when extending
+  members carry no format trait and use the epoch default, so check each member when extending
   this service.)
 - **`namespaceId` is a generated UUID** and `namespaceArn` is `arn:aws:redshift-serverless:<region>:<account>:namespace/<namespaceId>`.
 - **`DeleteNamespace` returns the deleted namespace with `status` `DELETING`** and removes it in the same call, so the next `GetNamespace` returns `ResourceNotFoundException`.

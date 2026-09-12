@@ -28,6 +28,27 @@ public class Namespace {
     public Namespace() {
     }
 
+    /**
+     * Deep enough copy that a mutation of the copy cannot be observed through the original:
+     * the collections are copied, and every other member is immutable. Services build an
+     * updated namespace on a copy and store that, so a reader holding the previous instance
+     * never sees a half-applied update.
+     */
+    public Namespace(Namespace other) {
+        this.namespaceName = other.namespaceName;
+        this.namespaceId = other.namespaceId;
+        this.namespaceArn = other.namespaceArn;
+        this.adminUsername = other.adminUsername;
+        this.dbName = other.dbName;
+        this.kmsKeyId = other.kmsKeyId;
+        this.defaultIamRoleArn = other.defaultIamRoleArn;
+        this.iamRoles = new ArrayList<>(other.iamRoles);
+        this.logExports = new ArrayList<>(other.logExports);
+        this.status = other.status;
+        this.creationDate = other.creationDate;
+        this.tags = new LinkedHashMap<>(other.tags);
+    }
+
     public String getNamespaceName() {
         return namespaceName;
     }

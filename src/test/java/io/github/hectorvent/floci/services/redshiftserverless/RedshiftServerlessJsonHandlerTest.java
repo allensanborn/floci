@@ -122,6 +122,80 @@ class RedshiftServerlessJsonHandlerTest {
         assertEquals("UnknownOperationException", errorType(response));
     }
 
+    @Test
+    void aPresentCollectionMemberOfTheWrongTypeIsRejectedPerMember() {
+        create("wrong-type-ns");
+
+        for (String member : new String[] {"iamRoles", "logExports"}) {
+            for (String malformed : new String[] {"\"a-string\"", "7", "{\"k\":\"v\"}", "true"}) {
+                ObjectNode request = (ObjectNode) parse(
+                        "{\"namespaceName\":\"wrong-type-ns\"," + quoted(member) + ":" + malformed + "}");
+
+                Response response = handler.handle("UpdateNamespace", request, REGION);
+
+                assertEquals(400, response.getStatus(),
+                        member + "=" + malformed + " must not be accepted");
+                assertEquals("ValidationException", errorType(response),
+                        member + "=" + malformed + " must be a ValidationException");
+            }
+        }
+    }
+
+    @Test
+    void aWrongTypedCollectionIsNotSilentlyTreatedAsOmitted() {
+        ObjectNode created = (ObjectNode) parse("{\"namespaceName\":\"not-omitted-ns\","
+                + "\"adminUsername\":\"admin\",\"iamRoles\":[\"arn:aws:iam::000000000000:role/one\"]}");
+        body(handler.handle("CreateNamespace", created, REGION));
+
+        Response response = handler.handle("UpdateNamespace",
+                (ObjectNode) parse("{\"namespaceName\":\"not-omitted-ns\",\"iamRoles\":\"role/one\"}"), REGION);
+
+        assertEquals(400, response.getStatus(),
+                "a malformed iamRoles must fail the request, not quietly keep the stored roles");
+        JsonNode unchanged = body(handler.handle("GetNamespace",
+                request("namespaceName", "not-omitted-ns"), REGION)).get("namespace");
+        assertEquals(1, unchanged.get("iamRoles").size(), "the rejected update must not have applied");
+    }
+
+    @Test
+    void nonStringElementsInACollectionAreRejected() {
+        create("bad-element-ns");
+
+        Response response = handler.handle("UpdateNamespace",
+                (ObjectNode) parse("{\"namespaceName\":\"bad-element-ns\",\"iamRoles\":[7]}"), REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("ValidationException", errorType(response));
+    }
+
+    @Test
+    void aWrongTypedTagsOrTagKeysMemberIsRejected() {
+        JsonNode namespace = body(create("tag-type-ns")).get("namespace");
+        String arn = namespace.get("namespaceArn").textValue();
+
+        Response tagged = handler.handle("TagResource",
+                (ObjectNode) parse("{\"resourceArn\":" + quoted(arn) + ",\"tags\":\"env=dev\"}"), REGION);
+        assertEquals(400, tagged.getStatus());
+        assertEquals("ValidationException", errorType(tagged));
+
+        Response untagged = handler.handle("UntagResource",
+                (ObjectNode) parse("{\"resourceArn\":" + quoted(arn) + ",\"tagKeys\":\"env\"}"), REGION);
+        assertEquals(400, untagged.getStatus());
+        assertEquals("ValidationException", errorType(untagged));
+    }
+
+    private JsonNode parse(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalArgumentException("bad test fixture: " + json, e);
+        }
+    }
+
+    private static String quoted(String value) {
+        return '"' + value + '"';
+    }
+
     private Response create(String namespaceName) {
         ObjectNode request = request("namespaceName", namespaceName);
         request.put("adminUsername", "admin");

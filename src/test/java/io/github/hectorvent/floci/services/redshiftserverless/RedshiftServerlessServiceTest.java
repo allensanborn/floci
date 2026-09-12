@@ -15,6 +15,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -212,6 +213,68 @@ class RedshiftServerlessServiceTest {
         clearInvocations(store);
         service.untagResource(arn, List.of("team"), REGION);
         verify(store).put(eq(REGION + "::persist-ns"), any(Namespace.class));
+    }
+
+    @Test
+    void updateStoresACopySoAReaderNeverSeesAHalfAppliedChange() {
+        service.createNamespace("copy-ns", "admin", "analytics", null, null,
+                List.of("arn:aws:iam::123456789012:role/one"), List.of("userlog"), Map.of(), REGION);
+        Namespace readBeforeUpdate = service.getNamespace("copy-ns", REGION);
+
+        service.updateNamespace("copy-ns", "newadmin", "custom-key", null, List.of(), null, REGION);
+
+        Namespace readAfterUpdate = service.getNamespace("copy-ns", REGION);
+        assertNotSame(readBeforeUpdate, readAfterUpdate, "update must store a new instance, not mutate the stored one");
+        // The instance a concurrent reader was already holding is untouched, which is what makes
+        // a torn read structurally impossible rather than merely unlikely.
+        assertEquals("admin", readBeforeUpdate.getAdminUsername());
+        assertEquals("AWS_OWNED_KMS_KEY", readBeforeUpdate.getKmsKeyId());
+        assertEquals(List.of("arn:aws:iam::123456789012:role/one"), readBeforeUpdate.getIamRoles());
+        assertEquals("newadmin", readAfterUpdate.getAdminUsername());
+        assertEquals("custom-key", readAfterUpdate.getKmsKeyId());
+        assertTrue(readAfterUpdate.getIamRoles().isEmpty());
+    }
+
+    @Test
+    void tagMutationsAlsoStoreACopy() {
+        Namespace created = service.createNamespace("copy-tags-ns", "admin", null, null, null, null, null,
+                Map.of("env", "dev"), REGION);
+        Namespace readBeforeTagging = service.getNamespace("copy-tags-ns", REGION);
+
+        service.tagResource(created.getNamespaceArn(), Map.of("team", "data"), REGION);
+
+        Namespace readAfterTagging = service.getNamespace("copy-tags-ns", REGION);
+        assertNotSame(readBeforeTagging, readAfterTagging);
+        assertEquals(Map.of("env", "dev"), readBeforeTagging.getTags());
+        assertEquals(Map.of("env", "dev", "team", "data"), readAfterTagging.getTags());
+    }
+
+    @Test
+    void deleteDoesNotMutateTheInstanceAReaderMayHold() {
+        create("delete-copy-ns");
+        Namespace readBeforeDelete = service.getNamespace("delete-copy-ns", REGION);
+
+        Namespace returned = service.deleteNamespace("delete-copy-ns", REGION);
+
+        assertEquals("DELETING", returned.getStatus());
+        assertEquals("AVAILABLE", readBeforeDelete.getStatus(),
+                "delete must not flip the status on an instance handed out by an earlier read");
+    }
+
+    @Test
+    void theCopyConstructorSharesNoMutableState() {
+        Namespace original = service.createNamespace("copy-ctor-ns", "admin", null, null, null,
+                List.of("arn:aws:iam::123456789012:role/one"), List.of("userlog"),
+                Map.of("env", "dev"), REGION);
+
+        Namespace copy = new Namespace(original);
+        copy.getIamRoles().add("arn:aws:iam::123456789012:role/two");
+        copy.getLogExports().add("connectionlog");
+        copy.getTags().put("team", "data");
+
+        assertEquals(List.of("arn:aws:iam::123456789012:role/one"), original.getIamRoles());
+        assertEquals(List.of("userlog"), original.getLogExports());
+        assertEquals(Map.of("env", "dev"), original.getTags());
     }
 
     private Namespace create(String namespaceName) {

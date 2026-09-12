@@ -150,7 +150,7 @@ ln -s AGENTS.md COPILOT.md
    SDKs (Go, Java) reject the whole response. `javap -c` on the SDK model class shows the
    traits attached to each `SdkField`. In Redshift Serverless, for instance,
    `Namespace.creationDate` is `ISO_8601` while roughly half the model's other timestamp
-   members carry no trait and use the epoch default — the trait is per member, so check each
+   members carry no trait and use the epoch default. The trait is per member, so check each
    one you emit
 10. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
 11. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
