@@ -34,7 +34,7 @@ public class CacheCluster {
     private List<String> securityGroupIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
 
-    // Transient — not persisted, restored on container restart
+    // Transient: not persisted, restored on container restart
     private transient String containerId;
     private transient String containerHost;
     private transient int containerPort;
