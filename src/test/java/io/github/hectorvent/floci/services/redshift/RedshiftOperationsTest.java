@@ -519,6 +519,68 @@ public class RedshiftOperationsTest {
     }
 
     @Test
+    @Order(7)
+    void testSnapshotCopyGrantNameContract() {
+        String tooLong = "g123456789012345678901234567890123456789012345678901234567890123";
+        for (String invalid : List.of("1grant", "Grant", "grant--copy", "grant-", tooLong)) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "CreateSnapshotCopyGrant")
+                .formParam("SnapshotCopyGrantName", invalid)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("InvalidParameterValue"));
+
+            // A rejected name must leave nothing behind, read back through Describe.
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER)
+                .formParam("Action", "DescribeSnapshotCopyGrants")
+                .formParam("SnapshotCopyGrantName", invalid)
+            .when()
+                .post("/")
+            .then()
+                .body(not(containsString("<SnapshotCopyGrantName>" + invalid + "</SnapshotCopyGrantName>")));
+        }
+
+        String maxLength = "g12345678901234567890123456789012345678901234567890123456789012";
+        assertEquals(63, maxLength.length());
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CreateSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SnapshotCopyGrantName>" + maxLength + "</SnapshotCopyGrantName>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", maxLength)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(3)
     void testTagLifecycle() {
         when(containerManager.start(any(), eq("cluster-tags"), any(), any()))

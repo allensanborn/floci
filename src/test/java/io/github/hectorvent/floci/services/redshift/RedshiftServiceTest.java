@@ -20,6 +20,8 @@ import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
@@ -1165,6 +1167,39 @@ class RedshiftServiceTest {
                 service.createSnapshotCopyGrant("existing", "key-abc", Map.of()));
         assertEquals("SnapshotCopyGrantAlreadyExistsFault", ex.getErrorCode());
         verify(snapshotCopyGrantBackend, never()).put(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "1grant",                                                          // must start with a letter
+            "Grant",                                                           // no uppercase
+            "grant--copy",                                                     // no consecutive hyphens
+            "grant-",                                                          // no trailing hyphen
+            "g123456789012345678901234567890123456789012345678901234567890123" // 64 characters
+    })
+    void testCreateSnapshotCopyGrantRejectsNamesRedshiftRejects(String name) {
+        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createSnapshotCopyGrant(name, "key-abc", Map.of()));
+
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(snapshotCopyGrantBackend, never()).put(any(), any());
+        verify(snapshotCopyGrantBackend, never()).flush();
+    }
+
+    @Test
+    void testCreateSnapshotCopyGrantAcceptsMaximumLengthName() {
+        String name = "g12345678901234567890123456789012345678901234567890123456789012";
+        assertEquals(63, name.length());
+        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+
+        SnapshotCopyGrant grant = service.createSnapshotCopyGrant(name, "key-abc", Map.of());
+
+        assertEquals(name, grant.getSnapshotCopyGrantName());
+        verify(snapshotCopyGrantBackend).put(eq(name), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).flush();
     }
 
     @Test

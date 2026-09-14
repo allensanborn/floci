@@ -721,7 +721,23 @@ public class RedshiftService {
         return regionResolver.buildArn("kms", regionResolver.getRegion(), "alias/aws/redshift");
     }
 
+    /**
+     * AWS constrains a snapshot copy grant name to 1-63 characters, first a lowercase letter,
+     * then lowercase letters, digits or single hyphens (no trailing or doubled hyphen). Names
+     * Redshift rejects must not create here either, or Terraform sees a grant that cannot
+     * exist upstream.
+     */
+    private static void validateSnapshotCopyGrantName(String name) {
+        if (name == null || !name.matches("[a-z][a-z0-9-]{0,62}")
+                || name.contains("--") || name.endsWith("-")) {
+            throw new AwsException("InvalidParameterValue",
+                    "SnapshotCopyGrantName must be 1-63 characters, start with a lowercase letter, "
+                    + "and contain only lowercase letters, digits and non-consecutive hyphens", 400);
+        }
+    }
+
     public SnapshotCopyGrant createSnapshotCopyGrant(String name, String kmsKeyId, Map<String, String> tags) {
+        validateSnapshotCopyGrantName(name);
         if (snapshotCopyGrants.get(name).isPresent()) {
             throw new AwsException("SnapshotCopyGrantAlreadyExistsFault",
                     "Snapshot copy grant " + name + " already exists", 400);
