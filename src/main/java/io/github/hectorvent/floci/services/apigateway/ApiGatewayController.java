@@ -1933,7 +1933,11 @@ public class ApiGatewayController {
         // as aws_api_gateway_rest_api.root_resource_id, which is how the first resource
         // under "/" gets its parent, so leaving it out breaks the conventional way of
         // building a REST API.
-        service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+        if (api.getRootResourceId() != null) {
+            node.put("rootResourceId", api.getRootResourceId());
+        } else {
+            service.findRootResourceId(region, api.getId()).ifPresent(id -> node.put("rootResourceId", id));
+        }
 
         // Neither member is settable on a REST API here: createRestApi ignores both and
         // updateRestApi patches only /name and /description, so the emulated value is always
@@ -1959,6 +1963,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
+        node.put("apiKeyRequired", m.isApiKeyRequired());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
         if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
         if (m.getRequestModels() != null && !m.getRequestModels().isEmpty()) {
@@ -1984,6 +1989,19 @@ public class ApiGatewayController {
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
         node.put("passthroughBehavior", i.getPassthroughBehavior());
+        if (!i.getRequestParameters().isEmpty()) {
+            ObjectNode params = node.putObject("requestParameters");
+            i.getRequestParameters().forEach(params::put);
+        }
+        if (!i.getRequestTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("requestTemplates");
+            i.getRequestTemplates().forEach(templates::put);
+        }
+        if (!i.getIntegrationResponses().isEmpty()) {
+            ObjectNode responses = node.putObject("integrationResponses");
+            i.getIntegrationResponses().forEach((status, ir) ->
+                    responses.set(status, toIntegrationResponseNode(ir)));
+        }
         return node;
     }
 
@@ -1991,6 +2009,14 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("statusCode", r.statusCode());
         node.put("selectionPattern", r.selectionPattern());
+        if (r.responseParameters() != null && !r.responseParameters().isEmpty()) {
+            ObjectNode params = node.putObject("responseParameters");
+            r.responseParameters().forEach(params::put);
+        }
+        if (r.responseTemplates() != null && !r.responseTemplates().isEmpty()) {
+            ObjectNode templates = node.putObject("responseTemplates");
+            r.responseTemplates().forEach(templates::put);
+        }
         return node;
     }
 
