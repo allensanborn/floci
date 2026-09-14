@@ -214,9 +214,9 @@ public class DmsService implements Resettable {
     }
 
     /**
-     * The DMS request model constrains the description to printable characters, so a value carrying
-     * a control character such as 0x01 is rejected here rather than persisted. Blank and absent stay
-     * the same parameter error they were.
+     * A description carrying a control character such as 0x01 is rejected here rather than
+     * persisted, per the review of the upstream PR; AWS rejects non-printable control characters
+     * in this member. Blank and absent stay the same parameter error they were.
      */
     private static String requireDescription(JsonNode request) {
         String description = text(request, "ReplicationSubnetGroupDescription");
