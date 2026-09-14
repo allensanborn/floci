@@ -1264,6 +1264,18 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void deletingAGroupCreatedInProcessFreesItsPort() {
+        // The ordinary path, which the squatter and restored-group tests both step around: a
+        // group created here holds its port, so its delete has to give it back.
+        service.createReplicationGroup("grp", "d", AuthMode.NO_AUTH, null, "us-east-1");
+
+        service.deleteReplicationGroup("grp");
+
+        assertEquals(16379, service.createCacheCluster(cacheClusterRequest("next", "redis", 1))
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
     void deletingARestoredGroupFreesThePortItActuallyHolds() {
         service.createReplicationGroup("persisted", "d", AuthMode.NO_AUTH, null, "us-east-1");
         ElastiCacheService restarted = serviceAfterRestart();
