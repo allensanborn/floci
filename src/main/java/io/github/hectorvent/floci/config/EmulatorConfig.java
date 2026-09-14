@@ -370,7 +370,8 @@ public interface EmulatorConfig {
     interface CloudWatchLogsStorageConfig {
         Optional<String> mode();
 
-        @WithDefault("5000")
+        // Log events are the largest and most write-heavy store, so they flush less often than the rest.
+        @WithDefault("15000")
         long flushIntervalMs();
     }
 
@@ -672,6 +673,7 @@ public interface EmulatorConfig {
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
         ResourceGroupsTaggingServiceConfig tagging();
+        BedrockServiceConfig bedrock();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
         MwaaServiceConfig mwaa();
@@ -702,6 +704,8 @@ public interface EmulatorConfig {
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
+        OamServiceConfig oam();
+        BcmPricingCalculatorServiceConfig bcmPricingCalculator();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -724,6 +728,7 @@ public interface EmulatorConfig {
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
         SsoAdminServiceConfig ssoadmin();
+        SsoOidcServiceConfig ssooidc();
         Macie2ServiceConfig macie2();
         AccountServiceConfig account();
         AccessAnalyzerServiceConfig accessanalyzer();
@@ -733,11 +738,15 @@ public interface EmulatorConfig {
         SecurityHubServiceConfig securityhub();
         DetectiveServiceConfig detective();
         ServiceQuotasServiceConfig servicequotas();
+        VerifiedPermissionsServiceConfig verifiedpermissions();
         RamServiceConfig ram();
         ControlCatalogServiceConfig controlcatalog();
         ControlTowerServiceConfig controltower();
         ConnectServiceConfig connect();
+        AppIntegrationsServiceConfig appintegrations();
         CognitoIdentityServiceConfig cognitoidentity();
+        GlobalAcceleratorServiceConfig globalaccelerator();
+        DataSyncServiceConfig datasync();
 
         ApsServiceConfig aps();
 
@@ -752,7 +761,22 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface AppIntegrationsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface CognitoIdentityServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface GlobalAcceleratorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface DataSyncServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -760,6 +784,13 @@ public interface EmulatorConfig {
     interface SsoAdminServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface SsoOidcServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        Optional<String> localPrincipalId();
     }
 
     interface Macie2ServiceConfig {
@@ -780,6 +811,9 @@ public interface EmulatorConfig {
     interface IdentityStoreServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("floci-scim-token")
+        String scimBearerToken();
     }
 
     interface BudgetsServiceConfig {
@@ -913,6 +947,17 @@ public interface EmulatorConfig {
     interface ServiceQuotasServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface VerifiedPermissionsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When set, Floci uses this URL and skips Cedar sidecar container management. */
+        Optional<String> cedarUrl();
+
+        @WithDefault("floci/floci:latest-cedar")
+        String cedarImage();
     }
 
     interface RamServiceConfig {
@@ -1289,6 +1334,21 @@ public interface EmulatorConfig {
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();
+
+        // Default lifetime for GetClusterCredentials / GetClusterCredentialsWithIAM when
+        // DurationSeconds is omitted. AWS allows 900 to 3600.
+        @WithDefault("900")
+        int defaultCredentialDurationSeconds();
+
+        // Bounds for the per-cluster auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsServiceConfig {
@@ -1325,6 +1385,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+
+        // Bounds for the per-instance auth proxy: how long a client has to complete the
+        // startup/auth handshake, how long a backend connect attempt may take, and how many
+        // concurrent connections the proxy accepts before refusing new ones.
+        @WithDefault("10000")
+        int proxyHandshakeTimeoutMillis();
+        @WithDefault("5000")
+        int proxyBackendConnectTimeoutMillis();
+        @WithDefault("100")
+        int proxyMaxConnections();
     }
 
     interface RdsDataServiceConfig {
@@ -1445,6 +1515,14 @@ public interface EmulatorConfig {
 
         @WithDefault("10000")
         int maxEventsPerQuery();
+
+        /**
+         * Upper bound on log events kept across all groups. The store is one JSON document rewritten
+         * in full on every flush, so an unbounded store turns a chatty or retrying Lambda into a
+         * sustained multi-hundred-MB/s disk writer. Oldest events are evicted first once exceeded.
+         */
+        @WithDefault("20000")
+        int maxStoredEvents();
 
         /**
          * Artificial Logs Insights query completion delay, in milliseconds. With the default 0,
@@ -1704,9 +1782,31 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+
+        /**
+         * Approved parent directories for task definition host volume bind mounts
+         * (volumes[].host.sourcePath). A sourcePath must resolve under one of these roots.
+         * Empty (the default) rejects every host volume sourcePath unless
+         * {@link #allowUnsafeHostVolumes()} is set, subject to the always-on traversal,
+         * bare-root, and Docker socket blocks below.
+         */
+        Optional<List<String>> hostVolumeRoots();
+
+        /**
+         * When true, bypasses the {@link #hostVolumeRoots()} allowlist check for host volumes,
+         * allowing any absolute path. Traversal segments, the bare root "/", and the Docker
+         * socket (or any ancestor directory that contains it) are still always rejected.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeHostVolumes();
     }
 
     interface ResourceGroupsTaggingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BedrockServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1868,6 +1968,16 @@ public interface EmulatorConfig {
         /** Seconds to wait for in-flight schema workers on shutdown. Env: FLOCI_SERVICES_APPSYNC_SCHEMA_WORKER_SHUTDOWN_TIMEOUT_SECONDS */
         @WithDefault("30")
         int schemaWorkerShutdownTimeoutSeconds();
+    }
+
+    interface OamServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface BcmPricingCalculatorServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -2082,6 +2192,28 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS (comma-separated)
          */
         Optional<List<String>> extraHosts();
+
+        /**
+         * Accept a {@code Layers} ARN naming another account, recording it on the function
+         * without mounting its content. Off by default, because it broadens what CreateFunction
+         * and UpdateFunctionConfiguration accept beyond what AWS does.
+         *
+         * <p>On the live service a foreign-account layer resolves through its resource policy:
+         * an AWS-managed public layer succeeds, and everything else is AccessDeniedException.
+         * Floci implements no layer permissions, so it cannot tell those apart. The default
+         * answers both the way AWS answers the second, which is the faithful choice for a
+         * compatibility layer. Turn this on to attach public layers such as Powertools, the
+         * AppConfig extension or a vendor-published layer, at the cost of also accepting an
+         * ARN AWS would refuse. The content is never fetched either way, so a function whose
+         * behaviour depends on the layer will not run correctly here.
+         *
+         * <p>A layer ARN outside the {@code aws} partition is rejected regardless: partitions
+         * are isolated, so no resource policy can make one readable.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS
+         */
+        @WithDefault("false")
+        boolean acceptExternalLayerArns();
 
         /**
          * Concurrent executions ceiling applied per region. AWS Lambda's
@@ -2474,7 +2606,9 @@ public interface EmulatorConfig {
         String defaultPostgresImage();
 
         /** Airflow versions environments may request. Combined with the image tag
-         *  {@code apache/airflow:<version>-python3.12}. */
+         *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
+         *  version real Amazon MWAA runs for that Airflow version: see
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
         @WithDefault("2.10.5,2.9.3,2.8.4")
         List<String> supportedVersions();
 

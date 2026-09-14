@@ -368,6 +368,48 @@ class DynamoDbAccessPathIntegrationTest {
 
     @Test
     @Order(10)
+    void queryRejectsExclusiveStartKeyOutsideKeyCondition() {
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p2"}},
+                  "ExclusiveStartKey":{"pk":{"S":"p1"},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "The provided starting key is outside query boundaries based on provided condition"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditions":{
+                    "pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"p2"}]}
+                  },
+                  "ExclusiveStartKey":{"pk":{"S":"p1"},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "The provided starting key is outside query boundaries based on provided condition"));
+
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "KeyConditionExpression":"pk = :pk",
+                  "ExpressionAttributeValues":{":pk":{"S":"p1"}},
+                  "ExclusiveStartKey":{"pk":{"S":"p1"},"sk":{"S":"s1"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(0));
+    }
+
+    @Test
+    @Order(10)
     void queryRejectsMalformedNumericExclusiveStartKey() {
         String numericTable = TABLE + "-numeric";
         request("DynamoDB_20120810.CreateTable", """

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.backup.BackupService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
@@ -28,11 +29,13 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayApiKeyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayDomainCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingLifecycleHookCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingScalingPolicyCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BackupVaultCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.BatchCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CdkMetadataCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
@@ -62,9 +65,13 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaEve
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LambdaVersionAliasCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SchedulerScheduleGroupCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
@@ -93,6 +100,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
@@ -134,6 +142,7 @@ final class CfnProvisionerFixture {
         private SnsService snsService;
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
+        private AppSyncService appSyncService;
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
@@ -178,6 +187,7 @@ final class CfnProvisionerFixture {
         private SqsService sqsService;
         private WafV2Service wafV2Service;
         private BackupService backupService;
+        private RedshiftService redshiftService;
         private CloudFormationResourceRegistry resourceRegistry;
         private boolean registryChosenByTest;
         private CfnDynamicReferences dynamicReferences;
@@ -215,6 +225,7 @@ final class CfnProvisionerFixture {
          * behind silently.
          */
         private List<CfnResourceProvisioner> inferredProvisioners() {
+            ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
             if (s3Service != null) {
@@ -274,11 +285,15 @@ final class CfnProvisionerFixture {
                 discovered.add(new ApiGatewayDomainCfnProvisioner(apiGatewayService));
             }
             if (autoScalingService != null) {
+                discovered.add(new AutoScalingGroupCfnProvisioner(autoScalingService));
                 discovered.add(new AutoScalingLifecycleHookCfnProvisioner(autoScalingService));
                 discovered.add(new AutoScalingScalingPolicyCfnProvisioner(autoScalingService));
             }
             if (acmService != null) {
                 discovered.add(new AcmCfnProvisioner(acmService));
+            }
+            if (appSyncService != null) {
+                discovered.add(new AppSyncCfnProvisioner(appSyncService));
             }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
@@ -316,6 +331,14 @@ final class CfnProvisionerFixture {
             if (batchService != null) {
                 discovered.add(new BatchCfnProvisioner(batchService));
             }
+            if (rdsService != null) {
+                discovered.add(new RdsCfnProvisioner(rdsService, dynamicReferences));
+            }
+            if (secretsManagerService != null) {
+                discovered.add(new SecretsManagerCfnProvisioner(secretsManagerService));
+                discovered.add(new SecretTargetAttachmentCfnProvisioner(
+                        secretsManagerService, rdsService, docDbService, objectMapper));
+            }
             if (wafV2Service != null) {
                 discovered.add(new WafV2CfnProvisioner(wafV2Service));
             }
@@ -337,6 +360,9 @@ final class CfnProvisionerFixture {
             if (schedulerService != null) {
                 discovered.add(new SchedulerScheduleGroupCfnProvisioner(schedulerService));
             }
+            if (redshiftService != null) {
+                discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
+            }
             return discovered;
         }
 
@@ -357,6 +383,11 @@ final class CfnProvisionerFixture {
 
         public Builder lambda(LambdaService v) {
             this.lambdaService = v;
+            return this;
+        }
+
+        public Builder appSync(AppSyncService v) {
+            this.appSyncService = v;
             return this;
         }
 
@@ -570,6 +601,15 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder redshiftService(RedshiftService s) {
+            this.redshiftService = s;
+            return this;
+        }
+
+        public Builder redshift(RedshiftService s) {
+            return redshiftService(s);
+        }
+
         public Builder registry(CloudFormationResourceRegistry v) {
             this.resourceRegistry = v;
             this.registryChosenByTest = true;
@@ -586,6 +626,21 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        /**
+         * Wires {@link CfnDynamicReferences} from the services already named, the way CDI does in
+         * production, so a test resolving {{@code resolve:ssm:...}} does not have to know that
+         * resolution moved out of the provisioner.
+         *
+         * <p>Called before the registry is built, not only from {@link #build()}: RdsCfnProvisioner
+         * takes it as a constructor argument, so inferring the provisioners needs it in hand.
+         */
+        private void ensureDynamicReferences() {
+            if (dynamicReferences == null) {
+                dynamicReferences = new CfnDynamicReferences(
+                        secretsManagerService, ssmService, objectMapper);
+            }
+        }
+
         /** The registry {@link #build()} would use: explicit if the test chose one, else inferred. */
         CloudFormationResourceRegistry buildRegistry() {
             return registryChosenByTest
@@ -597,13 +652,7 @@ final class CfnProvisionerFixture {
             if (!registryChosenByTest) {
                 resourceRegistry = buildRegistry();
             }
-            if (dynamicReferences == null) {
-                // Wire it from the services already named, the way CDI does in production, so a
-                // test resolving {{resolve:ssm:...}} or {{resolve:secretsmanager:...}} does not
-                // have to know that resolution moved out of the provisioner.
-                dynamicReferences = new CfnDynamicReferences(
-                        secretsManagerService, ssmService, objectMapper);
-            }
+            ensureDynamicReferences();
             return new CloudFormationResourceProvisioner(
                     s3Service,
                     snsService,
@@ -612,7 +661,6 @@ final class CfnProvisionerFixture {
                     iamService,
                     ssmService,
                     kmsService,
-                    secretsManagerService,
                     apiGatewayService,
                     apiGatewayV2Service,
                     ecrService,
@@ -623,14 +671,11 @@ final class CfnProvisionerFixture {
                     reachableEndpoint,
                     stepFunctionsService,
                     ec2Service,
-                    rdsService,
                     eksService,
                     logsService,
                     kinesisService,
                     cloudWatchMetricsService,
-                    autoScalingService,
                     firehoseService,
-                    docDbService,
                     cloudFrontService,
                     resourceRegistry,
                     dynamicReferences,
