@@ -54,12 +54,14 @@ replication groups.
 An id is taken across all three at once: a standalone cache cluster, a Memcached cluster and a
 replication group cannot share one. Two of them would have `DescribeCacheClusters` report the same
 id twice, and for a cache cluster against a replication group it is worse, since Floci names both
-their containers `valkey-<id>` and keys both their proxies by it. The second create is refused
-rather than allowed to remove the first's container.
+their containers `valkey-<id>` and keys both their proxies by it. Whichever create arrives second
+is refused, whether it is `CreateCacheCluster` or `CreateReplicationGroup`, rather than allowed to
+remove the first's container.
 
-`CacheSubnetGroupName` must name a subnet group that exists, as on AWS. (`CreateReplicationGroup`
-does not check this yet, so a replication group can still be created against a name nothing
-resolves.)
+`CacheSubnetGroupName` must name a subnet group that exists, as on AWS, on the `Engine=redis` and
+`Engine=valkey` paths. `Engine=memcached` drops the parameter: it is neither checked nor echoed
+back. (`CreateReplicationGroup` does not check it either, so a replication group can still be
+created against a name nothing resolves.)
 
 After a restart, the ports of records that are not re-provisioned are reserved before Floci serves
 anything, so a create is never handed a port a surviving cluster or replication group still
