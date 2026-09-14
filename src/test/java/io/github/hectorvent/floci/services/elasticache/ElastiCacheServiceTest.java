@@ -1246,6 +1246,51 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void deletingAGroupThatNeverHeldItsPortDoesNotFreeTheHoldersPort() {
+        // The same asymmetry on the replication-group side: a group written straight into the
+        // store advertises 16379 without ever reserving it, so its delete must not free the
+        // reservation the cluster is holding.
+        service.createCacheCluster(cacheClusterRequest("holder", "redis", 1));
+        AccountAwareStorageBackend<ReplicationGroup> store = storageFactory.create("elasticache",
+                "elasticache-groups.json", new TypeReference<Map<String, ReplicationGroup>>() {});
+        store.put("squatter", new ReplicationGroup("squatter", "d", ReplicationGroupStatus.AVAILABLE,
+                AuthMode.NO_AUTH, new Endpoint("localhost", 16379), Instant.now(), 16379));
+
+        service.deleteReplicationGroup("squatter");
+
+        assertEquals(16380, service.createCacheCluster(cacheClusterRequest("next", "redis", 1))
+                        .getConfigurationEndpoint().port(),
+                "16379 is still held by the cluster that actually reserved it");
+    }
+
+    @Test
+    void deletingARestoredGroupFreesThePortItActuallyHolds() {
+        service.createReplicationGroup("persisted", "d", AuthMode.NO_AUTH, null, "us-east-1");
+        ElastiCacheService restarted = serviceAfterRestart();
+        restarted.restorePersistedRuntime().join();
+        restarted.createCacheCluster(cacheClusterRequest("after", "redis", 1));
+
+        restarted.deleteReplicationGroup("persisted");
+
+        // 16379 is free again because that group owned it; 16380 is still the cluster's.
+        assertEquals(16379, restarted.createCacheCluster(cacheClusterRequest("third", "redis", 1))
+                .getConfigurationEndpoint().port());
+    }
+
+    @Test
+    void aReplicationGroupCannotTakeTheIdOfAMemcachedCluster() {
+        // The third store counts too: CreateReplicationGroup would otherwise name a group after
+        // a live memcached cluster and take over its container and proxy registration.
+        memcachedService().createCacheCluster("shared-id");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createReplicationGroup(
+                "shared-id", "d", AuthMode.NO_AUTH, null, "us-east-1"));
+
+        assertEquals("ReplicationGroupAlreadyExistsFault", ex.getErrorCode());
+        verify(containerManager, never()).tryStart(eq("shared-id"), anyString());
+    }
+
+    @Test
     void aPersistedReplicationGroupAlsoKeepsItsPortAcrossARestart() {
         service.createReplicationGroup("grp", "d", AuthMode.NO_AUTH, null, "us-east-1");
 

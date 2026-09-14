@@ -87,12 +87,14 @@ public class ElastiCacheService implements ResourceProvider {
      */
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     /**
-     * Standalone cache clusters whose advertised port this process holds in {@link #usedPorts}.
-     * A record restored from disk whose port was already taken keeps advertising it but does not
-     * own it, and a delete that released it anyway would hand a live cluster's port to the next
-     * create.
+     * Records whose advertised port this process holds in {@link #usedPorts}: standalone cache
+     * clusters, and the replication groups that advertise one port of their own rather than a
+     * port per node. A record restored from disk whose port was already taken keeps advertising
+     * it but does not own it, and a delete that released it anyway would hand a live record's
+     * port to the next create. One set for both because an id is unique across the stores, so
+     * the two kinds cannot collide here either.
      */
-    private final Set<String> clustersHoldingTheirPort = ConcurrentHashMap.newKeySet();
+    private final Set<String> recordsHoldingTheirPort = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> parameterGroupLocks = new ConcurrentHashMap<>();
     /**
      * Parameter groups claimed by in-flight creates, keyed by account and name (see
@@ -186,8 +188,10 @@ public class ElastiCacheService implements ResourceProvider {
         // DeleteCacheParameterGroup sees the dependency before the stored-groups scan can.
         String parameterGroupReservation = reserveParameterGroup(request.cacheParameterGroupName());
         try {
-            // A standalone cache cluster of that id counts as taken: see provisioningIds.
-            if (groups.get(groupId).isPresent() || cacheClusters.get(groupId).isPresent()) {
+            // A standalone cache cluster of that id counts as taken, memcached included: see
+            // provisioningIds, and cacheClusterIdTaken for the same test the other way round.
+            if (groups.get(groupId).isPresent() || cacheClusters.get(groupId).isPresent()
+                    || memcachedClusters.get(groupId).isPresent()) {
                 throw new AwsException("ReplicationGroupAlreadyExistsFault",
                         "Replication group " + groupId + " already exists.", 400);
             }
@@ -296,6 +300,8 @@ public class ElastiCacheService implements ResourceProvider {
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the cache do not until a daemon appears.", groupId);
                 }
+                // Under the same monitor as the put, for the reason given on recordsHoldingTheirPort.
+                recordsHoldingTheirPort.add(groupId);
             }
 
             LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
@@ -610,7 +616,7 @@ public class ElastiCacheService implements ResourceProvider {
                 continue;
             }
             if (usedPorts.add(endpoint.port())) {
-                clustersHoldingTheirPort.add(cluster.getCacheClusterId());
+                recordsHoldingTheirPort.add(cluster.getCacheClusterId());
             } else {
                 LOG.warnv("Cache cluster {0} came back advertising port {1}, which is already in "
                         + "use. Its endpoint is not served by this cluster.",
@@ -624,7 +630,9 @@ public class ElastiCacheService implements ResourceProvider {
             if (group.getProxyPort() <= 0 || group.getStatus() == ReplicationGroupStatus.DELETING) {
                 continue;
             }
-            if (!usedPorts.add(group.getProxyPort())) {
+            if (usedPorts.add(group.getProxyPort())) {
+                recordsHoldingTheirPort.add(group.getReplicationGroupId());
+            } else {
                 LOG.warnv("Replication group {0} came back advertising port {1}, which is already "
                         + "in use. Its endpoint is not served by this group.",
                         group.getReplicationGroupId(), String.valueOf(group.getProxyPort()));
@@ -715,6 +723,7 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
         } finally {
             groups.delete(groupId);
+            recordsHoldingTheirPort.remove(groupId);
             releaseProxyPort(proxyPort);
         }
     }
@@ -768,7 +777,11 @@ public class ElastiCacheService implements ResourceProvider {
                             group.getContainerId(), groupId, group.getContainerHost(), group.getContainerPort()));
                 }
 
-                releaseProxyPort(group.getProxyPort());
+                // Only a port this process reserved for this record, as on the cluster path: a
+                // restored group whose port was already taken advertises one it does not own.
+                if (recordsHoldingTheirPort.remove(groupId)) {
+                    releaseProxyPort(group.getProxyPort());
+                }
             }
             groups.delete(groupId);
             LOG.infov("Replication group {0} deleted", groupId);
@@ -934,9 +947,11 @@ public class ElastiCacheService implements ResourceProvider {
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the cache do not until a daemon appears.", clusterId);
                 }
+                // Under the same monitor as the put: a delete slipping into the gap would find
+                // no claim on the port and leave the reservation behind for good.
+                recordsHoldingTheirPort.add(clusterId);
             }
 
-            clustersHoldingTheirPort.add(clusterId);
             LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
                     cluster.getConfigurationEndpoint().address(), String.valueOf(proxyPort));
             return cluster;
@@ -994,7 +1009,7 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.warnv("Error stopping container for cache cluster {0}: {1}", clusterId, e.getMessage());
         } finally {
             cacheClusters.delete(clusterId);
-            clustersHoldingTheirPort.remove(clusterId);
+            recordsHoldingTheirPort.remove(clusterId);
             releaseProxyPort(proxyPort);
         }
     }
@@ -1032,7 +1047,7 @@ public class ElastiCacheService implements ResourceProvider {
             // Only a port this process reserved for this record: a restored cluster whose port
             // was already taken advertises one it does not own, and freeing it would hand the
             // holder's port to the next create.
-            if (cluster.getConfigurationEndpoint() != null && clustersHoldingTheirPort.remove(clusterId)) {
+            if (cluster.getConfigurationEndpoint() != null && recordsHoldingTheirPort.remove(clusterId)) {
                 releaseProxyPort(cluster.getConfigurationEndpoint().port());
             }
 
