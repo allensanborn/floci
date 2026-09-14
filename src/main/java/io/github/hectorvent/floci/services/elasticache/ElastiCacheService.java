@@ -80,12 +80,13 @@ public class ElastiCacheService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     /**
-     * Ids claimed by in-flight creates, for replication groups and standalone cache clusters
-     * alike. One set, because the two share a namespace in floci whatever AWS does with them:
-     * both name their container {@code valkey-<id>} and register their proxy under the id, so a
-     * second create of a live id would remove the first's container and orphan its listener.
+     * Ids claimed by in-flight creates: replication groups, standalone cache clusters and the
+     * Memcached clusters {@link ElastiCacheMemcachedService} creates, all claiming against the
+     * one instance so a create on either side sees the other's claim. Both redis paths name
+     * their container {@code valkey-<id>} and register their proxy under the id, so a second
+     * create of a live id would remove the first's container and orphan its listener.
      */
-    private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
+    private final ElastiCacheProvisioningIds provisioningIds;
     /**
      * Records whose advertised port this process holds in {@link #usedPorts}: standalone cache
      * clusters, and the replication groups that advertise one port of their own rather than a
@@ -113,8 +114,10 @@ public class ElastiCacheService implements ResourceProvider {
                               EmulatorConfig config,
                               Ec2Service ec2Service,
                               RegionResolver regionResolver,
-                              KmsService kmsService) {
+                              KmsService kmsService,
+                              ElastiCacheProvisioningIds provisioningIds) {
         this.kmsService = kmsService;
+        this.provisioningIds = provisioningIds;
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.clusterFormation = clusterFormation;
@@ -197,7 +200,7 @@ public class ElastiCacheService implements ResourceProvider {
             }
             // Claim the id for the whole provisioning attempt so a concurrent create can't race
             // ahead and be stopped by this request's handle-less rollback fallback.
-            if (!provisioningIds.add(groupId)) {
+            if (!provisioningIds.claim(groupId)) {
                 throw new AwsException("ReplicationGroupAlreadyExistsFault",
                         "Replication group " + groupId + " is already being created.", 400);
             }
@@ -208,7 +211,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 return provisionSingleNodeGroup(request, resolvedSettings);
             } finally {
-                provisioningIds.remove(groupId);
+                provisioningIds.release(groupId);
             }
         } finally {
             releaseParameterGroup(parameterGroupReservation);
@@ -840,14 +843,14 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("CacheClusterAlreadyExists",
                         "Cache cluster " + clusterId + " already exists.", 400);
             }
-            if (!provisioningIds.add(clusterId)) {
+            if (!provisioningIds.claim(clusterId)) {
                 throw new AwsException("CacheClusterAlreadyExists",
                         "Cache cluster " + clusterId + " is already being created.", 400);
             }
             try {
                 return provisionCacheCluster(request, engine);
             } finally {
-                provisioningIds.remove(clusterId);
+                provisioningIds.release(clusterId);
             }
         } finally {
             releaseParameterGroup(parameterGroupReservation);

@@ -67,11 +67,13 @@ class ElastiCacheServiceTest {
     private StorageFactory storageFactory;
     private ElastiCacheMemcachedContainerManager memcachedContainerManager;
     private Ec2Service ec2Service;
+    private ElastiCacheProvisioningIds provisioningIds;
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheContainerManager.class);
         proxyManager = mock(ElastiCacheProxyManager.class);
+        provisioningIds = new ElastiCacheProvisioningIds();
         storageFactory = mock(StorageFactory.class);
         config = mock(EmulatorConfig.class);
 
@@ -103,7 +105,7 @@ class ElastiCacheServiceTest {
         clusterFormation = mock(ValkeyClusterFormation.class);
         service = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService);
+                kmsService, provisioningIds);
     }
 
     @Test
@@ -131,7 +133,7 @@ class ElastiCacheServiceTest {
         ElastiCacheService svc = new ElastiCacheService(cm, pm, mock(ValkeyClusterFormation.class),
                 sf, cfg, org.mockito.Mockito.mock(Ec2Service.class),
                 new RegionResolver("us-east-1", "000000000000"),
-                org.mockito.Mockito.mock(KmsService.class));
+                org.mockito.Mockito.mock(KmsService.class), provisioningIds);
 
         svc.createReplicationGroup("g1", "d", AuthMode.PASSWORD, null, "us-east-1");
 
@@ -489,7 +491,7 @@ class ElastiCacheServiceTest {
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class));
+                new RegionResolver("us-east-1", "000000000000"), mock(KmsService.class), new ElastiCacheProvisioningIds());
     }
 
     private static void stubPerNodeContainers(ElastiCacheContainerManager containerManager) {
@@ -747,7 +749,7 @@ class ElastiCacheServiceTest {
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, org.mockito.Mockito.mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
         svc.createReplicationGroup("g1", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
         pausing.pauseOn(PausingStorageBackend.Call.PUT, "g1");
@@ -866,7 +868,7 @@ class ElastiCacheServiceTest {
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), requestContextInstance, "000000000000"));
         ElastiCacheService svc = new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 factory, config, mock(Ec2Service.class),
-                new RegionResolver("us-east-1", "000000000000"), kmsService);
+                new RegionResolver("us-east-1", "000000000000"), kmsService, provisioningIds);
 
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
@@ -1187,11 +1189,11 @@ class ElastiCacheServiceTest {
     private ElastiCacheService serviceAfterRestart() {
         return new ElastiCacheService(containerManager, proxyManager, clusterFormation,
                 storageFactory, config, ec2Service, new RegionResolver("us-east-1", "000000000000"),
-                kmsService);
+                kmsService, provisioningIds);
     }
 
     private ElastiCacheMemcachedService memcachedService() {
-        return new ElastiCacheMemcachedService(memcachedContainerManager, storageFactory, config);
+        return new ElastiCacheMemcachedService(memcachedContainerManager, storageFactory, config, provisioningIds);
     }
 
     @Test
@@ -1340,6 +1342,41 @@ class ElastiCacheServiceTest {
                         .getErrorCode());
         verify(memcachedContainerManager, never()).tryStart(eq("redis-id"), anyString());
         verify(memcachedContainerManager, never()).tryStart(eq("group-id"), anyString());
+    }
+
+    @Test
+    void aMemcachedCreateIsRefusedWhileAReplicationGroupCreateHoldsTheSameIdInFlight()
+            throws InterruptedException {
+        // The stores were the only thing the memcached path consulted, and neither path writes
+        // its record until its container has started. Held in that window, a group create and a
+        // memcached create for one id both saw three empty stores and both went on to write,
+        // leaving the id in two stores with one describe reporting it twice.
+        ElastiCacheMemcachedService memcached = memcachedService();
+        CountDownLatch startedLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+            startedLatch.countDown();
+            assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
+            return new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379);
+        });
+
+        Thread groupCreate = new Thread(() ->
+                service.createReplicationGroup("shared-id", "d", AuthMode.NO_AUTH, null, "us-east-1"));
+        groupCreate.start();
+        assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> memcached.createCacheCluster("shared-id"));
+        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        verify(memcachedContainerManager, never()).tryStart(eq("shared-id"), anyString());
+
+        releaseLatch.countDown();
+        groupCreate.join(5000);
+
+        // One record for the id, in the store the winning create writes.
+        assertEquals("shared-id", service.getReplicationGroup("shared-id").getReplicationGroupId());
+        assertTrue(memcached.listCacheClusters(null).isEmpty(),
+                "the refused memcached create must not have written a second record for the id");
     }
 
     @Test
