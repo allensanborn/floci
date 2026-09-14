@@ -39,12 +39,13 @@ those subnets actually have.
 - `DescribeReplicationSubnetGroups` paginates on `MaxRecords` and `Marker`. `MaxRecords`
   defaults to 100 and must be between 20 and 100; a value outside that range is rejected
   with `InvalidParameterValueException` rather than clamped, as AWS does. Results are
-  ordered by identifier and `Marker` carries the last identifier of the page, so a page
-  stays resumable across groups created or deleted between requests. `Marker` is returned
+  ordered by identifier and `Marker` is an opaque cursor that resumes after the last item
+  of the page, so a page stays resumable across groups created or deleted between
+  requests. `Marker` is returned
   only when a further page exists, never on the last one.
 - `ReplicationSubnetGroupDescription` is required, must not be blank, and must contain only
   printable characters. A control character such as `0x01` returns
-  `InvalidParameterValueException`, matching the DMS request model.
+  `InvalidParameterValueException`.
 - A member of the wrong JSON type returns `SerializationException`, as AWS does, rather than
   being coerced. That covers a `Tags` entry whose `Value` is an object, a filter whose
   `Values` is not a list, a non-string element in `ResourceArnList`, `SubnetIds` or
