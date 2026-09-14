@@ -404,7 +404,7 @@ class SqsIntegrationTest {
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
         try {
-            String bigBody = "x".repeat(100_000);
+            String bigBody = "x".repeat(400_000);
             given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "SendMessageBatch")
@@ -773,8 +773,8 @@ class SqsIntegrationTest {
         try {
             Map<String, String> attributes = allQueueAttributes(attrQueueUrl);
 
-            assertEquals("262144", attributes.get("MaximumMessageSize"),
-                    "MaximumMessageSize must default to the AWS value of 262144 bytes");
+            assertEquals("1048576", attributes.get("MaximumMessageSize"),
+                    "MaximumMessageSize must default to the AWS value of 1048576 bytes");
             assertEquals("true", attributes.get("SqsManagedSseEnabled"),
                     "A queue without a KMS key reports SSE-SQS enabled");
             assertEquals("30", attributes.get("VisibilityTimeout"));
@@ -815,12 +815,12 @@ class SqsIntegrationTest {
                 .formParam("Action", "SetQueueAttributes")
                 .formParam("QueueUrl", limitQueueUrl)
                 .formParam("Attribute.1.Name", "MaximumMessageSize")
-                .formParam("Attribute.1.Value", "262145")
+                .formParam("Attribute.1.Value", "1048577")
             .when().post("/").then()
                 .statusCode(400)
                 .body(containsString("<Code>InvalidAttributeValue</Code>"));
 
-            assertEquals("262144", allQueueAttributes(limitQueueUrl).get("MaximumMessageSize"),
+            assertEquals("1048576", allQueueAttributes(limitQueueUrl).get("MaximumMessageSize"),
                     "A rejected SetQueueAttributes must leave the stored value untouched");
         } finally {
             given()

@@ -40,9 +40,10 @@ public class SqsService implements Resettable, ResourceProvider {
     private static final int MAX_RECEIVE_WAIT_TIME_SECONDS = 20;
     private static final int MAX_TERMINAL_MOVE_TASKS = 10;
     private static final Duration TERMINAL_MOVE_TASK_TTL = Duration.ofHours(1);
-    /** AWS accepts MaximumMessageSize between 1 KiB and 256 KiB; 256 KiB is also the default. */
+    /** AWS accepts MaximumMessageSize between 1 KiB and 1 MiB; 1 MiB is also the default.
+     * Both the maximum and the default were raised from 256 KiB in August 2025. */
     private static final int MIN_MAXIMUM_MESSAGE_SIZE = 1024;
-    private static final int AWS_MAXIMUM_MESSAGE_SIZE = 262144;
+    private static final int AWS_MAXIMUM_MESSAGE_SIZE = 1048576;
 
     private final StorageBackend<String, Queue> queueStore;
     private final StorageBackend<String, List<Message>> messageStore;

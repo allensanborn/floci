@@ -44,15 +44,15 @@ class ApplicationDefaultsTest {
     void productionConfigUsesTheAwsSqsMaximumMessageSize() throws IOException, NoSuchMethodException {
         JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
 
-        assertEquals(262144,
+        assertEquals(1048576,
                 config.path("floci").path("services").path("sqs").path("max-message-size").asInt(),
-                "production application.yml should use the AWS SQS maximum of 262144 bytes");
+                "production application.yml should use the AWS SQS maximum of 1048576 bytes");
 
         WithDefault fallback = EmulatorConfig.SqsServiceConfig.class
                 .getMethod("maxMessageSize")
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "maxMessageSize should declare a fallback default");
-        assertEquals("262144", fallback.value(),
+        assertEquals("1048576", fallback.value(),
                 "the EmulatorConfig fallback should match the AWS SQS maximum too");
     }
 
