@@ -117,6 +117,28 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void reservedWordNamespaceNamesAreRejectedByEveryOperation() {
+        // "select" and "user" pass the length and [a-z0-9-] rules, so only the reserved-word
+        // check can reject them. Asserting on create and on the read path as well, because
+        // update and delete reach the validator through getNamespace.
+        for (String reserved : List.of("select", "user")) {
+            assertEquals("ValidationException",
+                    assertThrows(AwsException.class, () -> create(reserved)).getErrorCode());
+            assertEquals("ValidationException",
+                    assertThrows(AwsException.class, () -> service.getNamespace(reserved, REGION)).getErrorCode());
+            assertEquals("ValidationException", assertThrows(AwsException.class,
+                    () -> service.deleteNamespace(reserved, REGION)).getErrorCode());
+            assertEquals("ValidationException", assertThrows(AwsException.class,
+                    () -> service.updateNamespace(reserved, null, "k", null, null, null, REGION)).getErrorCode());
+        }
+
+        // A name that merely looks SQL-ish is not reserved and must still be accepted, and the
+        // namespace must be readable back through a separate call rather than trusting create.
+        create("analytics");
+        assertEquals("analytics", service.getNamespace("analytics", REGION).getNamespaceName());
+    }
+
+    @Test
     void listIsScopedToTheRegionAndPaginates() {
         create("alpha-ns");
         create("beta-ns");
