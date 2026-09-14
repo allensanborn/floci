@@ -40,13 +40,17 @@ public class ElastiCacheMemcachedService {
     private final StorageBackend<String, ReplicationGroup> groups;
     private final ElastiCacheMemcachedContainerManager containerManager;
     private final EmulatorConfig config;
+    /** Shared with {@link ElastiCacheService}: one namespace, one set of in-flight claims. */
+    private final ElastiCacheProvisioningIds provisioningIds;
 
     @Inject
     public ElastiCacheMemcachedService(ElastiCacheMemcachedContainerManager containerManager,
                                        StorageFactory storageFactory,
-                                       EmulatorConfig config) {
+                                       EmulatorConfig config,
+                                       ElastiCacheProvisioningIds provisioningIds) {
         this.containerManager = containerManager;
         this.config = config;
+        this.provisioningIds = provisioningIds;
         this.clusters = storageFactory.create("elasticache", "elasticache-cache-clusters.json",
                 new TypeReference<Map<String, CacheCluster>>() {});
         this.redisClusters = storageFactory.create("elasticache", "elasticache-redis-clusters.json",
@@ -56,6 +60,23 @@ public class ElastiCacheMemcachedService {
     }
 
     public CacheCluster createCacheCluster(String clusterId) {
+        // Claimed before the store checks rather than after, because no create here or in
+        // ElastiCacheService persists its record until its container has started: a store check
+        // that passes is no promise the id is still free by the time this one writes. The claim
+        // is the same set the redis paths take, so of two concurrent creates for one id only the
+        // one that claims it reaches the stores at all.
+        if (!provisioningIds.claim(clusterId)) {
+            throw new AwsException("CacheClusterAlreadyExistsFault",
+                    "Cache cluster " + clusterId + " is already being created.", 400);
+        }
+        try {
+            return provisionCacheCluster(clusterId);
+        } finally {
+            provisioningIds.release(clusterId);
+        }
+    }
+
+    private CacheCluster provisionCacheCluster(String clusterId) {
         // Every store that answers DescribeCacheClusters, not just this one: two records sharing
         // an id would have one describe report it twice, each with a different engine.
         if (clusters.get(clusterId).isPresent()
