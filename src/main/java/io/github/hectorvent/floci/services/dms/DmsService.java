@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -16,7 +18,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -33,6 +34,9 @@ public class DmsService implements Resettable {
     private static final String SUBNET_GROUP_ID_FILTER = "replication-subnet-group-id";
     private static final int MINIMUM_AVAILABILITY_ZONES = 2;
     private static final String SUBNET_GROUP_ARN_RESOURCE_TYPE = "subgrp";
+    private static final int DEFAULT_MAX_RECORDS = 100;
+    private static final int MINIMUM_MAX_RECORDS = 20;
+    private static final int MAXIMUM_MAX_RECORDS = 100;
     private static final Set<String> RESERVED_TAG_PREFIXES = Set.of("aws:", "dms:");
 
     private final AccountAwareStorageBackend<ReplicationSubnetGroup> subnetGroups;
@@ -49,11 +53,7 @@ public class DmsService implements Resettable {
 
     public synchronized ReplicationSubnetGroup createReplicationSubnetGroup(JsonNode request, String region) {
         String identifier = requireIdentifier(request);
-        String description = text(request, "ReplicationSubnetGroupDescription");
-        if (description == null || description.isBlank()) {
-            throw invalidParameter("The parameter ReplicationSubnetGroupDescription must be provided"
-                    + " and must not be blank.");
-        }
+        String description = requireDescription(request);
         List<String> subnetIds = requireSubnetIds(request);
         if (subnetGroups.get(storageKey(region, identifier)).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsFault",
@@ -66,17 +66,28 @@ public class DmsService implements Resettable {
         return group;
     }
 
-    public List<ReplicationSubnetGroup> describeReplicationSubnetGroups(JsonNode request, String region) {
+    /**
+     * Pages by identifier through the shared opaque-cursor helper, so {@code Marker} stays
+     * resumable when a group is created or deleted between requests. DMS documents a default
+     * {@code MaxRecords} of 100 and a valid range of 20 to 100, and rejects a value outside that
+     * range rather than clamping it.
+     */
+    public PaginatedResult<ReplicationSubnetGroup> describeReplicationSubnetGroups(JsonNode request, String region) {
+        Integer maxRecords = maxRecords(request);
+        String marker = text(request, "Marker");
         List<String> requestedIdentifiers = identifierFilters(request);
+        List<ReplicationSubnetGroup> matching;
         if (!requestedIdentifiers.isEmpty()) {
-            return requestedIdentifiers.stream()
+            matching = requestedIdentifiers.stream()
                     .map(identifier -> subnetGroups.get(storageKey(region, identifier))
                             .orElseThrow(() -> notFound(identifier)))
                     .toList();
+        } else {
+            matching = subnetGroups.scan(key -> key.startsWith(region + "::"));
         }
-        return subnetGroups.scan(key -> key.startsWith(region + "::")).stream()
-                .sorted(Comparator.comparing(ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier))
-                .toList();
+        return Pagination.paginate(matching, ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier,
+                maxRecords, marker, DEFAULT_MAX_RECORDS, MAXIMUM_MAX_RECORDS,
+                "InvalidParameterValueException");
     }
 
     public synchronized void deleteReplicationSubnetGroup(JsonNode request, String region) {
@@ -200,6 +211,45 @@ public class DmsService implements Resettable {
             throw invalidParameter("ReplicationSubnetGroupIdentifier must not be \"default\".");
         }
         return identifier;
+    }
+
+    /**
+     * The DMS request model constrains the description to printable characters, so a value carrying
+     * a control character such as 0x01 is rejected here rather than persisted. Blank and absent stay
+     * the same parameter error they were.
+     */
+    private static String requireDescription(JsonNode request) {
+        String description = text(request, "ReplicationSubnetGroupDescription");
+        if (description == null || description.isBlank()) {
+            throw invalidParameter("The parameter ReplicationSubnetGroupDescription must be provided"
+                    + " and must not be blank.");
+        }
+        if (description.chars().anyMatch(Character::isISOControl)) {
+            throw invalidParameter("The parameter ReplicationSubnetGroupDescription must contain only"
+                    + " printable characters.");
+        }
+        return description;
+    }
+
+    /**
+     * {@code MaxRecords} is modelled as an integer, so a non-integer value is a serialization error
+     * rather than a parameter one. A value outside 20 to 100 is rejected, not clamped, which is
+     * what a live account does.
+     */
+    private static Integer maxRecords(JsonNode request) {
+        JsonNode node = request == null ? null : request.get("MaxRecords");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw serialization("MaxRecords must be an integer.");
+        }
+        int value = node.intValue();
+        if (value < MINIMUM_MAX_RECORDS || value > MAXIMUM_MAX_RECORDS) {
+            throw invalidParameter("Invalid value " + value + " for MaxRecords. Must be between "
+                    + MINIMUM_MAX_RECORDS + " and " + MAXIMUM_MAX_RECORDS + ".");
+        }
+        return value;
     }
 
     private static List<String> requireSubnetIds(JsonNode request) {

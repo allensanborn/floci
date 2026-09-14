@@ -3,12 +3,14 @@ package com.floci.test;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.databasemigration.DatabaseMigrationClient;
 import software.amazon.awssdk.services.databasemigration.model.DatabaseMigrationException;
+import software.amazon.awssdk.services.databasemigration.model.DescribeReplicationSubnetGroupsResponse;
 import software.amazon.awssdk.services.databasemigration.model.ReplicationSubnetGroup;
 import software.amazon.awssdk.services.databasemigration.model.Tag;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Subnet;
 import software.amazon.awssdk.services.sts.StsClient;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DmsTest {
 
     private static final String GROUP_ID = "sdk-compat-subnet-group";
+    private static final String PAGED_GROUP_PREFIX = "sdk-compat-page-";
+    private static final String CONTROL_CHAR_GROUP_ID = "sdk-compat-control-char";
 
     @Test
     void replicationSubnetGroupLifecycleUsesAwsSdkWireContract() {
@@ -64,6 +68,95 @@ class DmsTest {
                     () -> dms.describeReplicationSubnetGroups(request -> request
                             .filters(filter -> filter.name("replication-subnet-group-id").values(GROUP_ID))));
             assertEquals("ResourceNotFoundFault", deleted.awsErrorDetails().errorCode());
+        }
+    }
+
+    /**
+     * DMS pages this describe at a minimum MaxRecords of 20, so a second page needs more than 20
+     * groups to exist. Walk the pages by Marker and check the walk is a partition of what was
+     * created: every identifier once, none missing, non-final pages full, and no Marker handed back
+     * on the last page (an SDK paginator treats any Marker as "ask again" and would loop).
+     */
+    @Test
+    void describeReplicationSubnetGroupsPagesByMarker() {
+        List<String> subnetIds = twoSubnetsInOneVpcAcrossZones().stream().map(Subnet::subnetId).toList();
+        List<String> created = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            created.add(PAGED_GROUP_PREFIX + String.format("%02d", i));
+        }
+
+        try (DatabaseMigrationClient dms = TestFixtures.databaseMigrationClient()) {
+            for (String identifier : created) {
+                dms.createReplicationSubnetGroup(request -> request
+                        .replicationSubnetGroupIdentifier(identifier)
+                        .replicationSubnetGroupDescription("sdk pagination suite")
+                        .subnetIds(subnetIds));
+            }
+            try {
+                List<String> walked = new ArrayList<>();
+                String marker = null;
+                int pages = 0;
+                do {
+                    String resume = marker;
+                    DescribeReplicationSubnetGroupsResponse page = dms.describeReplicationSubnetGroups(
+                            request -> request.maxRecords(20).marker(resume));
+                    pages++;
+                    marker = page.marker();
+                    if (marker != null) {
+                        assertEquals(20, page.replicationSubnetGroups().size(),
+                                "a non-final page must be full");
+                    }
+                    page.replicationSubnetGroups()
+                            .forEach(g -> walked.add(g.replicationSubnetGroupIdentifier()));
+                } while (marker != null);
+
+                assertTrue(pages > 1, "25 groups at MaxRecords=20 must span more than one page");
+                assertEquals(walked.size(), walked.stream().distinct().count(), "a group was returned twice");
+                assertEquals(created, walked.stream()
+                        .filter(id -> id.startsWith(PAGED_GROUP_PREFIX))
+                        .sorted()
+                        .toList());
+            } finally {
+                for (String identifier : created) {
+                    dms.deleteReplicationSubnetGroup(request -> request
+                            .replicationSubnetGroupIdentifier(identifier));
+                }
+            }
+        }
+    }
+
+    @Test
+    void describeReplicationSubnetGroupsRejectsMaxRecordsOutsideTheDocumentedRange() {
+        try (DatabaseMigrationClient dms = TestFixtures.databaseMigrationClient()) {
+            for (int outOfRange : new int[] {19, 101}) {
+                DatabaseMigrationException rejected = assertThrows(DatabaseMigrationException.class,
+                        () -> dms.describeReplicationSubnetGroups(request -> request.maxRecords(outOfRange)));
+                assertEquals("InvalidParameterValueException", rejected.awsErrorDetails().errorCode());
+            }
+        }
+    }
+
+    /**
+     * The DMS request model allows only printable characters in the description, so a control
+     * character is rejected rather than persisted.
+     */
+    @Test
+    void createReplicationSubnetGroupRejectsANonPrintableDescription() {
+        List<String> subnetIds = twoSubnetsInOneVpcAcrossZones().stream().map(Subnet::subnetId).toList();
+
+        try (DatabaseMigrationClient dms = TestFixtures.databaseMigrationClient()) {
+            DatabaseMigrationException rejected = assertThrows(DatabaseMigrationException.class,
+                    () -> dms.createReplicationSubnetGroup(request -> request
+                            .replicationSubnetGroupIdentifier(CONTROL_CHAR_GROUP_ID)
+                            .replicationSubnetGroupDescription("sdk\u0001suite")
+                            .subnetIds(subnetIds)));
+            assertEquals("InvalidParameterValueException", rejected.awsErrorDetails().errorCode());
+
+            DatabaseMigrationException absent = assertThrows(DatabaseMigrationException.class,
+                    () -> dms.describeReplicationSubnetGroups(request -> request
+                            .filters(filter -> filter.name("replication-subnet-group-id")
+                                    .values(CONTROL_CHAR_GROUP_ID))));
+            assertEquals("ResourceNotFoundFault", absent.awsErrorDetails().errorCode());
         }
     }
 
