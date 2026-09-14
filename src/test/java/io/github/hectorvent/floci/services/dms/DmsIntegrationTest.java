@@ -2,9 +2,13 @@ package io.github.hectorvent.floci.services.dms;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
@@ -13,6 +17,9 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class DmsIntegrationTest {
@@ -73,6 +80,98 @@ class DmsIntegrationTest {
         dms("DescribeReplicationSubnetGroups")
                 .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\","
                         + "\"Values\":[\"tf-lifecycle\"]}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+    }
+
+    /**
+     * DMS pages at a minimum MaxRecords of 20, so a second page needs more than 20 groups. Walk the
+     * pages on the wire and check Marker resumes where the previous page stopped and is absent from
+     * the final response.
+     */
+    @Test
+    void describePagesOnMarkerAndOmitsItFromTheFinalPage() {
+        List<String> created = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            String identifier = "tf-page-" + String.format("%02d", i);
+            created.add(identifier);
+            dms("CreateReplicationSubnetGroup")
+                    .body(createBody(identifier))
+            .when()
+                    .post("/")
+            .then()
+                    .statusCode(200);
+        }
+        try {
+            List<String> walked = new ArrayList<>();
+            String marker = null;
+            int pages = 0;
+            do {
+                String body = marker == null
+                        ? "{\"MaxRecords\":20}"
+                        : "{\"MaxRecords\":20,\"Marker\":\"" + marker + "\"}";
+                Response page = dms("DescribeReplicationSubnetGroups")
+                        .body(body)
+                .when()
+                        .post("/")
+                .then()
+                        .statusCode(200)
+                        .extract().response();
+                pages++;
+                marker = page.path("Marker");
+                List<String> identifiers =
+                        page.path("ReplicationSubnetGroups.ReplicationSubnetGroupIdentifier");
+                if (marker != null) {
+                    assertEquals(20, identifiers.size(), "a non-final page must be full");
+                }
+                walked.addAll(identifiers);
+            } while (marker != null);
+
+            assertNull(marker, "the final page must not carry a Marker");
+            assertTrue(pages > 1, "25 groups at MaxRecords=20 must span more than one page");
+            assertEquals(walked.size(), walked.stream().distinct().count(), "a group was returned twice");
+            assertEquals(created, walked.stream().filter(id -> id.startsWith("tf-page-")).sorted().toList());
+        } finally {
+            created.forEach(identifier -> dms("DeleteReplicationSubnetGroup")
+                    .body("{\"ReplicationSubnetGroupIdentifier\":\"" + identifier + "\"}")
+                    .when()
+                    .post("/")
+                    .then()
+                    .statusCode(200));
+        }
+    }
+
+    @Test
+    void describeRejectsMaxRecordsOutsideTheDocumentedRange() {
+        for (int outOfRange : new int[] {19, 101}) {
+            dms("DescribeReplicationSubnetGroups")
+                    .body("{\"MaxRecords\":" + outOfRange + "}")
+            .when()
+                    .post("/")
+            .then()
+                    .statusCode(400)
+                    .body("__type", equalTo("InvalidParameterValueException"));
+        }
+    }
+
+    @Test
+    void createRejectsADescriptionCarryingAControlCharacter() {
+        dms("CreateReplicationSubnetGroup")
+                .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-control-char\","
+                        + "\"ReplicationSubnetGroupDescription\":\"terraform\\u0001managed\","
+                        + "\"SubnetIds\":[\"" + SUBNET_A + "\",\"" + SUBNET_B + "\"]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+
+        dms("DescribeReplicationSubnetGroups")
+                .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\","
+                        + "\"Values\":[\"tf-control-char\"]}]}")
         .when()
                 .post("/")
         .then()

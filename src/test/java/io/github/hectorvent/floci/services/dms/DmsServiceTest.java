@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -15,10 +16,13 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -61,7 +65,7 @@ class DmsServiceTest {
                 createRequest("Tf-Example", "example", "subnet-a", "subnet-b"), REGION);
 
         List<ReplicationSubnetGroup> described =
-                service.describeReplicationSubnetGroups(filterRequest("tf-example"), REGION);
+                service.describeReplicationSubnetGroups(filterRequest("tf-example"), REGION).items();
 
         assertEquals(1, described.size());
         ReplicationSubnetGroup group = described.getFirst();
@@ -138,7 +142,8 @@ class DmsServiceTest {
     void describeIsScopedToTheRequestRegion() {
         service.createReplicationSubnetGroup(createRequest("scoped", "example", "subnet-a", "subnet-b"), REGION);
 
-        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), "eu-west-1").isEmpty());
+        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), "eu-west-1")
+                .items().isEmpty());
     }
 
     @Test
@@ -146,6 +151,88 @@ class DmsServiceTest {
         AwsException notFound = assertThrows(AwsException.class,
                 () -> service.describeReplicationSubnetGroups(filterRequest("absent"), REGION));
         assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
+    }
+
+    @Test
+    void describeWalksEveryGroupAcrossPagesWithoutDuplicatesOrOmissions() {
+        List<String> created = createGroups(25);
+
+        PaginatedResult<ReplicationSubnetGroup> first =
+                service.describeReplicationSubnetGroups(pageRequest(20, null), REGION);
+        assertEquals(20, first.items().size());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<ReplicationSubnetGroup> second =
+                service.describeReplicationSubnetGroups(pageRequest(20, first.nextToken()), REGION);
+        assertEquals(5, second.items().size());
+        assertNull(second.nextToken(), "the final page must not carry a Marker");
+
+        List<String> walked = new ArrayList<>();
+        first.items().forEach(group -> walked.add(group.getReplicationSubnetGroupIdentifier()));
+        second.items().forEach(group -> walked.add(group.getReplicationSubnetGroupIdentifier()));
+        assertEquals(created, walked);
+    }
+
+    @Test
+    void describeResumesAfterTheMarkerEvenWhenAnEarlierGroupIsDeleted() {
+        createGroups(25);
+
+        PaginatedResult<ReplicationSubnetGroup> first =
+                service.describeReplicationSubnetGroups(pageRequest(20, null), REGION);
+        service.deleteReplicationSubnetGroup(identifierRequest("page-00"), REGION);
+
+        PaginatedResult<ReplicationSubnetGroup> second =
+                service.describeReplicationSubnetGroups(pageRequest(20, first.nextToken()), REGION);
+
+        assertEquals(List.of("page-20", "page-21", "page-22", "page-23", "page-24"),
+                second.items().stream().map(ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier).toList());
+    }
+
+    @Test
+    void describeDefaultsToOneHundredRecordsPerPage() {
+        createGroups(25);
+
+        PaginatedResult<ReplicationSubnetGroup> page =
+                service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION);
+
+        assertEquals(25, page.items().size());
+        assertNull(page.nextToken());
+    }
+
+    @Test
+    void describeRejectsMaxRecordsBelowTwenty() {
+        AwsException tooSmall = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(pageRequest(19, null), REGION));
+        assertEquals("InvalidParameterValueException", tooSmall.getErrorCode());
+    }
+
+    @Test
+    void describeRejectsMaxRecordsAboveOneHundred() {
+        AwsException tooLarge = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(pageRequest(101, null), REGION));
+        assertEquals("InvalidParameterValueException", tooLarge.getErrorCode());
+    }
+
+    @Test
+    void describeRejectsMaxRecordsThatIsNotAnInteger() {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("MaxRecords", "20");
+
+        AwsException wrongType = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(request, REGION));
+        assertEquals("SerializationException", wrongType.getErrorCode());
+    }
+
+    @Test
+    void createRejectsADescriptionCarryingAControlCharacter() {
+        ObjectNode request = createRequest("control-char", "terraform\u0001managed", "subnet-a", "subnet-b");
+
+        AwsException nonPrintable = assertThrows(AwsException.class,
+                () -> service.createReplicationSubnetGroup(request, REGION));
+        assertEquals("InvalidParameterValueException", nonPrintable.getErrorCode());
+        AwsException notStored = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(filterRequest("control-char"), REGION));
+        assertEquals("ResourceNotFoundFault", notStored.getErrorCode());
     }
 
     @Test
@@ -170,7 +257,7 @@ class DmsServiceTest {
         service.createReplicationSubnetGroup(createRequest("reset-me", "example", "subnet-a", "subnet-b"), REGION);
         service.clear();
 
-        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).isEmpty());
+        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).items().isEmpty());
     }
 
     @Test
@@ -431,6 +518,26 @@ class DmsServiceTest {
     private ObjectNode identifierRequest(String identifier) {
         ObjectNode request = mapper.createObjectNode();
         request.put("ReplicationSubnetGroupIdentifier", identifier);
+        return request;
+    }
+
+    private List<String> createGroups(int count) {
+        List<String> identifiers = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            String identifier = String.format("page-%02d", i);
+            service.createReplicationSubnetGroup(
+                    createRequest(identifier, "example", "subnet-a", "subnet-b"), REGION);
+            identifiers.add(identifier);
+        }
+        return identifiers;
+    }
+
+    private ObjectNode pageRequest(int maxRecords, String marker) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("MaxRecords", maxRecords);
+        if (marker != null) {
+            request.put("Marker", marker);
+        }
         return request;
     }
 

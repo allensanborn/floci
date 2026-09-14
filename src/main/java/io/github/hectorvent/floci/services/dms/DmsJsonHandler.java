@@ -4,13 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.dms.model.ReplicationSubnetGroup;
 import io.github.hectorvent.floci.services.dms.model.ResourceTag;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
-
-import java.util.List;
 
 @ApplicationScoped
 public class DmsJsonHandler {
@@ -33,10 +32,16 @@ public class DmsJsonHandler {
                 yield Response.ok(response).build();
             }
             case "DescribeReplicationSubnetGroups" -> {
-                List<ReplicationSubnetGroup> groups = service.describeReplicationSubnetGroups(request, region);
+                PaginatedResult<ReplicationSubnetGroup> page =
+                        service.describeReplicationSubnetGroups(request, region);
                 ObjectNode response = objectMapper.createObjectNode();
                 ArrayNode items = response.putArray("ReplicationSubnetGroups");
-                groups.forEach(group -> items.add(subnetGroup(group)));
+                page.items().forEach(group -> items.add(subnetGroup(group)));
+                // Marker is present only while another page remains: an SDK paginator treats any
+                // Marker at all as "ask again", so emitting one on the final page loops forever.
+                if (page.nextToken() != null) {
+                    response.put("Marker", page.nextToken());
+                }
                 yield Response.ok(response).build();
             }
             case "DeleteReplicationSubnetGroup" -> {
