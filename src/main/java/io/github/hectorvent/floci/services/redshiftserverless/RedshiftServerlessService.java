@@ -30,6 +30,40 @@ public class RedshiftServerlessService implements Resettable {
     private static final Pattern DB_NAME = Pattern.compile("[a-zA-Z][a-zA-Z_0-9+.@-]*");
     private static final Set<String> LOG_EXPORTS = Set.of("useractivitylog", "userlog", "connectionlog");
 
+    /**
+     * Amazon Redshift's SQL reserved words, which CreateNamespace rejects as namespace names even
+     * though they satisfy the length and character rules. Held lowercase because a namespace name
+     * is already constrained to lowercase letters, digits and hyphens, so a direct lookup suffices.
+     * Transcribed from https://docs.aws.amazon.com/redshift/latest/dg/r_pg_keywords.html
+     */
+    private static final Set<String> RESERVED_WORDS = Set.of(
+            "aes128", "aes256", "all", "allowoverwrite", "analyse", "analyze",
+            "and", "any", "array", "as", "asc", "authorization",
+            "az64", "backup", "between", "binary", "blanksasnull", "both",
+            "bytedict", "bzip2", "case", "cast", "check", "collate",
+            "column", "constraint", "create", "credentials", "cross", "current_date",
+            "current_time", "current_timestamp", "current_user", "current_user_id", "default", "deferrable",
+            "deflate", "defrag", "delta", "delta32k", "desc", "disable",
+            "distinct", "do", "else", "emptyasnull", "enable", "encode",
+            "encrypt", "encryption", "end", "except", "explicit", "false",
+            "for", "foreign", "freeze", "from", "full", "globaldict256",
+            "globaldict64k", "grant", "group", "gzip", "having", "identity",
+            "ignore", "ilike", "in", "initially", "inner", "intersect",
+            "interval", "into", "is", "isnull", "join", "leading",
+            "left", "like", "limit", "localtime", "localtimestamp", "lun",
+            "luns", "lzo", "lzop", "minus", "mostly16", "mostly32",
+            "mostly8", "natural", "new", "not", "notnull", "null",
+            "nulls", "off", "offline", "offset", "oid", "old",
+            "on", "only", "open", "or", "order", "outer",
+            "overlaps", "parallel", "partition", "percent", "permissions", "pivot",
+            "placing", "primary", "raw", "readratio", "recover", "references",
+            "rejectlog", "resort", "respect", "restore", "right", "select",
+            "session_user", "similar", "snapshot", "some", "sysdate", "system",
+            "table", "tag", "tdes", "text255", "text32k", "then",
+            "timestamp", "to", "top", "trailing", "true", "truncatecolumns",
+            "union", "unique", "unnest", "unpivot", "user", "using",
+            "verbose", "wallet", "when", "where", "with", "without");
+
     private final AccountAwareStorageBackend<Namespace> namespaces;
     private final RegionResolver regionResolver;
 
@@ -165,6 +199,9 @@ public class RedshiftServerlessService implements Resettable {
         if (namespaceName == null || namespaceName.length() < 3 || namespaceName.length() > 64
                 || !NAMESPACE_NAME.matcher(namespaceName).matches()) {
             throw validation("namespaceName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
+        }
+        if (RESERVED_WORDS.contains(namespaceName)) {
+            throw validation("namespaceName must not be an Amazon Redshift reserved word.");
         }
     }
 
