@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -147,6 +148,37 @@ class AwsConfigServiceAggregationAuthorizationTest {
 
         List<Map<String, String>> tags = service.listTagsForResource(created.aggregationAuthorizationArn());
         assertEquals(List.of(Map.of("Key", "env", "Value", "prod")), tags);
+    }
+
+    @Test
+    void rePutIgnoresItsTagsAndLeavesTheCreationTagsInPlace() {
+        AwsConfigService service = service();
+        String arn = service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1",
+                        List.of(Map.of("Key", "env", "Value", "prod"),
+                                Map.of("Key", "owner", "Value", "platform")))
+                .aggregationAuthorizationArn();
+
+        service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1",
+                List.of(Map.of("Key", "env", "Value", "dev"),
+                        Map.of("Key", "tier", "Value", "gold")));
+
+        assertEquals(Map.of("env", "prod", "owner", "platform"), tagMap(service, arn),
+                "a put that finds the authorization already there must ignore its Tags: "
+                        + "no overwrite of env, and no tier added");
+
+        // Tags do change through the tagging API, which is the only way AWS offers.
+        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "dev")));
+        assertEquals(Map.of("env", "dev", "owner", "platform"), tagMap(service, arn),
+                "TagResource must still update an existing tag");
+
+        service.untagResource(arn, List.of("owner"));
+        assertEquals(Map.of("env", "dev"), tagMap(service, arn),
+                "UntagResource must still remove a tag");
+    }
+
+    private Map<String, String> tagMap(AwsConfigService service, String arn) {
+        return service.listTagsForResource(arn).stream()
+                .collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
     }
 
     @Test

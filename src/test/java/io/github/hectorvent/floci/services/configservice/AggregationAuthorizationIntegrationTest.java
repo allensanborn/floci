@@ -106,6 +106,54 @@ class AggregationAuthorizationIntegrationTest {
 
     @Test
     @Order(5)
+    void rePutIgnoresItsTagsAndTheTaggingApiStillWorks() {
+        String arn = call("DescribeAggregationAuthorizations", "{}")
+                .then().statusCode(200)
+                .extract().<String>path(MATCHING + "[0].AggregationAuthorizationArn");
+        String listTags = "{\"ResourceArn\": \"" + arn + "\"}";
+
+        call("PutAggregationAuthorization", """
+            {
+                "AuthorizedAccountId": "%s",
+                "AuthorizedAwsRegion": "%s",
+                "Tags": [{"Key": "env", "Value": "dev"}, {"Key": "tier", "Value": "gold"}]
+            }
+            """.formatted(AUTHORIZED_ACCOUNT, AUTHORIZED_REGION))
+        .then()
+            .statusCode(200);
+
+        call("ListTagsForResource", listTags)
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("env"))
+            .body("Tags[0].Value", equalTo("prod"));
+
+        call("TagResource", """
+            {"ResourceArn": "%s", "Tags": [{"Key": "tier", "Value": "gold"}]}
+            """.formatted(arn))
+        .then()
+            .statusCode(200);
+
+        call("ListTagsForResource", listTags)
+        .then()
+            .statusCode(200)
+            .body("Tags.Key", containsInAnyOrder("env", "tier"));
+
+        call("UntagResource", """
+            {"ResourceArn": "%s", "TagKeys": ["tier"]}
+            """.formatted(arn))
+        .then()
+            .statusCode(200);
+
+        call("ListTagsForResource", listTags)
+        .then()
+            .statusCode(200)
+            .body("Tags.Key", contains("env"));
+    }
+
+    @Test
+    @Order(6)
     void deleteAggregationAuthorization() {
         call("DeleteAggregationAuthorization", authorizationBody())
         .then()
@@ -118,7 +166,7 @@ class AggregationAuthorizationIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void deleteNonexistentAggregationAuthorizationSucceeds() {
         call("DeleteAggregationAuthorization", authorizationBody())
         .then()
@@ -126,7 +174,7 @@ class AggregationAuthorizationIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void putRejectsAnAccountIdThatIsNotTwelveDigits() {
         call("PutAggregationAuthorization", """
             {"AuthorizedAccountId": "12345", "AuthorizedAwsRegion": "eu-west-1"}
@@ -137,7 +185,7 @@ class AggregationAuthorizationIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void unrelatedActionsStillReportInvalidAction() {
         call("PutAggregationAuthorizations", authorizationBody())
         .then()

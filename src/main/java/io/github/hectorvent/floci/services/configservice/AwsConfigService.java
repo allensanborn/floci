@@ -891,13 +891,19 @@ public class AwsConfigService {
 
     // --- Aggregation Authorizations ---
 
+    /** Put is an upsert, and request tags are applied at creation only. A Put that finds the
+     *  authorization already there ignores its Tags, leaving whatever TagResource/UntagResource
+     *  last set, so re-putting with a different tag set is not a way to retag. */
     public AggregationAuthorization putAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion, List<Map<String, String>> tagList) {
         requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
         Map<String, AggregationAuthorization> store = authorizationsFor(region);
         String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
         AggregationAuthorization existing = store.get(key);
-        AggregationAuthorization authorization = existing != null ? existing : new AggregationAuthorization(
+        if (existing != null) {
+            return existing;
+        }
+        AggregationAuthorization authorization = new AggregationAuthorization(
                 aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion),
                 authorizedAccountId, authorizedAwsRegion, now());
         store.put(key, authorization);
