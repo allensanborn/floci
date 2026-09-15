@@ -877,15 +877,28 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("ARN", c.getArn());
         }
         if (showNodeInfo && ep != null) {
+            // terraform-provider-aws dereferences CacheNodeCreateTime and ParameterGroupStatus
+            // without a nil check while adopting the resource, so a node carrying only an
+            // endpoint fails the refresh right after a successful create. Both are stable
+            // metadata AWS returns on every available node, and both are already known here:
+            // a single-node cluster's node was created with the cluster, and its parameter
+            // group has the same in-sync status reported for the cluster above.
             xml.start("CacheNodes")
                .start("CacheNode")
                  .elem("CacheNodeId", "0001")
-                 .elem("CacheNodeStatus", "available")
-                 .start("Endpoint")
-                   .elem("Address", ep.address())
-                   .elem("Port", (long) ep.port())
-                 .end("Endpoint")
-               .end("CacheNode")
+                 .elem("CacheNodeStatus", "available");
+            if (c.getCacheClusterCreateTime() != null) {
+                xml.elem("CacheNodeCreateTime", c.getCacheClusterCreateTime().toString());
+            }
+            xml.start("Endpoint")
+                 .elem("Address", ep.address())
+                 .elem("Port", (long) ep.port())
+               .end("Endpoint")
+               .elem("ParameterGroupStatus", "in-sync");
+            if (c.getPreferredAvailabilityZone() != null) {
+                xml.elem("CustomerAvailabilityZone", c.getPreferredAvailabilityZone());
+            }
+            xml.end("CacheNode")
                .end("CacheNodes");
         }
         return xml.end("CacheCluster").build();

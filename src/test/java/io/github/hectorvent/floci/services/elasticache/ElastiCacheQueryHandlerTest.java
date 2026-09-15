@@ -575,6 +575,37 @@ class ElastiCacheQueryHandlerTest {
     }
 
     @Test
+    void describeCacheClusters_singleNodeCarriesTheNodeMetadataTerraformDereferences() {
+        // The node shape, not the endpoint, is what broke adoption: a create succeeded and the
+        // very next refresh died with "Unexpected nil pointer" showing CacheNodeCreateTime:<nil>
+        // and ParameterGroupStatus:<nil>. terraform-provider-aws reads both without a nil check,
+        // and AWS returns both on every available node.
+        when(service.findCacheClusters("tf-redis")).thenReturn(List.of(redisCacheCluster("tf-redis")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("CacheClusterId", "tf-redis");
+        p.add("ShowCacheNodeInfo", "true");
+        Response response = handler.handle("DescribeCacheClusters", p, "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<CacheNodeCreateTime>"), body);
+        assertTrue(body.contains("<ParameterGroupStatus>in-sync</ParameterGroupStatus>"), body);
+        // AWS reports the node's AZ as the cluster's; a mismatch is a permanent terraform diff
+        assertTrue(body.contains("<CustomerAvailabilityZone>us-east-1b</CustomerAvailabilityZone>"), body);
+        // the node was created with its cluster, so the two timestamps agree
+        String nodeTime = between(body, "<CacheNodeCreateTime>", "</CacheNodeCreateTime>");
+        String clusterTime = between(body, "<CacheClusterCreateTime>", "</CacheClusterCreateTime>");
+        assertEquals(clusterTime, nodeTime, body);
+    }
+
+    private static String between(String body, String open, String close) {
+        int from = body.indexOf(open);
+        assertTrue(from >= 0, "missing " + open + " in " + body);
+        return body.substring(from + open.length(), body.indexOf(close, from));
+    }
+
+    @Test
     void describeCacheClusters_stillRaisesNotFoundWhenNoSourceKnowsTheId() {
         when(service.findCacheClusters("absent")).thenReturn(List.of());
         when(memcachedService.listCacheClusters("absent")).thenThrow(

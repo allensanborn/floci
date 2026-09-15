@@ -66,7 +66,7 @@ public class ElastiCacheMemcachedService {
         // is the same set the redis paths take, so of two concurrent creates for one id only the
         // one that claims it reaches the stores at all.
         if (!provisioningIds.claim(clusterId)) {
-            throw new AwsException("CacheClusterAlreadyExistsFault",
+            throw new AwsException("CacheClusterAlreadyExists",
                     "Cache cluster " + clusterId + " is already being created.", 400);
         }
         try {
@@ -82,7 +82,7 @@ public class ElastiCacheMemcachedService {
         if (clusters.get(clusterId).isPresent()
                 || redisClusters.get(clusterId).isPresent()
                 || groups.get(clusterId).isPresent()) {
-            throw new AwsException("CacheClusterAlreadyExistsFault",
+            throw new AwsException("CacheClusterAlreadyExists",
                     "Cache cluster " + clusterId + " already exists.", 400);
         }
 
