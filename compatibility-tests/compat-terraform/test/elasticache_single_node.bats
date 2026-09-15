@@ -76,7 +76,7 @@ valkey_command() {
 
     run terraform -chdir="$EC_TF_DIR" output -raw port
     assert_success
-    assert_output "6395"
+    assert_output "6396"
 }
 
 @test "ElastiCache single node: describe reports one node, no replication group" {
