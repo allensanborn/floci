@@ -674,8 +674,11 @@ public class Ec2QueryHandler {
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
         String imageId = p.getFirst("ImageId");
         String instanceType = p.getFirst("InstanceType");
-        int minCount = Integer.parseInt(p.getOrDefault("MinCount", List.of("1")).get(0));
-        int maxCount = Integer.parseInt(p.getOrDefault("MaxCount", List.of("1")).get(0));
+        int minCount = parseRunInstancesCount(p, "MinCount");
+        int maxCount = parseRunInstancesCount(p, "MaxCount");
+        if (maxCount < minCount) {
+            throw new AwsException("InvalidParameterValue", "MaxCount must be greater than or equal to MinCount", 400);
+        }
         String keyName = p.getFirst("KeyName");
         String subnetId = p.getFirst("SubnetId");
         // The launch-time public-IP override arrives either on the primary
@@ -767,7 +770,7 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits, userDataEncoded);
+                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -792,6 +795,22 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private int parseRunInstancesCount(MultivaluedMap<String, String> p, String name) {
+        String value = p.getFirst(name);
+        if (value == null) {
+            return 1;
+        }
+        try {
+            int count = Integer.parseInt(value);
+            if (count > 0) {
+                return count;
+            }
+        } catch (NumberFormatException ignored) {
+            // Malformed and non-positive counts share the same EC2 validation error.
+        }
+        throw new AwsException("InvalidParameterValue", name + " must be a positive integer", 400);
     }
 
     private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
