@@ -893,25 +893,32 @@ public class AwsConfigService {
 
     /** Put is an upsert, and request tags are applied at creation only. A Put that finds the
      *  authorization already there ignores its Tags, leaving whatever TagResource/UntagResource
-     *  last set, so re-putting with a different tag set is not a way to retag. */
+     *  last set, so re-putting with a different tag set is not a way to retag.
+     *
+     *  <p>The get-then-put runs under the same lock delete takes, because idempotency that is
+     *  only probable is not idempotency: two concurrent Puts for one account/Region would
+     *  otherwise both find nothing and both create, and the second would overwrite the first's
+     *  CreationTime and re-apply creation tags over a set TagResource may already have changed. */
     public AggregationAuthorization putAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion, List<Map<String, String>> tagList) {
         requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
-        Map<String, AggregationAuthorization> store = authorizationsFor(region);
-        String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
-        AggregationAuthorization existing = store.get(key);
-        if (existing != null) {
-            return existing;
+        synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
+            Map<String, AggregationAuthorization> store = authorizationsFor(region);
+            String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
+            AggregationAuthorization existing = store.get(key);
+            if (existing != null) {
+                return existing;
+            }
+            AggregationAuthorization authorization = new AggregationAuthorization(
+                    aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion),
+                    authorizedAccountId, authorizedAwsRegion, now());
+            store.put(key, authorization);
+            persistRegion(aggregationAuthorizations, region);
+            if (tagList != null && !tagList.isEmpty()) {
+                tagResource(authorization.aggregationAuthorizationArn(), tagList);
+            }
+            return authorization;
         }
-        AggregationAuthorization authorization = new AggregationAuthorization(
-                aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion),
-                authorizedAccountId, authorizedAwsRegion, now());
-        store.put(key, authorization);
-        persistRegion(aggregationAuthorizations, region);
-        if (tagList != null && !tagList.isEmpty()) {
-            tagResource(authorization.aggregationAuthorizationArn(), tagList);
-        }
-        return authorization;
     }
 
     public Paged<AggregationAuthorization> describeAggregationAuthorizations(String region, Integer limit,
@@ -936,12 +943,15 @@ public class AwsConfigService {
     public void deleteAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion) {
         requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
-        Map<String, AggregationAuthorization> store = authorizationsFor(region);
-        AggregationAuthorization removed = store.remove(authorizationKey(authorizedAccountId, authorizedAwsRegion));
-        if (removed != null) {
-            persistRegion(aggregationAuthorizations, region);
+        synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
+            Map<String, AggregationAuthorization> store = authorizationsFor(region);
+            AggregationAuthorization removed =
+                    store.remove(authorizationKey(authorizedAccountId, authorizedAwsRegion));
+            if (removed != null) {
+                persistRegion(aggregationAuthorizations, region);
+            }
+            tags.remove(aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion));
         }
-        tags.remove(aggregationAuthorizationArn(region, authorizedAccountId, authorizedAwsRegion));
     }
 
     private String aggregationAuthorizationArn(String region, String authorizedAccountId,
@@ -1034,6 +1044,15 @@ public class AwsConfigService {
 
     private static String authorizationKey(String authorizedAccountId, String authorizedAwsRegion) {
         return authorizedAccountId + "|" + authorizedAwsRegion;
+    }
+
+    /** Aggregation authorizations share {@link #ruleLocks} with the config rules, so their keys
+     *  are namespaced apart. A config rule name cannot contain '|', but making the two key spaces
+     *  disjoint by construction costs nothing and does not depend on that staying true. */
+    private static String authorizationLockKey(String region, String authorizedAccountId,
+            String authorizedAwsRegion) {
+        return "aggregation-authorization|" + region + "|"
+                + authorizationKey(authorizedAccountId, authorizedAwsRegion);
     }
 
     private Map<String, Map<String, ConfigEvaluation>> evaluationsFor(String region) {

@@ -6,14 +6,23 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -237,5 +246,94 @@ class AwsConfigServiceAggregationAuthorizationTest {
         assertEquals(1, second.items().size());
         assertNull(second.nextToken());
         assertEquals("eu-west-1", second.items().getFirst().authorizedAwsRegion());
+    }
+
+    /**
+     * Idempotency that only usually holds is not idempotency. Put is a get-then-put, so without a
+     * lock two concurrent Puts for one (account, Region) both find nothing and both create, and
+     * the loser's caller is handed an object the store no longer contains.
+     *
+     * <p>Reference identity is the assertion that catches this, and the obvious alternatives do
+     * not: the store is keyed on the pair so its size is 1 either way, the ARN is derived from the
+     * key so it is equal either way, and CreationTime is epoch seconds so a racing pair created
+     * inside one second is indistinguishable by timestamp too.
+     *
+     * <p>Many short rounds rather than one wide one: the unlocked window is a few instructions, so
+     * what makes the race land is repeated fresh starts, not more threads on one start.
+     */
+    @Test
+    void concurrentPutsForOneKeyAllReturnTheStoredAuthorization() throws Exception {
+        int rounds = 300;
+        int threads = 4;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            int mismatches = 0;
+            for (int round = 0; round < rounds; round++) {
+                AwsConfigService service = service();
+                CyclicBarrier gate = new CyclicBarrier(threads);
+                List<Future<AggregationAuthorization>> futures = new ArrayList<>();
+                for (int i = 0; i < threads; i++) {
+                    futures.add(pool.submit(() -> {
+                        gate.await(10, TimeUnit.SECONDS);
+                        return service.putAggregationAuthorization(
+                                REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null);
+                    }));
+                }
+                List<AggregationAuthorization> returned = new ArrayList<>();
+                for (Future<AggregationAuthorization> future : futures) {
+                    returned.add(future.get(10, TimeUnit.SECONDS));
+                }
+                List<AggregationAuthorization> stored = authorizations(service, REGION);
+                assertEquals(1, stored.size());
+                for (AggregationAuthorization each : returned) {
+                    if (each != stored.getFirst()) {
+                        mismatches++;
+                    }
+                }
+            }
+            assertEquals(0, mismatches,
+                    "a concurrent Put returned an authorization the store does not hold");
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    /** Delete takes the same lock, so it cannot interleave with the create half of a Put. */
+    @Test
+    void concurrentPutAndDeleteLeaveNoHalfState() throws Exception {
+        AwsConfigService service = service();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 50; round++) {
+                CountDownLatch start = new CountDownLatch(1);
+                Future<?> put = pool.submit(() -> {
+                    start.await();
+                    return service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1", null);
+                });
+                Future<?> delete = pool.submit(() -> {
+                    start.await();
+                    service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
+                    return null;
+                });
+                start.countDown();
+                put.get(10, TimeUnit.SECONDS);
+                delete.get(10, TimeUnit.SECONDS);
+
+                // Either order is legal; what is not legal is an entry whose tags outlived a delete.
+                List<AggregationAuthorization> after = authorizations(service, REGION);
+                assertTrue(after.size() <= 1);
+                if (after.isEmpty()) {
+                    assertTrue(service.listTagsForResource(
+                            AwsArnUtils.Arn.of("config", REGION, ACCOUNT,
+                                    "aggregation-authorization/" + AUTHORIZED_ACCOUNT + "/eu-west-1").toString())
+                            .isEmpty(), "delete left tags behind for a removed authorization");
+                }
+                service.deleteAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "eu-west-1");
+            }
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
+        }
     }
 }
