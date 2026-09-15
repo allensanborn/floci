@@ -92,6 +92,74 @@ public final class AwsArnUtils {
     }
 
     /**
+     * Regex fragment matching any AWS partition id: {@code aws}, {@code aws-cn},
+     * {@code aws-us-gov}, and the classified {@code aws-iso*} and {@code aws-eusc} partitions.
+     *
+     * <p>Transcribed from the shape AWS publishes in its own service models, where every
+     * partition-carrying ARN member is patterned {@code arn:aws(-[a-z]{1,5}){0,3}:...}. The group
+     * is non-capturing so it can be dropped into an existing pattern without shifting the
+     * numbering of the groups around it.
+     *
+     * <p>Exists because a literal {@code ^arn:aws:} anchors a pattern to the commercial partition
+     * and silently rejects every legal ARN outside it.
+     */
+    public static final String PARTITION_REGEX = "aws(?:-[a-z]{1,5}){0,3}";
+
+    /**
+     * True when {@code value} is syntactically an ARN: six colon-delimited segments, the first
+     * of which is {@code arn}. Says nothing about whether the resource part is well formed for
+     * its service, which only that service can decide.
+     *
+     * <p>The partition-tolerant replacement for a {@code startsWith("arn:aws:")} probe.
+     */
+    public static boolean isArn(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String[] parts = value.split(":", 6);
+        return parts.length == 6 && "arn".equals(parts[0]);
+    }
+
+    /**
+     * True when {@code value} is an ARN naming {@code service}, in any partition. The common use
+     * is telling an identifier that may be either a bare name or a full ARN apart, e.g. a
+     * DynamoDB {@code TableName} that clients are allowed to give either way.
+     */
+    public static boolean isArnFor(String value, String service) {
+        return isArn(value) && value.split(":", 6)[2].equals(service);
+    }
+
+    /**
+     * True when the ARN names a partition other than {@code aws}, the only one Floci emulates.
+     * An empty partition field is not foreign: callers that omit it are naming a local
+     * resource.
+     *
+     * <p>Deliberately a literal {@code aws} rather than {@link #PARTITION_REGEX}. That constant
+     * exists to recognise a legal ARN in any partition; this asks the opposite question, whether
+     * the ARN names a partition this emulator can serve, and the answer is only ever the
+     * commercial one.
+     */
+    public static boolean isForeignPartition(Arn arn) {
+        if (arn == null) {
+            return false;
+        }
+        String partition = arn.partition();
+        return partition != null && !partition.isEmpty() && !"aws".equals(partition);
+    }
+
+    /**
+     * True when the ARN names an account other than {@code localAccountId}. An empty account
+     * field is not foreign: several AWS ARN forms omit it for a resource the caller owns.
+     */
+    public static boolean isForeignAccount(Arn arn, String localAccountId) {
+        if (arn == null) {
+            return false;
+        }
+        String account = arn.accountId();
+        return account != null && !account.isEmpty() && !account.equals(localAccountId);
+    }
+
+    /**
      * Converts an SQS ARN to a queue URL using the given base URL.
      * Example: arn:aws:sqs:us-east-1:000000000000:my-queue → http://localhost:4566/000000000000/my-queue
      */

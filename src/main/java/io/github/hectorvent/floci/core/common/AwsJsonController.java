@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.cloudcontrol.CloudControlJsonHandler;
+import io.github.hectorvent.floci.services.bcmpricingcalculator.BcmPricingCalculatorJsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbResponses;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
 import io.github.hectorvent.floci.services.swf.SwfJsonHandler;
+import io.github.hectorvent.floci.services.verifiedpermissions.VerifiedPermissionsJsonHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -51,6 +53,8 @@ public class AwsJsonController {
     private final SwfJsonHandler swfJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
     private final MarketplaceJsonHandler marketplaceJsonHandler;
+    private final VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler;
+    private final BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler;
 
     @Inject
     public AwsJsonController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -63,7 +67,9 @@ public class AwsJsonController {
                              CloudControlJsonHandler cloudControlJsonHandler,
                              SwfJsonHandler swfJsonHandler,
                              NetworkFirewallJsonHandler networkFirewallJsonHandler,
-                             MarketplaceJsonHandler marketplaceJsonHandler) {
+                             MarketplaceJsonHandler marketplaceJsonHandler,
+                             VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler,
+                             BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler) {
         this.objectMapper = objectMapper;
         this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
         this.catalog = catalog;
@@ -78,6 +84,8 @@ public class AwsJsonController {
         this.swfJsonHandler = swfJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
         this.marketplaceJsonHandler = marketplaceJsonHandler;
+        this.verifiedPermissionsJsonHandler = verifiedPermissionsJsonHandler;
+        this.bcmPricingCalculatorJsonHandler = bcmPricingCalculatorJsonHandler;
     }
 
     @POST
@@ -103,8 +111,16 @@ public class AwsJsonController {
 
         JsonNode request;
         try {
-            request = strictBodyReader.readTree(body);
+            // No payload is how an operation without input goes over the wire, so it reads as {}.
+            request = body == null || body.isBlank()
+                    ? objectMapper.createObjectNode()
+                    : strictBodyReader.readTree(body);
         } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+        // Input is always a structure: a bare null, array or scalar parses but is still a
+        // client serialization error rather than something every handler must guard against.
+        if (!request.isObject()) {
             return JsonErrorResponseUtils.createSerializationErrorResponse();
         }
 
@@ -129,6 +145,8 @@ public class AwsJsonController {
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 case "marketplace" -> marketplaceJsonHandler.handle(action, request, region);
+                case "verifiedpermissions" -> verifiedPermissionsJsonHandler.handle(action, request, region);
+                case "bcm-pricing-calculator" -> bcmPricingCalculatorJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.1 target
