@@ -1334,10 +1334,10 @@ class ElastiCacheServiceTest {
         service.createCacheCluster(cacheClusterRequest("redis-id", "redis", 1));
         service.createReplicationGroup("group-id", "d", AuthMode.NO_AUTH, null, "us-east-1");
 
-        assertEquals("CacheClusterAlreadyExistsFault",
+        assertEquals("CacheClusterAlreadyExists",
                 assertThrows(AwsException.class, () -> memcached.createCacheCluster("redis-id"))
                         .getErrorCode());
-        assertEquals("CacheClusterAlreadyExistsFault",
+        assertEquals("CacheClusterAlreadyExists",
                 assertThrows(AwsException.class, () -> memcached.createCacheCluster("group-id"))
                         .getErrorCode());
         verify(memcachedContainerManager, never()).tryStart(eq("redis-id"), anyString());
@@ -1367,7 +1367,7 @@ class ElastiCacheServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> memcached.createCacheCluster("shared-id"));
-        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
         verify(memcachedContainerManager, never()).tryStart(eq("shared-id"), anyString());
 
         releaseLatch.countDown();

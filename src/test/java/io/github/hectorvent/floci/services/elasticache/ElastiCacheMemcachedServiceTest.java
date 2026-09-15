@@ -68,7 +68,7 @@ class ElastiCacheMemcachedServiceTest {
         service.createCacheCluster("my-cluster");
 
         AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster("my-cluster"));
-        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
     }
 
     @Test
@@ -81,7 +81,7 @@ class ElastiCacheMemcachedServiceTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createCacheCluster("racing-cluster"));
-        assertEquals("CacheClusterAlreadyExistsFault", ex.getErrorCode());
+        assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
         verify(containerManager, never()).tryStart(eq("racing-cluster"), anyString());
 
         // The refusal must not have released the claim the other create still holds.
