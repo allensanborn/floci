@@ -44,10 +44,10 @@ class DmsTest {
                         .replicationSubnetGroups();
 
                 assertEquals(1, described.size());
-                ReplicationSubnetGroup group = described.getFirst();
+                ReplicationSubnetGroup group = described.get(0);
                 assertEquals(GROUP_ID, group.replicationSubnetGroupIdentifier());
                 assertEquals("Complete", group.subnetGroupStatus());
-                assertEquals(subnets.getFirst().vpcId(), group.vpcId());
+                assertEquals(subnets.get(0).vpcId(), group.vpcId());
                 assertFalse(group.subnets().isEmpty());
                 assertTrue(group.subnets().stream()
                         .allMatch(subnet -> "Active".equals(subnet.subnetStatus())));
