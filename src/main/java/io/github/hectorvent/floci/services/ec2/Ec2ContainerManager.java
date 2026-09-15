@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Container;
@@ -38,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -167,6 +170,7 @@ public class Ec2ContainerManager {
     private final RegionResolver regionResolver;
     private final ContainerNetworkReachability containerNetworkReachability;
     private final VpcNetworkManager vpcNetworkManager;
+    private final ContainerReachableEndpoint reachableEndpoint;
     private final ExecutorService executor;
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
@@ -186,10 +190,11 @@ public class Ec2ContainerManager {
                                Ec2PortForwardManager portForwardManager,
                                RegionResolver regionResolver,
                                ContainerNetworkReachability containerNetworkReachability,
-                               VpcNetworkManager vpcNetworkManager) {
+                               VpcNetworkManager vpcNetworkManager,
+                               ContainerReachableEndpoint reachableEndpoint) {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
-                containerNetworkReachability, vpcNetworkManager, createLaunchExecutor(),
+                containerNetworkReachability, vpcNetworkManager, reachableEndpoint, createLaunchExecutor(),
                 Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
     }
 
@@ -206,6 +211,7 @@ public class Ec2ContainerManager {
                         RegionResolver regionResolver,
                         ContainerNetworkReachability containerNetworkReachability,
                         VpcNetworkManager vpcNetworkManager,
+                        ContainerReachableEndpoint reachableEndpoint,
                         ExecutorService executor,
                         Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
@@ -221,6 +227,7 @@ public class Ec2ContainerManager {
         this.portForwardManager = portForwardManager;
         this.containerNetworkReachability = containerNetworkReachability;
         this.vpcNetworkManager = vpcNetworkManager;
+        this.reachableEndpoint = reachableEndpoint;
         this.executor = executor;
         this.userDataExecutionTimeout = userDataExecutionTimeout;
     }
@@ -367,6 +374,8 @@ public class Ec2ContainerManager {
                     return;
                 }
 
+                refreshMetadataAddresses(instance, containerId);
+
                 if (!markRunning(instance)) {
                     failLaunch(instance, leasedPrivateIp);
                     return;
@@ -435,7 +444,7 @@ public class Ec2ContainerManager {
         String instanceId = instance.getInstanceId();
         String containerName = ContainerStorageHelper.resourceName(config, "ec2", null, instanceId);
         String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
-        String serviceEndpoint = "http://" + flociHost + ":4566";
+        String serviceEndpoint = reachableEndpoint.baseUrl();
 
         while (true) {
             if (isLaunchCancelled(instance)) {
@@ -579,6 +588,7 @@ public class Ec2ContainerManager {
         if (sshHostPort > 0) {
             portAllocator.release(sshHostPort);
         }
+        metadataServer.unregisterInstance(instance);
         if (containerIp != null && !containerIp.isBlank()) {
             try {
                 metadataServer.unregisterContainer(containerIp, instance);
@@ -782,6 +792,7 @@ public class Ec2ContainerManager {
                     }
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
+                    refreshMetadataAddresses(instance, containerId);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -852,6 +863,28 @@ public class Ec2ContainerManager {
         return removed;
     }
 
+    private void refreshMetadataAddresses(Instance instance, String containerId) {
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
+                return;
+            }
+            Set<String> addresses = new HashSet<>();
+            for (ContainerNetwork network : inspect.getNetworkSettings().getNetworks().values()) {
+                if (network != null && network.getIpAddress() != null && !network.getIpAddress().isBlank()) {
+                    addresses.add(network.getIpAddress());
+                }
+            }
+            // An incomplete Docker response must not discard the last known registrations.
+            if (!addresses.isEmpty()) {
+                metadataServer.reconcileContainerAddresses(addresses, instance);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not refresh IMDS addresses for EC2 instance {0}, keeping existing registrations: {1}",
+                    instance.getInstanceId(), e.getMessage());
+        }
+    }
+
     boolean restoreMetadataRegistration(Instance instance) {
         if (instance == null || instance.getDockerContainerId() == null) {
             return false;
@@ -882,6 +915,7 @@ public class Ec2ContainerManager {
         }
         metadataServer.registerContainer(containerIp, instance.getInstanceId(), instance);
         refreshImdsSourceRegistration(instance, containerId, containerIp);
+        refreshMetadataAddresses(instance, containerId);
         return true;
     }
 
@@ -1066,6 +1100,7 @@ public class Ec2ContainerManager {
             }
             metadataServer.unregisterContainer(containerIp, instance);
             metadataServer.unregisterContainer(imdsSourceIp, instance);
+            metadataServer.unregisterInstance(instance);
             // Give the address back only now that the container is gone: releasing it while
             // Docker still holds the endpoint would hand the same IP to the next launch and
             // have Docker refuse it.
@@ -1097,6 +1132,76 @@ public class Ec2ContainerManager {
     public boolean isContainerRunning(Instance instance) {
         String containerId = instance.getDockerContainerId();
         return containerId != null && lifecycleManager.isContainerRunning(containerId);
+    }
+
+    /** Signals that an instance's file system could not be captured as a Docker image. */
+    public static class CaptureFailedException extends RuntimeException {
+        public CaptureFailedException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * Captures an instance's file system as a new Docker image, so that an AMI created from it
+     * carries what was provisioned rather than pointing back at the base image.
+     *
+     * <p>Returns the image reference, or null when the instance has no container to capture.
+     * A commit that is attempted and fails throws instead of returning null: an AMI with no
+     * captured file system launches its ancestor, so reporting the failure as "no capture" would
+     * hand back an available AMI whose contents are silently not what was asked for.
+     *
+     * @param tag repository:tag to commit to, unique per AMI
+     * @throws CaptureFailedException if the commit was attempted and did not succeed
+     */
+    public String commitInstance(Instance instance, String tag) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return null;
+        }
+        try {
+            // Committing a running container is what AWS does for CreateImage without
+            // NoReboot; docker quiesces nothing either way, so the semantics match closely
+            // enough. The container is left running -- CreateImage does not terminate its
+            // source instance.
+            String imageId = dockerClient.commitCmd(containerId)
+                    .withRepository(tag.contains(":") ? tag.substring(0, tag.indexOf(':')) : tag)
+                    .withTag(tag.contains(":") ? tag.substring(tag.indexOf(':') + 1) : "latest")
+                    .exec();
+            LOG.infov("Captured EC2 instance {0} as Docker image {1} ({2})",
+                    instance.getInstanceId(), tag, imageId);
+            return tag;
+        } catch (Exception e) {
+            LOG.warnv("Could not capture EC2 instance {0} as an image: {1}",
+                    instance.getInstanceId(), e.getMessage());
+            throw new CaptureFailedException("could not commit container " + containerId
+                    + " of instance " + instance.getInstanceId() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Removes an image previously produced by {@link #commitInstance}. Called when the AMI that
+     * owns it is deregistered, so captures do not accumulate on disk indefinitely.
+     *
+     * @return true when the layer is known to be gone, either removed now or already absent;
+     *         false when the daemon refused, in which case the caller must keep the reference
+     *         so the layer can still be found and removed later
+     */
+    public boolean removeCommittedImage(String tag) {
+        if (tag == null) {
+            return true;
+        }
+        try {
+            dockerClient.removeImageCmd(tag).withForce(true).exec();
+            LOG.infov("Removed captured Docker image {0}", tag);
+            return true;
+        } catch (NotFoundException e) {
+            // Already gone: deregistering twice, or the daemon was pruned. Not an error.
+            LOG.debugv("Captured Docker image {0} was already absent", tag);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not remove captured Docker image {0}: {1}", tag, e.getMessage());
+            return false;
+        }
     }
 
     private void injectSshKey(String containerId, String publicKey) {
@@ -1528,7 +1633,12 @@ public class Ec2ContainerManager {
                 "  apt-get update -qq >/dev/null",
                 "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
                 "elif command -v dnf >/dev/null 2>&1; then",
-                "  dnf install -y iproute socat curl ca-certificates >/dev/null",
+                // --allowerasing lets dnf swap the curl-minimal that
+                // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
+                // curl package this proxy needs. Without it, dnf aborts the whole transaction
+                // on a curl/curl-minimal conflict and iproute+socat never install either, even
+                // though neither of them conflicts with anything.
+                "  dnf install -y --allowerasing iproute socat curl ca-certificates >/dev/null",
                 // Same gap as the sshd probe: Amazon Linux 2 has only yum, so on an instance
                 // launched from ami-amazonlinux2 this chain reached its else branch and exited 1
                 // with "No supported package manager found for IMDS proxy dependencies" --
