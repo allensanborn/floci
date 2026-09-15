@@ -6,7 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -51,13 +51,15 @@ public class RedshiftService {
     private final RegionResolver regionResolver;
     private final RedshiftProxyManager proxyManager;
     private final DockerHostResolver dockerHostResolver;
+    private final RedshiftCredentialBroker credentialBroker;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
-                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver) {
+                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                            RedshiftCredentialBroker credentialBroker) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -67,6 +69,7 @@ public class RedshiftService {
         this.regionResolver = regionResolver;
         this.proxyManager = proxyManager;
         this.dockerHostResolver = dockerHostResolver;
+        this.credentialBroker = credentialBroker;
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -133,6 +136,9 @@ public class RedshiftService {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
+        // A previous cluster with this identifier may have been deleted without its temp
+        // credentials being cleared; drop them so the new cluster starts with none.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
@@ -168,6 +174,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -179,6 +186,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -220,7 +228,10 @@ public class RedshiftService {
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
-        
+        // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
+        // identifier does not accept them as master-equivalent.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
+
         cluster.setClusterStatus("deleting");
         return cluster;
     }
@@ -936,11 +947,40 @@ public class RedshiftService {
         return accountId + ":" + clusterIdentifier;
     }
 
-    // Validates the master password at the proxy against current cluster state, so a
-    // ModifyCluster password change is reflected for new connections without a proxy restart.
-    private RdsAuthProxy.PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
-        return (user, password) -> clusters.getForAccount(accountId, clusterIdentifier)
-                .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
-                .orElse(false);
+    // Classifies a proxy login against current cluster state: the master pair and any live
+    // GetClusterCredentials credential both run the backend leg as the cluster master, a known
+    // broker user with a stale password is rejected, everyone else passes through to the backend.
+    // Reading cluster state per call means a ModifyCluster password change takes effect for new
+    // connections without a proxy restart.
+    private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
+        return (user, password) -> {
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, clusterIdentifier);
+            if (cluster.isEmpty()) {
+                // No cluster row to validate against: vouch for nothing. Falling through to the
+                // broker would classify an unknown user as PASSTHROUGH, and the wire proxy reads
+                // isMaster from its own start-time config, so a PASSTHROUGH there still opens the
+                // backend as master, authenticating any password for the master username.
+                return PasswordValidator.AuthResult.REJECT;
+            }
+            Cluster c = cluster.get();
+            if (user.equals(c.getMasterUsername())) {
+                // The master username is authoritative here: a wrong password must be rejected,
+                // never handed to the broker (which only knows minted DbUsers) and never passed
+                // through as if the user were unknown.
+                return password.equals(c.getMasterPassword())
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
+            }
+            return switch (credentialBroker.classify(accountId, clusterIdentifier, user, password)) {
+                case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                case REJECT -> PasswordValidator.AuthResult.REJECT;
+                case PASSTHROUGH -> PasswordValidator.AuthResult.PASSTHROUGH;
+            };
+        };
+    }
+
+    // Package-private hook for tests: passwordValidatorFor is otherwise private.
+    PasswordValidator passwordValidatorForTesting(String accountId, String clusterIdentifier) {
+        return passwordValidatorFor(accountId, clusterIdentifier);
     }
 }
