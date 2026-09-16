@@ -1233,6 +1233,8 @@ class RedshiftServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.describeSnapshotCopyGrants("missing", null, null));
         assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        // DescribeSnapshotCopyGrants documents this fault as 400, not 404.
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
@@ -1321,6 +1323,8 @@ class RedshiftServiceTest {
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshotCopyGrant("missing"));
         assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        // DeleteSnapshotCopyGrant documents this fault as 400, not 404.
+        assertEquals(400, ex.getHttpStatus());
         verify(snapshotCopyGrantBackend, never()).delete(any());
     }
 
@@ -1334,6 +1338,19 @@ class RedshiftServiceTest {
 
         assertEquals(Map.of("env", "prod"),
                 service.listTagsForResource("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant"));
+    }
+
+    @Test
+    void testCreateTagsOnMissingSnapshotCopyGrantIsNotFound() {
+        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:missing",
+                        Map.of("env", "prod")));
+        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
+        // Deliberately 404, unlike the Describe/Delete grant actions: the tagging
+        // actions document their missing-resource error at 404.
+        assertEquals(404, ex.getHttpStatus());
     }
 
     private static String extractResourceId(String arn) {

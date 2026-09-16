@@ -404,7 +404,7 @@ public class RedshiftOperationsTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body(containsString("SnapshotCopyGrantNotFoundFault"));
 
         given()
@@ -415,7 +415,7 @@ public class RedshiftOperationsTest {
         .when()
             .post("/")
         .then()
-            .statusCode(404)
+            .statusCode(400)
             .body(containsString("SnapshotCopyGrantNotFoundFault"));
 
         given()
