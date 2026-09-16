@@ -961,7 +961,7 @@ public class RedshiftService {
         if (name != null && !name.isBlank()) {
             SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
                     .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
-                            "Snapshot copy grant " + name + " not found", 404));
+                            "Snapshot copy grant " + name + " not found", 400));
             matching = List.of(grant);
         } else {
             matching = snapshotCopyGrants.scan(k -> true);
@@ -975,7 +975,7 @@ public class RedshiftService {
     public SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {
         SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
                 .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
-                        "Snapshot copy grant " + name + " not found", 404));
+                        "Snapshot copy grant " + name + " not found", 400));
         snapshotCopyGrants.delete(name);
         snapshotCopyGrants.flush();
         return grant;
@@ -1157,6 +1157,12 @@ public class RedshiftService {
                 });
             }
             case "snapshotcopygrant" -> {
+                // 404 here, unlike the 400 that describeSnapshotCopyGrants and
+                // deleteSnapshotCopyGrant return for the same fault code. The status
+                // belongs to the action, not the code: this path is only reached from
+                // CreateTags/DeleteTags/DescribeTags, whose documented missing-resource
+                // error is ResourceNotFoundFault at 404 -- matching every sibling case
+                // in this switch.
                 SnapshotCopyGrant grant = snapshotCopyGrants.get(id)
                         .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault", "Snapshot copy grant " + id + " not found", 404));
                 yield new TagHandle(grant.getTags(), updated -> {
