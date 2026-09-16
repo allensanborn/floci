@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -84,7 +85,7 @@ class ElastiCacheRedisClusterIntegrationTest {
     @Test
     @Order(2)
     void describeReportsTheClusterWithItsNodeEndpoint() {
-        var describe =
+        XmlPath describe =
                 given()
                     .formParam("Action", "DescribeCacheClusters")
                     .formParam("CacheClusterId", CLUSTER_ID)
