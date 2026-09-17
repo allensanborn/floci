@@ -18,6 +18,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
+| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
+| `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
+| `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
+| `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
 | `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
 | `DescribeEvents` | - |
 | `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
@@ -32,13 +36,18 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBParameterGroups` | List parameter groups |
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
+| `CopyDBParameterGroup` | Copy a parameter group (by name or ARN) with its family and parameter overrides into a new group |
+| `ResetDBParameterGroup` | Reset named parameters, or all of them, to engine defaults |
 | `DescribeDBParameters` | List parameters in a group |
 | `CreateDBClusterParameterGroup` | Create an Aurora-compatible cluster parameter group |
 | `DescribeDBClusterParameterGroups` | List cluster parameter groups |
 | `DeleteDBClusterParameterGroup` | Delete a cluster parameter group |
 | `ModifyDBClusterParameterGroup` | Update cluster parameter group settings |
+| `CopyDBClusterParameterGroup` | Copy a cluster parameter group into a new group; a managed `default.*` group cannot be copied, as on AWS |
+| `ResetDBClusterParameterGroup` | Reset named cluster parameters, or all of them, to engine defaults |
 | `DescribeDBClusterParameters` | List parameters in a cluster group |
 | `CreateOptionGroup` | Create an option group |
+| `CopyOptionGroup` | Copy an option group with its engine, major version and options into a new group |
 | `DescribeOptionGroups` | List option groups, including the implicit `default:` groups |
 | `ModifyOptionGroup` | Add, update, or remove options in an option group |
 | `DeleteOptionGroup` | Delete an option group |
@@ -306,10 +315,39 @@ Known gaps, all deliberate:
 
 | Behavior | Status |
 |---|---|
-| `CopyOptionGroup`, `DescribeOptionGroupOptions` | Not implemented — separate actions, not part of option group CRUD |
+| `DescribeOptionGroupOptions` | Not implemented: the per-engine option catalog is not modeled |
 | `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
 | `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
 | `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
+
+## Read replicas
+
+`CreateDBInstanceReadReplica` creates a standalone instance with its own container and endpoint.
+As on AWS it inherits the source's engine, version, credentials and database name and, unless the
+request overrides them, the instance class, storage and minor version upgrade setting. A replica
+in the source's region also inherits the source's parameter group, option group, subnet group and
+security groups; a replica in another region (source given by ARN, `--region` set to the
+destination) gets that region's defaults. IAM authentication and `CopyTagsToSnapshot` are off
+unless requested. The replica starts with `BackupRetentionPeriod` 0. Both ends report the link
+the way `DescribeDBInstances` does: the replica carries `ReadReplicaSourceDBInstanceIdentifier`
+and a `StatusInfos` entry of type `read replication`, the source lists it under
+`ReadReplicaDBInstanceIdentifiers`; within a region the link is the identifier, across regions
+it is the ARN. A `DBSubnetGroupName` with a source given by plain identifier is refused with
+`DBSubnetGroupNotAllowedFault`, as on AWS.
+
+The replica's database is initialised from a `pg_dumpall` of the source taken when the replica is
+created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
+as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
+the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
+with `InvalidDBInstanceState`, as `CreateDBSnapshot` refuses them. A source with automated backups
+off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
+
+`PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`
+(one day when omitted) and `PreferredBackupWindow`, and reboots the instance as AWS does, so open
+connections drop while the container, endpoint and data stay. Deleting a source promotes its
+same-region replicas; a cross-region replica keeps its link with the replication status
+`terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
+replica drops it from its source's list.
 
 ## Persistence
 
