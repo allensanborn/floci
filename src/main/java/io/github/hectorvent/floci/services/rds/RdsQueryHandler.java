@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
@@ -24,14 +25,15 @@ import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
+import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -71,6 +73,10 @@ public class RdsQueryHandler {
                 case "DeleteDBInstance" -> handleDeleteDbInstance(params, region);
                 case "ModifyDBInstance" -> handleModifyDbInstance(params, region);
                 case "RebootDBInstance" -> handleRebootDbInstance(params, region);
+                case "CreateDBInstanceReadReplica" -> handleCreateDbInstanceReadReplica(params, region);
+                case "PromoteReadReplica" -> handlePromoteReadReplica(params, region);
+                case "SwitchoverReadReplica" -> handleSwitchoverReadReplica(params, region);
+                case "PromoteReadReplicaDBCluster" -> handlePromoteReadReplicaDbCluster(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
@@ -85,13 +91,18 @@ public class RdsQueryHandler {
                 case "DescribeDBParameterGroups" -> handleDescribeDbParameterGroups(params, region);
                 case "DeleteDBParameterGroup" -> handleDeleteDbParameterGroup(params, region);
                 case "ModifyDBParameterGroup" -> handleModifyDbParameterGroup(params, region);
+                case "CopyDBParameterGroup" -> handleCopyDbParameterGroup(params, region);
+                case "ResetDBParameterGroup" -> handleResetDbParameterGroup(params, region);
                 case "DescribeDBParameters" -> handleDescribeDbParameters(params, region);
                 case "CreateDBClusterParameterGroup" -> handleCreateDbClusterParameterGroup(params, region);
                 case "DescribeDBClusterParameterGroups" -> handleDescribeDbClusterParameterGroups(params, region);
                 case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params, region);
                 case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params, region);
+                case "CopyDBClusterParameterGroup" -> handleCopyDbClusterParameterGroup(params, region);
+                case "ResetDBClusterParameterGroup" -> handleResetDbClusterParameterGroup(params, region);
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params, region);
                 case "CreateOptionGroup" -> handleCreateOptionGroup(params, region);
+                case "CopyOptionGroup" -> handleCopyOptionGroup(params, region);
                 case "DescribeOptionGroups" -> handleDescribeOptionGroups(params, region);
                 case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
                 case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
@@ -122,7 +133,7 @@ public class RdsQueryHandler {
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in RDS {0}", action);
             return AwsQueryResponse.error("InternalFailure",
-                    "Unexpected error: " + e.getMessage(), AwsNamespaces.RDS, 500);
+                    "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.RDS, 500);
         }
     }
 
@@ -554,6 +565,84 @@ public class RdsQueryHandler {
         }
     }
 
+    // ── Read replicas ─────────────────────────────────────────────────────────
+
+    private Response handleCreateDbInstanceReadReplica(
+            MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("DBInstanceIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            ReadReplicaRequest request = new ReadReplicaRequest(
+                    id,
+                    params.getFirst("SourceDBInstanceIdentifier"),
+                    params.getFirst("DBInstanceClass"),
+                    params.getFirst("AvailabilityZone"),
+                    parseOptionalBoolean(params, "MultiAZ"),
+                    parseOptionalBoolean(params, "AutoMinorVersionUpgrade"),
+                    params.getFirst("OptionGroupName"),
+                    params.getFirst("DBParameterGroupName"),
+                    parseOptionalBoolean(params, "PubliclyAccessible"),
+                    params.getFirst("DBSubnetGroupName"),
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    parseOptionalBoolean(params, "CopyTagsToSnapshot"),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
+                    optionalInt(params.getFirst("AllocatedStorage")),
+                    params.getFirst("ReplicaMode"),
+                    parseTags(params));
+            DbInstance replica = service.createDbInstanceReadReplica(request, region);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "CreateDBInstanceReadReplica", AwsNamespaces.RDS, dbInstanceXml(replica))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handlePromoteReadReplica(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("DBInstanceIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbInstance instance = service.promoteReadReplica(id,
+                    optionalInt(params.getFirst("BackupRetentionPeriod")),
+                    params.getFirst("PreferredBackupWindow"), region);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "PromoteReadReplica", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleSwitchoverReadReplica(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("DBInstanceIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbInstance instance = service.switchoverReadReplica(id, region);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "SwitchoverReadReplica", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handlePromoteReadReplicaDbCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("DBClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbCluster cluster = service.promoteReadReplicaDbCluster(id, region);
+            return Response.ok(AwsQueryResponse.envelope(
+                    "PromoteReadReplicaDBCluster", AwsNamespaces.RDS, dbClusterXml(cluster))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
     // ── DB Clusters ───────────────────────────────────────────────────────────
 
     private Response handleCreateDbCluster(MultivaluedMap<String, String> params, String region) {
@@ -771,17 +860,7 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
-        Map<String, String> parameters = new HashMap<>();
-        for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
-            if (paramName == null) {
-                break;
-            }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
-            if (paramValue != null) {
-                parameters.put(paramName, paramValue);
-            }
-        }
+        Map<String, String> parameters = parseParameterOverrides(params);
         try {
             DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, region);
             String result = new XmlBuilder()
@@ -791,6 +870,87 @@ public class RdsQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    /**
+     * Parses the {@code Parameters} list of a modify request. The RDS model declares the list
+     * with {@code locationName: Parameter}, so every SDK and the CLI send
+     * {@code Parameters.Parameter.N.*}; the {@code Parameters.member.N.*} form is the plain Query
+     * encoding older or hand-built callers use, and is accepted as well.
+     */
+    private static Map<String, String> parseParameterOverrides(MultivaluedMap<String, String> params) {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            for (int n = 1; ; n++) {
+                String paramName = params.getFirst(prefix + "." + n + ".ParameterName");
+                if (paramName == null) {
+                    break;
+                }
+                String paramValue = params.getFirst(prefix + "." + n + ".ParameterValue");
+                if (paramValue != null) {
+                    parameters.put(paramName, paramValue);
+                }
+            }
+        }
+        return parameters;
+    }
+
+    private Response handleCopyDbParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String source = params.getFirst("SourceDBParameterGroupIdentifier");
+        String target = params.getFirst("TargetDBParameterGroupIdentifier");
+        String description = params.getFirst("TargetDBParameterGroupDescription");
+        Response missing = firstMissingParam(
+                "SourceDBParameterGroupIdentifier", source,
+                "TargetDBParameterGroupIdentifier", target,
+                "TargetDBParameterGroupDescription", description);
+        if (missing != null) {
+            return missing;
+        }
+        try {
+            DbParameterGroup group = service.copyDbParameterGroup(source, target, description, region);
+            Map<String, String> tags = parseTags(params);
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(group.getDbParameterGroupArn(), tags, region);
+            }
+            return Response.ok(AwsQueryResponse.envelope("CopyDBParameterGroup", AwsNamespaces.RDS,
+                    paramGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleResetDbParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("DBParameterGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbParameterGroup group = service.resetDbParameterGroup(name,
+                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+            String result = new XmlBuilder()
+                    .elem("DBParameterGroupName", group.getDbParameterGroupName())
+                    .build();
+            return Response.ok(AwsQueryResponse.envelope("ResetDBParameterGroup", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    /** The parameter names of a modify or reset request, in either list encoding. */
+    private static List<String> parameterNames(MultivaluedMap<String, String> params) {
+        List<String> names = new ArrayList<>();
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            for (int n = 1; ; n++) {
+                String paramName = params.getFirst(prefix + "." + n + ".ParameterName");
+                if (paramName == null) {
+                    break;
+                }
+                names.add(paramName);
+            }
+        }
+        return names;
     }
 
     private Response handleDescribeDbParameters(
@@ -877,17 +1037,7 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
-        Map<String, String> parameters = new HashMap<>();
-        for (int n = 1; ; n++) {
-            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
-            if (paramName == null) {
-                break;
-            }
-            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
-            if (paramValue != null) {
-                parameters.put(paramName, paramValue);
-            }
-        }
+        Map<String, String> parameters = parseParameterOverrides(params);
         try {
             DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(
                     name, parameters, region);
@@ -895,6 +1045,49 @@ public class RdsQueryHandler {
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
             return Response.ok(AwsQueryResponse.envelope("ModifyDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleCopyDbClusterParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String source = params.getFirst("SourceDBClusterParameterGroupIdentifier");
+        String target = params.getFirst("TargetDBClusterParameterGroupIdentifier");
+        String description = params.getFirst("TargetDBClusterParameterGroupDescription");
+        Response missing = firstMissingParam(
+                "SourceDBClusterParameterGroupIdentifier", source,
+                "TargetDBClusterParameterGroupIdentifier", target,
+                "TargetDBClusterParameterGroupDescription", description);
+        if (missing != null) {
+            return missing;
+        }
+        try {
+            DbClusterParameterGroup group = service.copyDbClusterParameterGroup(source, target, description, region);
+            Map<String, String> tags = parseTags(params);
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(group.getDbClusterParameterGroupArn(), tags, region);
+            }
+            return Response.ok(AwsQueryResponse.envelope("CopyDBClusterParameterGroup", AwsNamespaces.RDS,
+                    clusterParamGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleResetDbClusterParameterGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("DBClusterParameterGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbClusterParameterGroup group = service.resetDbClusterParameterGroup(name,
+                    Boolean.parseBoolean(params.getFirst("ResetAllParameters")), parameterNames(params), region);
+            String result = new XmlBuilder()
+                    .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
+                    .build();
+            return Response.ok(AwsQueryResponse.envelope("ResetDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
@@ -943,6 +1136,23 @@ public class RdsQueryHandler {
                 name, engineName, majorEngineVersion, description, parseTags(params), region);
         return Response.ok(AwsQueryResponse.envelope(
                 "CreateOptionGroup", AwsNamespaces.RDS, optionGroupXml(group))).build();
+    }
+
+    private Response handleCopyOptionGroup(
+            MultivaluedMap<String, String> params, String region) {
+        String source = params.getFirst("SourceOptionGroupIdentifier");
+        String target = params.getFirst("TargetOptionGroupIdentifier");
+        String description = params.getFirst("TargetOptionGroupDescription");
+        Response missing = firstMissingParam(
+                "SourceOptionGroupIdentifier", source,
+                "TargetOptionGroupIdentifier", target,
+                "TargetOptionGroupDescription", description);
+        if (missing != null) {
+            return missing;
+        }
+        OptionGroup group = service.copyOptionGroup(source, target, description, parseTags(params), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CopyOptionGroup", AwsNamespaces.RDS, optionGroupXml(group))).build();
     }
 
     private Response handleDescribeOptionGroups(
@@ -1544,9 +1754,41 @@ public class RdsQueryHandler {
         if (i.getDbClusterIdentifier() != null && !i.getDbClusterIdentifier().isBlank()) {
             xml.elem("DBClusterIdentifier", i.getDbClusterIdentifier());
         }
+        xml.raw(readReplicaXml(i));
         xml.start("TagList");
         writeTags(xml, i.getTags());
         xml.end("TagList");
+        return xml.build();
+    }
+
+    /**
+     * The replication links as DescribeDBInstances reports them: the replica list is always
+     * present (empty on a standalone), the source and the "read replication" status entry only
+     * on a replica. Message is blank unless the entry reports an error, and terminated (the
+     * cross-Region source is gone) is the one non-normal state modelled.
+     */
+    private static String readReplicaXml(DbInstance i) {
+        XmlBuilder xml = new XmlBuilder();
+        if (i.hasReadReplicaSource()) {
+            xml.elem("ReadReplicaSourceDBInstanceIdentifier", i.getReadReplicaSourceDbInstanceIdentifier());
+        }
+        xml.start("ReadReplicaDBInstanceIdentifiers");
+        for (String replicaId : i.getReadReplicaDbInstanceIdentifiers()) {
+            xml.elem("ReadReplicaDBInstanceIdentifier", replicaId);
+        }
+        xml.end("ReadReplicaDBInstanceIdentifiers");
+        if (i.hasReadReplicaSource()) {
+            String status = i.getReadReplicationStatus() != null
+                    ? i.getReadReplicationStatus() : RdsService.READ_REPLICATION_REPLICATING;
+            xml.start("StatusInfos")
+                    .start("DBInstanceStatusInfo")
+                    .elem("StatusType", "read replication")
+                    .elem("Normal", RdsService.READ_REPLICATION_REPLICATING.equals(status))
+                    .elem("Status", status)
+                    .elem("Message", "")
+                    .end("DBInstanceStatusInfo")
+                    .end("StatusInfos");
+        }
         return xml.build();
     }
 

@@ -1424,6 +1424,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return profile;
     }
 
+    public Optional<InstanceProfile> findInstanceProfile(String accountId, String profileName) {
+        if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
+            return aware.getForAccount(accountId, profileName);
+        }
+        return instanceProfiles.get(profileName);
+    }
+
     public InstanceProfile getInstanceProfile(String instanceProfileName) {
         return instanceProfiles.get(instanceProfileName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
@@ -1876,6 +1883,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .map(AccessKey::getSecretAccessKey);
     }
 
+    public record EksSessionIdentity(String accountId, String roleArn, String roleId, String instanceId) {}
+
+    /** Returns only identity metadata, never the session secret or token. */
+    public Optional<EksSessionIdentity> findEksSessionIdentity(String accessKeyId) {
+        return currentSession(accessKeyId).map(session -> new EksSessionIdentity(
+                session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
+    }
+
     private Optional<SessionCredential> currentSession(String accessKeyId) {
         return findSessionAnyAccount(accessKeyId)
                 .filter(session -> session.getExpiration() == null || Instant.now().isBefore(session.getExpiration()));
@@ -2018,6 +2033,33 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         LOG.debugv("Registered Lambda execution-role session {0} under account {1} for {2}",
                 sessionAccessKeyId, accountId, roleArn);
+    }
+
+    /** Registers an IMDS session in the profile's account, outside request scope. */
+    public void registerEc2InstanceSession(SessionCredential session) {
+        if (session.getOriginAccountId() == null || session.getOriginAccountId().isBlank()
+                || session.getEc2InstanceId() == null || session.getEc2InstanceId().isBlank()) {
+            throw new IllegalArgumentException("EC2 session account and instance ID must not be blank");
+        }
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(session.getOriginAccountId(), session.getAccessKeyId(), session);
+        } else {
+            sessions.put(session.getAccessKeyId(), session);
+        }
+    }
+
+    /** IMDS registrations are rebuilt on startup; discard credentials from the previous server. */
+    public int sweepOrphanedEc2InstanceSessions() {
+        List<SessionCredential> stored = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts() : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : stored) {
+            if (session.getEc2InstanceId() != null) {
+                deleteSession(session.getAccessKeyId(), session);
+                removed++;
+            }
+        }
+        return removed;
     }
 
     /** Removes a session from an explicit account namespace. */
@@ -2190,7 +2232,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/"
+                    + (session.getEc2InstanceId() != null ? session.getEc2InstanceId() : "floci-session")).toString());
         }
 
         return Optional.empty();
