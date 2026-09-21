@@ -374,7 +374,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(5)
-    void testSnapshotCopyGrantLifecycle() {
+    void snapshotCopyGrantLifecycle() {
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -485,7 +485,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(6)
-    void testSnapshotCopyGrantPagination() {
+    void snapshotCopyGrantPagination() {
         // AWS constrains MaxRecords to 20-100, so a two-page walk needs more than 20 grants.
         int total = 21;
         for (int i = 1; i <= total; i++) {
@@ -574,7 +574,7 @@ public class RedshiftOperationsTest {
 
     @Test
     @Order(7)
-    void testSnapshotCopyGrantNameContract() {
+    void snapshotCopyGrantNameContract() {
         String tooLong = "g123456789012345678901234567890123456789012345678901234567890123";
         for (String invalid : List.of("1grant", "Grant", "grant--copy", "grant-", tooLong)) {
             given()

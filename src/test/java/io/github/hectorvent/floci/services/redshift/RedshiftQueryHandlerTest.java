@@ -431,7 +431,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrant() {
+    void createsSnapshotCopyGrant() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotCopyGrantName", "grant-1");
         params.putSingle("KmsKeyId", "key-abc");
@@ -450,7 +450,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantAcceptsNamedMemberTags() {
+    void createSnapshotCopyGrantAcceptsNamedMemberTags() {
         // Real Redshift SDK sends "Tags.Tag.N.Key/.Value" on CreateSnapshotCopyGrant.
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotCopyGrantName", "grant-1");
@@ -475,7 +475,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantRequiresName() {
+    void createSnapshotCopyGrantRequiresName() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("KmsKeyId", "key-abc");
 
@@ -554,7 +554,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrants() {
+    void describesSnapshotCopyGrants() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotCopyGrantName", "grant-1");
 
@@ -572,7 +572,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsWithoutNameListsAll() {
+    void describeSnapshotCopyGrantsWithoutNameListsAll() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
 
         when(service.describeSnapshotCopyGrants(isNull(), isNull(), isNull()))
@@ -589,7 +589,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsForwardsMaxRecordsAndMarker() {
+    void describeSnapshotCopyGrantsForwardsMaxRecordsAndMarker() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("MaxRecords", "20");
         params.putSingle("Marker", "Z3JhbnQtMjA");
@@ -604,7 +604,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsEmitsMarkerWhenMorePagesRemain() {
+    void describeSnapshotCopyGrantsEmitsMarkerWhenMorePagesRemain() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("MaxRecords", "20");
 
@@ -619,7 +619,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsRejectsNonNumericMaxRecords() {
+    void describeSnapshotCopyGrantsRejectsNonNumericMaxRecords() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("MaxRecords", "many");
 
@@ -630,7 +630,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDeleteSnapshotCopyGrant() {
+    void deletesSnapshotCopyGrant() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotCopyGrantName", "grant-1");
 
@@ -646,7 +646,7 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void testDeleteSnapshotCopyGrantRequiresName() {
+    void deleteSnapshotCopyGrantRequiresName() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
 
         AwsException ex = assertThrows(

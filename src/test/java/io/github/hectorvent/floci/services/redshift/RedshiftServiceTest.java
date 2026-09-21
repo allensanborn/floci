@@ -1328,7 +1328,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrant() {
+    void createsSnapshotCopyGrant() {
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of());
@@ -1340,7 +1340,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantDefaultsKmsKeyId() {
+    void createSnapshotCopyGrantDefaultsKmsKeyId() {
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", null, Map.of());
@@ -1349,7 +1349,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantStoresTags() {
+    void createSnapshotCopyGrantStoresTags() {
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of("env", "prod"));
@@ -1358,7 +1358,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantAlreadyExists() {
+    void createSnapshotCopyGrantRejectsDuplicateName() {
         when(snapshotCopyGrantBackend.get("existing")).thenReturn(Optional.of(new SnapshotCopyGrant()));
 
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -1375,7 +1375,7 @@ class RedshiftServiceTest {
             "grant-",                                                          // no trailing hyphen
             "g123456789012345678901234567890123456789012345678901234567890123" // 64 characters
     })
-    void testCreateSnapshotCopyGrantRejectsNamesRedshiftRejects(String name) {
+    void createSnapshotCopyGrantRejectsNamesRedshiftRejects(String name) {
         when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -1388,7 +1388,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateSnapshotCopyGrantAcceptsMaximumLengthName() {
+    void createSnapshotCopyGrantAcceptsMaximumLengthName() {
         String name = "g12345678901234567890123456789012345678901234567890123456789012";
         assertEquals(63, name.length());
         when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
@@ -1401,7 +1401,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsByName() {
+    void describeSnapshotCopyGrantsByName() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
 
@@ -1413,7 +1413,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsReturnsAllWhenNameOmitted() {
+    void describeSnapshotCopyGrantsReturnsAllWhenNameOmitted() {
         when(snapshotCopyGrantBackend.scan(any())).thenReturn(List.of(
                 new SnapshotCopyGrant("grant-a", "key-a"),
                 new SnapshotCopyGrant("grant-b", "key-b")));
@@ -1425,7 +1425,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsNotFound() {
+    void describeSnapshotCopyGrantsRejectsMissingGrant() {
         when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class,
@@ -1436,7 +1436,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsPagesInNameOrder() {
+    void describeSnapshotCopyGrantsPagesInNameOrder() {
         // 25 grants created out of order: paging must follow name order, not insertion order.
         List<SnapshotCopyGrant> stored = new ArrayList<>();
         for (int i = 25; i >= 1; i--) {
@@ -1461,7 +1461,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsOmitsMarkerWhenPageExactlyFits() {
+    void describeSnapshotCopyGrantsOmitsMarkerWhenPageExactlyFits() {
         List<SnapshotCopyGrant> stored = new ArrayList<>();
         for (int i = 1; i <= 20; i++) {
             stored.add(new SnapshotCopyGrant(String.format("grant-%02d", i), "key-" + i));
@@ -1475,7 +1475,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsRejectsMaxRecordsBelowMinimum() {
+    void describeSnapshotCopyGrantsRejectsMaxRecordsBelowMinimum() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.describeSnapshotCopyGrants(null, 19, null));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
@@ -1483,14 +1483,14 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsRejectsMaxRecordsAboveMaximum() {
+    void describeSnapshotCopyGrantsRejectsMaxRecordsAboveMaximum() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.describeSnapshotCopyGrants(null, 101, null));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
     }
 
     @Test
-    void testDescribeSnapshotCopyGrantsAcceptsMarkerAlongsideName() {
+    void describeSnapshotCopyGrantsAcceptsMarkerAlongsideName() {
         // AWS documents the two as mutually exclusive but models no error, so Floci filters
         // by name and then paginates rather than rejecting the pair.
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
@@ -1504,7 +1504,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteSnapshotCopyGrant() {
+    void deletesSnapshotCopyGrant() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
 
@@ -1516,7 +1516,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testDeleteSnapshotCopyGrantNotFound() {
+    void deleteSnapshotCopyGrantRejectsMissingGrant() {
         when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshotCopyGrant("missing"));
@@ -1527,7 +1527,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateTagsOnSnapshotCopyGrant() {
+    void createTagsOnSnapshotCopyGrant() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
 
@@ -1539,7 +1539,7 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void testCreateTagsOnMissingSnapshotCopyGrantIsNotFound() {
+    void createTagsOnMissingSnapshotCopyGrantIsNotFound() {
         when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class,
