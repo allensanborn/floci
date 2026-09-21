@@ -3129,7 +3129,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 inst.setState(InstanceState.terminated());
                 inst.setTerminatedAt(System.currentTimeMillis());
             } else {
-                containerManager.terminate(inst);
+                // Also attempt the reclaim once this container is really gone. The synchronous
+                // attempt below runs while teardown is still scheduled, so for a batch whose
+                // containers all tear down slowly every in-loop attempt can be refused by the
+                // daemon and, without this, nothing would try again.
+                containerManager.terminate(inst, () -> reclaimCapturesPinnedBy(region, inst, terminating));
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {
@@ -3138,6 +3142,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             releaseStandaloneInterfacesOnTermination(region, inst);
             instances.put(key(region, id), inst);
             // The last instance depending on a deregistered AMI's capture has just gone away.
+            // Cheap and usually sufficient: by here the container is often already removed.
             reclaimCapturesPinnedBy(region, inst, terminating);
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
