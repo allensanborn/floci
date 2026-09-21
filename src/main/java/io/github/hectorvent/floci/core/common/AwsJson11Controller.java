@@ -270,7 +270,7 @@ public class AwsJson11Controller {
             String body) {
 
         if (target == null) {
-            return null;
+            return JsonErrorResponseUtils.createMissingTargetErrorResponse();
         }
 
         ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);

@@ -136,8 +136,15 @@ iterations.
   `ReaderConfig.ItemsPointer` selects a node inside it.
 - `JSONL` is one item per line. Blank lines are skipped, and `ItemsPointer` does not apply,
   matching AWS.
-- `CSV`, `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution
-  with `States.ItemReaderFailed`.
+- `CSV` takes its field names from the first row, or from `ReaderConfig.CSVHeaders` when
+  `CSVHeaderLocation` is `GIVEN`. Every value is a string: a row shorter than the headers pads
+  with empty strings, and a longer one drops the surplus. `ReaderConfig.CSVDelimiter` selects
+  `COMMA`, `PIPE`, `SEMICOLON`, `SPACE` or `TAB`, and a quoted field may contain the delimiter
+  or a line break without ending the record. A doubled quote stands for a single quote, in an
+  unquoted field as well as a quoted one, and a backslash escapes another backslash, a quote or
+  the delimiter. A backslash before anything else is dropped, as AWS documents.
+- `PARQUET` and `MANIFEST` are accepted by `CreateStateMachine` and fail the execution with
+  `States.ItemReaderFailed`.
 
 `arn:aws:states:::s3:listObjectsV2` reads every page under `Prefix`. Each item carries the AWS
 fields `Etag`, `Key`, `LastModified` (epoch seconds), `Size` and `StorageClass`. An empty prefix
@@ -419,7 +426,11 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
+
+Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
+offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
@@ -463,6 +474,10 @@ cause is the response serialized as a string, so a `Catch` can read which entry 
 ```json
 {"FailedEntryCount":1,"Entries":[{"EventId":"08cbdc46-…"},{"ErrorCode":"InvalidArgument","ErrorMessage":"EventBus not found: no-such-bus"}]}
 ```
+
+The optimized integration accepts `Detail` as a JSON object in JSONPath and JSONata workflows. It
+serializes that object once for the EventBridge request, preserving nested values and escaped text.
+The direct EventBridge API continues to accept its native string-valued `Detail` field.
 
 One deviation, and it belongs to EventBridge rather than to the integration: Floci rejects an entry
 addressed to an event bus that does not exist, while AWS accepts it and returns an `EventId`.

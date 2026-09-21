@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -74,6 +75,35 @@ class EcsServiceTeardownTest {
         // Handles are claimed on the first pass; a second invocation must be a no-op.
         service.stopManagedContainers();
         verify(containerManager, times(1)).stopTask(handle);
+    }
+
+    @Test
+    void afterResetRestartsTheReconcilerThatAResetTeardownStopped() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false); // docker mode
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsService service = new EcsService(
+                new RegionResolver(REGION, "000000000000"),
+                mock(EcsContainerManager.class),
+                config,
+                mock(EcsLoadBalancerRegistrar.class),
+                new SingleUseStorageFactory(),
+                null);
+        service.initializeStorage();
+
+        // A reset runs the teardown, then clear(), and afterReset() last, even when the wipe or
+        // a clear() threw; shutdown runs only the teardown. afterReset() alone must bring the
+        // reconciler back.
+        service.stopManagedContainers();
+        assertTrue(service.isReconcilerShutdown());
+
+        service.afterReset();
+        assertFalse(service.isReconcilerShutdown());
+        service.afterReset();
+        assertFalse(service.isReconcilerShutdown());
+
+        service.stopManagedContainers();
+        assertTrue(service.isReconcilerShutdown());
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.ContainerTeardowns;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.storage.PersistentPathValidator;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -33,6 +34,7 @@ import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerM
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -41,6 +43,7 @@ import io.quarkus.vertx.http.HttpServerStart;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
@@ -83,6 +86,7 @@ public class EmulatorLifecycle {
     private final RabbitMqManager rabbitMqManager;
     private final FlinkContainerManager flinkContainerManager;
     private final RdsService rdsService;
+    private final TimestreamInfluxDbService timestreamInfluxDbService;
     private final ElbV2Service elbV2Service;
     private final ElbClassicService elbClassicService;
     private final InitializationHooksRunner initializationHooksRunner;
@@ -96,7 +100,7 @@ public class EmulatorLifecycle {
     private final InitLifecycleState initLifecycleState;
     private final SchemaCreationWorker schemaCreationWorker;
     private final StepFunctionsService stepFunctionsService;
-    private final jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns;
+    private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
 
     @Inject
@@ -117,6 +121,7 @@ public class EmulatorLifecycle {
                              RabbitMqManager rabbitMqManager,
                              FlinkContainerManager flinkContainerManager,
                              RdsService rdsService,
+                             TimestreamInfluxDbService timestreamInfluxDbService,
                              ElbV2Service elbV2Service,
                              ElbClassicService elbClassicService,
                              InitializationHooksRunner initializationHooksRunner,
@@ -130,7 +135,7 @@ public class EmulatorLifecycle {
                              InitLifecycleState initLifecycleState,
                              SchemaCreationWorker schemaCreationWorker,
                              StepFunctionsService stepFunctionsService,
-                             jakarta.enterprise.inject.Instance<ContainerTeardown> containerTeardowns,
+                             Instance<ContainerTeardown> containerTeardowns,
                              PersistentPathValidator persistentPathValidator) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
@@ -150,6 +155,7 @@ public class EmulatorLifecycle {
         this.rabbitMqManager = rabbitMqManager;
         this.flinkContainerManager = flinkContainerManager;
         this.rdsService = rdsService;
+        this.timestreamInfluxDbService = timestreamInfluxDbService;
         this.elbV2Service = elbV2Service;
         this.elbClassicService = elbClassicService;
         this.initializationHooksRunner = initializationHooksRunner;
@@ -173,6 +179,11 @@ public class EmulatorLifecycle {
         LOG.infof("Region:    %s  Account: %s", config.defaultRegion(), config.defaultAccountId());
         LOG.infov("Storage:   {0}  Path: {1}", config.storage().mode(), config.storage().persistentPath());
         LOG.infov("TLS:       {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
+        // Surfaced in the banner because a mistyped flag name (issue #3931) silently leaves
+        // enforcement off, and nothing else in the logs reveals that policies are not evaluated.
+        LOG.infov("IAM:       {0}", config.services().iam().enforcementEnabled()
+                ? "policy enforcement enabled"
+                : "policy enforcement disabled (set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to enforce)");
 
         // BOOT hooks run before service initialization — scripts cannot use AWS APIs yet.
         try {
@@ -193,6 +204,10 @@ public class EmulatorLifecycle {
         if (sweptSessions > 0) {
             LOG.infov("Removed {0} orphaned Lambda execution-role session(s)", sweptSessions);
         }
+        int sweptEc2Sessions = iamService.sweepOrphanedEc2InstanceSessions();
+        if (sweptEc2Sessions > 0) {
+            LOG.infov("Removed {0} orphaned EC2 instance session(s)", sweptEc2Sessions);
+        }
         schemaCreationWorker.recoverOrphans();
         schemaCreationWorker.rehydrateSchemas();
         stepFunctionsService.abortAbandonedExecutions();
@@ -202,6 +217,9 @@ public class EmulatorLifecycle {
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
         rdsService.restorePersistedRuntime();
+        if (config.services().timestreamInfluxdb().enabled()) {
+            timestreamInfluxDbService.restorePersistedRuntime();
+        }
         if (config.services().elasticache().enabled()) {
             elastiCacheService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv("ElastiCache cluster-mode restore failed: {0}", ex.getMessage());
@@ -215,7 +233,7 @@ public class EmulatorLifecycle {
             elbClassicService.restorePersistedRuntime();
         }
 
-        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+        if (isMetadataServerNeeded()) {
             ec2MetadataServer.start().exceptionally(ex -> {
                 LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
                 return null;
@@ -304,7 +322,7 @@ public class EmulatorLifecycle {
         // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
         runCleanup("storage flush", storageFactory::flushAll);
         runCleanup("EC2 metadata server", () -> {
-            if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+            if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();
             }
         });
@@ -325,14 +343,7 @@ public class EmulatorLifecycle {
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
-        for (ContainerTeardown teardown : containerTeardowns) {
-            try {
-                teardown.stopManagedContainers();
-            } catch (Exception e) {
-                LOG.warnv("Container teardown failed for {0}: {1}",
-                        teardown.getClass().getSimpleName(), e.getMessage());
-            }
-        }
+        ContainerTeardowns.stopAll(containerTeardowns, LOG);
         runCleanup("storage shutdown", storageFactory::shutdownAll);
 
         LOG.info("=== AWS Local Emulator Stopped ===");
@@ -344,5 +355,17 @@ public class EmulatorLifecycle {
         } catch (RuntimeException e) {
             LOG.warnv(e, "Shutdown cleanup failed for {0}; continuing with the remaining steps", resource);
         }
+    }
+
+    private boolean isMetadataServerNeeded() {
+        if (config == null || config.services() == null) {
+            return false;
+        }
+        EmulatorConfig.Ec2ServiceConfig ec2 = config.services().ec2();
+        if (ec2 != null && ec2.enabled() && !ec2.mock()) {
+            return true;
+        }
+        EmulatorConfig.EksServiceConfig eks = config.services().eks();
+        return eks != null && eks.enabled() && !eks.mock() && eks.imds();
     }
 }

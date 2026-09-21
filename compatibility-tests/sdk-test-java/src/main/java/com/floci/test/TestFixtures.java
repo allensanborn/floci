@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.codeartifact.CodeartifactClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
@@ -40,6 +41,7 @@ import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
 import software.amazon.awssdk.services.identitystore.IdentitystoreClient;
 import software.amazon.awssdk.services.budgets.BudgetsClient;
 import software.amazon.awssdk.services.bcmpricingcalculator.BcmPricingCalculatorClient;
+import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClient;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.controlcatalog.ControlCatalogClient;
 import software.amazon.awssdk.services.marketplacecatalog.MarketplaceCatalogClient;
@@ -1068,6 +1070,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static CodeartifactClient codeArtifactClient() {
+        return CodeartifactClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static NeptuneClient neptuneClient() {
         return NeptuneClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1333,6 +1343,14 @@ public final class TestFixtures {
 
     public static BcmPricingCalculatorClient bcmPricingCalculatorClient() {
         return BcmPricingCalculatorClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static TimestreamInfluxDbClient timestreamInfluxDbClient() {
+        return TimestreamInfluxDbClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

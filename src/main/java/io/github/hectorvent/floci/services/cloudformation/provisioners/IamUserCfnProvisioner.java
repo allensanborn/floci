@@ -144,7 +144,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                                         + " has no PolicyDocument.", 400);
                     }
                     iamService.putUserPolicy(resolvedUserName, policyName,
-                            ctx.engine().resolveJsonAttribute(document));
+                            ctx.engine().resolveJsonAttributeStrict(document));
                     inlineWrittenByThisAttempt.add(policyName);
                 }
             }
@@ -313,6 +313,9 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             }
             LOG.debugv("IAM user access keys already gone, treating as deleted: {0}", physicalId);
         }
+
+        CfnDeletes.safeDelete("login profile on user", physicalId,
+                () -> iamService.deleteLoginProfile(physicalId), "NoSuchEntity");
 
         CfnDeletes.safeDelete("IAM user", physicalId,
                 () -> iamService.deleteUser(physicalId), "NoSuchEntity");
