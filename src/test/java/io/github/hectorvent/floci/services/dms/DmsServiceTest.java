@@ -19,6 +19,8 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -52,7 +54,7 @@ class DmsServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.describeSubnets(eq(REGION), anyList(), anyMap())).thenAnswer(invocation -> {
             List<String> requested = invocation.getArgument(1);
-            return requested.stream().map(DmsServiceTest::subnet).filter(java.util.Objects::nonNull).toList();
+            return requested.stream().map(DmsServiceTest::subnet).filter(Objects::nonNull).toList();
         });
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -484,7 +486,7 @@ class DmsServiceTest {
 
     private Map<String, String> tagsOf(String identifier) {
         return service.listTagsForResource(arnRequest(identifier), REGION).stream()
-                .collect(java.util.stream.Collectors.toMap(ResourceTag::key, ResourceTag::value));
+                .collect(Collectors.toMap(ResourceTag::key, ResourceTag::value));
     }
 
     private ObjectNode arnRequest(String identifier) {
