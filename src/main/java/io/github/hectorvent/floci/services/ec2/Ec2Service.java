@@ -13,16 +13,20 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.jboss.logging.Logger;
 
@@ -101,10 +105,13 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpointDnsEntry;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnection;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionStateReason;
 import io.github.hectorvent.floci.services.ec2.model.VpcPeeringConnectionVpcInfo;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import jakarta.annotation.PostConstruct;
 import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
 import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
@@ -137,14 +144,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Set<String> ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES =
+            Set.of("resource-id", "resource-type", "transit-gateway-attachment-id");
+    /**
+     * Private DNS names that are not the token in the endpoint service name, empty for the
+     * services AWS serves no private name for.
+     */
+    private static final Map<String, String> PRIVATE_DNS_NAMES = Map.of(
+            "kinesis-streams", "kinesis",
+            "kinesis-firehose", "firehose",
+            "dkr.ecr", "*.dkr.ecr",
+            "execute-api", "*.execute-api",
+            "ecs-agent", "ecs-a",
+            "ecs-telemetry", "ecs-t",
+            "data.iot", "");
     // A first launch may need to pull a large AMI-backed image. Keep a finite CloudFormation
     // bound, but allow enough time for that legitimate cold-start path before cancellation.
     private static final Duration CONTAINER_LAUNCH_TIMEOUT = Duration.ofMinutes(5);
     private static final long CONTAINER_LAUNCH_POLL_MILLIS = 50;
+    private static final Set<String> VPN_GATEWAY_FILTERS = Set.of(
+            "amazon-side-asn", "attachment.state", "attachment.vpc-id", "availability-zone",
+            "state", "tag-key", "tag-value", "type", "vpn-gateway-id");
+    private static final Set<String> EGRESS_ONLY_INTERNET_GATEWAY_FILTERS = Set.of(
+            "attachment.state", "attachment.vpc-id",
+            "egress-only-internet-gateway-id", "tag-key", "tag-value");
 
-    private final String accountId;
+    private final String defaultAccountId;
     private final jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance;
     private final EmulatorConfig config;
+    private final IamService iamService;
     private final Ec2ContainerManager containerManager;
     private final Ec2PortForwardManager portForwardManager;
     private final AmiImageResolver amiImageResolver;
@@ -225,9 +253,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
-                      VpcNetworkManager vpcNetworkManager) {
+                      VpcNetworkManager vpcNetworkManager, IamService iamService) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
-                instanceTypeCatalog, storageFactory, requestContextInstance);
+                instanceTypeCatalog, storageFactory, requestContextInstance, iamService);
         this.vpcNetworkManager = vpcNetworkManager;
     }
 
@@ -236,6 +264,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
                       jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, storageFactory, requestContextInstance, null);
+    }
+
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory,
+                      jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+                      IamService iamService) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
@@ -271,7 +309,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, NetworkInterface>>() {}),
                 storageFactory.create("ec2", "ec2-capacity-reservations.json",
                         new TypeReference<Map<String, CapacityReservation>>() {}),
-                requestContextInstance);
+                requestContextInstance, iamService);
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -381,7 +419,50 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                StorageBackend<String, NetworkInterface> networkInterfaces,
                StorageBackend<String, CapacityReservation> capacityReservations,
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance) {
-        this.accountId = config.defaultAccountId();
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, vpcs, subnets, securityGroups, securityGroupRules,
+                internetGateways, routeTables, keyPairs, addresses, instances,
+                volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections, networkInterfaces, capacityReservations, requestContextInstance, null);
+    }
+
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService) {
+        this.iamService = iamService;
+        this.defaultAccountId = config.defaultAccountId();
         this.requestContextInstance = requestContextInstance;
         this.config = config;
         this.containerManager = containerManager;
@@ -437,6 +518,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         for (String key : instances.keys()) {
             Instance instance = instances.get(key).orElse(null);
             if (!needsMetadataRegistration(instance)) {
+                continue;
+            }
+            try {
+                restoreInstanceFirewall(instance);
+            } catch (Exception e) {
+                LOG.warnv("Could not restore EC2 firewall for {0}: {1}", instance.getInstanceId(), e.getMessage());
+                containerManager.stopForShutdown(instance);
+                instance.setState(InstanceState.stopped());
+                instances.put(key, instance);
                 continue;
             }
             if (containerManager.restoreMetadataRegistration(instance)) {
@@ -730,7 +820,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         acl.setDefault(false);
         acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
         acl.getEntries().add(naclEntry(32767, "-1", "deny", true, "0.0.0.0/0"));
-        networkAcls.put(key(region, networkAclId), acl);
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, vpcId);
+            networkAcls.put(key(region, networkAclId), acl);
+        }
         return acl;
     }
 
@@ -949,10 +1042,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String prefixListId = "pl-" + randomHex(17);
         list.setPrefixListId(prefixListId);
         list.setPrefixListName(prefixListName);
-        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, accountId, "prefix-list/" + prefixListId).toString());
+        String ownerAccountId = callerAccountId();
+        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "prefix-list/" + prefixListId).toString());
         list.setAddressFamily(addressFamily);
         list.setMaxEntries(maxEntries);
-        list.setOwnerId(accountId);
+        list.setOwnerId(ownerAccountId);
         list.setRegion(region);
         // AWS creates asynchronously (create-in-progress then create-complete). Nothing here is
         // slow, so the list is complete by the time the caller sees it.
@@ -1053,6 +1147,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             list.setState("modify-complete");
             managedPrefixLists.put(key(region, prefixListId), list);
+            reconcileFirewallPolicies(region);
             return list;
         }
     }
@@ -1063,6 +1158,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             requireCustomerManaged(list, "deleted");
             managedPrefixLists.delete(key(region, prefixListId));
             tags.delete(prefixListId);
+            reconcileFirewallPolicies(region);
             // AWS reports delete-complete on the returned object even though it is now gone.
             list.setState("delete-complete");
             return list;
@@ -1251,10 +1347,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String transitGatewayId = "tgw-" + randomHex(17);
         TransitGateway gateway = new TransitGateway();
         gateway.setTransitGatewayId(transitGatewayId);
+        String ownerAccountId = callerAccountId();
         gateway.setTransitGatewayArn(AwsArnUtils.Arn
-                .of("ec2", region, accountId, "transit-gateway/" + transitGatewayId).toString());
+                .of("ec2", region, ownerAccountId, "transit-gateway/" + transitGatewayId).toString());
         gateway.setState("available");
-        gateway.setOwnerId(accountId);
+        gateway.setOwnerId(ownerAccountId);
         gateway.setDescription(description);
         gateway.setCreationTime(ISO_FMT.format(Instant.now()));
         gateway.setRegion(region);
@@ -1668,7 +1765,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         attachment.setTransitGatewayAttachmentId(attachmentId);
         attachment.setTransitGatewayId(gateway.getTransitGatewayId());
         attachment.setVpcId(vpcId);
-        attachment.setVpcOwnerId(accountId);
+        attachment.setVpcOwnerId(callerAccountId());
         attachment.setTransitGatewayOwnerId(gateway.getOwnerId());
         // AWS reports pending and settles on available; nothing is slow locally, the same
         // compression createTransitGateway applies.
@@ -1991,11 +2088,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
     }
 
-    /** The attachments associated with a route table, which is where an association is recorded. */
     public List<TransitGatewayVpcAttachment> associationsOf(String region, String routeTableId) {
+        return associationsOf(region, routeTableId, Map.of());
+    }
+
+    /** The attachments associated with a route table, which is where an association is recorded. */
+    public List<TransitGatewayVpcAttachment> associationsOf(
+            String region, String routeTableId, Map<String, List<String>> filters) {
+        Map<String, List<String>> modeledFilters = new LinkedHashMap<>(filters);
+        modeledFilters.keySet().retainAll(ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES);
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
+                .filter(attachment -> matchesFilters(attachment, modeledFilters, region))
                 .collect(Collectors.toList());
     }
 
@@ -2040,9 +2145,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public List<TransitGatewayRouteTablePropagation> propagationsOf(String region, String routeTableId) {
+        return propagationsOf(region, routeTableId, Map.of());
+    }
+
+    public List<TransitGatewayRouteTablePropagation> propagationsOf(
+            String region, String routeTableId, Map<String, List<String>> filters) {
+        Map<String, List<String>> modeledFilters = new LinkedHashMap<>(filters);
+        modeledFilters.keySet().retainAll(ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES);
         return transitGatewayPropagations.scan(k -> true).stream()
                 .filter(propagation -> region.equals(propagation.getRegion()))
                 .filter(propagation -> routeTableId.equals(propagation.getTransitGatewayRouteTableId()))
+                .filter(propagation -> matchesFilters(propagation, modeledFilters, region))
                 .collect(Collectors.toList());
     }
 
@@ -2576,7 +2689,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String reservationId = "r-" + randomHex(17);
         Reservation reservation = new Reservation();
         reservation.setReservationId(reservationId);
-        reservation.setOwnerId(accountId);
+        reservation.setOwnerId(callerAccountId());
 
         String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
@@ -2661,7 +2774,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 eni.setNetworkInterfaceId(suppliedEni != null ? suppliedEni.getNetworkInterfaceId() : "eni-" + randomHex(17));
                 eni.setSubnetId(finalSubnetId);
                 eni.setVpcId(vpcId);
-                eni.setOwnerId(accountId);
+                eni.setOwnerId(callerAccountId());
                 eni.setDescription(suppliedEni != null ? suppliedEni.getDescription() : null);
                 eni.setMacAddress(suppliedEni != null ? suppliedEni.getMacAddress() : null);
                 eni.setPrivateIpAddress(privateIp);
@@ -2685,7 +2798,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     launchAttachment.setDeviceIndex(eni.getDeviceIndex());
                     launchAttachment.setStatus("attached");
                     launchAttachment.setInstanceId(instanceId);
-                    launchAttachment.setInstanceOwnerId(accountId);
+                    launchAttachment.setInstanceOwnerId(callerAccountId());
                     launchAttachment.setAttachTime(eni.getAttachTime());
                     launchAttachment.setDeleteOnTermination(false);
                     suppliedEni.setAttachment(launchAttachment);
@@ -2731,7 +2844,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 }
             }
             for (Instance inst : launched) {
-                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst));
+                List<SecurityGroup> policyGroups = inst.getSecurityGroups().stream()
+                        .map(group -> securityGroups.get(key(region, group.getGroupId()))
+                                .orElseThrow(() -> new IllegalStateException("Missing security group " + group.getGroupId())))
+                        .toList();
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst),
+                        policyGroups, policyPrefixLists(region, policyGroups));
             }
         }
 
@@ -2804,12 +2922,52 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 sgs, config.services().ec2().maxPublishedPortsPerInstance());
     }
 
+    private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
+        Map<String, List<String>> resolved = new LinkedHashMap<>();
+        for (SecurityGroup group : groups) {
+            Stream.concat(group.getIpPermissions().stream(),
+                            group.getIpPermissionsEgress().stream())
+                    .flatMap(permission -> permission.getPrefixListIds().stream())
+                    .map(PrefixListId::getPrefixListId).distinct()
+                    .forEach(id -> resolved.put(id, managedPrefixLists.get(key(region, id)).isEmpty()
+                            ? List.of() : getManagedPrefixListEntries(region, id, null).stream()
+                            .map(PrefixListEntry::getCidr).toList()));
+        }
+        return resolved;
+    }
+
+    private boolean securityGroupEnforcementEnabled() {
+        return config.network() != null && config.network().securityGroupEnforcement() != null
+                && config.network().securityGroupEnforcement().enabled();
+    }
+
+    private void reconcileFirewallPolicies(String region) {
+        if (!securityGroupEnforcementEnabled() || config.services().ec2().mock()) {
+            return;
+        }
+        List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+        Map<String, SecurityGroup> byId = current.stream()
+                .collect(Collectors.toMap(SecurityGroup::getGroupId, Function.identity()));
+        containerManager.refreshSecurityGroups(region, byId, policyPrefixLists(region, current));
+    }
+
+    private void restoreInstanceFirewall(Instance instance) {
+        if (!securityGroupEnforcementEnabled()) {
+            return;
+        }
+        String region = instance.getRegion();
+        List<SecurityGroup> attached = instance.getSecurityGroups().stream()
+                .map(group -> getRequiredSecurityGroup(region, group.getGroupId())).toList();
+        containerManager.restoreSecurityGroups(instance, region, attached, policyPrefixLists(region, attached));
+    }
+
     /**
      * Re-publishes host forwards for every running instance attached to the given security group,
      * so ports opened or closed via authorize/revoke ingress take effect on already-running
      * instances. No-op in mock mode or when publishing is disabled.
      */
     private void reconcilePublishedPortsForGroup(String region, String groupId) {
+        reconcileFirewallPolicies(region);
         if (!config.services().ec2().publishSecurityGroupPorts() || config.services().ec2().mock()) {
             return;
         }
@@ -2942,10 +3100,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
         // Group into reservations (one instance per reservation for simplicity)
         Map<String, Reservation> reservationMap = new LinkedHashMap<>();
+        String ownerAccountId = callerAccountId();
         for (Instance inst : matched) {
             Reservation res = new Reservation();
             res.setReservationId("r-" + randomHex(17));
-            res.setOwnerId(accountId);
+            res.setOwnerId(ownerAccountId);
             res.getInstances().add(inst);
             reservationMap.put(inst.getInstanceId(), res);
         }
@@ -3084,6 +3243,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             if (config.services().ec2().mock()) {
                 inst.setState(InstanceState.running());
             } else {
+                restoreInstanceFirewall(inst);
                 containerManager.start(inst);
             }
             instances.put(key(region, id), inst);
@@ -3297,7 +3457,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         List<GroupIdentifier> identifiers = new ArrayList<>();
         for (String groupId : groupIds) {
             SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
+                throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
+            }
             identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+
+        if (securityGroupEnforcementEnabled() && !config.services().ec2().mock()
+                && inst.getState() != null && "running".equals(inst.getState().getName())
+                && inst.getNetworkInterfaces() != null && !inst.getNetworkInterfaces().isEmpty()) {
+            List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+            Map<String, SecurityGroup> byId = current.stream().collect(Collectors.toMap(
+                    SecurityGroup::getGroupId, Function.identity()));
+            containerManager.updateSecurityGroups(inst.getNetworkInterfaces().getFirst().getNetworkInterfaceId(),
+                    new HashSet<>(groupIds), byId, policyPrefixLists(region, current));
         }
 
         inst.setSecurityGroups(new ArrayList<>(identifiers));
@@ -3414,6 +3587,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
+    public List<String> describeVpnGatewayIds(
+            List<String> gatewayIds, Map<String, List<String>> filters) {
+        requireSupportedFilters(filters, VPN_GATEWAY_FILTERS);
+        if (!gatewayIds.isEmpty()) {
+            throw new AwsException("InvalidVpnGatewayID.NotFound",
+                    "The vpnGateway ID '" + gatewayIds.getFirst() + "' does not exist", 400);
+        }
+        return List.of();
+    }
+
+    // AWS answers an unknown egress-only gateway ID with an empty set, not an error; callers such as
+    // the Terraform provider treat the empty result as "not found".
+    public List<String> describeEgressOnlyInternetGatewayIds(Map<String, List<String>> filters) {
+        requireSupportedFilters(filters, EGRESS_ONLY_INTERNET_GATEWAY_FILTERS);
+        return List.of();
+    }
+
+    private void requireSupportedFilters(Map<String, List<String>> filters, Set<String> supportedFilters) {
+        filters.keySet().stream()
+                .filter(name -> !supportedFilters.contains(name)
+                        && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
+                .findFirst()
+                .ifPresent(name -> {
+                    throw new AwsException("InvalidParameterValue", "The filter '" + name + "' is invalid", 400);
+                });
+    }
+
     public void deleteVpc(String region, String vpcId) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
@@ -3421,11 +3621,89 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             requireNoTransitGatewayAttachment(region,
                     attachment -> vpcId.equals(attachment.getVpcId()),
                     "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
+            requireNoVpcDependents(region, vpcId);
+            deleteVpcDefaultResources(region, vpcId);
             vpcs.delete(key(region, vpcId));
+            tags.delete(vpcId);
         }
         if (vpcNetworkManager != null) {
             vpcNetworkManager.deleteVpcNetwork(region, vpcId);
         }
+    }
+
+    /**
+     * DeleteVpc only removes the resources AWS creates with the VPC (default security group, main
+     * route table, default network ACL). A subnet, or a security group, route table or network ACL the
+     * caller made, an internet gateway still attached, or a VPC endpoint must be removed first,
+     * otherwise AWS answers {@code DependencyViolation}.
+     */
+    private void requireNoVpcDependents(String region, String vpcId) {
+        boolean hasDependents = subnets.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(subnet -> vpcId.equals(subnet.getVpcId()))
+                || securityGroups.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(group -> vpcId.equals(group.getVpcId())
+                                && !"default".equals(group.getGroupName()))
+                || routeTables.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(table -> vpcId.equals(table.getVpcId())
+                                && table.getAssociations().stream().noneMatch(association -> association.isMain()))
+                || networkAcls.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(acl -> vpcId.equals(acl.getVpcId()) && !acl.isDefault())
+                || internetGateways.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(igw -> igw.getAttachments().stream()
+                                .anyMatch(attachment -> vpcId.equals(attachment.getVpcId())))
+                || vpcEndpoints.scan(k -> k.startsWith(region + "::")).stream()
+                        .anyMatch(endpoint -> vpcId.equals(endpoint.getVpcId()));
+        if (hasDependents) {
+            throw new AwsException("DependencyViolation",
+                    "The vpc '" + vpcId + "' has dependencies and cannot be deleted.", 400);
+        }
+    }
+
+    private void deleteVpcDefaultResources(String region, String vpcId) {
+        List<SecurityGroup> defaultGroups = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(group -> region.equals(group.getRegion()))
+                .filter(group -> vpcId.equals(group.getVpcId()))
+                .filter(group -> "default".equals(group.getGroupName()))
+                .toList();
+        for (SecurityGroup group : defaultGroups) {
+            // Same lock the authorize/revoke paths hold while they read and re-save a group; without
+            // it, one of them can save the group back after this delete and resurrect it.
+            synchronized (lockFor(key(region, group.getGroupId()))) {
+                List<String> ruleIds = securityGroupRules.scan(k -> k.startsWith(region + "::")).stream()
+                        .filter(rule -> group.getGroupId().equals(rule.getGroupId()))
+                        .map(SecurityGroupRule::getSecurityGroupRuleId)
+                        .toList();
+                ruleIds.forEach(ruleId -> {
+                    securityGroupRules.delete(key(region, ruleId));
+                    tags.delete(ruleId);
+                });
+                securityGroups.delete(key(region, group.getGroupId()));
+                tags.delete(group.getGroupId());
+            }
+        }
+
+        List<String> mainRouteTableIds = routeTables.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(table -> region.equals(table.getRegion()))
+                .filter(table -> vpcId.equals(table.getVpcId()))
+                .filter(table -> table.getAssociations().stream()
+                        .anyMatch(association -> association.isMain()))
+                .map(RouteTable::getRouteTableId)
+                .toList();
+        mainRouteTableIds.forEach(routeTableId -> {
+            routeTables.delete(key(region, routeTableId));
+            tags.delete(routeTableId);
+        });
+
+        List<String> defaultNetworkAclIds = networkAcls.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(acl -> region.equals(acl.getRegion()))
+                .filter(acl -> vpcId.equals(acl.getVpcId()))
+                .filter(acl -> acl.isDefault())
+                .map(NetworkAcl::getNetworkAclId)
+                .toList();
+        defaultNetworkAclIds.forEach(aclId -> {
+            networkAcls.delete(key(region, aclId));
+            tags.delete(aclId);
+        });
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {
@@ -3566,7 +3844,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             endpoint.setTags(new ArrayList<>(endpointTags));
             tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
         }
-        vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, vpcId);
+            vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
+        }
         return endpoint;
     }
 
@@ -3793,6 +4074,82 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
+     * The {@code DnsEntries} an interface endpoint reports. The names and zones are synthesized
+     * deterministically rather than persisted, so a restart keeps answering with what the caller
+     * first saw, and the private-DNS entry carries its own zone because AWS creates one per
+     * endpoint. One class AWS also serves is not modelled, needing per-service metadata floci
+     * does not hold: the several private names a service such as S3 answers to.
+     */
+    public List<VpcEndpointDnsEntry> endpointDnsEntries(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        String region = endpoint.getRegion();
+        String serviceToken = endpointServiceToken(endpoint.getServiceName(), region);
+        String name = endpoint.getVpcEndpointId() + "-" + endpointDnsDiscriminator(endpoint.getVpcEndpointId());
+        String dnsSuffix = AwsRegions.dnsSuffixFor(region);
+        String domain = serviceToken + "." + region + ".vpce." + dnsSuffix;
+        String hostedZoneId = vpceHostedZoneId(region);
+
+        List<VpcEndpointDnsEntry> entries = new ArrayList<>();
+        entries.add(new VpcEndpointDnsEntry(name + "." + domain, hostedZoneId));
+        endpoint.getSubnetIds().stream()
+                .map(subnetId -> subnets.get(key(region, subnetId)).orElse(null))
+                .filter(Objects::nonNull)
+                .map(Subnet::getAvailabilityZone)
+                .filter(az -> az != null && !az.isBlank())
+                .distinct()
+                .sorted()
+                .forEach(az -> entries.add(new VpcEndpointDnsEntry(name + "-" + az + "." + domain, hostedZoneId)));
+        if (endpoint.isPrivateDnsEnabled() && !serviceToken.startsWith("vpce-svc-")) {
+            String privateName = PRIVATE_DNS_NAMES.getOrDefault(serviceToken, serviceToken);
+            if (!privateName.isEmpty()) {
+                entries.add(new VpcEndpointDnsEntry(privateName + "." + region + "." + dnsSuffix,
+                        privateDnsHostedZoneId(endpoint.getVpcEndpointId())));
+            }
+        }
+        return entries;
+    }
+
+    private static String endpointDnsDiscriminator(String endpointId) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-dns|" + endpointId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+        return hex.substring(0, 8);
+    }
+
+    /**
+     * The service segment of the name. AWS drops the {@code com.amazonaws.<region>} prefix and
+     * reverses what is left, so {@code com.amazonaws.us-east-1.ecr.api} is reached at
+     * {@code api.ecr.<region>.vpce.amazonaws.com}. An endpoint service carries its
+     * {@code vpce-svc-*} identifier as the one trailing segment, which the same rule returns.
+     */
+    private static String endpointServiceToken(String serviceName, String region) {
+        if (serviceName == null || serviceName.isBlank()) {
+            return "unknown";
+        }
+        List<String> parts = List.of(serviceName.split("\\."));
+        int regionAt = region == null ? -1 : parts.indexOf(region);
+        if (regionAt < 0 || regionAt == parts.size() - 1) {
+            return parts.get(parts.size() - 1);
+        }
+        List<String> serviceParts = new ArrayList<>(parts.subList(regionAt + 1, parts.size()));
+        Collections.reverse(serviceParts);
+        return String.join(".", serviceParts);
+    }
+
+    private static String vpceHostedZoneId(String region) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-zone|" + region).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "").toUpperCase(Locale.ROOT);
+        return "Z" + hex.substring(0, 13);
+    }
+
+    private static String privateDnsHostedZoneId(String endpointId) {
+        String hex = UUID.nameUUIDFromBytes(("vpce-private-zone|" + endpointId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "").toUpperCase(Locale.ROOT);
+        return "Z" + hex.substring(0, 13);
+    }
+
+    /**
      * The interface address for one of the endpoint's subnets. An address the caller pinned
      * through {@code SubnetConfiguration} wins outright: AWS fixes that address on the interface,
      * and falling back to a synthesized one would answer a later describe with an address the
@@ -3920,18 +4277,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         subnet.setAvailabilityZone(zoneName);
         subnet.setAvailabilityZoneId(zoneIdForZoneName(region, zoneName));
         subnet.setAvailableIpAddressCount(251);
-        subnet.setOwnerId(accountId);
+        String ownerAccountId = callerAccountId();
+        subnet.setOwnerId(ownerAccountId);
         subnet.setRegion(region);
-        subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
+        subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "subnet/" + subnetId).toString());
         if (ipv6CidrBlock != null && !ipv6CidrBlock.isBlank()) {
             subnet.getIpv6CidrBlockAssociationSet().add(new VpcIpv6CidrBlockAssociation(
                     "subnet-cidr-assoc-" + randomHex(17), ipv6CidrBlock, null));
         }
         // The conflict scan and the store must be one step under the VPC's lock, or two
         // overlapping creates in flight together both pass the scan before either is stored.
-        synchronized (lockFor(key(region, vpcId))) {
-            rejectConflictingSubnetCidr(region, vpcId, cidrBlock);
-            subnets.put(key(region, subnetId), subnet);
+        // The topology lock, outermost, keeps DeleteVpc from removing the VPC in between.
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, vpcId);
+            synchronized (lockFor(key(region, vpcId))) {
+                rejectConflictingSubnetCidr(region, vpcId, cidrBlock);
+                subnets.put(key(region, subnetId), subnet);
+            }
         }
         declareSubnetNetwork(region, vpcId, subnetId, cidrBlock);
 
@@ -4033,7 +4395,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // Check duplicate
         String finalVpcId = vpcId;
         boolean exists = securityGroups.scan(k -> true).stream()
-                .anyMatch(sg -> sg.getRegion().equals(region) && sg.getGroupName().equals(groupName)
+                .anyMatch(sg -> sg.getRegion().equals(region) && Objects.equals(sg.getGroupName(), groupName)
                         && finalVpcId.equals(sg.getVpcId()));
         if (exists) {
             throw new AwsException("InvalidGroup.Duplicate", "The security group '" + groupName + "' already exists", 400);
@@ -4044,14 +4406,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         sg.setGroupName(groupName);
         sg.setDescription(description);
         sg.setVpcId(vpcId);
-        sg.setOwnerId(accountId);
+        sg.setOwnerId(callerAccountId());
         sg.setRegion(region);
         // Default egress all
         IpPermission egressAll = new IpPermission();
         egressAll.setIpProtocol("-1");
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         sg.getIpPermissionsEgress().add(egressAll);
-        securityGroups.put(key(region, sgId), sg);
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, sg.getVpcId());
+            securityGroups.put(key(region, sgId), sg);
+        }
         // Persist the default egress rule as a SecurityGroupRule so that
         // DescribeSecurityGroupRules can find it immediately (#1093).
         createRules(region, sgId, egressAll, true);
@@ -4122,6 +4487,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
         return rules;
     }
 
@@ -4203,7 +4569,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         SecurityGroupRule rule = new SecurityGroupRule();
         rule.setSecurityGroupRuleId("sgr-" + randomHex(17));
         rule.setGroupId(groupId);
-        rule.setGroupOwnerId(accountId);
+        rule.setGroupOwnerId(callerAccountId());
         rule.setEgress(egress);
         rule.setIpProtocol(perm.getIpProtocol());
         rule.setFromPort(perm.getFromPort());
@@ -4226,7 +4592,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         for (UserIdGroupPair pair : perm.getUserIdGroupPairs()) {
             if (pair.getUserId() == null) {
-                pair.setUserId(accountId);
+                pair.setUserId(callerAccountId());
             }
             if (pair.getGroupId() == null && pair.getGroupName() != null) {
                 securityGroups.scan(k -> true).stream()
@@ -4266,6 +4632,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             sg.setIpPermissionsEgress(next);
             securityGroups.put(key(region, groupId), sg);
         }
+        reconcileFirewallPolicies(region);
     }
 
     /**
@@ -4302,6 +4669,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         if (!rule.isEgress()) {
             reconcilePublishedPortsForGroup(region, groupId);
+        } else {
+            reconcileFirewallPolicies(region);
         }
         return true;
     }
@@ -4471,11 +4840,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public KeyPair createKeyPair(String region, String keyName) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4519,28 +4885,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
-    public void deleteKeyPair(String region, String keyName, String keyPairId) {
+    /**
+     * Deletes by id when one is given, otherwise by name, and returns the deleted key pair so
+     * the response can carry its id. Null when nothing matched: AWS answers a delete of an
+     * unknown key pair with plain success.
+     */
+    public KeyPair deleteKeyPair(String region, String keyName, String keyPairId) {
         ensureDefaultResources(region);
-        if (keyPairId != null && !keyPairId.isEmpty()) {
-            keyPairs.delete(key(region, keyPairId));
-        } else {
-            // scan() returns a detached copy, so the key pair has to be resolved to its
-            // store key and deleted through the backend — mutating the scan result does
-            // not touch the store.
-            keyPairs.scan(k -> true).stream()
-                    .filter(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName))
-                    .map(KeyPair::getKeyPairId)
-                    .forEach(id -> keyPairs.delete(key(region, id)));
+        boolean byId = keyPairId != null && !keyPairId.isEmpty();
+        // scan() returns detached copies, so each match is resolved to its store key and deleted
+        // through the backend; mutating the scan result does not touch the store.
+        List<KeyPair> matches = keyPairs.scan(k -> true).stream()
+                .filter(k -> region.equals(k.getRegion()))
+                .filter(k -> byId ? keyPairId.equals(k.getKeyPairId()) : keyName != null && keyName.equals(k.getKeyName()))
+                .toList();
+        for (KeyPair match : matches) {
+            keyPairs.delete(key(region, match.getKeyPairId()));
         }
+        return matches.isEmpty() ? null : matches.getFirst();
     }
 
     public KeyPair importKeyPair(String region, String keyName, String publicKeyMaterial) {
         ensureDefaultResources(region);
-        boolean exists = keyPairs.scan(k -> true).stream()
-                .anyMatch(k -> k.getRegion().equals(region) && k.getKeyName().equals(keyName));
-        if (exists) {
-            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
-        }
+        requireKeyName(keyName);
+        rejectDuplicateKeyName(region, keyName);
         String keyPairId = "key-" + randomHex(17);
         KeyPair kp = new KeyPair();
         kp.setKeyPairId(keyPairId);
@@ -4556,6 +4924,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
         return kp;
+    }
+
+    public Optional<Instance> findInstanceForAccount(String accountId, String region, String instanceId) {
+        return instances instanceof AccountAwareStorageBackend<Instance> aware
+                ? aware.getForAccount(accountId, key(region, instanceId)) : instances.get(key(region, instanceId));
     }
 
     public Instance findInstanceById(String instanceId) {
@@ -4579,6 +4952,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
         }
         return containerManager.isContainerRunning(instance.getDockerContainerId());
+    }
+
+    private static void requireKeyName(String keyName) {
+        if (keyName == null || keyName.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
+        }
+    }
+
+    // Compared name-first so a nameless record can never throw here. One such record, stored
+    // before KeyName was validated, used to fail every later CreateKeyPair in the account (#3356).
+    private void rejectDuplicateKeyName(String region, String keyName) {
+        boolean exists = keyPairs.scan(k -> true).stream()
+                .anyMatch(k -> region.equals(k.getRegion()) && keyName.equals(k.getKeyName()));
+        if (exists) {
+            throw new AwsException("InvalidKeyPair.Duplicate", "The keypair '" + keyName + "' already exists", 400);
+        }
     }
 
     public KeyPair findKeyPair(String region, String keyName) {
@@ -4614,6 +5003,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // A deregistered AMI is retained only as a tombstone, so that ancestry and
                 // repeat-deregistration still resolve; DescribeImages must not report it.
                 .filter(img -> !DEREGISTERED_STATE.equals(img.getState()))
+                .map(this::withCurrentImageTags)
                 .filter(img -> matchesImageIds(img, imageIds))
                 .filter(img -> matchesImageOwners(img, owners))
                 .filter(img -> matchesRegisteredImageFilters(img, filters))
@@ -4915,7 +5305,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         image.setImageId("ami-" + randomHex(17));
         image.setName(name);
         image.setDescription(description != null ? description : name);
-        image.setOwnerId(accountId);
+        image.setOwnerId(callerAccountId());
         image.setImageOwnerAlias(null);
         image.setPublic(false);
         image.setArchitecture(architecture != null ? architecture : "x86_64");
@@ -5222,7 +5612,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
         launchTemplate.setLaunchTemplateName(name);
         launchTemplate.setCreateTime(Instant.now());
-        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
+        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", callerAccountId(), "root").toString());
         launchTemplate.setRegion(region);
         launchTemplate.setData(new LaunchTemplateData(data != null ? data : new LaunchTemplateData()));
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
@@ -5458,7 +5848,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /**
      * The instance-profile ARN a launch from {@code data} should use. A template given only a
-     * {@code Name} keeps that form as stored; the ARN is derived here, at launch time, instead of
+     * {@code Name} keeps that form as stored; the ARN is resolved from IAM here, at launch time, instead of
      * being written back into the template.
      */
     public String iamInstanceProfileArn(LaunchTemplateData data) {
@@ -5472,7 +5862,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (profile.getName() == null || profile.getName().isBlank()) {
             return null;
         }
-        return AwsArnUtils.Arn.of("iam", "", accountId, "instance-profile/" + profile.getName()).toString();
+        return resolveIamInstanceProfileName(profile.getName());
+    }
+
+    public String resolveIamInstanceProfileName(String name) {
+        if (iamService == null) {
+            throw new IllegalStateException("IAM service is required to resolve instance profile names");
+        }
+        return iamService.findInstanceProfile(callerAccountId(), name)
+                .map(InstanceProfile::getArn)
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "Invalid IAM Instance Profile name: " + name, 400));
     }
 
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
@@ -5585,6 +5985,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     private boolean matchesImageFilter(Ec2ImageCatalog.CatalogImage catalogImage, String name, List<String> values) {
         Image image = catalogImage.toImage();
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
@@ -5618,7 +6021,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         String ownerId = image.getOwnerId();
         return owners.contains(ownerId)
-                || (owners.contains("self") && accountId.equals(ownerId))
+                || (owners.contains("self") && callerAccountId().equals(ownerId))
                 || (owners.contains("amazon") && AMAZON_OWNER_ID.equals(ownerId))
                 || (owners.contains("aws-marketplace") && AWS_MARKETPLACE_OWNER_ID.equals(ownerId));
     }
@@ -5653,6 +6056,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesRegisteredImageFilter(Image image, String name, List<String> values) {
+        if (isImageTagFilter(name)) {
+            return matchesImageTagFilter(image, name, values);
+        }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
             case "block-device-mapping.snapshot-id" -> image.getBlockDeviceMappings().stream()
@@ -5676,11 +6082,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         };
     }
 
+    private Image withCurrentImageTags(Image image) {
+        List<Tag> currentTags = tags.get(image.getImageId())
+                .orElseGet(() -> image.getTags() == null ? List.of() : image.getTags());
+        image.setTags(new ArrayList<>(currentTags));
+        // Persistent backends may return detached values from scan(), so do not rely on
+        // in-place mutation to retain CreateTags/DeleteTags changes across reads or restarts.
+        registeredImages.put(key(image.getRegion(), image.getImageId()), image);
+        return image;
+    }
+
+    private boolean isImageTagFilter(String name) {
+        return name != null && (name.startsWith("tag:") || "tag-key".equals(name));
+    }
+
+    private boolean matchesImageTagFilter(Image image, String name, List<String> values) {
+        return matchesTagFilter(image.getTags(), name, values, this::matchesFilterValue);
+    }
+
+    private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
+                                     BiPredicate<List<String>, String> valueMatcher) {
+        List<Tag> tags = resourceTags == null ? List.of() : resourceTags;
+        if (filterName.startsWith("tag:")) {
+            String key = filterName.substring("tag:".length());
+            return tags.stream().anyMatch(tag -> key.equals(tag.getKey())
+                    && valueMatcher.test(values, tag.getValue()));
+        }
+        return tags.stream().anyMatch(tag -> valueMatcher.test(values, tag.getKey()));
+    }
+
     private Snapshot snapshotFrom(String region, String snapshotId, Image image, BlockDeviceMapping mapping) {
         EbsBlockDevice ebs = mapping.getEbs();
         Snapshot snapshot = new Snapshot();
         snapshot.setSnapshotId(snapshotId);
-        snapshot.setOwnerId(accountId);
+        snapshot.setOwnerId(callerAccountId());
         snapshot.setState("completed");
         snapshot.setDescription("Created by RegisterImage for " + image.getName());
         snapshot.setStartTime(Instant.now());
@@ -5703,11 +6138,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesSnapshotOwners(Snapshot snapshot, List<String> ownerIds) {
+        String caller = callerAccountId();
         if (ownerIds == null || ownerIds.isEmpty()) {
-            return accountId.equals(snapshot.getOwnerId());
+            return caller.equals(snapshot.getOwnerId());
         }
         return ownerIds.contains(snapshot.getOwnerId())
-                || ownerIds.contains("self") && accountId.equals(snapshot.getOwnerId());
+                || ownerIds.contains("self") && caller.equals(snapshot.getOwnerId());
     }
 
     private boolean matchesSnapshotFilter(Snapshot snapshot, String name, List<String> values) {
@@ -5978,7 +6414,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String igwId = "igw-" + randomHex(8);
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
-        igw.setOwnerId(accountId);
+        igw.setOwnerId(callerAccountId());
         igw.setRegion(region);
         internetGateways.put(key(region, igwId), igw);
         return igw;
@@ -6003,10 +6439,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     public void attachInternetGateway(String region, String igwId, String vpcId) {
         ensureDefaultResources(region);
-        InternetGateway igw = getRequiredInternetGateway(region, igwId);
-
-        igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
-        internetGateways.put(key(region, igwId), igw);
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, vpcId);
+            InternetGateway igw = getRequiredInternetGateway(region, igwId);
+            igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
+            internetGateways.put(key(region, igwId), igw);
+        }
     }
 
     public void detachInternetGateway(String region, String igwId, String vpcId) {
@@ -6058,10 +6496,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         int count = requirePositiveInstanceCount(instanceCount);
         CapacityReservation reservation = new CapacityReservation();
         reservation.setCapacityReservationId("cr-" + randomHex(17));
-        reservation.setOwnerId(accountId);
+        String ownerAccountId = callerAccountId();
+        reservation.setOwnerId(ownerAccountId);
         reservation.setRegion(region);
         reservation.setCapacityReservationArn(
-                AwsArnUtils.Arn.of("ec2", region, accountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
+                AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
         reservation.setAvailabilityZone(availabilityZone);
         reservation.setAvailabilityZoneId(availabilityZoneId);
         reservation.setInstanceType(instanceType);
@@ -6169,10 +6608,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         RouteTable rt = new RouteTable();
         rt.setRouteTableId(rtId);
         rt.setVpcId(vpcId);
-        rt.setOwnerId(accountId);
+        rt.setOwnerId(callerAccountId());
         rt.setRegion(region);
         rt.getRoutes().add(new Route(vpc.getCidrBlock(), "local", "CreateRouteTable"));
-        routeTables.put(key(region, rtId), rt);
+        synchronized (attachmentTopologyLock(region)) {
+            getRequiredVpc(region, vpcId);
+            routeTables.put(key(region, rtId), rt);
+        }
         return rt;
     }
 
@@ -6772,10 +7214,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /**
      * The account making the current request, resolved the same way {@code AccountAwareStorageBackend}
-     * derives its key prefix, so an identity comparison against a resolved peering connection's
-     * requester/accepter owner id is meaningful both in and out of a request scope.
+     * derives its key prefix. Every resource EC2 creates is attributed to this account (its
+     * {@code ownerId} and ARN), and the {@code self} owner alias resolves to it, so what a caller
+     * sees as owner matches the account STS reports for the same credentials. Falls back to the
+     * configured default account outside a request scope (startup, internal provisioning).
      */
-    private String callerAccountId() {
+    String callerAccountId() {
         if (requestContextInstance != null) {
             try {
                 String caller = requestContextInstance.get().getAccountId();
@@ -6785,10 +7229,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             } catch (ContextNotActiveException e) {
                 // Tolerated: callers outside a request scope (startup, internal provisioning)
                 // legitimately fall through to the default account.
-                LOG.debugv("No active request context — resolving caller as default account {0}", accountId);
+                LOG.debugv("No active request context — resolving caller as default account {0}", defaultAccountId);
             }
         }
-        return accountId;
+        return defaultAccountId;
     }
 
     // ─── NAT Gateways ─────────────────────────────────────────────────────────
@@ -7161,15 +7605,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     private boolean matchesFilter(Object resource, String filterName, List<String> values, String region) {
-        if (filterName.startsWith("tag:")) {
-            String tagKey = filterName.substring(4);
-            List<Tag> resourceTags = getResourceTags(resource);
-            return resourceTags.stream()
-                    .anyMatch(t -> t.getKey().equals(tagKey) && matchesValue(values, t.getValue()));
-        }
-        if ("tag-key".equals(filterName)) {
-            List<Tag> resourceTags = getResourceTags(resource);
-            return resourceTags.stream().anyMatch(t -> matchesValue(values, t.getKey()));
+        if (filterName.startsWith("tag:") || "tag-key".equals(filterName)) {
+            return matchesTagFilter(getResourceTags(resource), filterName, values, this::matchesValue);
         }
         if ("tag-value".equals(filterName)) {
             List<Tag> resourceTags = getResourceTags(resource);
@@ -7216,6 +7653,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "prefix-list-id" -> matchesValue(values, prefixList.getPrefixListId());
                 case "prefix-list-name" -> matchesValue(values, prefixList.getPrefixListName());
                 case "owner-id" -> matchesValue(values, prefixList.getOwnerId());
+                default -> true;
+            };
+        }
+        if (resource instanceof TransitGatewayRouteTable routeTable) {
+            return switch (filterName) {
+                case "transit-gateway-route-table-id" ->
+                        matchesValue(values, routeTable.getTransitGatewayRouteTableId());
+                case "transit-gateway-id" -> matchesValue(values, routeTable.getTransitGatewayId());
+                case "state" -> matchesValue(values, routeTable.getState());
+                case "default-association-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultAssociationRouteTable()));
+                case "default-propagation-route-table" ->
+                        matchesValue(values, String.valueOf(routeTable.isDefaultPropagationRouteTable()));
+                default -> true;
+            };
+        }
+        if (resource instanceof TransitGatewayRouteTablePropagation propagation) {
+            return switch (filterName) {
+                case "transit-gateway-attachment-id" -> matchesValue(values, propagation.getTransitGatewayAttachmentId());
+                case "resource-id" -> matchesValue(values, propagation.getResourceId());
+                case "resource-type" -> matchesValue(values, propagation.getResourceType());
                 default -> true;
             };
         }
@@ -7790,10 +8248,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
+                if (!subnet.getVpcId().equals(sg.getVpcId())) {
+                    throw new AwsException("InvalidGroup.NotFound",
+                            "Security group " + sgId + " does not belong to the subnet VPC", 400);
+                }
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
+            SecurityGroup defaultSg = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
+                    .filter(group -> subnet.getVpcId().equals(group.getVpcId())
+                            && "default".equals(group.getGroupName()))
+                    .findFirst().orElse(null);
             if (defaultSg != null) {
                 sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
             }
@@ -7810,7 +8275,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         ni.setVpcId(subnet.getVpcId());
         ni.setAvailabilityZone(subnet.getAvailabilityZone());
         ni.setDescription(description);
-        ni.setOwnerId(accountId);
+        ni.setOwnerId(callerAccountId());
         ni.setStatus("available");
         ni.setMacAddress(randomMac());
         ni.setPrivateIpAddress(primaryIp);
@@ -7844,14 +8309,55 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return ni;
     }
 
-    /** Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9. */
+    /**
+     * Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9, and equally
+     * while a service holds it: {@link #holdNetworkInterfaceForService} leaves no attachment
+     * behind, so the status is what says the interface is spoken for.
+     */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null) {
+        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
             throw new AwsException("InvalidParameterValue",
                     "Network interface '" + networkInterfaceId + "' is currently in use", 400);
         }
         networkInterfaces.delete(key(region, networkInterfaceId));
+    }
+
+    /**
+     * Marks an ENI as held by an AWS service rather than by an instance in this account, the state
+     * a running ECS task's interface is in. DescribeNetworkInterfaces documents the status rule
+     * this rests on: an interface that is not attached is {@code available}, one that is attached
+     * is {@code in-use}, and AWS does not let the account delete a task's interface while the task
+     * runs.
+     *
+     * <p>No attachment is synthesised. Every member AWS documents on one describes an instance
+     * ({@code instanceId}, {@code instanceOwnerId} "The AWS account ID of the owner of the
+     * instance", {@code deviceIndex} "The device index ... on the instance"), and a task has no
+     * instance in the account to name there.
+     */
+    public void holdNetworkInterfaceForService(String region, String networkInterfaceId) {
+        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+        if (ni.getAttachment() != null) {
+            throw new AwsException("InvalidNetworkInterface.InUse",
+                    "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
+        }
+        ni.setStatus("in-use");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
+    }
+
+    /**
+     * Returns a service-held ENI to {@code available}, the mirror of
+     * {@link #holdNetworkInterfaceForService}. Silent on an interface that is already gone, or one
+     * an instance holds, so a teardown that runs twice is harmless and cannot free an attachment
+     * that AttachNetworkInterface owns.
+     */
+    public void releaseNetworkInterfaceFromService(String region, String networkInterfaceId) {
+        NetworkInterface ni = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+        if (ni == null || ni.getAttachment() != null) {
+            return;
+        }
+        ni.setStatus("available");
+        networkInterfaces.put(key(region, networkInterfaceId), ni);
     }
 
     /**
@@ -7883,7 +8389,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         attachment.setDeviceIndex(deviceIndex);
         attachment.setStatus("attached");
         attachment.setInstanceId(instanceId);
-        attachment.setInstanceOwnerId(accountId);
+        attachment.setInstanceOwnerId(callerAccountId());
         attachment.setAttachTime(ISO_FMT.format(Instant.now()));
         attachment.setDeleteOnTermination(false);
 
@@ -8203,6 +8709,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private <T> void collectExplorerResources(List<ExplorerResource> out, List<T> stored, String resourceType,
                                               Function<T, String> id, Function<T, String> region,
                                               Function<T, Instant> createdAt, Function<T, List<Tag>> tags) {
+        String ownerAccountId = callerAccountId();
         for (T resource : stored) {
             String resourceId = id.apply(resource);
             String resourceRegion = region.apply(resource);
@@ -8211,8 +8718,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             }
             Instant created = createdAt.apply(resource);
             out.add(new ExplorerResource(
-                    "arn:aws:ec2:" + resourceRegion + ":" + accountId + ":" + resourceType + "/" + resourceId,
-                    "ec2:" + resourceType, "ec2", resourceRegion, accountId,
+                    "arn:aws:ec2:" + resourceRegion + ":" + ownerAccountId + ":" + resourceType + "/" + resourceId,
+                    "ec2:" + resourceType, "ec2", resourceRegion, ownerAccountId,
                     created != null ? created : Instant.now(),
                     explorerTags(tags.apply(resource))));
         }

@@ -13,28 +13,51 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupFirewallManager;
+import io.github.hectorvent.floci.services.ec2.SecurityGroupNftCompiler;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDependency;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.ManagedAgent;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.Secret;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
+import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.LogConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -47,6 +70,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -57,6 +82,17 @@ public class EcsContainerManager {
 
     private static final Logger LOG = Logger.getLogger(EcsContainerManager.class);
 
+    private static final String ATTACHMENT_DELETED = "DELETED";
+
+    /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
+    private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
+            Set.of("InvalidSubnetID.NotFound", "InvalidGroup.NotFound");
+    /** How long a container waits for a dependency that has to COMPLETE, SUCCEED or get HEALTHY. */
+    private static final int DEPENDENCY_WAIT_SECONDS = 60;
+    private static final long DEPENDENCY_POLL_MILLIS = 200;
+    /** How long a killed container gets to register as exited before its code is read. */
+    private static final int KILL_SETTLE_SECONDS = 5;
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
@@ -66,8 +102,11 @@ public class EcsContainerManager {
     private final LaunchedContainerAwsEnv awsEnv;
     private final SsmService ssmService;
     private final SecretsManagerService secretsManagerService;
+    private final S3Service s3Service;
     private final EcrRegistryManager ecrRegistryManager;
     private final HostVolumePolicy hostVolumePolicy;
+    private Ec2Service ec2Service;
+    private SecurityGroupFirewallManager firewallManager;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -79,6 +118,27 @@ public class EcsContainerManager {
                                LaunchedContainerAwsEnv awsEnv,
                                SsmService ssmService,
                                SecretsManagerService secretsManagerService,
+                               S3Service s3Service,
+                               EcrRegistryManager ecrRegistryManager,
+                               HostVolumePolicy hostVolumePolicy,
+                               Ec2Service ec2Service,
+                               SecurityGroupFirewallManager firewallManager) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver,
+                awsEnv, ssmService, secretsManagerService, s3Service, ecrRegistryManager, hostVolumePolicy);
+        this.ec2Service = ec2Service;
+        this.firewallManager = firewallManager;
+    }
+
+    public EcsContainerManager(ContainerBuilder containerBuilder,
+                               ContainerLifecycleManager lifecycleManager,
+                               ContainerLogStreamer logStreamer,
+                               ContainerDetector containerDetector,
+                               EmulatorConfig config,
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv,
+                               SsmService ssmService,
+                               SecretsManagerService secretsManagerService,
+                               S3Service s3Service,
                                EcrRegistryManager ecrRegistryManager,
                                HostVolumePolicy hostVolumePolicy) {
         this.containerBuilder = containerBuilder;
@@ -90,6 +150,7 @@ public class EcsContainerManager {
         this.awsEnv = awsEnv;
         this.ssmService = ssmService;
         this.secretsManagerService = secretsManagerService;
+        this.s3Service = s3Service;
         this.hostVolumePolicy = hostVolumePolicy;
         this.ecrRegistryManager = ecrRegistryManager;
     }
@@ -105,6 +166,16 @@ public class EcsContainerManager {
         Map<String, String> containerIds = new LinkedHashMap<>();
         Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
         List<Container> runtimeContainers = new ArrayList<>();
+        ContainerDefinition firelensRouter = findFirelensRouter(taskDef.getContainerDefinitions());
+        Map<String, Map<String, String>> firelensLogOptions =
+                awsFirelensLogOptions(taskDef.getContainerDefinitions());
+        if (!firelensLogOptions.isEmpty() && firelensRouter == null) {
+            throw new AwsException("ClientException",
+                    "awsfirelens log driver requires a firelensConfiguration container", 400);
+        }
+
+        List<ContainerDefinition> launchOrder = orderForDependencies(
+                launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -128,140 +199,648 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+        for (ContainerDefinition def : launchOrder) {
             envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region));
             imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
         }
 
-        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
-            String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
+        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
 
-            // RunTask containerOverrides matched by container name: command replaces
-            // the task-def command; environment is merged over the task-def environment.
-            ContainerOverride override = overridesByName.get(def.getName());
-
-            // Build container spec
-            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
-                    .withName(containerName)
-                    .withEnv(envVarsByContainer.get(def))
-                    .withDockerNetwork(config.services().ecs().dockerNetwork())
-                    // Resolve Floci's endpoint from inside the task container the same way Lambda
-                    // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
-                    // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
-                    // own loopback.
-                    .withHostDockerInternalOnLinux()
-                    .withEmbeddedDns()
-                    .withLogRotation()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "ecs", taskId, regionResolver.getAccountId(), region));
-
-            // Add memory limit if specified
-            if (def.getMemory() != null) {
-                specBuilder.withMemoryMb(def.getMemory());
-            }
-
-            // Add port mappings. In bridge/host mode an explicit hostPort is
-            // published to the Docker host literally, matching AWS bridge mode
-            // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
-            // every AWS task gets its own ENI, so a literal hostPort carries no
-            // host-binding semantics and would collide across tasks on the single
-            // local Docker host (#1778) — awsvpc mappings always get a dynamic
-            // host port in native mode, or expose-only in Docker mode where ECS
-            // consumers reach containers via the docker network IP.
-            if (def.getPortMappings() != null) {
-                boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
-                boolean publishToHost = !containerDetector.isRunningInContainer();
-                for (PortMapping pm : def.getPortMappings()) {
-                    if (!awsvpc && pm.hostPort() > 0) {
-                        specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
-                    } else if (publishToHost) {
-                        specBuilder.withDynamicPort(pm.containerPort());
-                    } else {
-                        specBuilder.withExposedPort(pm.containerPort());
-                    }
-                }
-            }
-
-            // Add command and entrypoint if specified. An override command (from
-            // RunTask containerOverrides) takes precedence over the task-def command.
-            List<String> effectiveCommand =
-                    (override != null && override.getCommand() != null && !override.getCommand().isEmpty())
-                            ? override.getCommand()
-                            : def.getCommand();
-            if (effectiveCommand != null && !effectiveCommand.isEmpty()) {
-                specBuilder.withCmd(effectiveCommand);
-            }
-            if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
-                specBuilder.withEntrypoint(def.getEntryPoint());
-            }
-
-            // Bind-mount task-level volumes referenced by this container's mountPoints.
-            // The host source path resolves on the Docker daemon (sibling-container launch),
-            // so it must be an absolute host path. Unresolved volume references are skipped.
-            if (def.getMountPoints() != null) {
-                for (MountPoint mp : def.getMountPoints()) {
-                    if (mp.containerPath() == null) {
-                        continue;
-                    }
-                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
-                    EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
-                    if (sourcePath != null) {
-                        // Host volume: bind-mount an absolute path on the Docker host. Re-validate
-                        // here (not just at RegisterTaskDefinition time): this narrows the window
-                        // between validation and mount for a symlink swapped in afterward, and
-                        // also covers task definitions persisted before this policy existed. A
-                        // rejection is not swallowed, it propagates out of startTask and is
-                        // surfaced by EcsService as the task's stoppedReason.
-                        hostVolumePolicy.validate(sourcePath);
-                        if (mp.readOnly()) {
-                            specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
-                        } else {
-                            specBuilder.withBind(sourcePath, mp.containerPath());
-                        }
-                    } else if (efs != null) {
-                        mountEfsVolume(specBuilder, efs, mp);
-                    } else {
-                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
-                                mp.sourceVolume(), def.getName());
-                    }
-                }
-            }
-
-            ContainerSpec spec = specBuilder.build();
-
-            // Create and start container
-            ContainerInfo info = lifecycleManager.createAndStart(spec);
-            String dockerId = info.containerId();
-
-            LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
-
-            // Resolve network bindings for ECS-specific model
-            List<NetworkBinding> networkBindings = resolveNetworkBindings(dockerId, def);
-
-            // Build ECS container model
-            Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
-            runtimeContainers.add(container);
-            containerIds.put(def.getName(), dockerId);
-
-            // Attach log streaming
-            String logGroup = "/ecs/" + taskDef.getFamily();
-            String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
-
-            Closeable logHandle = logStreamer.attach(
-                    dockerId, logGroup, logStream, region,
-                    "ecs:" + taskDef.getFamily() + ":" + def.getName());
-            if (logHandle != null) {
-                logStreamsByContainerId.put(dockerId, logHandle);
-            }
+        String firelensVolumeName = null;
+        String firelensSocketAddress = null;
+        String firelensConfig = null;
+        String firelensExternalConfig = null;
+        if (firelensRouter != null) {
+            firelensConfig = firelensConfig(task, taskDef, firelensRouter, firelensLogOptions);
+            firelensExternalConfig = s3ExternalConfig(firelensRouter);
+            firelensVolumeName = ContainerStorageHelper.dockerName(config, "floci-ecs-firelens-" + taskId);
+            lifecycleManager.ensureVolume(firelensVolumeName);
+            firelensSocketAddress = unixSocketAddress(firelensVolumeName);
         }
 
-        task.setContainers(runtimeContainers);
+        String fluentHost = null;
+        String networkModeName = taskDef.getNetworkMode() != null
+                ? taskDef.getNetworkMode().name()
+                : NetworkMode.bridge.name();
+
+        try {
+            for (ContainerDefinition def : launchOrder) {
+                awaitDependencies(def, containerIds);
+                String containerName = ContainerStorageHelper.dockerName(config, "floci-ecs-" + taskId + "-" + def.getName());
+
+                // RunTask containerOverrides matched by container name: command replaces
+                // the task-def command; environment is merged over the task-def environment.
+                ContainerOverride override = overridesByName.get(def.getName());
+
+                List<String> env = new ArrayList<>(envVarsByContainer.get(def));
+                if (fluentHost != null && def != firelensRouter
+                        && FirelensConfigGenerator.addsTcpForward(networkModeName)) {
+                    env.add("FLUENT_HOST=" + fluentHost);
+                    env.add("FLUENT_PORT=" + FirelensConfigGenerator.FORWARD_PORT);
+                }
+
+                // Build container spec
+                ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(imagesByContainer.get(def))
+                        .withName(containerName)
+                        .withEnv(env)
+                        .withDockerNetwork(config.services().ecs().dockerNetwork())
+                        // Resolve Floci's endpoint from inside the task container the same way Lambda
+                        // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
+                        // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
+                        // own loopback.
+                        .withHostDockerInternalOnLinux()
+                        .withEmbeddedDns()
+                        .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                                "ecs", taskId, regionResolver.getAccountId(), region));
+                if (protectedNetwork != null) {
+                    specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
+                    specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+                }
+
+                boolean awsFirelens = isAwsFirelens(def);
+                if (awsFirelens) {
+                    specBuilder.withLogConfig(awsFirelensLogConfig(def, taskId, firelensSocketAddress));
+                } else {
+                    specBuilder.withLogRotation();
+                }
+
+                if (def == firelensRouter && firelensVolumeName != null) {
+                    specBuilder.withNamedVolume(firelensVolumeName, "/var/run");
+                }
+
+                // Resource limits. A container-level memory is its own hard limit; without one the
+                // container is capped at the task's memory, which is what a Fargate task gets
+                // (the whole task shares one allocation). The task's cpu becomes a quota and a
+                // container-level cpu becomes its share of that quota, as on ECS.
+                if (def.getMemory() != null) {
+                    specBuilder.withMemoryMb(def.getMemory());
+                } else {
+                    Integer taskMemoryMb = parseTaskMemoryMb(task.getMemory());
+                    if (taskMemoryMb != null) {
+                        specBuilder.withMemoryMb(taskMemoryMb);
+                    }
+                }
+                Integer taskCpuUnits = parseTaskCpuUnits(task.getCpu());
+                if (taskCpuUnits != null) {
+                    specBuilder.withCpuUnits(taskCpuUnits);
+                }
+                if (def.getCpu() != null && def.getCpu() > 0) {
+                    specBuilder.withCpuShares(def.getCpu());
+                }
+                if (def.getUser() != null) {
+                    specBuilder.withUser(def.getUser());
+                }
+                if (def.getWorkingDirectory() != null) {
+                    specBuilder.withWorkingDir(def.getWorkingDirectory());
+                }
+                if (Boolean.TRUE.equals(def.getReadonlyRootFilesystem())) {
+                    specBuilder.withReadonlyRootfs();
+                }
+
+                // Add port mappings. In bridge/host mode an explicit hostPort is
+                // published to the Docker host literally, matching AWS bridge mode
+                // (mirrors the ECR registry's fixed-port publishing). In awsvpc mode
+                // every AWS task gets its own ENI, so a literal hostPort carries no
+                // host-binding semantics and would collide across tasks on the single
+                // local Docker host (#1778) — awsvpc mappings always get a dynamic
+                // host port in native mode, or expose-only in Docker mode where ECS
+                // consumers reach containers via the docker network IP. The explicit
+                // emulator opt-in below publishes a stable port for host-side clients.
+                if (protectedNetwork == null && def.getPortMappings() != null) {
+                    boolean awsvpc = taskDef.getNetworkMode() == NetworkMode.awsvpc;
+                    boolean publishAwsvpcPorts = awsvpc
+                            && config.services().ecs().publishAwsvpcPortsToHost();
+                    boolean publishDynamicPortsToHost = !containerDetector.isRunningInContainer();
+                    for (PortMapping pm : def.getPortMappings()) {
+                        if (publishAwsvpcPorts) {
+                            int hostPort = pm.hostPort() > 0 ? pm.hostPort() : pm.containerPort();
+                            LOG.warnv("Publishing ECS awsvpc container port {0} on host port {1}; "
+                                            + "multiple tasks cannot share this host port",
+                                    pm.containerPort(), hostPort);
+                            specBuilder.withPortBinding(pm.containerPort(), hostPort);
+                        } else if (!awsvpc && pm.hostPort() > 0) {
+                            specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                        } else if (publishDynamicPortsToHost) {
+                            specBuilder.withDynamicPort(pm.containerPort());
+                        } else {
+                            specBuilder.withExposedPort(pm.containerPort());
+                        }
+                    }
+                }
+
+                // Add command and entrypoint if specified. An override command (from
+                // RunTask containerOverrides) takes precedence over the task-def command.
+                List<String> effectiveCommand =
+                        (override != null && override.getCommand() != null && !override.getCommand().isEmpty())
+                                ? override.getCommand()
+                                : def.getCommand();
+                if (effectiveCommand != null && !effectiveCommand.isEmpty()) {
+                    specBuilder.withCmd(effectiveCommand);
+                }
+                if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
+                    specBuilder.withEntrypoint(def.getEntryPoint());
+                }
+
+                // Bind-mount task-level volumes referenced by this container's mountPoints.
+                // The host source path resolves on the Docker daemon (sibling-container launch),
+                // so it must be an absolute host path. Unresolved volume references are skipped.
+                if (def.getMountPoints() != null) {
+                    for (MountPoint mp : def.getMountPoints()) {
+                        if (mp.containerPath() == null) {
+                            continue;
+                        }
+                        String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
+                        EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
+                        if (sourcePath != null) {
+                            // Host volume: bind-mount an absolute path on the Docker host. Re-validate
+                            // here (not just at RegisterTaskDefinition time): this narrows the window
+                            // between validation and mount for a symlink swapped in afterward, and
+                            // also covers task definitions persisted before this policy existed. A
+                            // rejection is not swallowed, it propagates out of startTask and is
+                            // surfaced by EcsService as the task's stoppedReason.
+                            hostVolumePolicy.validate(sourcePath);
+                            if (mp.readOnly()) {
+                                specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                            } else {
+                                specBuilder.withBind(sourcePath, mp.containerPath());
+                            }
+                        } else if (efs != null) {
+                            mountEfsVolume(specBuilder, efs, mp);
+                        } else {
+                            LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
+                                    mp.sourceVolume(), def.getName());
+                        }
+                    }
+                }
+
+                if (def.getVolumesFrom() != null) {
+                    for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
+                        String sourceContainerId = containerIds.get(volumeFrom.sourceContainer());
+                        if (sourceContainerId == null) {
+                            throw new IllegalStateException("ECS volumesFrom source container "
+                                    + volumeFrom.sourceContainer() + " has not started");
+                        }
+                        specBuilder.withVolumesFrom(sourceContainerId, volumeFrom.readOnly());
+                    }
+                }
+
+                ContainerSpec spec = specBuilder.build();
+
+                String dockerId;
+                if (def == firelensRouter) {
+                    dockerId = lifecycleManager.create(spec);
+                    try {
+                        copyFirelensConfig(dockerId, firelensConfig, isFluentdRouter(firelensRouter),
+                                firelensExternalConfig);
+                        lifecycleManager.startCreated(dockerId, spec);
+                    } catch (RuntimeException e) {
+                        lifecycleManager.removeIfExists(dockerId);
+                        throw e;
+                    }
+                    fluentHost = inspectContainerIp(dockerId);
+                } else {
+                    ContainerInfo info = lifecycleManager.createAndStart(spec);
+                    dockerId = info.containerId();
+                }
+
+                LOG.infov("Created ECS container {0} for task {1} container {2}", dockerId, taskId, def.getName());
+
+                // Resolve network bindings for ECS-specific model
+                List<NetworkBinding> networkBindings = resolveNetworkBindings(
+                        protectedNetwork == null ? dockerId : protectedNetwork.namespace().helperId(), def);
+
+                // Build ECS container model
+                Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region);
+                runtimeContainers.add(container);
+                containerIds.put(def.getName(), dockerId);
+
+                // awsfirelens containers are shipped to Fluent Bit by Docker; don't also scrape json-file.
+                if (!awsFirelens) {
+                    String logGroup = "/ecs/" + taskDef.getFamily();
+                    String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
+                    Closeable logHandle = logStreamer.attach(
+                            dockerId, logGroup, logStream, region,
+                            "ecs:" + taskDef.getFamily() + ":" + def.getName());
+                    if (logHandle != null) {
+                        logStreamsByContainerId.put(dockerId, logHandle);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            for (String dockerId : containerIds.values()) {
+                lifecycleManager.stopAndRemove(dockerId, null);
+            }
+            if (firelensVolumeName != null) {
+                lifecycleManager.removeVolume(firelensVolumeName);
+            }
+            if (protectedNetwork != null) {
+                releaseTaskNetwork(task, region);
+            }
+            throw e;
+        }
+
+        Map<String, Container> runtimeContainersByName = new LinkedHashMap<>();
+        for (Container container : runtimeContainers) {
+            runtimeContainersByName.put(container.getName(), container);
+        }
+        List<Container> containersInDefinitionOrder = new ArrayList<>();
+        for (ContainerDefinition definition : taskDef.getContainerDefinitions()) {
+            Container container = runtimeContainersByName.get(definition.getName());
+            if (container != null) {
+                containersInDefinitionOrder.add(container);
+            }
+        }
+        // An awsvpc task's containers share the task ENI, and each reports it.
+        if (task.getNetworkInterfaceId() != null) {
+            List<TaskNetworkInterface> taskInterfaces = List.of(new TaskNetworkInterface(
+                    task.getAttachmentId(), task.getPrivateIpAddress(), null));
+            containersInDefinitionOrder.forEach(container -> container.setNetworkInterfaces(taskInterfaces));
+        }
+        // ECS Exec is gated on the agent reporting RUNNING, which a client checks before it tries
+        // to open a session.
+        if (task.isEnableExecuteCommand()) {
+            List<ManagedAgent> agents = List.of(ManagedAgent.executeCommandAgent(Instant.now()));
+            containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
+        }
+        task.setContainers(containersInDefinitionOrder);
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setDesiredStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
 
-        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId);
+        Map<String, Integer> stopTimeouts = new LinkedHashMap<>();
+        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+            if (def.getStopTimeout() != null) {
+                stopTimeouts.put(def.getName(), def.getStopTimeout());
+            }
+        }
+        return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
+                firelensVolumeName,
+                protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,
+                stopTimeouts);
     }
+
+    /** A task-level {@code memory} is MiB as a plain number, or a {@code "1GB"}-style string. */
+    private static Integer parseTaskMemoryMb(String memory) {
+        if (memory == null || memory.isBlank()) {
+            return null;
+        }
+        String trimmed = memory.trim().toUpperCase();
+        try {
+            if (trimmed.endsWith("GB")) {
+                return (int) Math.round(Double.parseDouble(trimmed.substring(0, trimmed.length() - 2).trim()) * 1024);
+            }
+            return Integer.parseInt(trimmed.replaceAll("(?i)mib|mb", "").trim());
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring unparseable task memory {0}", memory);
+            return null;
+        }
+    }
+
+    /** A task-level {@code cpu} is CPU units as a plain number, or a {@code "0.5vCPU"}-style string. */
+    private static Integer parseTaskCpuUnits(String cpu) {
+        if (cpu == null || cpu.isBlank()) {
+            return null;
+        }
+        String trimmed = cpu.trim().toUpperCase();
+        try {
+            if (trimmed.endsWith("VCPU")) {
+                return (int) Math.round(
+                        Double.parseDouble(trimmed.substring(0, trimmed.length() - 4).trim()) * 1024);
+            }
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException e) {
+            LOG.debugv("Ignoring unparseable task cpu {0}", cpu);
+            return null;
+        }
+    }
+
+    /**
+     * Holds a container's start until the containers it declared a {@code dependsOn} on have
+     * reached the state it asked for. {@code START} is satisfied by the launch order alone;
+     * {@code COMPLETE} and {@code SUCCESS} wait for the dependency to exit (and {@code SUCCESS}
+     * additionally requires it to have exited cleanly); {@code HEALTHY} waits for its health check
+     * to pass.
+     *
+     * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
+     * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
+     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
+     * not get there in time fails the task.
+     */
+    private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
+        if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
+            return;
+        }
+        long timeoutSeconds = definition.getStartTimeout() != null
+                ? definition.getStartTimeout() : DEPENDENCY_WAIT_SECONDS;
+        for (ContainerDependency dependency : definition.getDependsOn()) {
+            String condition = dependency.condition();
+            if (ContainerDependency.START.equals(condition)) {
+                continue;
+            }
+            String dockerId = startedContainerIds.get(dependency.containerName());
+            if (dockerId == null) {
+                continue;
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+            while (!dependencySatisfied(dockerId, condition)) {
+                if (System.nanoTime() > deadline) {
+                    throw new AwsException("ClientException",
+                            "Container '" + definition.getName() + "' did not start because container '"
+                                    + dependency.containerName() + "' did not reach " + condition
+                                    + " within " + timeoutSeconds + " seconds.", 400);
+                }
+                try {
+                    TimeUnit.MILLISECONDS.sleep(DEPENDENCY_POLL_MILLIS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while waiting for ECS container dependency "
+                            + dependency.containerName(), e);
+                }
+            }
+        }
+    }
+
+    private boolean dependencySatisfied(String dockerId, String condition) {
+        if (ContainerDependency.HEALTHY.equals(condition)) {
+            return "healthy".equals(inspectHealthStatus(dockerId));
+        }
+        Integer exitCode = getExitCodeIfStopped(dockerId);
+        if (exitCode == null) {
+            return false;
+        }
+        if (ContainerDependency.SUCCESS.equals(condition) && exitCode != 0) {
+            throw new AwsException("ClientException",
+                    "A dependency container exited with code " + exitCode
+                            + ", so the containers depending on its SUCCESS were not started.", 400);
+        }
+        return true;
+    }
+
+    /**
+     * A container's health in ECS's vocabulary: {@code HEALTHY} or {@code UNHEALTHY} once its
+     * health check has reported, {@code UNKNOWN} while it is still starting or when the container
+     * declares no health check at all.
+     */
+    public String ecsHealthStatus(String dockerId) {
+        String status = inspectHealthStatus(dockerId);
+        if (status == null) {
+            return "UNKNOWN";
+        }
+        return switch (status) {
+            case "healthy" -> "HEALTHY";
+            case "unhealthy" -> "UNHEALTHY";
+            default -> "UNKNOWN";
+        };
+    }
+
+    /** The Docker health status of a container, or null when it declares no health check. */
+    private String inspectHealthStatus(String dockerId) {
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(dockerId).exec();
+            return inspect.getState() != null && inspect.getState().getHealth() != null
+                    ? inspect.getState().getHealth().getStatus() : null;
+        } catch (Exception e) {
+            LOG.debugv("Could not read the health of container {0}: {1}", dockerId, e.getMessage());
+            return null;
+        }
+    }
+
+    private List<ContainerDefinition> orderForDependencies(List<ContainerDefinition> definitions,
+                                                          ContainerDefinition firelensRouter) {
+        Map<String, ContainerDefinition> definitionsByName = new LinkedHashMap<>();
+        for (ContainerDefinition definition : definitions) {
+            definitionsByName.put(definition.getName(), definition);
+        }
+
+        List<ContainerDefinition> ordered = new ArrayList<>();
+        Set<ContainerDefinition> visiting = new HashSet<>();
+        Set<ContainerDefinition> visited = new HashSet<>();
+        for (ContainerDefinition definition : definitions) {
+            addAfterDependencies(definition, definitionsByName, firelensRouter, visiting, visited, ordered);
+        }
+        return ordered;
+    }
+
+    private void addAfterDependencies(ContainerDefinition definition,
+                                      Map<String, ContainerDefinition> definitionsByName,
+                                      ContainerDefinition firelensRouter,
+                                      Set<ContainerDefinition> visiting,
+                                      Set<ContainerDefinition> visited,
+                                      List<ContainerDefinition> ordered) {
+        if (visited.contains(definition)) {
+            return;
+        }
+        if (!visiting.add(definition)) {
+            throw new IllegalArgumentException("ECS container dependencies contain a cycle at container "
+                    + definition.getName());
+        }
+        if (isAwsFirelens(definition)) {
+            addAfterDependencies(firelensRouter, definitionsByName, firelensRouter, visiting, visited, ordered);
+        }
+        if (definition.getVolumesFrom() != null) {
+            for (VolumeFrom volumeFrom : definition.getVolumesFrom()) {
+                ContainerDefinition source = definitionsByName.get(volumeFrom.sourceContainer());
+                if (source == null) {
+                    throw new IllegalArgumentException("ECS volumesFrom references unknown source container "
+                            + volumeFrom.sourceContainer());
+                }
+                addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
+            }
+        }
+        if (definition.getDependsOn() != null) {
+            for (ContainerDependency dependency : definition.getDependsOn()) {
+                ContainerDefinition source = definitionsByName.get(dependency.containerName());
+                if (source == null) {
+                    throw new IllegalArgumentException("ECS dependsOn references unknown container "
+                            + dependency.containerName());
+                }
+                addAfterDependencies(source, definitionsByName, firelensRouter, visiting, visited, ordered);
+            }
+        }
+        visiting.remove(definition);
+        visited.add(definition);
+        ordered.add(definition);
+    }
+
+    /**
+     * Gives an {@code awsvpc} task the elastic network interface AWS gives it: its own ENI in the
+     * requested subnet, with a private address of its own and the task's security groups.
+     *
+     * <p>Called for every {@code awsvpc} task, in Docker and in mock mode alike, because the ENI is
+     * control-plane state that DescribeTasks reports (a client waits on
+     * {@code attachments[].details[?name=='privateIPv4Address']} to find the task) rather than a
+     * property of the containers. Security-group enforcement, which additionally puts the task's
+     * containers in a protected network namespace, stays opt-in on top of it.
+     *
+     * <p>A subnet or security group that does not exist fails the task, reported as the
+     * {@code InvalidParameterException} RunTask declares rather than the EC2 code
+     * {@link Ec2Service#createNetworkInterface} raises.
+     */
+    public void attachTaskNetwork(EcsTask task, TaskDefinition definition, String region) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc || ec2Service == null) {
+            return;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "Network Configuration must be provided when networkMode 'awsvpc' is specified.", 400);
+        }
+        String subnetId = awsvpc.getSubnets().getFirst();
+        NetworkInterface eni;
+        try {
+            eni = ec2Service.createNetworkInterface(region, subnetId,
+                    "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+        } catch (AwsException e) {
+            throw asEcsNetworkRejection(e);
+        }
+        // A running task holds its interface, so EC2 must report it "in-use" rather than
+        // "available" as a fresh one starts out, and must refuse to delete it under the task.
+        ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
+        task.setNetworkInterfaceId(eni.getNetworkInterfaceId());
+        task.setPrivateIpAddress(eni.getPrivateIpAddress());
+        task.setMacAddress(eni.getMacAddress());
+        task.setPrivateDnsName(eni.getPrivateDnsName());
+        task.setAttachmentId("eni-attach-" + eni.getNetworkInterfaceId());
+        ec2Service.describeSubnets(region, List.of(subnetId), Map.of()).stream()
+                .findFirst()
+                .ifPresent(subnet -> task.setAvailabilityZone(subnet.getAvailabilityZone()));
+    }
+
+    /**
+     * Restates an EC2 lookup failure as the error RunTask declares. A caller naming a subnet or a
+     * security group that is not there asked for something the task cannot have, and
+     * {@code InvalidSubnetID.NotFound} is not in RunTask's error list, so an SDK sees it as an
+     * unmodelled failure rather than the InvalidParameterException AWS returns. Anything else the
+     * ENI path raises is already an ECS-shaped error and travels unchanged.
+     */
+    private static AwsException asEcsNetworkRejection(AwsException e) {
+        if (!EC2_NETWORK_LOOKUP_FAILURES.contains(e.getErrorCode())) {
+            return e;
+        }
+        return new AwsException("InvalidParameterException", e.getMessage(), 400);
+    }
+
+    /**
+     * Releases a stopped task's ENI. The interface id stays on the task, with its attachment
+     * reported as {@code DELETED}, because AWS keeps describing a stopped task's attachment.
+     * Idempotent: the status is flipped first, so a second teardown path does nothing.
+     */
+    public void releaseTaskNetwork(EcsTask task, String region) {
+        String eniId = task.getNetworkInterfaceId();
+        if (eniId == null || ec2Service == null || ATTACHMENT_DELETED.equals(task.getAttachmentStatus())) {
+            return;
+        }
+        task.setAttachmentStatus(ATTACHMENT_DELETED);
+        if (firewallManager != null) {
+            firewallManager.unregister(eniId);
+        }
+        try {
+            // EC2 refuses to delete an interface that is in use, and attachTaskNetwork marked
+            // this one as held by the task, so the hold goes before the interface does.
+            ec2Service.releaseNetworkInterfaceFromService(region, eniId);
+            ec2Service.deleteNetworkInterface(region, eniId);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not delete the ENI {0} of task {1}: {2}",
+                    eniId, task.getTaskArn(), e.getMessage());
+        }
+    }
+
+    /** The ENI {@link #attachTaskNetwork} allocated for this task, or null if it is already gone. */
+    private NetworkInterface existingTaskEni(EcsTask task, String region) {
+        if (task.getNetworkInterfaceId() == null) {
+            return null;
+        }
+        try {
+            return ec2Service.describeNetworkInterfaces(region, List.of(task.getNetworkInterfaceId()),
+                            Map.of(), 0, null)
+                    .networkInterfaces().stream().findFirst().orElse(null);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not resolve the ENI {0} of task {1}, allocating a new one: {2}",
+                    task.getNetworkInterfaceId(), task.getTaskArn(), e.getMessage());
+            return null;
+        }
+    }
+
+    private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
+        if (definition.getNetworkMode() != NetworkMode.awsvpc
+                || firewallManager == null || !firewallManager.enabled()) {
+            return null;
+        }
+        AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
+                : task.getNetworkConfiguration().getAwsvpcConfiguration();
+        if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
+            throw new AwsException("ClientException", "awsvpc tasks require a subnet", 400);
+        }
+        // attachTaskNetwork already allocated the task ENI; the namespace is built around it.
+        NetworkInterface eni = existingTaskEni(task, region);
+        if (eni == null) {
+            eni = ec2Service.createNetworkInterface(region, awsvpc.getSubnets().getFirst(),
+                    "ECS task " + task.getTaskArn(), null, List.of(), awsvpc.getSecurityGroups(), List.of());
+            ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
+        }
+        String eniId = eni.getNetworkInterfaceId();
+        SecurityGroupFirewallManager.Namespace namespace = null;
+        try {
+            Map<Integer, Integer> bindings = namespacePortBindings(
+                    definition,
+                    containerDetector.isRunningInContainer(),
+                    config.services().ecs().publishAwsvpcPortsToHost());
+            namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
+                    region, config.services().ecs().dockerNetwork(), bindings);
+            List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
+            List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
+            if (groups.size() != groupIds.size()) {
+                throw new IllegalStateException("An ECS task security group could not be resolved");
+            }
+            Map<String, List<String>> prefixLists = new LinkedHashMap<>();
+            for (SecurityGroup group : groups) {
+                Stream.concat(group.getIpPermissions().stream(),
+                                group.getIpPermissionsEgress().stream())
+                        .flatMap(permission -> permission.getPrefixListIds().stream())
+                        .map(reference -> reference.getPrefixListId())
+                        .distinct()
+                        .forEach(id -> prefixLists.put(id, ec2Service.getManagedPrefixListEntries(region, id, null)
+                                .stream().map(PrefixListEntry::getCidr).toList()));
+            }
+            firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
+                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+            task.setNetworkInterfaceId(eniId);
+            task.setPrivateIpAddress(eni.getPrivateIpAddress());
+            return new PreparedNetwork(eni, namespace);
+        } catch (Exception e) {
+            if (namespace != null) {
+                lifecycleManager.removeIfExists(namespace.helperId());
+            }
+            ec2Service.releaseNetworkInterfaceFromService(region, eniId);
+            ec2Service.deleteNetworkInterface(region, eniId);
+            throw e;
+        }
+    }
+
+    static Map<Integer, Integer> namespacePortBindings(
+            TaskDefinition definition, boolean runningInContainer, boolean publishAwsvpcPortsToHost) {
+        Map<Integer, Integer> bindings = new LinkedHashMap<>();
+        if (runningInContainer && !publishAwsvpcPortsToHost) {
+            return bindings;
+        }
+        for (ContainerDefinition container : definition.getContainerDefinitions()) {
+            if (container.getPortMappings() == null) {
+                continue;
+            }
+            for (PortMapping port : container.getPortMappings()) {
+                int hostPort = publishAwsvpcPortsToHost
+                        ? (port.hostPort() > 0 ? port.hostPort() : port.containerPort())
+                        : 0;
+                bindings.put(port.containerPort(), hostPort);
+            }
+        }
+        return bindings;
+    }
+
+    private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}
 
     /**
      * Stops and removes all Docker containers for a task.
@@ -281,8 +860,10 @@ public class EcsContainerManager {
         for (String dockerId : handle.getContainerIds().values()) {
             lifecycleManager.stopAndRemove(dockerId, null);
         }
+        cleanupProtectedNetwork(handle);
         new ArrayList<>(handle.getLogStreamsByContainerId().keySet())
                 .forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        removeFirelensVolume(handle);
     }
 
     /**
@@ -296,17 +877,21 @@ public class EcsContainerManager {
             return exitCodes;
         }
 
-        // Phase 1: stop all containers (no-op for those already exited).
+        // Phase 1: stop all containers (no-op for those already exited), each given the grace
+        // period its container definition asked for.
         Set<String> terminatedContainerIds = new HashSet<>();
-        for (String dockerId : handle.getContainerIds().values()) {
+        for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
+            String dockerId = entry.getValue();
             try {
-                lifecycleManager.getDockerClient().stopContainerCmd(dockerId).withTimeout(5).exec();
+                lifecycleManager.getDockerClient().stopContainerCmd(dockerId)
+                        .withTimeout(handle.stopTimeoutFor(entry.getKey())).exec();
                 terminatedContainerIds.add(dockerId);
             } catch (NotFoundException ignored) {
                 terminatedContainerIds.add(dockerId);
             } catch (Exception e) {
                 LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
             }
+            killIfStillRunning(dockerId);
         }
 
         // Phase 2: inspect exit codes, then remove.
@@ -326,7 +911,296 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
+        cleanupProtectedNetwork(handle);
+        removeFirelensVolume(handle);
         return exitCodes;
+    }
+
+    /**
+     * Makes sure a container really is stopped before its exit code is read.
+     *
+     * <p>A container that ignores SIGTERM only dies when its {@code stopTimeout} elapses, and the
+     * Docker client can give up on the stop request before the daemon gets there. Either way the
+     * container would still be running when the exit code is collected, and the task would report
+     * no exit code at all, so it is killed here.
+     */
+    private void killIfStillRunning(String dockerId) {
+        if (getExitCodeIfStopped(dockerId) != null) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().killContainerCmd(dockerId).exec();
+        } catch (NotFoundException ignored) {
+            return; // already gone, and its exit code is whatever the earlier inspect saw
+        } catch (Exception e) {
+            LOG.warnv("Error killing ECS container {0}: {1}", dockerId, e.getMessage());
+            return;
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(KILL_SETTLE_SECONDS);
+        while (System.nanoTime() < deadline && getExitCodeIfStopped(dockerId) == null) {
+            try {
+                TimeUnit.MILLISECONDS.sleep(DEPENDENCY_POLL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private void removeFirelensVolume(EcsTaskHandle handle) {
+        if (handle == null || handle.getFirelensVolumeName() == null) {
+            return;
+        }
+        lifecycleManager.removeVolume(handle.getFirelensVolumeName());
+    }
+
+    private static ContainerDefinition findFirelensRouter(List<ContainerDefinition> defs) {
+        if (defs == null) {
+            return null;
+        }
+        ContainerDefinition router = null;
+        for (ContainerDefinition def : defs) {
+            FirelensConfiguration firelens = def.getFirelensConfiguration();
+            if (firelens == null) {
+                continue;
+            }
+            if (!"fluentbit".equalsIgnoreCase(firelens.type()) && !"fluentd".equalsIgnoreCase(firelens.type())) {
+                throw new AwsException("ClientException",
+                        "FireLens configuration type must be fluentbit or fluentd.", 400);
+            }
+            if (router != null) {
+                throw new AwsException("ClientException",
+                        "A task definition can have only one FireLens log router.", 400);
+            }
+            if (def.getPortMappings() != null && def.getPortMappings().stream()
+                    .anyMatch(port -> port.containerPort() == 24224)) {
+                throw new AwsException("ClientException",
+                        "FireLens port 24224 must not be exposed.", 400);
+            }
+            router = def;
+        }
+        return router;
+    }
+
+    private static boolean isFluentdRouter(ContainerDefinition router) {
+        return router != null
+                && router.getFirelensConfiguration() != null
+                && "fluentd".equalsIgnoreCase(router.getFirelensConfiguration().type());
+    }
+
+    private static Map<String, Map<String, String>> awsFirelensLogOptions(List<ContainerDefinition> defs) {
+        LinkedHashMap<String, Map<String, String>> options = new LinkedHashMap<>();
+        if (defs == null) {
+            return options;
+        }
+        for (ContainerDefinition def : defs) {
+            if (!isAwsFirelens(def)) {
+                continue;
+            }
+            LogConfiguration log = def.getLogConfiguration();
+            options.put(def.getName(), log.options() != null ? log.options() : Map.of());
+        }
+        return options;
+    }
+
+    private static boolean isAwsFirelens(ContainerDefinition def) {
+        LogConfiguration log = def.getLogConfiguration();
+        return log != null && "awsfirelens".equals(log.logDriver());
+    }
+
+    private static List<ContainerDefinition> launchOrder(
+            List<ContainerDefinition> defs, ContainerDefinition firelensRouter) {
+        if (firelensRouter == null) {
+            return defs;
+        }
+        List<ContainerDefinition> ordered = new ArrayList<>();
+        ordered.add(firelensRouter);
+        for (ContainerDefinition def : defs) {
+            if (def != firelensRouter) {
+                ordered.add(def);
+            }
+        }
+        return ordered;
+    }
+
+    private FirelensConfigGenerator.Context firelensContext(
+            EcsTask task, TaskDefinition taskDef, ContainerDefinition router,
+            Map<String, Map<String, String>> logOptions) {
+        FirelensConfiguration firelens = router.getFirelensConfiguration();
+        Map<String, String> options = firelens.options() != null ? firelens.options() : Map.of();
+        boolean metadata = !"false".equalsIgnoreCase(options.get("enable-ecs-log-metadata"));
+        String external = null;
+        String externalType = options.get("config-file-type");
+        if ("file".equals(externalType)) {
+            external = options.get("config-file-value");
+        } else if ("s3".equals(externalType)) {
+            // The agent downloads the object to this fixed path and @INCLUDEs it; Floci
+            // writes it there directly with the generated config.
+            external = isFluentdRouter(router)
+                    ? "/fluentd/etc/external.conf"
+                    : "/fluent-bit/etc/external.conf";
+        }
+        int memoryMb = 0;
+        if (router.getMemoryReservation() != null) {
+            memoryMb = router.getMemoryReservation();
+        } else if (router.getMemory() != null) {
+            memoryMb = router.getMemory();
+        }
+        String cluster = extractTaskId(task.getClusterArn());
+        String familyRevision = taskDef.getFamily() + ":" + taskDef.getRevision();
+        String networkMode = taskDef.getNetworkMode() != null
+                ? taskDef.getNetworkMode().name()
+                : NetworkMode.bridge.name();
+        return new FirelensConfigGenerator.Context(
+                networkMode, metadata, cluster, task.getTaskArn(), familyRevision,
+                memoryMb, external, awsEnv.flociEndpoint(), logOptions);
+    }
+
+    private String firelensConfig(
+            EcsTask task, TaskDefinition taskDef, ContainerDefinition router,
+            Map<String, Map<String, String>> logOptions) {
+        FirelensConfigGenerator.Context ctx = firelensContext(task, taskDef, router, logOptions);
+        return isFluentdRouter(router)
+                ? FirelensConfigGenerator.fluentdConfig(ctx)
+                : FirelensConfigGenerator.fluentBitConfig(ctx);
+    }
+
+    private String unixSocketAddress(String volumeName) {
+        try {
+            String mountpoint = lifecycleManager.getDockerClient()
+                    .inspectVolumeCmd(volumeName).exec().getMountpoint();
+            if (mountpoint == null || mountpoint.isBlank()) {
+                throw new AwsException("ClientException",
+                        "FireLens socket volume has no mountpoint: " + volumeName, 500);
+            }
+            String path = mountpoint.endsWith("/")
+                    ? mountpoint + "fluent.sock"
+                    : mountpoint + "/fluent.sock";
+            return "unix://" + path;
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("ClientException",
+                    "unable to resolve FireLens socket path: " + e.getMessage(), 500);
+        }
+    }
+
+    private LogConfig awsFirelensLogConfig(ContainerDefinition def, String taskId, String socketAddress) {
+        LinkedHashMap<String, String> opts = new LinkedHashMap<>();
+        opts.put("fluentd-address", socketAddress);
+        opts.put("fluentd-async", "true");
+        opts.put("fluentd-sub-second-precision", "true");
+        opts.put("tag", def.getName() + "-firelens-" + taskId);
+        Map<String, String> logOptions = def.getLogConfiguration().options();
+        if (logOptions != null && logOptions.get("log-driver-buffer-limit") != null) {
+            opts.put("fluentd-buffer-limit", logOptions.get("log-driver-buffer-limit"));
+        }
+        return new LogConfig(LogConfig.LoggingType.FLUENTD, opts);
+    }
+
+    /**
+     * Reads a {@code config-file-type=s3} external config from Floci's S3, before any container is
+     * created, so a missing object stops the task without leaking a started router.
+     *
+     * <p>Wording is the ECS agent's, and the error code is ResourceInitializationError so that
+     * EcsService passes the message through verbatim as the task's stoppedReason rather than
+     * wrapping it in its generic start-failure prefix.
+     */
+    private String s3ExternalConfig(ContainerDefinition router) {
+        FirelensConfiguration firelens = router.getFirelensConfiguration();
+        Map<String, String> options = firelens.options() != null ? firelens.options() : Map.of();
+        if (!"s3".equals(options.get("config-file-type"))) {
+            return null;
+        }
+        String value = options.get("config-file-value");
+        // Registration already rejected a value that is not an S3 object ARN; this covers task
+        // definitions stored before that check existed.
+        AwsArnUtils.S3ObjectRef ref = AwsArnUtils.parseS3ObjectArn(value);
+        if (ref == null) {
+            throw firelensS3Failure("unable to parse s3 arn: " + value, 400);
+        }
+        try {
+            S3Object object = s3Service.getObject(ref.bucket(), ref.key());
+            return new String(object.getData(), StandardCharsets.UTF_8);
+        } catch (AwsException e) {
+            throw firelensS3Failure("unable to download s3 config " + ref.key()
+                    + " from bucket " + ref.bucket() + ": " + e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    /**
+     * A task-resource failure that never reaches a client: EcsService catches it and uses the
+     * message as the task's stoppedReason, keying off the ResourceInitializationError code to
+     * skip its generic "Failed to start:" prefix. The prefix on the message itself is the agent's.
+     */
+    private static AwsException firelensS3Failure(String detail, int httpStatus) {
+        return new AwsException("ResourceInitializationError",
+                "Unable to download firelens s3 config file: " + detail, httpStatus);
+    }
+
+    private void copyFirelensConfig(
+            String containerId, String configText, boolean fluentd, String externalConfig) {
+        byte[] content = configText.getBytes(StandardCharsets.UTF_8);
+        String fileName = fluentd ? "fluent.conf" : "fluent-bit.conf";
+        String remotePath = fluentd ? "/fluentd/etc" : "/fluent-bit/etc";
+        ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+            putTarEntry(tar, fileName, content);
+            if (externalConfig != null) {
+                putTarEntry(tar, "external.conf", externalConfig.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException e) {
+            throw new AwsException("ClientException",
+                    "unable to write FireLens config: " + e.getMessage(), 500);
+        }
+        lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                .withRemotePath(remotePath)
+                .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
+                .exec();
+    }
+
+    private static void putTarEntry(TarArchiveOutputStream tar, String name, byte[] content) throws IOException {
+        TarArchiveEntry entry = new TarArchiveEntry(name);
+        entry.setSize(content.length);
+        tar.putArchiveEntry(entry);
+        tar.write(content);
+        tar.closeArchiveEntry();
+    }
+
+    private String inspectContainerIp(String dockerId) {
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
+            String configured = config.services().ecs().dockerNetwork().orElse(null);
+            if (configured != null && networks.get(configured) != null
+                    && isUsableIp(networks.get(configured).getIpAddress())) {
+                return networks.get(configured).getIpAddress();
+            }
+            for (Map.Entry<String, ContainerNetwork> entry : networks.entrySet()) {
+                if (!isDefaultDockerNetwork(entry.getKey())
+                        && isUsableIp(entry.getValue().getIpAddress())) {
+                    return entry.getValue().getIpAddress();
+                }
+            }
+            for (ContainerNetwork net : networks.values()) {
+                if (isUsableIp(net.getIpAddress())) {
+                    return net.getIpAddress();
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not resolve FireLens container IP for {0}: {1}", dockerId, e.getMessage());
+        }
+        return "127.0.0.1";
+    }
+    /**
+     * Tears down the firewall registration of a protected task. The ENI itself outlives this:
+     * it belongs to the task, not to its containers, and {@link #releaseTaskNetwork} frees it when
+     * the task reaches STOPPED.
+     */
+    private void cleanupProtectedNetwork(EcsTaskHandle handle) {
+        if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
+            firewallManager.unregister(handle.getNetworkInterfaceId());
+        }
     }
 
     private void finalizeLogStream(EcsTaskHandle handle, String dockerId) {
@@ -574,14 +1448,28 @@ public class EcsContainerManager {
         container.setLastStatus("RUNNING");
         container.setNetworkBindings(networkBindings);
         container.setDockerId(dockerId);
+        container.setRuntimeId(dockerId);
+        container.setHealthStatus(def.getHealthCheck() != null ? "UNKNOWN" : null);
+        if (def.getCpu() != null) {
+            container.setCpu(String.valueOf(def.getCpu()));
+        }
+        if (def.getMemory() != null) {
+            container.setMemory(String.valueOf(def.getMemory()));
+        }
+        if (def.getMemoryReservation() != null) {
+            container.setMemoryReservation(String.valueOf(def.getMemoryReservation()));
+        }
         container.setContainerArn(regionResolver.buildArn("ecs", region,
                 "container/" + extractTaskId(taskArn) + "/" + def.getName()));
         return container;
     }
 
-    private static String extractTaskId(String taskArn) {
-        int slash = taskArn.lastIndexOf('/');
-        return slash >= 0 ? taskArn.substring(slash + 1) : taskArn;
+    private static String extractTaskId(String arn) {
+        if (arn == null) {
+            return "";
+        }
+        int slash = arn.lastIndexOf('/');
+        return slash >= 0 ? arn.substring(slash + 1) : arn;
     }
 
     /**

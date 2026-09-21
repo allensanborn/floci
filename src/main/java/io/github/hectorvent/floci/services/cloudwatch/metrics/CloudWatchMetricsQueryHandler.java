@@ -153,7 +153,7 @@ public class CloudWatchMetricsQueryHandler {
             xml.elem("Unit", dp.unit()).end("member");
         }
         xml.end("Datapoints");
-        return Response.ok(AwsQueryResponse.envelope("GetMetricStatistics", null, xml.build())).build();
+        return Response.ok(AwsQueryResponse.envelope("GetMetricStatistics", AwsNamespaces.CW, xml.build())).build();
     }
 
     private Response handleGetMetricData(MultivaluedMap<String, String> params, String region) {
@@ -188,7 +188,7 @@ public class CloudWatchMetricsQueryHandler {
             xml.end("member");
         }
         xml.end("MetricDataResults");
-        return Response.ok(AwsQueryResponse.envelope("GetMetricData", null, xml.build())).build();
+        return Response.ok(AwsQueryResponse.envelope("GetMetricData", AwsNamespaces.CW, xml.build())).build();
     }
 
     private List<CloudWatchMetricsService.MetricDataQuery> parseMetricDataQueries(
@@ -663,7 +663,9 @@ public class CloudWatchMetricsQueryHandler {
         a.setPeriod(parseIntParam(params, "Period", 60));
         a.setUnit(params.getFirst("Unit"));
         a.setEvaluationPeriods(parseIntParam(params, "EvaluationPeriods", 1));
-        a.setDatapointsToAlarm(parseIntParam(params, "DatapointsToAlarm", a.getEvaluationPeriods()));
+        String datapointsToAlarm = params.getFirst("DatapointsToAlarm");
+        a.setDatapointsToAlarm(datapointsToAlarm == null || datapointsToAlarm.isBlank()
+                ? null : Integer.parseInt(datapointsToAlarm));
         a.setThreshold(parseDouble(params.getFirst("Threshold"), 0));
         a.setComparisonOperator(params.getFirst("ComparisonOperator"));
         a.setTreatMissingData(params.getFirst("TreatMissingData"));
@@ -740,10 +742,13 @@ public class CloudWatchMetricsQueryHandler {
                 .elem("Period", String.valueOf(a.getPeriod()))
                 .elem("Unit", a.getUnit())
                 .elem("EvaluationPeriods", String.valueOf(a.getEvaluationPeriods()))
-                .elem("DatapointsToAlarm", String.valueOf(a.getDatapointsToAlarm()))
                 .elem("Threshold", String.valueOf(a.getThreshold()))
                 .elem("ComparisonOperator", a.getComparisonOperator())
                 .elem("TreatMissingData", a.getTreatMissingData());
+        // Only an alarm the caller gave an M for carries the member, matching what AWS returns.
+        if (a.getDatapointsToAlarm() != null) {
+            xml.elem("DatapointsToAlarm", String.valueOf(a.getDatapointsToAlarm()));
+        }
 
         xml.end("member");
     }

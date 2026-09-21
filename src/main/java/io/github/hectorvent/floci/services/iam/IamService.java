@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
+import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
@@ -33,6 +34,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
@@ -79,9 +81,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_PASSWORD_AGE_CEILING = 1095;
     private static final int PASSWORD_REUSE_PREVENTION_FLOOR = 1;
     private static final int PASSWORD_REUSE_PREVENTION_CEILING = 24;
+    /**
+     * AWS's documented {@code passwordType} pattern for Create/UpdateLoginProfile: printable
+     * ASCII and Latin-1 Supplement (space through code point 0xFF), plus tab/LF/CR, 1-128 chars.
+     */
+    private static final Pattern LOGIN_PROFILE_PASSWORD_PATTERN =
+            Pattern.compile("[\\t\\n\\r\\x20-\\xff]{1,128}");
 
     /** Guards the read-modify-write in the OIDC provider mutators. */
     private final Object oidcProviderLock = new Object();
+
+    /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
+    private final SecureRandom secureRandom = new SecureRandom();
 
     private static final String SERVICE_LINKED_ROLE_PATH = "/aws-service-role/";
     private static final String SERVICE_LINKED_ROLE_NAME_PREFIX = "AWSServiceRoleFor";
@@ -131,6 +142,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * single-value-per-account shape as {@link #accountAliases}.
      */
     private final StorageBackend<String, AccountPasswordPolicy> passwordPolicies;
+    private final StorageBackend<String, LoginProfile> loginProfiles;
     private final StorageBackend<String, OpenIDConnectProvider> oidcProviders;
     /** Deletion is synchronous, so an issued task id is a completed one; the value is its role. */
     private final StorageBackend<String, String> serviceLinkedRoleDeletions;
@@ -158,6 +170,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-account-aliases.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-password-policy.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-login-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-oidc-providers.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-slr-deletions.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-org-root-features.json", new TypeReference<>() {}),
@@ -189,7 +202,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, seedDeployerPrincipal, null);
     }
 
     // 8-backend constructor (no org-root-features): kept for existing callers/tests;
@@ -209,8 +223,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
-                accountAliases, passwordPolicies, oidcProviders, serviceLinkedRoleDeletions,
-                new InMemoryStorage<>(), regionResolver, seedDeployerPrincipal, seededAccountAlias);
+                accountAliases, passwordPolicies, new InMemoryStorage<>(), oidcProviders,
+                serviceLinkedRoleDeletions, new InMemoryStorage<>(), regionResolver,
+                seedDeployerPrincipal, seededAccountAlias);
     }
 
     // 9-backend constructor (no alias/OIDC/SLR backends): kept for existing callers/tests;
@@ -228,7 +243,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal) {
         this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions,
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), orgRootFeatures, regionResolver, seedDeployerPrincipal, null);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures, regionResolver,
+                seedDeployerPrincipal, null);
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -240,6 +256,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, SessionCredential> sessions,
                StorageBackend<String, String> accountAliases,
                StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, LoginProfile> loginProfiles,
                StorageBackend<String, OpenIDConnectProvider> oidcProviders,
                StorageBackend<String, String> serviceLinkedRoleDeletions,
                StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
@@ -255,6 +272,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.sessions = sessions;
         this.accountAliases = accountAliases;
         this.passwordPolicies = passwordPolicies;
+        this.loginProfiles = loginProfiles;
         this.oidcProviders = oidcProviders;
         this.serviceLinkedRoleDeletions = serviceLinkedRoleDeletions;
         this.orgRootFeatures = orgRootFeatures;
@@ -393,6 +411,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must remove from all groups first.", 409);
         }
+        if (loginProfiles.get(userName).isPresent()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete login profile first.", 409);
+        }
+        if (!user.getInlinePolicies().isEmpty()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete policies first.", 409);
+        }
+        if (!userAccessKeys(userName).isEmpty()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete access keys first.", 409);
+        }
         users.delete(userName);
         LOG.infov("Deleted IAM user: {0}", userName);
     }
@@ -425,11 +455,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("EntityAlreadyExists",
                         "User with name " + newUserName + " already exists.", 409);
             }
+            List<AccessKey> keysToMove = userAccessKeys(userName);
             users.delete(userName);
             user.setUserName(newUserName);
             if (newPath != null) user.setPath(normalizePath(newPath));
             user.setArn(iamArn("user", user.getPath(), newUserName));
             users.put(newUserName, user);
+            loginProfiles.get(userName).ifPresent(profile -> {
+                loginProfiles.delete(userName);
+                profile.setUserName(newUserName);
+                loginProfiles.put(newUserName, profile);
+            });
+            for (AccessKey key : keysToMove) {
+                key.setUserName(newUserName);
+                accessKeys.put(key.getAccessKeyId(), key);
+            }
+            for (String groupName : user.getGroupNames()) {
+                groups.get(groupName).ifPresent(group -> {
+                    group.getUserNames().remove(userName);
+                    group.getUserNames().add(newUserName);
+                    groups.put(groupName, group);
+                });
+            }
         } else {
             if (newPath != null) {
                 user.setPath(normalizePath(newPath));
@@ -1340,6 +1387,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public List<AccessKey> listAccessKeys(String userName) {
         getUser(userName); // validates existence
+        return userAccessKeys(userName);
+    }
+
+    private List<AccessKey> userAccessKeys(String userName) {
         return accessKeys.scan(k -> true).stream()
                 .filter(ak -> userName.equals(ak.getUserName()))
                 .toList();
@@ -1422,6 +1473,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         instanceProfiles.put(instanceProfileName, profile);
         LOG.infov("Created instance profile: {0}", instanceProfileName);
         return profile;
+    }
+
+    public Optional<InstanceProfile> findInstanceProfile(String accountId, String profileName) {
+        if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
+            return aware.getForAccount(accountId, profileName);
+        }
+        return instanceProfiles.get(profileName);
     }
 
     public InstanceProfile getInstanceProfile(String instanceProfileName) {
@@ -1625,6 +1683,100 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             throw new AwsException("ValidationError",
                     "PasswordReusePrevention must be between " + PASSWORD_REUSE_PREVENTION_FLOOR + " and "
                             + PASSWORD_REUSE_PREVENTION_CEILING + ".", 400);
+        }
+    }
+
+    // =========================================================================
+    // Login Profiles
+    // =========================================================================
+
+    /** A user holds at most one login profile: creating a second is EntityAlreadyExists. */
+    public LoginProfile createLoginProfile(String userName, String password, boolean passwordResetRequired) {
+        getUser(userName);
+        if (loginProfiles.get(userName).isPresent()) {
+            throw new AwsException("EntityAlreadyExists",
+                    "Login Profile for User " + userName + " already exists.", 409);
+        }
+        validateLoginProfilePassword(password);
+        LoginProfile profile = new LoginProfile(userName, password, passwordResetRequired);
+        loginProfiles.put(userName, profile);
+        LOG.infov("Created IAM login profile for user: {0}", userName);
+        return profile;
+    }
+
+    public LoginProfile getLoginProfile(String userName) {
+        getUser(userName);
+        return loginProfiles.get(userName)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "Login Profile for User " + userName + " cannot be found.", 404));
+    }
+
+    /**
+     * Replaces the fields the caller supplies; unlike {@link #updateAccountPasswordPolicy}, an
+     * omitted field here carries over its previous value rather than resetting to a default.
+     * {@code Password} and {@code PasswordResetRequired} are independently optional on AWS's
+     * {@code UpdateLoginProfile}, so a caller rotating only the password must not accidentally
+     * clear the reset-required flag, and vice versa.
+     */
+    public void updateLoginProfile(String userName, String password, Boolean passwordResetRequired) {
+        LoginProfile profile = getLoginProfile(userName);
+        if (password != null) {
+            validateLoginProfilePassword(password);
+            profile.setPassword(password);
+        }
+        if (passwordResetRequired != null) {
+            profile.setPasswordResetRequired(passwordResetRequired);
+        }
+        loginProfiles.put(userName, profile);
+        LOG.infov("Updated IAM login profile for user: {0}", userName);
+    }
+
+    public void deleteLoginProfile(String userName) {
+        getUser(userName);
+        if (loginProfiles.get(userName).isEmpty()) {
+            throw new AwsException("NoSuchEntity",
+                    "Login Profile for User " + userName + " cannot be found.", 404);
+        }
+        loginProfiles.delete(userName);
+        LOG.infov("Deleted IAM login profile for user: {0}", userName);
+    }
+
+    /**
+     * Base wire validation shared by Create/UpdateLoginProfile, then, only when the account has
+     * ever set one (matching {@link #getAccountPasswordPolicy}'s own NoSuchEntity-by-default
+     * semantics), the account's password policy.
+     */
+    private void validateLoginProfilePassword(String password) {
+        if (password == null || !LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'password' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to 128 and greater than or "
+                            + "equal to 1", 400);
+        }
+        getAccountPasswordPolicy().ifPresent(policy -> checkPasswordAgainstPolicy(password, policy));
+    }
+
+    private void checkPasswordAgainstPolicy(String password, AccountPasswordPolicy policy) {
+        List<String> violations = new ArrayList<>();
+        if (password.length() < policy.getMinimumPasswordLength()) {
+            violations.add("a minimum length of " + policy.getMinimumPasswordLength());
+        }
+        if (policy.isRequireUppercaseCharacters() && password.chars().noneMatch(Character::isUpperCase)) {
+            violations.add("at least one uppercase letter");
+        }
+        if (policy.isRequireLowercaseCharacters() && password.chars().noneMatch(Character::isLowerCase)) {
+            violations.add("at least one lowercase letter");
+        }
+        if (policy.isRequireNumbers() && password.chars().noneMatch(Character::isDigit)) {
+            violations.add("at least one number");
+        }
+        if (policy.isRequireSymbols() && password.chars().allMatch(Character::isLetterOrDigit)) {
+            violations.add("at least one non-alphanumeric character");
+        }
+        if (!violations.isEmpty()) {
+            throw new AwsException("PasswordPolicyViolation",
+                    "Password does not conform to the account password policy. It must contain: "
+                            + String.join(", ", violations) + ".", 400);
         }
     }
 
@@ -1876,6 +2028,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .map(AccessKey::getSecretAccessKey);
     }
 
+    public record EksSessionIdentity(String accountId, String roleArn, String roleId, String instanceId) {}
+
+    /** Returns only identity metadata, never the session secret or token. */
+    public Optional<EksSessionIdentity> findEksSessionIdentity(String accessKeyId) {
+        return currentSession(accessKeyId).map(session -> new EksSessionIdentity(
+                session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
+    }
+
     private Optional<SessionCredential> currentSession(String accessKeyId) {
         return findSessionAnyAccount(accessKeyId)
                 .filter(session -> session.getExpiration() == null || Instant.now().isBefore(session.getExpiration()));
@@ -2020,6 +2180,33 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionAccessKeyId, accountId, roleArn);
     }
 
+    /** Registers an IMDS session in the profile's account, outside request scope. */
+    public void registerEc2InstanceSession(SessionCredential session) {
+        if (session.getOriginAccountId() == null || session.getOriginAccountId().isBlank()
+                || session.getEc2InstanceId() == null || session.getEc2InstanceId().isBlank()) {
+            throw new IllegalArgumentException("EC2 session account and instance ID must not be blank");
+        }
+        if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.putForAccount(session.getOriginAccountId(), session.getAccessKeyId(), session);
+        } else {
+            sessions.put(session.getAccessKeyId(), session);
+        }
+    }
+
+    /** IMDS registrations are rebuilt on startup; discard credentials from the previous server. */
+    public int sweepOrphanedEc2InstanceSessions() {
+        List<SessionCredential> stored = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
+                ? aware.scanAllAccounts() : sessions.scan(key -> true);
+        int removed = 0;
+        for (SessionCredential session : stored) {
+            if (session.getEc2InstanceId() != null) {
+                deleteSession(session.getAccessKeyId(), session);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     /** Removes a session from an explicit account namespace. */
     public void unregisterSession(String accountId, String sessionAccessKeyId) {
         if (sessionAccessKeyId == null || sessionAccessKeyId.isBlank()) {
@@ -2087,15 +2274,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *
      * <p>Sessions are keyed by a globally-unique access key (e.g. {@code ASIA...}) but stored in
      * the minting account's namespace. Account routing must resolve the session <em>before</em> the
-     * request's account is known, so a normal account-scoped {@code get} would miss it. This scans
-     * across all accounts; the access key's global uniqueness keeps the result unambiguous.
+     * request's account is known, so a normal account-scoped {@code get} would miss it. The
+     * lookup spans all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
-            return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
+            return aware.findAnyAccount(accessKeyId);
         }
         return sessions.get(accessKeyId);
     }
@@ -2190,7 +2377,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
-            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/"
+                    + (session.getEc2InstanceId() != null ? session.getEc2InstanceId() : "floci-session")).toString());
         }
 
         return Optional.empty();
@@ -2406,11 +2594,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return sb.toString();
     }
 
-    private static String randomSecret(int length) {
+    private String randomSecret(int length) {
         String secretChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         StringBuilder sb = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
-            sb.append(secretChars.charAt(ThreadLocalRandom.current().nextInt(secretChars.length())));
+            sb.append(secretChars.charAt(secureRandom.nextInt(secretChars.length())));
         }
         return sb.toString();
     }

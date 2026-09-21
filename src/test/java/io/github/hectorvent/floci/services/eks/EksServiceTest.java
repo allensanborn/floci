@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2ContainerManager;
 import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
@@ -21,12 +23,16 @@ import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
+import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,12 +45,14 @@ import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,7 +75,8 @@ class EksServiceTest {
         Ec2Service ec2Service = null;
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         eksService = new EksService(storageFactory, config, regionResolver, clusterManager, ec2Service,
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class));
     }
 
     private EmulatorConfig testConfig() {
@@ -227,7 +236,8 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService);
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
         restarted.init();
 
         Cluster migrated = restarted.describeCluster("legacy-cluster");
@@ -251,7 +261,7 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService);
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class));
         restarted.init();
 
         // The issuer a trust policy was written against must survive a restart, and its key must
@@ -282,7 +292,7 @@ class EksServiceTest {
         EksOidcService oidcService = new EksOidcService(
                 fixedStorageFactory(keyStore), new ObjectMapper());
         new EksService(fixedStorageFactory(clusterStore), testConfig(),
-                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService).init();
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService, mock(EksAccessEntryService.class)).init();
 
         Cluster migrated = clusterStore.getForAccount(otherAccount, "legacy-cluster").orElseThrow();
         String issuer = migrated.getIdentity().getOidc().getIssuer();
@@ -316,7 +326,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -356,7 +366,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -390,7 +400,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -419,7 +429,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -446,7 +456,7 @@ class EksServiceTest {
         EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(false),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
                 new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()),
-                        new ObjectMapper()));
+                        new ObjectMapper()), mock(EksAccessEntryService.class));
         try {
             restarted.init();
 
@@ -521,7 +531,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of("subnet-1", "subnet-2"));
@@ -548,7 +558,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, realEc2Service(),
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
@@ -583,7 +593,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"),
@@ -613,7 +623,7 @@ class EksServiceTest {
         };
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()));
+                realEc2Service(), new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(Ec2Service.defaultSubnetId("eu-west-2", "a")));
@@ -660,7 +670,7 @@ class EksServiceTest {
         // The request is for eu-west-2, where that subnet does not exist.
         RegionResolver regionResolver = new RegionResolver("eu-west-2", "000000000000");
         EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
-                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()));
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
 
         ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
         vpcConfig.setSubnetIds(List.of(usEastOnlySubnet));
@@ -991,7 +1001,7 @@ class EksServiceTest {
         };
         return new EksService(storageFactory, testConfig(mock),
                 new RegionResolver("us-east-1", "000000000000"), clusterManager, null,
-                new EksOidcService(storageFactory, new ObjectMapper()));
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
     }
 
     @Test
@@ -1066,5 +1076,677 @@ class EksServiceTest {
         request.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
 
         assertEquals(ClusterStatus.FAILED, service.createCluster(request).getStatus());
+    }
+
+    @Test
+    void createClusterCreatesClusterSecurityGroupInResolvedVpc() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String subnetId = ec2Service
+                .createSubnet("us-east-1", defaultVpc, "172.31.100.0/24", "us-east-1a")
+                .getSubnetId();
+
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-sg-test");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster created = service.createCluster(req);
+        assertNotNull(created.getResourcesVpcConfig());
+        String sgId = created.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertNotNull(sgId);
+        assertTrue(sgId.startsWith("sg-"), "Security group ID should start with sg-");
+
+        Cluster described = service.describeCluster("cluster-sg-test");
+        assertEquals(sgId, described.getResourcesVpcConfig().getClusterSecurityGroupId());
+
+        List<SecurityGroup> sgs = ec2Service.describeSecurityGroups("us-east-1", List.of(sgId), List.of(), Map.of());
+        assertEquals(1, sgs.size());
+        SecurityGroup sg = sgs.getFirst();
+        assertEquals(sgId, sg.getGroupId());
+        assertTrue(sg.getGroupName().matches("^eks-cluster-sg-cluster-sg-test-[0-9a-f]{8}$"),
+                "Group name should match pattern, got: " + sg.getGroupName());
+        assertEquals("EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.",
+                sg.getDescription());
+        assertEquals(defaultVpc, sg.getVpcId());
+
+        Map<String, String> tagMap = sg.getTags().stream()
+                .collect(Collectors.toMap(Tag::getKey, Tag::getValue));
+        assertEquals(sg.getGroupName(), tagMap.get("Name"));
+        assertEquals("owned", tagMap.get("kubernetes.io/cluster/cluster-sg-test"));
+        assertEquals("cluster-sg-test", tagMap.get("aws:eks:cluster-name"));
+
+        assertEquals(1, sg.getIpPermissions().size());
+        assertEquals("-1", sg.getIpPermissions().getFirst().getIpProtocol());
+        assertEquals(sgId, sg.getIpPermissions().getFirst().getUserIdGroupPairs().getFirst().getGroupId());
+
+        boolean hasSelfEgress = sg.getIpPermissionsEgress().stream()
+                .anyMatch(p -> "-1".equals(p.getIpProtocol())
+                        && p.getUserIdGroupPairs().stream().anyMatch(u -> sgId.equals(u.getGroupId())));
+        assertTrue(hasSelfEgress, "Security group should have self-referencing outbound egress rule for EFA");
+    }
+
+    @Test
+    void createClusterWithoutVpcLeavesClusterSecurityGroupIdNull() {
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        Ec2Service ec2Service = realEc2Service();
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-no-vpc");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+
+        Cluster created = service.createCluster(req);
+        assertNotNull(created.getResourcesVpcConfig());
+        assertEquals("", created.getResourcesVpcConfig().getVpcId());
+        assertNull(created.getResourcesVpcConfig().getClusterSecurityGroupId());
+    }
+
+    @Test
+    void deleteClusterDeletesClusterSecurityGroup() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String subnetId = ec2Service
+                .createSubnet("us-east-1", defaultVpc, "172.31.101.0/24", "us-east-1a")
+                .getSubnetId();
+
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-to-delete");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster created = service.createCluster(req);
+        String sgId = created.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertFalse(ec2Service.describeSecurityGroups("us-east-1", List.of(sgId), List.of(), Map.of()).isEmpty());
+
+        service.deleteCluster("cluster-to-delete");
+        assertTrue(ec2Service.describeSecurityGroups("us-east-1", List.of(sgId), List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void deleteClusterSucceedsWhenClusterSecurityGroupAlreadyDeleted() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String subnetId = ec2Service
+                .createSubnet("us-east-1", defaultVpc, "172.31.102.0/24", "us-east-1a")
+                .getSubnetId();
+
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-pre-deleted-sg");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster created = service.createCluster(req);
+        String sgId = created.getResourcesVpcConfig().getClusterSecurityGroupId();
+
+        // Delete the security group before deleting the cluster
+        ec2Service.deleteSecurityGroup("us-east-1", sgId);
+
+        // Deleting the cluster must tolerate InvalidGroup.NotFound
+        Cluster deleted = service.deleteCluster("cluster-pre-deleted-sg");
+        assertEquals(ClusterStatus.DELETING, deleted.getStatus());
+    }
+
+    @Test
+    void deleteClusterPropagatesGenuineEc2Failure() {
+        Ec2Service mockEc2 = mock(Ec2Service.class);
+        doThrow(new AwsException("DependencyViolation", "Rules reference this group", 400))
+                .when(mockEc2).deleteSecurityGroup(any(), any());
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster cluster = new Cluster();
+        cluster.setName("failing-delete-cluster");
+        cluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/failing-delete-cluster");
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setClusterSecurityGroupId("sg-12345678");
+        cluster.setResourcesVpcConfig(vpcConfig);
+        clusterStore.putForAccount("000000000000", "failing-delete-cluster", cluster);
+
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                mockEc2, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteCluster("failing-delete-cluster"));
+        assertEquals("DependencyViolation", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void backfillClusterSecurityGroupOnStartup() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster legacyCluster = new Cluster();
+        legacyCluster.setName("legacy-eks");
+        legacyCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/legacy-eks");
+        legacyCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(defaultVpc);
+        vpcConfig.setClusterSecurityGroupId(null);
+        legacyCluster.setResourcesVpcConfig(vpcConfig);
+        clusterStore.putForAccount("000000000000", "legacy-eks", legacyCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                ec2Service, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        service.init();
+
+        Cluster described = service.describeCluster("legacy-eks");
+        String sgId = described.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertNotNull(sgId);
+        assertTrue(sgId.startsWith("sg-"));
+
+        List<SecurityGroup> sgs = ec2Service.describeSecurityGroups("us-east-1", List.of(sgId), List.of(), Map.of());
+        assertEquals(1, sgs.size());
+        SecurityGroup sg = sgs.getFirst();
+        assertEquals(defaultVpc, sg.getVpcId());
+        assertTrue(sg.getGroupName().startsWith("eks-cluster-sg-legacy-eks-"));
+    }
+
+    @Test
+    void backfillClusterSecurityGroupLeavesExistingSecurityGroupUnchanged() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster existingCluster = new Cluster();
+        existingCluster.setName("existing-eks");
+        existingCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/existing-eks");
+        existingCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(defaultVpc);
+        vpcConfig.setClusterSecurityGroupId("sg-already-present");
+        existingCluster.setResourcesVpcConfig(vpcConfig);
+        clusterStore.putForAccount("000000000000", "existing-eks", existingCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                ec2Service, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        service.init();
+
+        Cluster described = service.describeCluster("existing-eks");
+        assertEquals("sg-already-present", described.getResourcesVpcConfig().getClusterSecurityGroupId());
+    }
+
+    @Test
+    void restartRoundTripPersistsClusterSecurityGroupId() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String subnetId = ec2Service
+                .createSubnet("us-east-1", defaultVpc, "172.31.103.0/24", "us-east-1a")
+                .getSubnetId();
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        StorageFactory oidcStorageFactory = fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>());
+
+        EksService firstRun = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(oidcStorageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("round-trip-cluster");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        Cluster created = firstRun.createCluster(req);
+        String sgId = created.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertNotNull(sgId);
+        assertTrue(sgId.startsWith("sg-"));
+
+        // Simulate restart by creating a new EksService instance backed by the same storage and ec2Service
+        EksService restarted = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                ec2Service, new EksOidcService(oidcStorageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+        restarted.init();
+
+        Cluster described = restarted.describeCluster("round-trip-cluster");
+        assertEquals(sgId, described.getResourcesVpcConfig().getClusterSecurityGroupId());
+
+        // And verify it still resolves in EC2
+        List<SecurityGroup> sgs = ec2Service.describeSecurityGroups("us-east-1", List.of(sgId), List.of(), Map.of());
+        assertEquals(1, sgs.size());
+        assertEquals(sgId, sgs.getFirst().getGroupId());
+    }
+
+    @Test
+    void createClusterWithNonExistentVpcThrowsInvalidParameterException() {
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        Ec2Service ec2Service = realEc2Service();
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId("vpc-nonexistent");
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-invalid-vpc");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("vpc-nonexistent"));
+    }
+
+    @Test
+    void createClusterCleansUpSecurityGroupWhenClusterCreationFails() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+        String subnetId = ec2Service
+                .createSubnet("us-east-1", defaultVpc, "172.31.104.0/24", "us-east-1a")
+                .getSubnetId();
+
+        StorageBackend<String, Cluster> failingStorage = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, Cluster value) {
+                throw new RuntimeException("Simulated storage failure");
+            }
+        };
+        StorageFactory storageFactory = fixedStorageFactory(failingStorage);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                ec2Service, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setSubnetIds(List.of(subnetId));
+
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-leak-test");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        assertThrows(RuntimeException.class, () -> service.createCluster(req));
+
+        List<SecurityGroup> allSgs = ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
+        boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-cluster-leak-test-"));
+        assertFalse(leaked, "Cluster security group should have been deleted when cluster creation failed");
+    }
+
+    @Test
+    void backfillClusterSecurityGroupsSkipsMissingVpcWithoutFailingStartup() {
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster brokenCluster = new Cluster();
+        brokenCluster.setName("broken-eks");
+        brokenCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/broken-eks");
+        brokenCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig brokenVpc = new ResourcesVpcConfig();
+        brokenVpc.setVpcId("vpc-missing");
+        brokenCluster.setResourcesVpcConfig(brokenVpc);
+        clusterStore.putForAccount("000000000000", "broken-eks", brokenCluster);
+
+        Cluster validCluster = new Cluster();
+        validCluster.setName("valid-eks");
+        validCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/valid-eks");
+        validCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig validVpc = new ResourcesVpcConfig();
+        validVpc.setVpcId(defaultVpc);
+        validCluster.setResourcesVpcConfig(validVpc);
+        clusterStore.putForAccount("000000000000", "valid-eks", validCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                ec2Service, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster describedBroken = service.describeCluster("broken-eks");
+        assertNull(describedBroken.getResourcesVpcConfig().getClusterSecurityGroupId());
+
+        Cluster describedValid = service.describeCluster("valid-eks");
+        String validSgId = describedValid.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertNotNull(validSgId);
+        assertTrue(validSgId.startsWith("sg-"));
+    }
+
+    @Test
+    void backfillClusterSecurityGroupsInNonDefaultAccount() {
+        String nonDefaultAccount = "123456789012";
+        Ec2Service ec2Service = realEc2Service();
+        ec2Service.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster legacyCluster = new Cluster();
+        legacyCluster.setName("non-default-eks");
+        legacyCluster.setArn("arn:aws:eks:us-east-1:" + nonDefaultAccount + ":cluster/non-default-eks");
+        legacyCluster.setAccountId(nonDefaultAccount);
+        legacyCluster.setStatus(ClusterStatus.ACTIVE);
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(defaultVpc);
+        legacyCluster.setResourcesVpcConfig(vpcConfig);
+        clusterStore.putForAccount(nonDefaultAccount, "non-default-eks", legacyCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                ec2Service, new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster described = clusterStore.getForAccount(nonDefaultAccount, "non-default-eks")
+                .orElseThrow();
+        String sgId = described.getResourcesVpcConfig().getClusterSecurityGroupId();
+        assertNotNull(sgId);
+        assertTrue(sgId.startsWith("sg-"));
+        assertEquals(nonDefaultAccount, described.getAccountId());
+    }
+
+    @Test
+    void createClusterSecurityGroupCleansUpWhenTaggingFails() {
+        Ec2Service spyEc2 = spy(realEc2Service());
+        spyEc2.ensureDefaultResources("us-east-1");
+        String defaultVpc = Ec2Service.defaultVpcId("us-east-1");
+
+        doThrow(new RuntimeException("Simulated tagging failure"))
+                .when(spyEc2).createTags(any(), any(), any());
+
+        StorageFactory storageFactory = fixedStorageFactory(new InMemoryStorage<>());
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null,
+                spyEc2, new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        ResourcesVpcConfig vpcConfig = new ResourcesVpcConfig();
+        vpcConfig.setVpcId(defaultVpc);
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName("cluster-tag-fail");
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setResourcesVpcConfig(vpcConfig);
+
+        assertThrows(RuntimeException.class, () -> service.createCluster(req));
+
+        List<SecurityGroup> allSgs = spyEc2.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of());
+        boolean leaked = allSgs.stream().anyMatch(sg -> sg.getGroupName().startsWith("eks-cluster-sg-cluster-tag-fail-"));
+        assertFalse(leaked, "Cluster security group should have been deleted when tagging failed");
+    }
+
+    private CreateClusterRequest createTestClusterRequest(String name) {
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName(name);
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setVersion("1.29");
+        return req;
+    }
+
+    @Test
+    void createClusterWithEncryptionConfigAndLogging() {
+        CreateClusterRequest req = createTestClusterRequest("enc-log-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012"))
+        ));
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("api", "audit"), true),
+                new LogSetup(List.of("authenticator", "controllerManager", "scheduler"), false)
+        )));
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getEncryptionConfig());
+        assertEquals(1, created.getEncryptionConfig().size());
+        assertEquals(List.of("secrets"), created.getEncryptionConfig().getFirst().getResources());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+                created.getEncryptionConfig().getFirst().getProvider().getKeyArn());
+
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(2, logSetups.size());
+        assertEquals(List.of("api", "audit"), logSetups.get(0).getTypes());
+        assertTrue(logSetups.get(0).getEnabled());
+        assertEquals(List.of("authenticator", "controllerManager", "scheduler"), logSetups.get(1).getTypes());
+        assertFalse(logSetups.get(1).getEnabled());
+
+        Cluster described = eksService.describeCluster("enc-log-cluster");
+        assertEquals(created.getEncryptionConfig(), described.getEncryptionConfig());
+        assertEquals(created.getLogging(), described.getLogging());
+    }
+
+    @Test
+    void createClusterWithoutEncryptionConfigOrLoggingUsesDefaults() {
+        CreateClusterRequest req = createTestClusterRequest("default-cluster");
+
+        Cluster created = eksService.createCluster(req);
+        assertNull(created.getEncryptionConfig());
+
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(1, logSetups.size());
+        assertEquals(List.of("api", "audit", "authenticator", "controllerManager", "scheduler"),
+                logSetups.getFirst().getTypes());
+        assertFalse(logSetups.getFirst().getEnabled());
+
+        Cluster described = eksService.describeCluster("default-cluster");
+        assertNull(described.getEncryptionConfig());
+        assertNotNull(described.getLogging());
+        assertEquals(logSetups, described.getLogging().getClusterLogging());
+    }
+
+    @Test
+    void createClusterWithPartiallyEnabledLoggingSplitsEntries() {
+        CreateClusterRequest req = createTestClusterRequest("partial-log-cluster");
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("authenticator", "api"), true)
+        )));
+
+        Cluster created = eksService.createCluster(req);
+        assertNotNull(created.getLogging());
+        List<LogSetup> logSetups = created.getLogging().getClusterLogging();
+        assertEquals(2, logSetups.size());
+        assertEquals(List.of("api", "authenticator"), logSetups.get(0).getTypes());
+        assertTrue(logSetups.get(0).getEnabled());
+        assertEquals(List.of("audit", "controllerManager", "scheduler"), logSetups.get(1).getTypes());
+        assertFalse(logSetups.get(1).getEnabled());
+    }
+
+    @Test
+    void createClusterWithInvalidLogTypeThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("invalid-log-cluster");
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("nonexistentLogType"), true)
+        )));
+
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithInvalidEncryptionResourcesThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("invalid-enc-res-1");
+        req1.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("configmaps"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678"))
+        ));
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        CreateClusterRequest req2 = createTestClusterRequest("invalid-enc-res-2");
+        req2.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("Secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/12345678"))
+        ));
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithMultipleEncryptionConfigsThrowsInvalidParameterException() {
+        CreateClusterRequest req = createTestClusterRequest("multiple-enc-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/1")),
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/2"))
+        ));
+        AwsException ex = assertThrows(AwsException.class, () -> eksService.createCluster(req));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createClusterWithMissingEncryptionKeyArnThrowsInvalidParameterException() {
+        CreateClusterRequest req1 = createTestClusterRequest("missing-keyarn-1");
+        req1.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), null)
+        ));
+        AwsException ex1 = assertThrows(AwsException.class, () -> eksService.createCluster(req1));
+        assertEquals("InvalidParameterException", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        CreateClusterRequest req2 = createTestClusterRequest("missing-keyarn-2");
+        req2.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider(""))
+        ));
+        AwsException ex2 = assertThrows(AwsException.class, () -> eksService.createCluster(req2));
+        assertEquals("InvalidParameterException", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void backfillLoggingPopulatesDefaultLoggingForPreExistingClusters() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster legacyCluster = new Cluster();
+        legacyCluster.setName("legacy-eks");
+        legacyCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/legacy-eks");
+        legacyCluster.setAccountId("000000000000");
+        legacyCluster.setStatus(ClusterStatus.ACTIVE);
+        legacyCluster.setLogging(null);
+        legacyCluster.setEncryptionConfig(null);
+        clusterStore.putForAccount("000000000000", "legacy-eks", legacyCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster described = service.describeCluster("legacy-eks");
+        assertNotNull(described.getLogging());
+        assertEquals(1, described.getLogging().getClusterLogging().size());
+        assertEquals(List.of("api", "audit", "authenticator", "controllerManager", "scheduler"),
+                described.getLogging().getClusterLogging().getFirst().getTypes());
+        assertFalse(described.getLogging().getClusterLogging().getFirst().getEnabled());
+        assertNull(described.getEncryptionConfig());
+    }
+
+    @Test
+    void backfillLoggingPreservesExistingLogging() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+
+        Cluster existingCluster = new Cluster();
+        existingCluster.setName("custom-logging-eks");
+        existingCluster.setArn("arn:aws:eks:us-east-1:000000000000:cluster/custom-logging-eks");
+        existingCluster.setAccountId("000000000000");
+        existingCluster.setStatus(ClusterStatus.ACTIVE);
+        Logging customLogging = new Logging(List.of(new LogSetup(List.of("api"), true)));
+        existingCluster.setLogging(customLogging);
+        clusterStore.putForAccount("000000000000", "custom-logging-eks", existingCluster);
+
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        EksService service = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+
+        assertDoesNotThrow(service::init);
+
+        Cluster described = service.describeCluster("custom-logging-eks");
+        assertEquals(customLogging, described.getLogging());
+    }
+
+    @Test
+    void restartRoundTripPreservesEncryptionConfigAndLogging() {
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Cluster> clusterStore =
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000");
+        StorageFactory storageFactory = fixedStorageFactory(clusterStore);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        EksService service1 = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+        service1.init();
+
+        CreateClusterRequest req = createTestClusterRequest("restart-cluster");
+        req.setEncryptionConfig(List.of(
+                new EncryptionConfig(List.of("secrets"), new Provider("arn:aws:kms:us-east-1:000000000000:key/persist-key"))
+        ));
+        req.setLogging(new Logging(List.of(
+                new LogSetup(List.of("api", "audit"), true)
+        )));
+        Cluster created = service1.createCluster(req);
+
+        EksService service2 = new EksService(storageFactory, testConfig(true), regionResolver, null,
+                realEc2Service(), new EksOidcService(fixedStorageFactory(new InMemoryStorage<String, ClusterOidcKey>()), new ObjectMapper()), mock(EksAccessEntryService.class));
+        service2.init();
+
+        Cluster described = service2.describeCluster("restart-cluster");
+        assertEquals(created.getEncryptionConfig(), described.getEncryptionConfig());
+        assertEquals(created.getLogging(), described.getLogging());
     }
 }

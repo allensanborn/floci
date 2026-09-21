@@ -2,6 +2,19 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## JWT issuer network policy
+
+HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
+rejects HTTP issuers and destinations that resolve to local, link-local, private, or other
+non-public addresses by default. This prevents an authorizer configuration from turning JWT
+verification into an SSRF path.
+
+For an isolated development environment with a local fixture issuer, set
+`FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. This shared JWT policy also applies to AppSync
+OIDC providers. The option permits private HTTPS targets and HTTP URLs that use a literal private
+or loopback address. It does not permit public HTTP targets. Keep it disabled when Floci can
+receive untrusted API configuration.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
@@ -53,7 +66,7 @@ duplicate override IDs.
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **API Keys** | CreateApiKey, ImportApiKeys, GetApiKey, GetApiKeys, UpdateApiKey, DeleteApiKey |
-| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan |
+| **Usage Plans** | CreateUsagePlan, GetUsagePlan, GetUsagePlans, UpdateUsagePlan, DeleteUsagePlan, GetUsage |
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
@@ -79,17 +92,11 @@ column defaults to `true`. Duplicate key values are reported in the `warnings` a
 
 #### `generateDistinctId`
 
-Controls whether the key's `id` and `value` fields are distinct. AWS's undocumented default behaviour is that they are **the same string** unless `generateDistinctId=true` is explicitly requested.
-
-| `generateDistinctId` | `id` | `value` |
-|---|---|---|
-| absent (default) | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
-| `false` | same as `value` | caller-supplied `value`, or a generated UUID-derived string |
-| `true` | opaque short token (`shortId`) | caller-supplied `value`, or a generated UUID-derived string |
-
-When `generateDistinctId` is absent or `false`, a single shared string is used for both `id` and `value`. If the caller supplies a `value` in the request body, that string is used for both; otherwise a UUID-derived string is generated and assigned to both.
-
-When `generateDistinctId=true`, `id` is set to an opaque short token independent of `value`.
+API key identifiers are generated independently from their secret values when `generateDistinctId`
+is absent, matching current AWS behavior, or explicitly set to `true`. The deprecated explicit
+`generateDistinctId=false` behavior is retained for compatibility and uses the key value as its
+identifier. A caller-supplied `value` remains available only from create responses and reads that
+explicitly request values.
 
 #### Revocation
 
@@ -225,7 +232,6 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
 - Documentation parts and versions (the entire family, 10 operations)
-- VPC Links (5 operations)
 - Client Certificates (5 operations)
 - `GetExport` / `ImportDocumentationParts`
 
@@ -249,6 +255,35 @@ Passthrough keeps repeated values repeated, in both directions: `?tag=a&tag=b` r
 
 - **Request** — the body is the rendered `requestTemplates` entry selected by the incoming `Content-Type` (falling back to the type without its charset), subject to `passthroughBehavior` (`NEVER` and `WHEN_NO_TEMPLATES` return `415`). Only headers and query parameters named by `integration.request.*` mappings are forwarded; unmapped inbound headers are **not** passed through — that passthrough is `HTTP_PROXY`'s job.
 - **Response** — the backend's reply runs through the method's integration responses. As in AWS, `selectionPattern` is matched against the backend's **HTTP status code** (for `AWS`/Lambda integrations it is matched against the error message instead), so `"5\\d{2}"` on a `502` integration response remaps any backend `5xx` to `502`. The matched response's `responseTemplates` render the body, `responseParameters` map `integration.response.header.*` (case-insensitively) or `integration.response.body.<jsonpath>` onto `method.response.header.*`, and `$context.responseOverride` assignments take precedence. With no integration responses configured, the backend's status and body are relayed as-is.
+
+### Integration Settings
+
+`PutIntegration` persists and `GetIntegration` returns the full configuration, including the mapping templates and integration responses that IaC tools diff against:
+
+| Field | Behaviour |
+| --- | --- |
+| `requestParameters` / `requestTemplates` | Applied at invoke time and returned on read-back |
+| `passthroughBehavior` | `NEVER` and `WHEN_NO_TEMPLATES` reject an unmatched Content-Type with `415` |
+| `timeoutInMillis` | Honoured; defaults to AWS's 29,000 ms. Values below 50 are rejected. The 29s ceiling is an edge-optimized limit, so Regional APIs may exceed it |
+| `tlsConfig.insecureSkipVerification` | Honoured, with AWS's semantics: it stops requiring the backend certificate to be issued by a trusted CA, so a private-CA or self-signed backend is reachable, but expiration, hostname and the presence of a root certificate authority are still checked |
+| `contentHandling` | `CONVERT_TO_TEXT` base64-encodes a binary request for mapping templates; `CONVERT_TO_BINARY` base64-decodes a text request before sending it |
+| `connectionType` / `connectionId` | `VPC_LINK` requires `connectionId` to name an existing, available VPC link; an unknown link yields `502` |
+| `cacheNamespace` / `cacheKeyParameters` | Form the response cache key (see below) |
+| `credentials` | Persisted and returned. Floci does not enforce IAM, so the role is not actually assumed |
+
+Integration responses additionally accept `contentHandling`, applied as an output conversion after response templates.
+
+### Binary Payloads
+
+Set `binaryMediaTypes` on the RestApi to mark content types as binary. Entries are matched exactly, ignoring any charset parameter; `*/*` is the one wildcard entry, and it covers every content type. A subtype wildcard such as `image/*` is not expanded, matching AWS, which documents only `*/*` and otherwise names one exact media type at a time. A binary request body reaches an `AWS_PROXY` (Lambda) integration base64-encoded with `isBase64Encoded: true`; previously it was read as a UTF-8 string, which corrupted it. For non-proxy integrations, pair `binaryMediaTypes` with `contentHandling` as above.
+
+### Caching
+
+Response caching needs both switches AWS requires: `cacheClusterEnabled` on the stage and `caching/enabled` on the method (or the `*/*` wildcard) via `UpdateStage` patch operations. Entries are keyed by the integration's `cacheNamespace` and the values of its `cacheKeyParameters`, and by nothing else: AWS lets separate resources share a `cacheNamespace` precisely so they can return the same cached data, so the method and request path are deliberately not part of the key. The namespace defaults to the resource id, which keeps resources that did not opt into sharing separate. Entries expire after `caching/ttlInSeconds` (default 300s), and only successful (`< 400`) responses are stored. There is no real cache cluster — `cacheClusterSize` is recorded and reported but has no effect on capacity.
+
+### VPC Links
+
+The five REST VPC Link operations (`CreateVpcLink`, `GetVpcLink`, `GetVpcLinks`, `UpdateVpcLink`, `DeleteVpcLink`) are emulated at `/vpclinks`. `CreateVpcLink` requires a name and at least one target ARN, answers `202`, and provisions the link as `AVAILABLE` immediately rather than transitioning through `PENDING`. Since Floci has no real VPC, a valid link routes straight to the integration URI; what is enforced is that the link exists and is available. `UpdateVpcLink` follows AWS's patch-operation table: only `replace` on `/name` and `/description` is accepted, and any other operation or path returns `BadRequestException` rather than being applied or silently ignored.
 
 ### Examples
 
@@ -302,6 +337,32 @@ aws apigateway create-deployment \
 # Call the deployed API
 curl http://localhost:4566/restapis/$API_ID/dev/_user_request_/users
 ```
+
+### Usage reporting
+
+`GetUsage` returns the real response envelope: a `values` map of API key id to one `[used, remaining]`
+pair per day of the inclusive range, alongside `usagePlanId`, `startDate` and `endDate`. The second
+element of each pair is the quota limit minus cumulative use on real API Gateway, not the quota
+itself.
+
+The operation pages over the API key entries with `limit` and `position`, defaulting to 25 keys a
+page and emitting `position` only when another page exists.
+
+Request acceptance and response page size are separate things here. Probed against real API
+Gateway, every `limit` from 500 up to `Integer.MAX_VALUE` is accepted without error, so none is
+rejected. That does not show the service ever returning more than 500 entries in one page, and the
+documented contract caps a page at 500, so a larger `limit` is honoured as a request while the page
+returned stays capped at 500.
+
+The lower bound is a deliberate divergence: real API Gateway answers `limit=0` and `limit=-1` with
+an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
+as a `BadRequestException` instead of reproducing a 500.
+
+**Both numbers are always zero.** Nothing meters requests per API key, and a usage plan stores no
+quota to subtract from, so there is no limit to report against. Throttle settings are likewise
+accepted and stored but never enforced. Storing a quota on the usage plan and counting on the
+execute path are the two pieces still missing; a caller that sums the used counts gets zero, which
+is what it already got before the action existed, without having to special-case a missing endpoint.
 
 ### Usage Plan Tags and Custom IDs
 

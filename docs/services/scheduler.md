@@ -36,7 +36,34 @@ background dispatcher fires schedule targets on time. Supported expressions:
 window are skipped. The dispatcher ticks every
 `floci.services.scheduler.tick-interval-seconds` (default `10`).
 
-Supported target types: SQS, Lambda, SNS, EventBridge `PutEvents`.
+Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
+`PutEvents`, and unqualified Step Functions state machine ARNs. A Step Functions
+target starts an asynchronous execution with the schedule target's `Input`, or
+`{}` when `Input` is absent. Scheduler delivery succeeds when `StartExecution`
+is accepted; a later workflow failure does not trigger Scheduler retries.
+
+### Retries and dead-letter queues
+
+A failed invocation is retried after a deterministic capped exponential delay
+until the target's `RetryPolicy` is exhausted. The delay starts at 60 seconds
+and is capped at 86400 seconds. Missing fields use the AWS defaults:
+`MaximumEventAgeInSeconds=86400` and `MaximumRetryAttempts=185`. Retries run
+when due, without undocumented AWS jitter. Each occurrence retries
+independently, so a failing occurrence does not delay later `rate` or `cron`
+fires. Pending retries are in memory and are dropped when the process restarts,
+or when a schedule is disabled, updated, or deleted. Targets Floci cannot
+deliver to count as failed invocations. Lambda targets are invoked
+asynchronously, so function errors are not retried by the scheduler.
+
+When an occurrence is exhausted and `DeadLetterConfig.Arn` names a standard SQS
+queue, Floci sends the fully materialized target request as a JSON body to that
+queue with the message attributes
+`ERROR_CODE`, `ERROR_MESSAGE`, `EXECUTION_ID`, `EXHAUSTED_RETRY_CONDITION`,
+`IS_PAYLOAD_TRUNCATED`, `RETRY_ATTEMPTS`, `SCHEDULED_TIME`, `SCHEDULE_ARN`, and
+`TARGET_ARN`. FIFO queues and non-SQS ARNs are logged and skipped. An `at`
+schedule with `ActionAfterCompletion=DELETE` is deleted once its occurrence is
+delivered or exhausted. For an SQS target, the body contains `MessageBody` and
+`QueueUrl`. Non-JSON target input is encoded as a JSON string field.
 
 ## Configuration
 
@@ -48,7 +75,6 @@ Supported target types: SQS, Lambda, SNS, EventBridge `PutEvents`.
 
 ## Not Yet Supported
 
-- `RetryPolicy` and `DeadLetterConfig` on failed invocations (stored but not honored)
 - `FlexibleTimeWindow` jitter (fires deterministically at the scheduled time)
 - `NextToken`-based pagination for List operations
 

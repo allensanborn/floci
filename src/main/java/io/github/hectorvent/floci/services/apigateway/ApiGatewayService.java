@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -30,6 +34,7 @@ import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
+import io.github.hectorvent.floci.services.apigateway.model.VpcLink;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
@@ -56,6 +61,15 @@ import jakarta.inject.Inject;
 @ApplicationScoped
 public class ApiGatewayService {
 
+    /** Documented default page size for GetUsage. */
+    private static final int DEFAULT_USAGE_LIMIT = 25;
+    /**
+     * Documented maximum results per page. A larger {@code limit} is accepted, as real API Gateway
+     * accepts one, but the page returned is still capped here.
+     */
+    private static final int MAX_USAGE_PAGE_SIZE = 500;
+
+
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
 
     private final StorageBackend<String, RestApi> apiStore;
@@ -69,6 +83,7 @@ public class ApiGatewayService {
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
     private final StorageBackend<String, GatewayResponse> gatewayResponseStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
@@ -123,6 +138,9 @@ public class ApiGatewayService {
         this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
                 new TypeReference<>() {
                 });
+        this.vpcLinkStore = storageFactory.create("apigateway", "apigateway-vpclinks.json",
+                new TypeReference<>() {
+                });
         this.accountStore = storageFactory.create("apigateway", "apigateway-account.json",
             new TypeReference<>() {
             });
@@ -165,22 +183,19 @@ public class ApiGatewayService {
                             "Unsupported patch operation: " + opType, 400);
                 }
 
-                switch (path) {
-                    case "/cloudwatchRoleArn" -> {
-                        if ("remove".equals(opType)) {
-                            copy.setCloudwatchRoleArn(null);
-                        } else {
-                            copy.setCloudwatchRoleArn(value);
-                        }
+                if (path.equals("/cloudwatchRoleArn")) {
+                    if ("remove".equals(opType)) {
+                        copy.setCloudwatchRoleArn(null);
+                    } else {
+                        copy.setCloudwatchRoleArn(value);
                     }
-                    default -> {
-                        if (path.startsWith("/throttleSettings")) {
-                            throw new AwsException("BadRequestException",
-                                    "/throttleSettings value cannot be changed this way", 400);
-                        }
+                } else {
+                    if (path.startsWith("/throttleSettings")) {
                         throw new AwsException("BadRequestException",
-                                "Unsupported patch path: " + path, 400);
+                                "/throttleSettings value cannot be changed this way", 400);
                     }
+                    throw new AwsException("BadRequestException",
+                            "Unsupported patch path: " + path, 400);
                 }
             }
         }
@@ -212,6 +227,14 @@ public class ApiGatewayService {
         api.setDescription(description);
         api.setCreatedDate(System.currentTimeMillis() / 1000L);
         api.setTags(ReservedTags.stripApiGatewayReservedTags(tags));
+
+        if (request.get("binaryMediaTypes") instanceof List<?> binaryTypes) {
+            api.setBinaryMediaTypes(binaryTypes.stream()
+                    .filter(String.class::isInstance).map(String.class::cast).toList());
+        }
+        if (request.get("policy") instanceof String policy && !policy.isEmpty()) {
+            api.setPolicy(policy);
+        }
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
@@ -516,6 +539,34 @@ public class ApiGatewayService {
             integration.setPassthroughBehavior((String) request.get("passthroughBehavior"));
         }
 
+        integration.setContentHandling((String) request.get("contentHandling"));
+        integration.setCredentials((String) request.get("credentials"));
+        integration.setCacheNamespace((String) request.get("cacheNamespace"));
+        if (request.get("connectionType") != null) {
+            integration.setConnectionType((String) request.get("connectionType"));
+        }
+        integration.setConnectionId((String) request.get("connectionId"));
+
+        if (request.get("timeoutInMillis") instanceof Number timeout) {
+            // AWS accepts 50ms upward; the 29s ceiling applies only to edge-optimized APIs, and
+            // Regional/private APIs (Floci's default) may exceed it, so only the floor is enforced.
+            if (timeout.intValue() < 50) {
+                throw new AwsException("BadRequestException",
+                        "Invalid timeout value: " + timeout.intValue(), 400);
+            }
+            integration.setTimeoutInMillis(timeout.intValue());
+        }
+
+        if (request.get("cacheKeyParameters") instanceof List<?> cacheKeys) {
+            integration.setCacheKeyParameters(cacheKeys.stream()
+                    .filter(String.class::isInstance).map(String.class::cast).toList());
+        }
+
+        if (request.get("tlsConfig") instanceof Map<?, ?> tls) {
+            integration.setTlsConfig(new Integration.TlsConfig(
+                    Boolean.TRUE.equals(tls.get("insecureSkipVerification"))));
+        }
+
         @SuppressWarnings("unchecked")
         Map<String, String> reqParams = (Map<String, String>) request.get("requestParameters");
         if (reqParams != null) integration.setRequestParameters(reqParams);
@@ -561,7 +612,8 @@ public class ApiGatewayService {
 
         IntegrationResponse ir = new IntegrationResponse(statusCode, selectionPattern,
                 respParams != null ? respParams : new HashMap<>(),
-                respTemplates != null ? respTemplates : new HashMap<>());
+                respTemplates != null ? respTemplates : new HashMap<>(),
+                (String) request.get("contentHandling"));
 
         integration.getIntegrationResponses().put(statusCode, ir);
         resourceStore.put(resourceKey(region, apiId, resourceId),
@@ -721,6 +773,23 @@ public class ApiGatewayService {
         Map<String, String> variables = (Map<String, String>) request.get("variables");
         if (variables != null) stage.setVariables(variables);
 
+        if (Boolean.TRUE.equals(request.get("cacheClusterEnabled"))) {
+            stage.setCacheClusterEnabled(true);
+            stage.setCacheClusterSize((String) request.getOrDefault("cacheClusterSize", "0.5"));
+        }
+
+        stage.setTracingEnabled(Boolean.TRUE.equals(request.get("tracingEnabled")));
+        if (request.get("tags") instanceof Map<?, ?> tags) {
+            tags.forEach((k, v) -> {
+                if (k instanceof String key && v instanceof String val) stage.getTags().put(key, val);
+            });
+        }
+        if (request.get("accessLogSettings") instanceof Map<?, ?> logs) {
+            stage.setAccessLogSettings(new Stage.AccessLogSettings(
+                    logs.get("destinationArn") instanceof String arn ? arn : null,
+                    logs.get("format") instanceof String format ? format : null));
+        }
+
         stageStore.put(stageKey(region, apiId, stageName), stage);
         LOG.infov("Created stage {0} for API {1}", stageName, apiId);
         return stage;
@@ -749,12 +818,24 @@ public class ApiGatewayService {
                 String value = op.get("value");
                 LOG.infov("Patch operation: op={0}, path={1}, value={2}", opType, path, value);
 
+                if ("remove" .equals(opType) && "/accessLogSettings" .equals(path)) {
+                    stage.setAccessLogSettings(null);
+                    continue;
+                }
                 if (!"replace" .equals(opType) && !"add" .equals(opType)) continue;
 
                 if ("/description" .equals(path)) {
                     stage.setDescription(value);
                 } else if ("/deploymentId" .equals(path)) {
                     stage.setDeploymentId(value);
+                } else if ("/tracingEnabled" .equals(path)) {
+                    stage.setTracingEnabled(Boolean.parseBoolean(value));
+                } else if ("/accessLogSettings/destinationArn" .equals(path)) {
+                    Stage.AccessLogSettings logs = stage.getAccessLogSettings();
+                    stage.setAccessLogSettings(new Stage.AccessLogSettings(value, logs != null ? logs.format() : null));
+                } else if ("/accessLogSettings/format" .equals(path)) {
+                    Stage.AccessLogSettings logs = stage.getAccessLogSettings();
+                    stage.setAccessLogSettings(new Stage.AccessLogSettings(logs != null ? logs.destinationArn() : null, value));
                 } else if (path.startsWith("/variables/")) {
                     String varKey = path.substring("/variables/" .length());
                     LOG.infov("Setting stage variable {0} = {1}", varKey, value);
@@ -949,22 +1030,29 @@ public class ApiGatewayService {
         apiKey.setCreatedDate(System.currentTimeMillis() / 1000L);
         apiKey.setLastUpdatedDate(apiKey.getCreatedDate());
         apiKey.setDescription((String) request.get("description"));
+        apiKey.setCustomerId((String) request.get("customerId"));
 
-        boolean generateDistinctId = Boolean.TRUE.equals(request.get("generateDistinctId"));
         String suppliedValue = (String) request.get("value");
+        String keyValue = (suppliedValue != null && !suppliedValue.isBlank())
+                ? suppliedValue
+                : UUID.randomUUID().toString().replace("-", "");
+        boolean generateDistinctId = !Boolean.FALSE.equals(request.get("generateDistinctId"));
+        apiKey.setId(generateDistinctId ? shortId(10) : keyValue);
+        apiKey.setValue(keyValue);
 
-        if (!generateDistinctId) {
-            String sharedValue = (suppliedValue != null && !suppliedValue.isBlank())
-                    ? suppliedValue
-                    : UUID.randomUUID().toString().replace("-", "");
-            apiKey.setId(sharedValue);
-            apiKey.setValue(sharedValue);
-        } else {
-            apiKey.setId(shortId(10));
-            apiKey.setValue((suppliedValue != null && !suppliedValue.isBlank())
-                    ? suppliedValue
-                    : UUID.randomUUID().toString().replace("-", ""));
+        List<String> stageKeys = new ArrayList<>();
+        if (request.get("stageKeys") instanceof List<?> rawStageKeys) {
+            for (Object rawStageKey : rawStageKeys) {
+                if (rawStageKey instanceof Map<?, ?> stageKey) {
+                    Object restApiId = stageKey.get("restApiId");
+                    Object stageName = stageKey.get("stageName");
+                    if (restApiId != null && stageName != null) {
+                        stageKeys.add(restApiId + "/" + stageName);
+                    }
+                }
+            }
         }
+        apiKey.setStageKeys(stageKeys);
 
         Map<String, String> tags = new HashMap<>();
         if (request.get("tags") instanceof Map<?, ?> rawTags) {
@@ -1092,6 +1180,7 @@ public class ApiGatewayService {
                     case "/name"        -> key.setName(op.get("value"));
                     case "/description" -> key.setDescription(op.get("value"));
                     case "/enabled"     -> key.setEnabled(Boolean.parseBoolean(op.get("value")));
+                    case "/customerId"  -> key.setCustomerId(op.get("value"));
                 }
             }
         }
@@ -1264,6 +1353,115 @@ public class ApiGatewayService {
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
         return usagePlanKeyStore.get(usagePlanKeyPathKey(region, usagePlanId, keyId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan Key not found", 404));
+    }
+
+    /**
+     * Builds a {@code GetUsage} report for a usage plan.
+     *
+     * <p>Shape measured against real API Gateway: the envelope carries {@code usagePlanId},
+     * {@code startDate}, {@code endDate} and an {@code items} map of API key id to one
+     * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
+     * when there is no further page, which is what stops a caller's pagination loop.
+     *
+     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, and a
+     * {@link UsagePlan} carries no quota, so there is no limit to subtract from. Storing a quota on
+     * the usage plan and counting on the execute path are the two pieces still missing; this method
+     * is where they would surface.
+     */
+    public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
+                                String keyId, Integer limit, String position) {
+        // Resolving the plan first gives the same NotFoundException an unknown id gets on AWS.
+        getUsagePlan(region, usagePlanId);
+
+        LocalDate start = parseUsageDate(startDate, "startDate");
+        LocalDate end = parseUsageDate(endDate, "endDate");
+        if (end.isBefore(start)) {
+            throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
+        }
+        int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
+        int pageSize = resolveUsageLimit(limit);
+
+        List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
+                .filter(key -> keyId == null || keyId.isBlank() || keyId.equals(key.getId()))
+                .sorted(Comparator.comparing(UsagePlanKey::getId))
+                .toList();
+
+        // The page token is the last key id already returned, so a page resumes after it rather
+        // than at a positional offset a concurrent key attachment could shift. Measured: an
+        // unrecognised token is a BadRequestException, not an empty page.
+        int from = 0;
+        if (position != null && !position.isBlank()) {
+            int previous = -1;
+            for (int i = 0; i < keys.size(); i++) {
+                if (position.equals(keys.get(i).getId())) {
+                    previous = i;
+                    break;
+                }
+            }
+            if (previous < 0) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            from = previous + 1;
+        }
+
+        List<UsagePlanKey> page = keys.subList(Math.min(from, keys.size()),
+                Math.min(from + pageSize, keys.size()));
+        boolean more = from + pageSize < keys.size();
+
+        Map<String, List<long[]>> items = new LinkedHashMap<>();
+        for (UsagePlanKey key : page) {
+            List<long[]> perDay = new ArrayList<>();
+            for (int day = 0; day < days; day++) {
+                // [used, remaining]: nothing is metered, and no quota is stored to subtract from.
+                perDay.add(new long[] {0L, 0L});
+            }
+            items.put(key.getId(), perDay);
+        }
+        // A token only when another page exists; its absence is what ends a caller's loop.
+        String next = more && !page.isEmpty() ? page.get(page.size() - 1).getId() : null;
+        return new UsageReport(usagePlanId, start.toString(), end.toString(), items, next);
+    }
+
+    /**
+     * Resolves the effective page size, which is not the same thing as accepting the request.
+     *
+     * <p>Request acceptance and response page size are separate. Probed against real API Gateway,
+     * every {@code limit} from 500 up to {@link Integer#MAX_VALUE} is accepted without error, so
+     * none is rejected here either. What that probe does <em>not</em> establish is that the service
+     * ever returns more than 500 entries in one page, and the documented contract says 500 is the
+     * maximum number of results per page. The effective page is therefore capped at 500 until a
+     * real result with more than 500 keys shows otherwise.
+     *
+     * <p>The lower bound is a deliberate divergence: real API Gateway answers {@code limit=0} and
+     * {@code limit=-1} with an {@code InternalFailure}, which is a fault rather than a contract, so
+     * a page size below one is rejected as a bad request instead of reproducing a 500.
+     */
+    static int resolveUsageLimit(Integer limit) {
+        if (limit == null) {
+            return DEFAULT_USAGE_LIMIT;
+        }
+        if (limit < 1) {
+            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
+        }
+        return Math.min(limit, MAX_USAGE_PAGE_SIZE);
+    }
+
+    /**
+     * One {@code GetUsage} report: {@code items} maps an API key id to its per-day pairs, and
+     * {@code position} is the continuation token, absent on the terminal page.
+     */
+    public record UsageReport(String usagePlanId, String startDate, String endDate,
+                              Map<String, List<long[]>> items, String position) {}
+
+    private static LocalDate parseUsageDate(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("BadRequestException", field + " is required", 400);
+        }
+        try {
+            return LocalDate.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new AwsException("BadRequestException", field + " must be a date of the form YYYY-MM-DD", 400);
+        }
     }
 
     public List<UsagePlanKey> getUsagePlanKeys(String region, String usagePlanId) {
@@ -2093,6 +2291,9 @@ public class ApiGatewayService {
                 String value = op.get("value");
                 if ("/name" .equals(path)) api.setName(value);
                 else if ("/description" .equals(path)) api.setDescription(value);
+                // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
+                // replacing it with an empty string.
+                else if ("/policy" .equals(path)) api.setPolicy(value == null || value.isEmpty() ? null : value);
             }
         }
         apiStore.put(apiKey(region, apiId), api);
@@ -2247,14 +2448,44 @@ public class ApiGatewayService {
                         throw new AwsException("BadRequestException", "Invalid boolean value '" + value + "' for apiKeyRequired. Must be 'true' or 'false'", 400);
                     }
                 }
+                // Checked here, before anything is applied: the method is the live stored object,
+                // so a failure halfway through the apply loop would leave earlier ops in place.
+                if (path.startsWith("/requestParameters/") && ("add".equals(opType) || "replace".equals(opType))) {
+                    validateRequestParameterNames(
+                            Map.of(unescapeJsonPointer(path.substring("/requestParameters/".length())), Boolean.TRUE));
+                }
             }
             for (Map<String, String> op : patchOperations) {
-                if (!"replace".equals(op.get("op"))) continue;
+                String opType = op.get("op");
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
+                // Terraform patches request parameters and models one entry at a time with
+                // add/replace/remove, so those maps are handled before the replace-only members.
+                if (path.startsWith("/requestParameters/")) {
+                    String name = unescapeJsonPointer(path.substring("/requestParameters/".length()));
+                    if ("remove".equals(opType)) {
+                        method.getRequestParameters().remove(name);
+                    } else if ("add".equals(opType) || "replace".equals(opType)) {
+                        method.getRequestParameters().put(name, Boolean.parseBoolean(value));
+                    }
+                    continue;
+                }
+                if (path.startsWith("/requestModels/")) {
+                    String contentType = unescapeJsonPointer(path.substring("/requestModels/".length()));
+                    if ("remove".equals(opType)) {
+                        method.getRequestModels().remove(contentType);
+                    } else if (("add".equals(opType) || "replace".equals(opType)) && value != null) {
+                        method.getRequestModels().put(contentType, value);
+                    }
+                    continue;
+                }
+                if (!"replace".equals(opType)) continue;
                 if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
                 else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);
                 else if ("/apiKeyRequired".equals(path)) method.setApiKeyRequired(Boolean.parseBoolean(value));
+                else if ("/requestValidatorId".equals(path)) {
+                    method.setRequestValidatorId(value == null || value.isEmpty() ? null : value);
+                }
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
@@ -2326,6 +2557,22 @@ public class ApiGatewayService {
         RestApi api = getRestApi(region, apiId);
         tagKeys.forEach(api.getTags()::remove);
         apiStore.put(apiKey(region, apiId), api);
+    }
+
+    public Map<String, String> getStageTags(String region, String apiId, String stageName) {
+        return getStage(region, apiId, stageName).getTags();
+    }
+
+    public void tagStage(String region, String apiId, String stageName, Map<String, String> tags) {
+        Stage stage = getStage(region, apiId, stageName);
+        stage.getTags().putAll(tags);
+        stageStore.put(stageKey(region, apiId, stageName), stage);
+    }
+
+    public void untagStage(String region, String apiId, String stageName, List<String> tagKeys) {
+        Stage stage = getStage(region, apiId, stageName);
+        tagKeys.forEach(stage.getTags()::remove);
+        stageStore.put(stageKey(region, apiId, stageName), stage);
     }
 
     public Map<String, String> getDomainNameTags(String region, String domainName) {
@@ -2914,6 +3161,12 @@ public class ApiGatewayService {
         integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
         integrationRequest.put("uri", integrationExt.get("uri"));
         integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
+        for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
+                "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig")) {
+            if (integrationExt.get(field) != null) {
+                integrationRequest.put(field, integrationExt.get(field));
+            }
+        }
 
         Map<String, String> reqParams = (Map<String, String>) integrationExt.get("requestParameters");
         if (reqParams != null) integrationRequest.put("requestParameters", reqParams);
@@ -3002,6 +3255,95 @@ public class ApiGatewayService {
 
     private String mappingKey(String region, String domainName, String basePath) {
         return region + "::" + domainName + "::" + basePath;
+    }
+
+    // ──────────────────────────── VPC Links (v1) ────────────────────────────
+
+    public VpcLink createVpcLink(String region, Map<String, Object> request) {
+        String name = (String) request.get("name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "Vpc link name must be specified", 400);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<String> targetArns = request.get("targetArns") instanceof List<?> arns
+                ? (List<String>) arns : List.of();
+        if (targetArns.isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "At least one target ARN must be specified", 400);
+        }
+
+        VpcLink link = new VpcLink();
+        link.setId(shortId(10));
+        link.setName(name);
+        link.setDescription((String) request.get("description"));
+        link.setTargetArns(targetArns);
+        // Floci has no real VPC to provision against, so the link is immediately usable rather
+        // than transitioning PENDING → AVAILABLE as it does in AWS.
+        link.setStatus("AVAILABLE");
+
+        if (request.get("tags") instanceof Map<?, ?> tags) {
+            Map<String, String> stringTags = new HashMap<>();
+            tags.forEach((k, v) -> {
+                if (k != null && v != null) stringTags.put(k.toString(), v.toString());
+            });
+            link.setTags(stringTags);
+        }
+
+        vpcLinkStore.put(vpcLinkKey(region, link.getId()), link);
+        LOG.infov("Created VPC Link: {0} ({1}) in {2}", link.getName(), link.getId(), region);
+        return link;
+    }
+
+    public VpcLink getVpcLink(String region, String vpcLinkId) {
+        return vpcLinkStore.get(vpcLinkKey(region, vpcLinkId))
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid VPC link identifier specified", 404));
+    }
+
+    public List<VpcLink> getVpcLinks(String region) {
+        return vpcLinkStore.scan(k -> k.startsWith(region + "::"));
+    }
+
+    /**
+     * AWS's patch-operation table for a VPC link supports only {@code replace}, and only on
+     * {@code /name} and {@code /description}. Applying anything else is an error rather than a
+     * no-op: silently accepting {@code op=remove,path=/name} would have set the name to the
+     * supplied value, and silently ignoring an unknown path would report success for a change that
+     * never happened.
+     */
+    public VpcLink updateVpcLink(String region, String vpcLinkId, List<Map<String, String>> patchOperations) {
+        VpcLink link = getVpcLink(region, vpcLinkId);
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                String operation = op.get("op");
+                String path = op.get("path");
+                String value = op.get("value");
+                if (!"replace".equals(operation)) {
+                    throw new AwsException("BadRequestException", "Unsupported operation", 400);
+                }
+                if (path == null) {
+                    throw new AwsException("BadRequestException", "Missing path", 400);
+                }
+                switch (path) {
+                    case "/name" -> link.setName(value);
+                    case "/description" -> link.setDescription(value);
+                    default -> throw new AwsException("BadRequestException",
+                            "Invalid patch path  '" + path + "' specified for op 'replace'. "
+                                    + "Must be one of: [/name, /description]", 400);
+                }
+            }
+        }
+        vpcLinkStore.put(vpcLinkKey(region, vpcLinkId), link);
+        return link;
+    }
+
+    public void deleteVpcLink(String region, String vpcLinkId) {
+        getVpcLink(region, vpcLinkId);
+        vpcLinkStore.delete(vpcLinkKey(region, vpcLinkId));
+    }
+
+    private String vpcLinkKey(String region, String vpcLinkId) {
+        return region + "::" + vpcLinkId;
     }
 
     private static String shortId(int length) {

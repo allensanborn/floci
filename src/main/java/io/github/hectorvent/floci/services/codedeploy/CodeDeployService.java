@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.codedeploy.model.DeploymentGroup;
 import io.github.hectorvent.floci.services.codedeploy.model.OnPremisesInstance;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.CreateTaskSetRequest;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
@@ -1357,8 +1358,14 @@ public class CodeDeployService {
             // Install: create green task set
             Map<String, Object> installEvent = addLifecycleEvent(ecsTargetMap, "Install");
             try {
-                greenTaskSet = ecsService.createTaskSet(clusterName, serviceName,
-                        appSpec.taskDefinition, null, 100.0, "PERCENT", deploymentId, region);
+                CreateTaskSetRequest createTaskSet = new CreateTaskSetRequest();
+                createTaskSet.setCluster(clusterName);
+                createTaskSet.setService(serviceName);
+                createTaskSet.setTaskDefinition(appSpec.taskDefinition);
+                createTaskSet.setScaleValue(100.0);
+                createTaskSet.setScaleUnit("PERCENT");
+                createTaskSet.setExternalId(deploymentId);
+                greenTaskSet = ecsService.createTaskSet(createTaskSet, region);
                 appendTaskSetInfo(ecsTargetMap, greenTaskSet, greenTgArn, 0.0);
                 finishLifecycleEvent(installEvent, "Succeeded");
             } catch (Exception e) {

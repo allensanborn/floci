@@ -2,6 +2,9 @@ quarkus:
   http:
     port: 0
     test-port: 0
+    # Integration signatures use localhost as the public test authority. Keep the test listener
+    # explicit so the production loopback default does not change the signed host.
+    host: 0.0.0.0
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
   # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
@@ -12,6 +15,10 @@ quarkus:
 
 floci:
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: true
+      helper-image: floci/network-helper:local
   default-region: us-east-1
   default-account-id: "000000000000"
   ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
@@ -39,6 +46,8 @@ floci:
       acm:
         flush-interval-ms: 60000
       opensearch:
+        flush-interval-ms: 60000
+      sagemaker:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
@@ -90,6 +99,10 @@ floci:
     extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
     extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
+    # The test listener binds all interfaces so Quarkus keeps localhost as its test authority.
+    # This is test-only; production keeps the loopback default.
+    allow-unsafe-network-exposure: true
+    allow-private-jwt-targets: true
 
   init-hooks:
     shell-executable: /bin/sh
@@ -128,6 +141,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
       # aws-config-path:
@@ -174,6 +188,7 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900
@@ -185,6 +200,7 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
@@ -297,6 +313,8 @@ floci:
       enabled: true
       mock: true
       ecr-registry-mirror: true
+      imds: false
+      irsa-signing-key: true
     mwaa:
       enabled: true
       mock: true
@@ -311,6 +329,21 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    sagemaker:
+      enabled: true
+      # docker-network: floci-network
+      gpu:
+        # Off by default: an existing deployment keeps launching CPU-only
+        # containers. How many GPUs an ml.* type has is shipped in
+        # sagemaker/instance-type-catalog.yaml; this is only about which of
+        # this machine's devices Floci may hand out.
+        enabled: false
+        # cdi | device-ids | count. Podman resolves only cdi, and accepts
+        # count while attaching no device, so cdi fails loudly instead.
+        mode: cdi
+        # Required for cdi and device-ids modes; unset allows no device.
+        # devices:
+        #   - nvidia.com/gpu=GPU-<uuid>
     batch:
       enabled: true
       runner-mode: immediate
@@ -350,6 +383,9 @@ floci:
       emit-mode: off
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off
@@ -466,10 +502,11 @@ floci:
       enabled: true
     verifiedpermissions:
       enabled: true
-      cedar-url: http://127.0.0.1:18180
     ram:
       enabled: true
     codegurureviewer:
+      enabled: true
+    codeartifact:
       enabled: true
     marketplace:
       enabled: true

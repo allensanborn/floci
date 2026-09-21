@@ -37,10 +37,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -57,11 +59,21 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
+    private static final int MAX_OPERATION_THREADS = 16;
+    private static final int MAX_QUEUED_OPERATIONS = 128;
+
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
     // Account-scoped exports registry: account:region:exportName -> exportValue
     private final ConcurrentHashMap<String, String> exports = new ConcurrentHashMap<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final ExecutorService executor = newOperationExecutor();
+
+    static ThreadPoolExecutor newOperationExecutor() {
+        return new ThreadPoolExecutor(
+                MAX_OPERATION_THREADS, MAX_OPERATION_THREADS, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(MAX_QUEUED_OPERATIONS),
+                new ThreadPoolExecutor.AbortPolicy());
+    }
 
     private final CloudFormationResourceProvisioner provisioner;
     private final S3Service s3Service;
@@ -620,19 +632,7 @@ public class CloudFormationService implements ResourceProvider {
      * that failure surfaces on those paths, and floci must still expose it there.
      */
     public Future<?> executeChangeSetForRequest(String stackName, String changeSetName, String region) {
-        Stack stack = getStackOrThrow(stackName, region, regionResolver.getAccountId());
-        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(
-                changeSetName, region, regionResolver.getAccountId()));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
-        }
-        if (!"AVAILABLE".equals(cs.getExecutionStatus())) {
-            throw new AwsException("InvalidChangeSetStatus",
-                    "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current "
-                            + "status of [" + cs.getStatus() + "]", 400);
-        }
-        return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
+        return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), true);
     }
 
     /**
@@ -643,33 +643,104 @@ public class CloudFormationService implements ResourceProvider {
      * are materialized under a synthetic request scope bound to {@code accountId} so a single-stack
      * deployment lands in the caller's account, and a StackSet instance lands in its target account.
      *
-     * <p>Unlike {@link #executeChangeSetForRequest}, this does not refuse a non-{@code AVAILABLE}
-     * change set: {@code CreateStack}/{@code UpdateStack} call this directly right after creating
-     * their own change set, and must still reach {@code CREATE_FAILED} (or its update equivalent)
-     * when that change set failed, for example from a failed SAM transform.
+     * <p>Unlike {@link #executeChangeSetForRequest}, this does not require the change set to be
+     * {@code AVAILABLE}: {@code CreateStack}/{@code UpdateStack} call this directly right after
+     * creating their own change set, and must still reach {@code CREATE_FAILED} (or its update
+     * equivalent) when that change set failed, for example from a failed SAM transform. It still
+     * refuses one that is already executing or has already executed.
      */
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
-        Stack stack = getStackOrThrow(stackName, region, accountId);
-        ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName, region, accountId));
-        if (cs == null) {
-            throw new AwsException("ChangeSetNotFoundException",
-                    "ChangeSet [" + changeSetName + "] does not exist", 400);
+        return claimAndSubmitExecution(stackName, changeSetName, region, accountId, false);
+    }
+
+    private record ClaimedExecution(ChangeSet changeSet, boolean isCreate) {}
+
+    private record ChangeSetState(String status, String executionStatus) {}
+
+    private record StackMutationSnapshot(String status, Instant lastUpdatedTime,
+                                         List<StackEvent> events,
+                                         Map<String, ChangeSet> changeSets,
+                                         Map<ChangeSet, ChangeSetState> changeSetStates) {}
+
+    // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
+    private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
+                                              String accountId, boolean requireAvailable) {
+        String canonicalStackName = getStackOrThrow(stackNameOrArn, region, accountId).getStackName();
+        String resolvedChangeSetName = resolveChangeSetName(changeSetName, region, accountId);
+
+        ClaimedExecution[] claimed = new ClaimedExecution[1];
+        StackMutationSnapshot[] snapshot = new StackMutationSnapshot[1];
+        Stack stack = stacks.compute(stackKey(accountId, canonicalStackName, region), (k, existing) -> {
+            if (existing == null) {
+                throw new AwsException("ValidationError",
+                        "Stack with id " + stackNameOrArn + " does not exist", 400);
+            }
+            ChangeSet cs = existing.getChangeSets().get(resolvedChangeSetName);
+            if (cs == null) {
+                throw new AwsException("ChangeSetNotFoundException",
+                        "ChangeSet [" + changeSetName + "] does not exist", 400);
+            }
+            String executionStatus = cs.getExecutionStatus();
+            boolean eligible = requireAvailable
+                    ? "AVAILABLE".equals(executionStatus)
+                    : executionStatus == null || !executionStatus.startsWith("EXECUTE_");
+            if (!eligible) {
+                throw invalidChangeSetStatus(cs);
+            }
+            snapshot[0] = snapshot(existing);
+            boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
+                    "CREATE_IN_PROGRESS".equals(existing.getStatus());
+            cs.setExecutionStatus("EXECUTE_IN_PROGRESS");
+            if (requireAvailable) {
+                // CloudFormation deletes every other change set on the stack once one of them executes.
+                existing.getChangeSets().values().removeIf(other -> other != cs);
+            } else {
+                for (ChangeSet other : existing.getChangeSets().values()) {
+                    if (other != cs && "AVAILABLE".equals(other.getExecutionStatus())) {
+                        other.setExecutionStatus("OBSOLETE");
+                    }
+                }
+            }
+            existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
+            existing.setLastUpdatedTime(now());
+            addEvent(existing, existing.getStackName(), existing.getStackId(),
+                    "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+            claimed[0] = new ClaimedExecution(cs, isCreate);
+            return existing;
+        });
+        try {
+            persistStack(stack);
+            return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
+        } catch (AwsException e) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
         }
+    }
 
-        boolean isCreate = "CREATE".equalsIgnoreCase(cs.getChangeSetType()) ||
-                "CREATE_IN_PROGRESS".equals(stack.getStatus());
+    private AwsException invalidChangeSetStatus(ChangeSet cs) {
+        String detail = "FAILED".equals(cs.getStatus())
+                ? "status of [" + cs.getStatus() + "]"
+                : "execution status of [" + cs.getExecutionStatus() + "]";
+        return new AwsException("InvalidChangeSetStatus",
+                "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current " + detail, 400);
+    }
 
-        stack.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
-        stack.setLastUpdatedTime(now());
-        addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
-        persistStack(stack);
-
+    private Future<?> submitExecution(Stack stack, ChangeSet cs, boolean isCreate, String region, String accountId) {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        return executor.submit(() -> runUnderAccount(accountId,
-                () -> executeTemplate(stack, templateBody, params, isCreate, region, accountId)));
+        return submitOperation(() -> runUnderAccount(accountId, () -> {
+            executeTemplate(stack, templateBody, params, isCreate, region, accountId);
+            String status = stack.getStatus();
+            cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
+                ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
+            persistStack(stack);
+        }));
     }
 
     /**
@@ -755,11 +826,69 @@ public class CloudFormationService implements ResourceProvider {
                     "Stack [" + stack.getStackId()
                             + "] cannot be deleted while TerminationProtection is enabled", 400);
         }
+        StackMutationSnapshot snapshot = snapshot(stack);
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        return executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+        try {
+            return submitOperation(() -> runUnderAccount(accountId,
+                    () -> deleteStackResources(stack, region, accountId)));
+        } catch (AwsException e) {
+            if ("LimitExceededException".equals(e.getErrorCode())) {
+                Stack restored = restoreStack(accountId, stack.getStackName(), region, snapshot);
+                if (restored != null) {
+                    persistStack(restored);
+                }
+            }
+            throw e;
+        }
+    }
+
+    private StackMutationSnapshot snapshot(Stack stack) {
+        Map<ChangeSet, ChangeSetState> states = new IdentityHashMap<>();
+        for (ChangeSet changeSet : stack.getChangeSets().values()) {
+            states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
+        }
+        return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
+                new ArrayList<>(stack.getEvents()), new LinkedHashMap<>(stack.getChangeSets()), states);
+    }
+
+    private void restore(Stack stack, StackMutationSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        stack.setStatus(snapshot.status());
+        stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
+        stack.setEvents(new ArrayList<>(snapshot.events()));
+        stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
+        snapshot.changeSetStates().forEach((changeSet, state) -> {
+            changeSet.setStatus(state.status());
+            changeSet.setExecutionStatus(state.executionStatus());
+        });
+    }
+
+    private Stack restoreStack(String accountId, String stackName, String region,
+                               StackMutationSnapshot snapshot) {
+        return stacks.compute(stackKey(accountId, stackName, region), (key, current) -> {
+            if (current != null) {
+                restore(current, snapshot);
+            }
+            return current;
+        });
+    }
+
+    private Future<?> submitOperation(Runnable operation) {
+        try {
+            return executor.submit(operation);
+        } catch (RejectedExecutionException e) {
+            throw operationLimitExceeded();
+        }
+    }
+
+    static AwsException operationLimitExceeded() {
+        return new AwsException("LimitExceededException",
+                "Too many CloudFormation operations are in progress.", 400);
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
@@ -1165,11 +1294,13 @@ public class CloudFormationService implements ResourceProvider {
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
-                                engine, region, accountId, isCreate);
+                                engine, region, accountId, isCreate, previousResource);
                     } else {
                         resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
                                 engine, region, accountId, stack.getStackName(),
-                                resource.getPhysicalId(), resource.getAttributes());
+                                resource.getPhysicalId(), resource.getAttributes(),
+                                event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
+                                        event.getResourceStatus(), event.getResourceStatusReason()));
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));
@@ -1194,7 +1325,10 @@ public class CloudFormationService implements ResourceProvider {
                     if ("CREATE_FAILED".equals(resource.getStatus())
                             || "UPDATE_FAILED".equals(resource.getStatus())) {
                         failedResource = resource;
-                        if (!isCreate && previousResource != null) {
+                        // A provisioner that keeps the failed attempt's identity and tracking for
+                        // its own rollback is not restored here; the rollback walker owns it.
+                        if (!isCreate && previousResource != null
+                                && !provisioner.retainsFailedUpdateState(resource)) {
                             // Provisioners work on a copy of the stored resource metadata. Keep the
                             // last known-good identity and status when an update attempt fails so a
                             // later retry or stack deletion still manages the original resource.
@@ -1491,30 +1625,22 @@ public class CloudFormationService implements ResourceProvider {
         return false;
     }
 
-    private void deleteResourcePhysically(StackResource resource, String region) throws Exception {
+    private void deleteResourcePhysically(StackResource resource, String region, String accountId)
+            throws Exception {
         if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
-            Future<?> future = deleteStack(resource.getPhysicalId(), region, regionResolver.getAccountId());
-            if (future != null) {
-                try {
-                    future.get();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw e;
-                } catch (ExecutionException e) {
-                    Throwable cause = e.getCause();
-                    if (cause instanceof Exception ex) {
-                        throw ex;
-                    }
-                    throw e;
-                }
+            Stack child = resolveStack(resource.getPhysicalId(), region, accountId);
+            if (child == null) {
+                return;
             }
-            Stack child = resolveStack(resource.getPhysicalId(), region);
-            if (child != null && "DELETE_FAILED".equals(child.getStatus())) {
-                String reason = child.getStatusReason() != null
-                        ? child.getStatusReason()
-                        : "Nested stack deletion failed";
-                throw new IllegalStateException(reason);
+            if (child.isEnableTerminationProtection()) {
+                throw new AwsException("ValidationError",
+                        "Stack [" + child.getStackId()
+                                + "] cannot be deleted while TerminationProtection is enabled", 400);
             }
+            child.setStatus("DELETE_IN_PROGRESS");
+            addEvent(child, child.getStackName(), child.getStackId(),
+                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+            deleteStackResources(child, region, accountId);
         } else {
             provisioner.delete(resource, region);
         }
@@ -1599,7 +1725,7 @@ public class CloudFormationService implements ResourceProvider {
                         addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                                 resource.getResourceType(), "DELETE_IN_PROGRESS",
                                 "Resource creation cancelled during update rollback");
-                        deleteResourcePhysically(resource, region);
+                        deleteResourcePhysically(resource, region, ownerAccount(stack));
                     }
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE",
@@ -1616,7 +1742,9 @@ public class CloudFormationService implements ResourceProvider {
                             resource.getResourceType(), "UPDATE_FAILED", reason);
                 } else if ("true".equals(resource.getAttributes().remove(
                         CloudFormationResourceProvisioner.UPDATE_ROLLBACK_RESTORED_ATTR))
-                        || provisioner.rollbackUpdate(resource)) {
+                        || provisioner.rollbackUpdate(resource,
+                                event -> addEvent(stack, resource.getLogicalId(), event.getPhysicalResourceId(),
+                                        resource.getResourceType(), event.getResourceStatus(), event.getResourceStatusReason()))) {
                     resource.setStatus(previous.getStatus());
                     resource.setStatusReason(previous.getStatusReason());
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
@@ -1759,7 +1887,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region);
+                deleteResourcePhysically(resource, region, ownerAccount(stack));
                 completeResourceDeletion(stack, resource);
             } catch (Exception e) {
                 if (isAlreadyDeleted(e)) {
@@ -1817,7 +1945,7 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                     resource.getResourceType(), "DELETE_IN_PROGRESS", null);
             try {
-                deleteResourcePhysically(resource, region);
+                deleteResourcePhysically(resource, region, ownerAccount(stack));
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_COMPLETE", null);
                 stack.getResources().remove(resource.getLogicalId());
@@ -1875,7 +2003,7 @@ public class CloudFormationService implements ResourceProvider {
         return ordered;
     }
 
-    private void deleteStackResources(Stack stack, String region) {
+    private void deleteStackResources(Stack stack, String region, String accountId) {
         try {
             List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
@@ -1891,10 +2019,13 @@ public class CloudFormationService implements ResourceProvider {
             for (StackResource resource : resources) {
                 // CREATE_COMPLETE/UPDATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous
                 // delete left the resource behind (e.g. the bucket was non-empty); AWS re-attempts
-                // it on retry.
+                // it on retry. Failed updates are included only when their provisioner still
+                // tracks an ownership-aware cleanup obligation.
                 boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
                         || "UPDATE_COMPLETE".equals(resource.getStatus())
-                        || "DELETE_FAILED".equals(resource.getStatus());
+                        || "DELETE_FAILED".equals(resource.getStatus())
+                        || ("UPDATE_FAILED".equals(resource.getStatus())
+                                && provisioner.hasPendingRollbackCleanup(resource));
                 if (resource.getPhysicalId() == null || !deletable) {
                     continue;
                 }
@@ -1904,7 +2035,7 @@ public class CloudFormationService implements ResourceProvider {
                 addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                         resource.getResourceType(), "DELETE_IN_PROGRESS", null);
                 try {
-                    deleteResourcePhysically(resource, region);
+                    deleteResourcePhysically(resource, region, accountId);
                     completeResourceDeletion(stack, resource);
                 } catch (Exception e) {
                     if (isAlreadyDeleted(e)) {
@@ -2221,9 +2352,29 @@ public class CloudFormationService implements ResourceProvider {
                 && normalizedHost.endsWith("." + normalizedSuffix);
     }
 
+    /**
+     * Terminal statuses under which {@link #executeTemplate} actually finished creating or
+     * updating a stack's resources and computed its Outputs, including the two "committed but
+     * still tidying up" statuses, which still mean Outputs were resolved successfully.
+     *
+     * <p>Every other terminal status ({@code ROLLBACK_COMPLETE}, {@code ROLLBACK_FAILED},
+     * {@code UPDATE_ROLLBACK_COMPLETE}, {@code UPDATE_ROLLBACK_FAILED}, {@code CREATE_FAILED},
+     * {@code UPDATE_FAILED}) means the resource loop failed and rolled back before Outputs were
+     * ever computed: see {@link #executeTemplate}, which only reaches its Outputs block once the
+     * whole resource loop has succeeded. This is deliberately an allow-list rather than a
+     * deny-list of failure strings: a nested stack's own {@code rollbackFailedExecution} rewrites
+     * its status past {@code CREATE_FAILED}/{@code UPDATE_FAILED} into one of the ROLLBACK_*
+     * statuses before this method ever inspects it, so checking for the FAILED strings here can
+     * never match on a create and silently reports a stack that rolled back to nothing as
+     * CREATE_COMPLETE.
+     */
+    private static final Set<String> NESTED_STACK_SUCCESS_STATUSES = Set.of(
+            "CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
+
     private StackResource executeNestedStack(Stack parentStack, String logicalId, JsonNode props,
                                              CloudFormationTemplateEngine engine, String region,
-                                             String accountId, boolean isCreate) {
+                                             String accountId, boolean isCreate,
+                                             StackResource previousResource) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType("AWS::CloudFormation::Stack");
@@ -2238,9 +2389,18 @@ public class CloudFormationService implements ResourceProvider {
         String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
-        Stack childStack = newStack(childStackName, region, accountId);
-        childStack.setStatus("CREATE_IN_PROGRESS");
-        stacks.put(stackKey(accountId, childStackName, region), childStack);
+        Stack childStack = null;
+        boolean childCreate = isCreate || previousResource == null
+                || previousResource.getPhysicalId() == null;
+        if (!childCreate) {
+            childStack = resolveStack(previousResource.getPhysicalId(), region, accountId);
+            childCreate = childStack == null;
+        }
+        if (childCreate) {
+            childStack = newStack(childStackName, region, accountId);
+            childStack.setStatus("CREATE_IN_PROGRESS");
+            stacks.put(stackKey(accountId, childStackName, region), childStack);
+        }
 
         Map<String, String> childParams = new LinkedHashMap<>();
         if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
@@ -2248,17 +2408,17 @@ public class CloudFormationService implements ResourceProvider {
                     childParams.put(e.getKey(), engine.resolve(e.getValue())));
         }
 
-        executeTemplate(childStack, childTemplate, childParams, isCreate, region, accountId);
+        executeTemplate(childStack, childTemplate, childParams, childCreate, region, accountId);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
         childStack.getOutputs().forEach((k, v) -> resource.getAttributes().put("Outputs." + k, v));
 
-        if ("CREATE_FAILED".equals(childStack.getStatus()) || "UPDATE_FAILED".equals(childStack.getStatus())) {
+        if (NESTED_STACK_SUCCESS_STATUSES.contains(childStack.getStatus())) {
+            resource.setStatus("CREATE_COMPLETE");
+        } else {
             resource.setStatus("CREATE_FAILED");
             resource.setStatusReason("Nested stack " + childStackName + " failed: " + childStack.getStatusReason());
-        } else {
-            resource.setStatus("CREATE_COMPLETE");
         }
 
         return resource;

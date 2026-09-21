@@ -1,11 +1,16 @@
 package io.github.hectorvent.floci.services.eks;
 
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.CreateAccessEntryRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.PodIdentityAssociation;
+import io.github.hectorvent.floci.services.eks.model.UpdatePodIdentityAssociationRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -14,6 +19,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -24,7 +30,7 @@ import java.util.Map;
  * EKS REST-JSON controller.
  *
  * <p>
- * EKS uses standard HTTP verbs with JSON bodies — not JSON 1.1 (X-Amz-Target)
+ * EKS uses standard HTTP verbs with JSON bodies - not JSON 1.1 (X-Amz-Target)
  * or Query protocol.
  */
 @Path("/")
@@ -33,10 +39,15 @@ import java.util.Map;
 public class EksController {
 
     private final EksService eksService;
+    private final EksAccessEntryService accessEntries;
+    private final EksPodIdentityAssociationService podIdentityAssociations;
 
     @Inject
-    public EksController(EksService eksService) {
+    public EksController(EksService eksService, EksAccessEntryService accessEntries,
+                         EksPodIdentityAssociationService podIdentityAssociations) {
         this.eksService = eksService;
+        this.accessEntries = accessEntries;
+        this.podIdentityAssociations = podIdentityAssociations;
     }
 
     @POST
@@ -134,11 +145,34 @@ public class EksController {
     // (issue #1754, same family as #1137): validate the cluster, then return the documented
     // empty list under each operation's model-exact result key.
 
+    @POST
+    @Path("/clusters/{name}/access-entries")
+    public Response createAccessEntry(@PathParam("name") String name, CreateAccessEntryRequest request) {
+        return Response.ok(Map.of("accessEntry", accessEntries.create(eksService.describeCluster(name), request))).build();
+    }
+
     @GET
     @Path("/clusters/{name}/access-entries")
-    public Response listAccessEntries(@PathParam("name") String name) {
-        eksService.describeCluster(name);
-        return Response.ok(Map.of("accessEntries", List.of())).build();
+    public Response listAccessEntries(@PathParam("name") String name,
+                                     @QueryParam("maxResults") String maxResults,
+                                     @QueryParam("nextToken") String nextToken) {
+        EksAccessEntryService.Page page = accessEntries.list(eksService.describeCluster(name),
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        return Response.ok(page.nextToken() == null ? Map.of("accessEntries", page.accessEntries())
+                : Map.of("accessEntries", page.accessEntries(), "nextToken", page.nextToken())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/access-entries/{principalArn: .+}")
+    public Response describeAccessEntry(@PathParam("name") String name, @PathParam("principalArn") String principalArn) {
+        return Response.ok(Map.of("accessEntry", accessEntries.describe(eksService.describeCluster(name), principalArn))).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/access-entries/{principalArn: .+}")
+    public Response deleteAccessEntry(@PathParam("name") String name, @PathParam("principalArn") String principalArn) {
+        accessEntries.delete(eksService.describeCluster(name), principalArn);
+        return Response.ok(Map.of()).build();
     }
 
     @GET
@@ -155,10 +189,55 @@ public class EksController {
         return Response.ok(Map.of("identityProviderConfigs", List.of())).build();
     }
 
+    @POST
+    @Path("/clusters/{name}/pod-identity-associations")
+    public Response createPodIdentityAssociation(@PathParam("name") String name,
+                                                 CreatePodIdentityAssociationRequest request) {
+        Cluster cluster = eksService.describeCluster(name);
+        PodIdentityAssociation association = podIdentityAssociations.create(cluster, request);
+        return Response.ok(Map.of("association", association)).build();
+    }
+
     @GET
     @Path("/clusters/{name}/pod-identity-associations")
-    public Response listPodIdentityAssociations(@PathParam("name") String name) {
-        eksService.describeCluster(name);
-        return Response.ok(Map.of("associations", List.of())).build();
+    public Response listPodIdentityAssociations(@PathParam("name") String name,
+                                                @QueryParam("namespace") String namespace,
+                                                @QueryParam("serviceAccount") String serviceAccount,
+                                                @QueryParam("maxResults") String maxResults,
+                                                @QueryParam("nextToken") String nextToken) {
+        Cluster cluster = eksService.describeCluster(name);
+        EksPodIdentityAssociationService.Page page = podIdentityAssociations.list(cluster, namespace, serviceAccount,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        return Response.ok(page.nextToken() == null
+                ? Map.of("associations", page.associations())
+                : Map.of("associations", page.associations(), "nextToken", page.nextToken())).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/pod-identity-associations/{associationId}")
+    public Response describePodIdentityAssociation(@PathParam("name") String name,
+                                                   @PathParam("associationId") String associationId) {
+        Cluster cluster = eksService.describeCluster(name);
+        PodIdentityAssociation association = podIdentityAssociations.describe(cluster, associationId);
+        return Response.ok(Map.of("association", association)).build();
+    }
+
+    @POST
+    @Path("/clusters/{name}/pod-identity-associations/{associationId}")
+    public Response updatePodIdentityAssociation(@PathParam("name") String name,
+                                                 @PathParam("associationId") String associationId,
+                                                 UpdatePodIdentityAssociationRequest request) {
+        Cluster cluster = eksService.describeCluster(name);
+        PodIdentityAssociation association = podIdentityAssociations.update(cluster, associationId, request);
+        return Response.ok(Map.of("association", association)).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/pod-identity-associations/{associationId}")
+    public Response deletePodIdentityAssociation(@PathParam("name") String name,
+                                                 @PathParam("associationId") String associationId) {
+        Cluster cluster = eksService.describeCluster(name);
+        PodIdentityAssociation association = podIdentityAssociations.delete(cluster, associationId);
+        return Response.ok(Map.of("association", association)).build();
     }
 }

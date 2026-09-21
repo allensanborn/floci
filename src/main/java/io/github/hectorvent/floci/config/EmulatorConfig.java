@@ -78,6 +78,8 @@ public interface EmulatorConfig {
 
     DnsConfig dns();
 
+    NetworkConfig network();
+
     AuthConfig auth();
 
     SecurityConfig security();
@@ -91,6 +93,18 @@ public interface EmulatorConfig {
     TlsConfig tls();
 
     ProtocolsConfig protocols();
+
+    interface NetworkConfig {
+        SecurityGroupEnforcementConfig securityGroupEnforcement();
+    }
+
+    interface SecurityGroupEnforcementConfig {
+        @WithDefault("false")
+        boolean enabled();
+
+        @WithDefault("floci/network-helper:local")
+        String helperImage();
+    }
 
     interface ProtocolsConfig {
         /**
@@ -184,6 +198,9 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean disableCorsHeaders();
 
+        @WithDefault("false")
+        boolean allowPrivateJwtTargets();
+
         /**
          * Whether to grant Private Network Access preflights (respond with
          * {@code Access-Control-Allow-Private-Network: true}) when the browser asks.
@@ -195,6 +212,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean corsAllowPrivateNetwork();
+
+        /**
+         * Whether Floci may listen outside loopback (127.0.0.0/8, ::1, localhost), through
+         * {@code quarkus.http.host} or the TLS proxy that uses it. Anyone who can reach such an
+         * address can call Floci's APIs, so startup fails unless this is set; see
+         * {@link NetworkExposureGuard}.
+         */
+        @WithDefault("false")
+        boolean allowUnsafeNetworkExposure();
     }
 
     interface StorageConfig {
@@ -322,6 +348,7 @@ public interface EmulatorConfig {
 
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
+        SageMakerStorageConfig sagemaker();
     }
 
     interface ApsStorageConfig {
@@ -597,7 +624,15 @@ public interface EmulatorConfig {
         @WithDefault("5000")
         long flushIntervalMs();
     }
+
     interface EfsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface SageMakerStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -706,6 +741,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         OamServiceConfig oam();
         BcmPricingCalculatorServiceConfig bcmPricingCalculator();
+        TimestreamInfluxDbServiceConfig timestreamInfluxdb();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
         CloudControlServiceConfig cloudcontrol();
@@ -713,6 +749,7 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        SageMakerServiceConfig sagemaker();
         LightsailServiceConfig lightsail();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
@@ -753,7 +790,13 @@ public interface EmulatorConfig {
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
         CodeGuruReviewerServiceConfig codegurureviewer();
+        CodeArtifactServiceConfig codeartifact();
         MarketplaceServiceConfig marketplace();
+    }
+
+    interface CodeArtifactServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface ConnectServiceConfig {
@@ -956,7 +999,7 @@ public interface EmulatorConfig {
         /** When set, Floci uses this URL and skips Cedar sidecar container management. */
         Optional<String> cedarUrl();
 
-        @WithDefault("floci/floci:latest-cedar")
+        @WithDefault("floci/floci-sidecar-cedar:1.1.0")
         String cedarImage();
     }
 
@@ -1088,6 +1131,64 @@ public interface EmulatorConfig {
         String runnerMode();
 
         Optional<String> dockerNetwork();
+    }
+
+    interface SageMakerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        Optional<String> dockerNetwork();
+
+        GpuConfig gpu();
+
+        /**
+         * Whether, and how, this host lends its accelerators to training containers.
+         *
+         * <p>How many GPUs an instance type has is an AWS fact and lives in the shipped
+         * catalog; this covers only the local decision of which devices Floci may use.
+         */
+        interface GpuConfig {
+            /**
+             * Off by default, so an existing deployment keeps launching CPU-only
+             * containers exactly as before.
+             */
+            @WithDefault("false")
+            boolean enabled();
+
+            /**
+             * How the device request is expressed on the wire, because daemons disagree.
+             *
+             * <p>Defaults to {@code cdi}: Podman resolves only that form, and accepts the
+             * {@code count} form while attaching no device
+             * (containers/podman#22645). Preferring CDI means a misconfiguration fails
+             * the container start instead of silently training on CPU. Use {@code count}
+             * or {@code device-ids} against Docker.
+             */
+            @WithDefault("cdi")
+            GpuRequestMode mode();
+
+            /**
+             * The devices Floci may hand out: CDI names such as
+             * {@code nvidia.com/gpu=GPU-<uuid>} for {@code cdi} mode, or daemon device ids
+             * for {@code device-ids} mode.
+             *
+             * <p>Unset allows no device, so a training job in those modes fails rather than
+             * starting. Defaulting to "every device the daemon exposes" would be the wrong
+             * behaviour on a machine sharing GPUs with other workloads.
+             *
+             * <p>Ignored in {@code count} mode, where the daemon does the choosing.
+             *
+             * <p>Optional rather than a defaulted list because SmallRye rejects an empty
+             * string as a collection default: unset simply means no device is allowed.
+             */
+            Optional<List<String>> devices();
+        }
+
+        enum GpuRequestMode {
+            CDI,
+            DEVICE_IDS,
+            COUNT
+        }
     }
 
     interface CodeDeployServiceConfig {
@@ -1346,6 +1447,9 @@ public interface EmulatorConfig {
         @WithDefault("7199")
         int proxyMaxPort();
 
+        @WithDefault("1000")
+        long pollIntervalMs();
+
         // Hostname clients use to reach a cluster endpoint. Empty -> resolved from
         // DockerHostResolver (falls back to "localhost").
         Optional<String> endpointHost();
@@ -1394,6 +1498,10 @@ public interface EmulatorConfig {
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMariadbImage();
+
+        /** Docker image used for SQL Server instances when no override is configured. */
+        @WithDefault("mcr.microsoft.com/mssql/server:2022-latest")
+        String defaultSqlServerImage();
 
         /** Hostname advertised for RDS endpoints. Uses published Docker ports when configured. */
         Optional<String> endpointHost();
@@ -1560,6 +1668,12 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         int defaultRecoveryWindowDays();
+
+        @WithDefault("true")
+        boolean scheduledRotationEnabled();
+
+        @WithDefault("60")
+        long rotationTickSeconds();
     }
 
     interface ApiGatewayV2ServiceConfig {
@@ -1790,6 +1904,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
+        /**
+         * Publish {@code awsvpc} task ports on the Docker host so local host processes can
+         * reach them. This is an emulator-only escape hatch and can cause port collisions
+         * when more than one task exposes the same port.
+         */
+        @WithDefault("false")
+        boolean publishAwsvpcPortsToHost();
+
         Optional<String> dockerNetwork();
 
         @WithDefault("512")
@@ -1998,6 +2120,12 @@ public interface EmulatorConfig {
          *  Env: FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS */
         @WithDefault("5000")
         long vtlTimeoutMillis();
+
+        /** When set, Floci uses this URL and skips GraphQL sidecar container management. */
+        Optional<String> graphqlUrl();
+
+        @WithDefault("floci/floci-sidecar-graphql:0.2.0")
+        String graphqlImage();
     }
 
     interface OamServiceConfig {
@@ -2008,6 +2136,34 @@ public interface EmulatorConfig {
     interface BcmPricingCalculatorServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface TimestreamInfluxDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** When true, DB instances and clusters reach AVAILABLE without a backing InfluxDB container. */
+        @WithDefault("false")
+        boolean mock();
+
+        /** InfluxDB 2.x image backing DB instances. Env: FLOCI_SERVICES_TIMESTREAM_INFLUXDB_DEFAULT_IMAGE */
+        @WithDefault("influxdb:2.7")
+        String defaultImage();
+
+        /** Lowest host port the InfluxDB HTTP listener (container port 8086) is published on. */
+        @WithDefault("8086")
+        int hostPortBase();
+
+        /** Highest host port the InfluxDB HTTP listener is published on. */
+        @WithDefault("8185")
+        int hostPortMax();
+
+        /** Seconds to wait for a started InfluxDB container to answer its health check. */
+        @WithDefault("120")
+        int readinessTimeoutSeconds();
+
+        /** Docker network to attach InfluxDB containers to. Empty uses the default network. */
+        Optional<String> dockerNetwork();
     }
 
     interface BcmDataExportsServiceConfig {
@@ -2256,6 +2412,9 @@ public interface EmulatorConfig {
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
 
+        /** Additional Docker create flags applied to every Lambda execution container. */
+        Optional<String> dockerFlags();
+
         /**
          * Base name prefix for the containers and code volumes Lambda spawns, replacing the
          * default {@code floci} (e.g. prefix {@code acme} names containers
@@ -2408,9 +2567,10 @@ public interface EmulatorConfig {
             boolean enabled();
 
             /**
-             * Optional allow-list of absolute path prefixes. When non-empty, the S3Key supplied
-             * to a hot-reload CreateFunction/UpdateFunctionCode must start with one of these
-             * prefixes. Empty = all absolute paths are accepted.
+             * Optional allow-list of absolute directories. When set, the S3Key supplied to a
+             * hot-reload CreateFunction/UpdateFunctionCode must be one of these directories or
+             * inside one, compared after {@code .} and {@code ..} segments are resolved.
+             * Unset = all absolute paths are accepted.
              *
              * Env var: FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS
              */
@@ -2696,6 +2856,20 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
+         * network namespace that relays to Floci's EC2 metadata service.
+         */
+        @WithDefault("false")
+        boolean imds();
+
+        /**
+         * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
+         * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
+         */
+        @WithDefault("true")
+        boolean irsaSigningKey();
     }
 
     /**

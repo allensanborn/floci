@@ -1,5 +1,10 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -13,24 +18,39 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
-import io.github.hectorvent.floci.services.sqs.model.Queue;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
+import io.github.hectorvent.floci.services.sqs.model.Queue;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SqsService implements Resettable, ResourceProvider {
@@ -54,13 +74,14 @@ public class SqsService implements Resettable, ResourceProvider {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     /** Move tasks keyed by opaque task handle. */
     private final MoveTaskStore moveTasksByHandle;
-    /** Per-task cancellation flag the move worker polls between iterations. */
-    private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
+    /** Per-task cancellation signal: the move worker waits on it between moves, so a cancel wakes
+     *  the worker instead of being noticed only after the rate interval has elapsed. */
+    private final ConcurrentHashMap<String, MoveTaskCancellation> moveTaskCancellation =
             new ConcurrentHashMap<>();
     /** Move tasks execute on a background thread so MaxNumberOfMessagesPerSecond can throttle
      * and CancelMessageMoveTask has something to interrupt. One thread per task is sufficient. */
-    private final java.util.concurrent.ExecutorService moveTaskExecutor =
-            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+    private final ExecutorService moveTaskExecutor =
+            Executors.newCachedThreadPool(r -> {
                 Thread t = new Thread(r, "sqs-move-task");
                 t.setDaemon(true);
                 return t;
@@ -76,6 +97,26 @@ public class SqsService implements Resettable, ResourceProvider {
                            long approximateNumberOfMessagesMoved,
                            long approximateNumberOfMessagesToMove,
                            long startedTimestampMillis, String failureReason) {
+    }
+
+    /**
+     * A cancel request the worker can wait on. {@link #awaitRequested} is the worker's throttle
+     * sleep: it returns early, and true, as soon as the task is cancelled.
+     */
+    private static final class MoveTaskCancellation {
+        private final CountDownLatch requested = new CountDownLatch(1);
+
+        void request() {
+            requested.countDown();
+        }
+
+        boolean isRequested() {
+            return requested.getCount() == 0;
+        }
+
+        boolean awaitRequested(long millis) throws InterruptedException {
+            return requested.await(millis, TimeUnit.MILLISECONDS);
+        }
     }
 
     private static final class MoveTaskStore {
@@ -105,7 +146,7 @@ public class SqsService implements Resettable, ResourceProvider {
         }
 
         private synchronized void put(String taskHandle, MoveTask task) {
-            boolean terminal = !"RUNNING".equals(task.status());
+            boolean terminal = !isActive(task.status());
             Long terminalAtMillis = terminal ? clock.millis() : null;
             long sequence = terminal ? ++terminalSequence : 0;
             entries.put(taskHandle, new Entry(task, terminalAtMillis, sequence));
@@ -133,7 +174,7 @@ public class SqsService implements Resettable, ResourceProvider {
             Set<String> sourceArns = entries.values().stream()
                     .filter(Entry::terminal)
                     .map(entry -> entry.task().sourceArn())
-                    .collect(java.util.stream.Collectors.toSet());
+                    .collect(Collectors.toSet());
             for (String sourceArn : sourceArns) {
                 List<Map.Entry<String, Entry>> terminalEntries = entries.entrySet().stream()
                         .filter(entry -> entry.getValue().terminal()
@@ -145,6 +186,60 @@ public class SqsService implements Resettable, ResourceProvider {
                     entries.remove(terminalEntries.get(i).getKey());
                 }
             }
+        }
+
+        private static boolean isActive(String status) {
+            return "RUNNING".equals(status) || "CANCELLING".equals(status);
+        }
+
+        /**
+         * Records the worker's running count against whatever status the task holds right now.
+         * The worker and {@code cancelMessageMoveTask} write the same record from two threads,
+         * so the read of the current status and the write back happen under the store's lock:
+         * a cancel that lands in between is never stomped back to RUNNING.
+         */
+        private synchronized void recordMoved(String taskHandle, long moved) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null) {
+                return;
+            }
+            MoveTask cur = entry.task();
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), cur.status(), moved,
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+        }
+
+        /**
+         * The worker's terminal write, resolved against the status the task holds at that moment.
+         * A cancel accepted while the worker was deciding has already moved the task to
+         * CANCELLING, so it ends CANCELLED whatever the worker concluded from its own signal;
+         * otherwise the worker's view (COMPLETED, or CANCELLED when it saw the cancel) stands.
+         * Reading the status and writing the outcome happen under one lock, so the two writers
+         * cannot interleave between them.
+         */
+        private synchronized void finish(String taskHandle, long moved, boolean cancellationRequested) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null) {
+                return;
+            }
+            MoveTask cur = entry.task();
+            String status = "CANCELLING".equals(cur.status()) || cancellationRequested ? "CANCELLED" : "COMPLETED";
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), status, moved,
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+        }
+
+        /** Moves a task from one status to another only if it still holds the expected one. */
+        private synchronized boolean transition(String taskHandle, String from, String to) {
+            Entry entry = entries.get(taskHandle);
+            if (entry == null || !from.equals(entry.task().status())) {
+                return false;
+            }
+            MoveTask cur = entry.task();
+            put(taskHandle, new MoveTask(cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                    cur.maxNumberOfMessagesPerSecond(), to, cur.approximateNumberOfMessagesMoved(),
+                    cur.approximateNumberOfMessagesToMove(), cur.startedTimestampMillis(), cur.failureReason()));
+            return true;
         }
 
         private record Entry(MoveTask task, Long terminalAtMillis, long terminalSequence) {
@@ -257,7 +352,7 @@ public class SqsService implements Resettable, ResourceProvider {
         queueLocks.clear();
         redrivePolicyCache.clear();
         deduplicationCache.clear();
-        moveTaskCancellation.values().forEach(flag -> flag.set(true));
+        moveTaskCancellation.values().forEach(MoveTaskCancellation::request);
         moveTaskCancellation.clear();
         moveTasksByHandle.clear();
     }
@@ -313,7 +408,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (dedupStore == null) {
             return;
         }
-        var dedupMap = deduplicationCache.get(storageKey);
+        ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.get(storageKey);
         if (dedupMap != null && !dedupMap.isEmpty()) {
             Map<String, Long> serializable = new HashMap<>();
             dedupMap.forEach((id, expiry) -> serializable.put(id, expiry.toEpochMilli()));
@@ -432,7 +527,7 @@ public class SqsService implements Resettable, ResourceProvider {
                     "The specified queue does not exist.", 400);
         }
         queueStore.delete(storageKey);
-        var removed = messagesByQueue.remove(storageKey);
+        GuardedMessageQueue removed = messagesByQueue.remove(storageKey);
         if (removed != null) {
             removed.close();
         }
@@ -483,13 +578,13 @@ public class SqsService implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
-        Map<String, String> attrs = new java.util.LinkedHashMap<>(queue.getAttributes());
+        Map<String, String> attrs = new LinkedHashMap<>(queue.getAttributes());
         // Add computed attributes
         attrs.put("QueueArn", regionResolver.buildArn("sqs", region, queue.getQueueName()));
         attrs.put("CreatedTimestamp", String.valueOf(queue.getCreatedTimestamp().getEpochSecond()));
         attrs.put("LastModifiedTimestamp", String.valueOf(queue.getLastModifiedTimestamp().getEpochSecond()));
 
-        var counts = getOrCreateQueue(storageKey).messageCounts();
+        GuardedMessageQueue.MessageCounts counts = getOrCreateQueue(storageKey).messageCounts();
         attrs.put("ApproximateNumberOfMessages", String.valueOf(counts.visible()));
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
         attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
@@ -517,7 +612,7 @@ public class SqsService implements Resettable, ResourceProvider {
         if (attributeNames == null || attributeNames.contains("All")) {
             return attrs;
         }
-        var filtered = new java.util.LinkedHashMap<String, String>();
+        Map<String, String> filtered = new LinkedHashMap<>();
         for (String name : attributeNames) {
             if (attrs.containsKey(name)) {
                 filtered.put(name, attrs.get(name));
@@ -606,7 +701,7 @@ public class SqsService implements Resettable, ResourceProvider {
             // MessageGroupId/MessageDeduplicationId, so the composite key is unambiguous.
             String dedupCacheKey = groupScoped ? messageGroupId + "\0" + dedupId : dedupId;
             cleanupDeduplicationCache(storageKey);
-            var dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
+            ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
             Instant expiry = Instant.now().plusSeconds(DEDUP_WINDOW_SECONDS);
             Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
             persistDedup(storageKey);
@@ -744,20 +839,20 @@ public class SqsService implements Resettable, ResourceProvider {
      * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
      */
     public static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
-        int total = body == null ? 0 : body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        int total = body == null ? 0 : body.getBytes(StandardCharsets.UTF_8).length;
         if (attributes == null || attributes.isEmpty()) {
             return total;
         }
         for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
-            total += entry.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;
             MessageAttributeValue value = entry.getValue();
             if (value.getDataType() != null) {
-                total += value.getDataType().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                total += value.getDataType().getBytes(StandardCharsets.UTF_8).length;
             }
             if (value.getBinaryValue() != null) {
                 total += value.getBinaryValue().length;
             } else if (value.getStringValue() != null) {
-                total += value.getStringValue().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+                total += value.getStringValue().getBytes(StandardCharsets.UTF_8).length;
             }
         }
         return total;
@@ -785,7 +880,7 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     private void cleanupDeduplicationCache(String queueUrl) {
-        var dedupMap = deduplicationCache.get(queueUrl);
+        ConcurrentHashMap<String, Instant> dedupMap = deduplicationCache.get(queueUrl);
         if (dedupMap != null) {
             Instant now = Instant.now();
             dedupMap.entrySet().removeIf(e -> now.isAfter(e.getValue()));
@@ -794,10 +889,11 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private static String computeMd5(String input) {
         try {
-            var md = java.security.MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
             return HEX.formatHex(digest);
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException ignored) {
+            // MD5 is guaranteed to be available in the standard JDK runtime
             return "";
         }
     }
@@ -878,7 +974,7 @@ public class SqsService implements Resettable, ResourceProvider {
 
         return redrivePolicyCache.computeIfAbsent(storageKey, k -> {
             try {
-                var rp = new com.fasterxml.jackson.databind.ObjectMapper().readTree(rawPolicy);
+                JsonNode rp = new ObjectMapper().readTree(rawPolicy);
                 return new RedrivePolicy(
                         rp.has("maxReceiveCount") ? rp.get("maxReceiveCount").asInt() : -1,
                         rp.has("deadLetterTargetArn") ? rp.get("deadLetterTargetArn").asText() : null
@@ -908,15 +1004,15 @@ public class SqsService implements Resettable, ResourceProvider {
         int maxReceiveCount = rp != null ? rp.maxReceiveCount() : -1;
         String deadLetterTargetArn = rp != null ? rp.deadLetterTargetArn() : null;
 
-        var guardedQueue = getOrCreateQueue(storageKey);
-        var claimResult = guardedQueue.claimVisibleMessages(
+        GuardedMessageQueue guardedQueue = getOrCreateQueue(storageKey);
+        GuardedMessageQueue.ClaimResult claimResult = guardedQueue.claimVisibleMessages(
                 maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount, deadLetterTargetArn);
 
         // Route DLQ candidates to the dead-letter queue only if the destination resolves
         if (!claimResult.dlqCandidates().isEmpty() && deadLetterTargetArn != null) {
             String dlqUrl = queueUrlFromArn(deadLetterTargetArn, region);
             if (dlqUrl != null) {
-                var dlqCandidates = claimResult.dlqCandidates();
+                List<Message> dlqCandidates = claimResult.dlqCandidates();
                 guardedQueue.removeMessages(dlqCandidates);
                 for (Message msg : dlqCandidates) {
                     msg.setVisibleAt(null);
@@ -1068,7 +1164,7 @@ public class SqsService implements Resettable, ResourceProvider {
             if (!sourceArn.equals(existing.sourceArn())) {
                 continue;
             }
-            if ("RUNNING".equals(existing.status())
+            if (MoveTaskStore.isActive(existing.status())
                     || (now - existing.startedTimestampMillis()) < 1_000) {
                 throw new AwsException("InvalidParameterValue",
                         "There is already a task running. Only one active task is allowed for a source queue arn at a given time.",
@@ -1090,8 +1186,8 @@ public class SqsService implements Resettable, ResourceProvider {
             }
         }
 
-        var srcQueueInitial = getOrCreateQueue(srcKey);
-        var srcCounts = srcQueueInitial.messageCounts();
+        GuardedMessageQueue srcQueueInitial = getOrCreateQueue(srcKey);
+        GuardedMessageQueue.MessageCounts srcCounts = srcQueueInitial.messageCounts();
         long toMove = srcCounts.visible() + srcCounts.inFlight() + srcCounts.delayed();
 
         String taskHandle = "task-" + UUID.randomUUID();
@@ -1099,7 +1195,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 taskHandle, sourceArn, destinationArn,
                 maxNumberOfMessagesPerSecond, "RUNNING",
                 0L, toMove, clock.millis(), null));
-        var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        MoveTaskCancellation cancelled = new MoveTaskCancellation();
         moveTaskCancellation.put(taskHandle, cancelled);
 
         // Move the first message synchronously inside the request scope so callers
@@ -1181,22 +1277,21 @@ public class SqsService implements Resettable, ResourceProvider {
     private void runMoveTask(String taskHandle, String srcKey, String destUrl,
                              int maxRate, String region, String sourceArn,
                              String destinationArn,
-                             java.util.concurrent.atomic.AtomicBoolean cancelled,
+                             MoveTaskCancellation cancelled,
                              long initialMoved) {
         long intervalMillis = maxRate > 0 ? Math.max(1L, 1000L / maxRate) : 0L;
         long moved = initialMoved;
         try {
-            var srcQueue = getOrCreateQueue(srcKey);
-            while (!cancelled.get()) {
+            GuardedMessageQueue srcQueue = getOrCreateQueue(srcKey);
+            while (!cancelled.isRequested()) {
                 if (intervalMillis > 0) {
                     try {
-                        Thread.sleep(intervalMillis);
+                        if (cancelled.awaitRequested(intervalMillis)) {
+                            break;
+                        }
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         return;
-                    }
-                    if (cancelled.get()) {
-                        break;
                     }
                 }
                 if (!moveOneMessage(srcQueue, destUrl, region)) {
@@ -1206,32 +1301,26 @@ public class SqsService implements Resettable, ResourceProvider {
                 updateMoveTaskCounter(taskHandle, moved);
             }
         } finally {
-            MoveTask cur = moveTasksByHandle.get(taskHandle);
-            if (cur != null) {
-                String status = cancelled.get() ? "CANCELLED" : "COMPLETED";
-                moveTasksByHandle.put(taskHandle, new MoveTask(
-                        cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
-                        cur.maxNumberOfMessagesPerSecond(), status,
-                        moved, cur.approximateNumberOfMessagesToMove(),
-                        cur.startedTimestampMillis(), cur.failureReason()));
-            }
+            finishMoveTask(taskHandle, moved, cancelled.isRequested());
             moveTaskCancellation.remove(taskHandle, cancelled);
             LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
-                    cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
+                    cancelled.isRequested() ? "cancelled" : "completed", moved, sourceArn,
                     destinationArn != null ? destinationArn : "original source");
         }
     }
 
     private void updateMoveTaskCounter(String taskHandle, long moved) {
-        MoveTask cur = moveTasksByHandle.get(taskHandle);
-        if (cur == null) {
-            return;
-        }
-        moveTasksByHandle.put(taskHandle, new MoveTask(
-                cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
-                cur.maxNumberOfMessagesPerSecond(), cur.status(),
-                moved, cur.approximateNumberOfMessagesToMove(),
-                cur.startedTimestampMillis(), cur.failureReason()));
+        moveTasksByHandle.recordMoved(taskHandle, moved);
+    }
+
+    /**
+     * Records a move task's outcome. {@code cancellationRequested} is what the worker saw on its
+     * own signal; the store still resolves a task that a cancel has already moved to CANCELLING
+     * as CANCELLED. Package-private so a test can replay the worker's terminal write with a stale
+     * decision after a cancel has been accepted.
+     */
+    void finishMoveTask(String taskHandle, long moved, boolean cancellationRequested) {
+        moveTasksByHandle.finish(taskHandle, moved, cancellationRequested);
     }
 
     public List<MoveTask> listMessageMoveTasks(String sourceArn, String region) {
@@ -1257,11 +1346,13 @@ public class SqsService implements Resettable, ResourceProvider {
             throw new AwsException("ResourceNotFoundException",
                     "The task you specified does not exist.", 404);
         }
-        // Signal the background worker to stop. The worker flips status to CANCELLED in
-        // its finally block and updates the moved counter; read both back here.
-        var flag = moveTaskCancellation.get(taskHandle);
-        if (flag != null) {
-            flag.set(true);
+        // As on AWS the task reports CANCELLING at once and CANCELLED when the worker has
+        // stopped: the worker is woken out of its throttle wait rather than left to notice the
+        // cancel after the interval, and its finally block writes CANCELLED and the final count.
+        moveTasksByHandle.transition(taskHandle, "RUNNING", "CANCELLING");
+        MoveTaskCancellation cancellation = moveTaskCancellation.get(taskHandle);
+        if (cancellation != null) {
+            cancellation.request();
         }
         return moveTasksByHandle.getCurrentOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
     }
@@ -1282,7 +1373,7 @@ public class SqsService implements Resettable, ResourceProvider {
             return null;
         }
         try {
-            JsonNode policy = new com.fasterxml.jackson.databind.ObjectMapper().readTree(raw);
+            JsonNode policy = new ObjectMapper().readTree(raw);
             JsonNode dlqArn = policy.get("deadLetterTargetArn");
             return dlqArn != null && !dlqArn.isNull() ? dlqArn.asText() : null;
         } catch (Exception e) {
@@ -1300,7 +1391,7 @@ public class SqsService implements Resettable, ResourceProvider {
                                                                List<ChangeVisibilityBatchEntry> entries, String region) {
         ensureQueueExists(regionKey(region, queueUrl));
         List<BatchResultEntry> results = new ArrayList<>();
-        for (var entry : entries) {
+        for (ChangeVisibilityBatchEntry entry : entries) {
             try {
                 changeMessageVisibility(queueUrl, entry.receiptHandle(), entry.visibilityTimeout(), region);
                 results.add(new BatchResultEntry(entry.id(), true, null, null));
@@ -1468,7 +1559,7 @@ public class SqsService implements Resettable, ResourceProvider {
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-        return new java.util.LinkedHashMap<>(queue.getTags());
+        return new LinkedHashMap<>(queue.getTags());
     }
 
     /**

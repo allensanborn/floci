@@ -18,6 +18,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -759,6 +761,147 @@ class DynamoDbJsonHandlerTest {
                 + "ProjectionType is ALL, but NonKeyAttributes is specified", ex.getMessage());
     }
 
+    @Test
+    void updateTableDropsADefinitionNoKeyUses() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "Drops",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "Drops",
+                    "AttributeDefinitions": [
+                        {"AttributeName": "g1", "AttributeType": "S"},
+                        {"AttributeName": "extraUnused", "AttributeType": "S"}
+                    ],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g1", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("g1", "pk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
+    void updateTableDeletingAGsiPrunesOnlyThatIndexKeyAttribute() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "Prunes",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "gsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }]
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "Prunes",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "gsi1"}}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("pk", "sk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
+    void updateTableDeletingAGsiKeepsTheAttributesAnLsiStillUses() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "SharedKeys",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "lsiSk", "AttributeType": "N"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "lsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "lsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }],
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "gsiSk", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }]
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "SharedKeys",
+                    "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "gsi1"}}]
+                }
+                """), "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(List.of("lsiSk", "pk", "sk"), sortedAttributeNames(body.get("TableDescription")));
+    }
+
+    @Test
+    void updateTableRejectsAnIndexKeyOnlyTheStoredDefinitionsCarry() {
+        createUsersTable("eu-west-1");
+        AwsException ex = expectValidationException("UpdateTable", json("""
+                {
+                    "TableName": "Users",
+                    "AttributeDefinitions": [{"AttributeName": "g3", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsiSharedPk",
+                        "KeySchema": [
+                            {"AttributeName": "userId", "KeyType": "HASH"},
+                            {"AttributeName": "g3", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"}
+                    }}]
+                }
+                """));
+        assertEquals("Attribute: userId is not defined in AttributeDefinitions", ex.getMessage());
+    }
+
+    private List<String> sortedAttributeNames(JsonNode tableDescription) {
+        List<String> names = new ArrayList<>();
+        tableDescription.path("AttributeDefinitions")
+                .forEach(definition -> names.add(definition.path("AttributeName").asText()));
+        names.sort(Comparator.naturalOrder());
+        return names;
+    }
+
     // Checked against real DynamoDB: the projection is validated before the table lookup.
     @Test
     void updateTableValidatesGsiProjectionBeforeTableLookup() {
@@ -1322,6 +1465,24 @@ class DynamoDbJsonHandlerTest {
         assertEquals(NESTING_MESSAGE, ex.getMessage());
     }
 
+    @Test
+    void updateItemRejectsAValueThatLeavesALeafAtLevel33UnderANestedPath() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode create = updateUserRequest();
+        create.put("UpdateExpression", "SET parent = :empty");
+        ObjectNode emptyMap = mapper.createObjectNode();
+        emptyMap.putObject("M");
+        create.set("ExpressionAttributeValues", mapper.createObjectNode().set(":empty", emptyMap));
+        handler.handle("UpdateItem", create, "eu-west-1");
+
+        ObjectNode request = updateUserRequest();
+        request.put("UpdateExpression", "SET parent.deep = :deep");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(31)));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+    }
+
     private ObjectNode transactWrite(String action, ObjectNode op) {
         op.put("TableName", "Users");
         var member = mapper.createObjectNode();
@@ -1344,6 +1505,19 @@ class DynamoDbJsonHandlerTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; "
                 + "expression size: 4097", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsANonTextConditionExpression() {
+        ObjectNode put = mapper.createObjectNode();
+        put.set("Item", item("userId", "u1"));
+        put.put("ConditionExpression", 1);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Put", put), "eu-west-1"));
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("Invalid ConditionExpression: Syntax error; token: \"1\", near: \"1\"",
+                exception.getMessage());
     }
 
     @Test
@@ -1645,21 +1819,95 @@ class DynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactGetItemsKeepsOnlyTheProjectedAttributes() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", "#k");
+        get.set("ExpressionAttributeNames", mapper.createObjectNode().put("#k", "keep"));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode returned = body.get("Responses").get(0).get("Item");
+        assertEquals(1, returned.size());
+        assertEquals("stay", returned.get("keep").get("S").asText());
+    }
+
+    @Test
+    void transactGetItemsLeavesAMissingKeyWithoutAnItemUnderAProjection() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "absent"));
+        get.put("ProjectionExpression", "keep");
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals(200, response.getStatus());
+        assertFalse(body.get("Responses").get(0).has("Item"));
+    }
+
+    @Test
+    void transactGetItemsOmitsItemWhenTheProjectionMatchesNothing() throws Exception {
+        seedTransactGetItem();
+        ObjectNode get = mapper.createObjectNode();
+        get.put("TableName", "Users");
+        get.set("Key", item("userId", "u1"));
+        get.put("ProjectionExpression", "#x");
+        get.set("ExpressionAttributeNames", mapper.createObjectNode().put("#x", "doesNotExist"));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.createArrayNode().add(mapper.createObjectNode().set("Get", get)));
+
+        Response response = handler.handle("TransactGetItems", request, "eu-west-1");
+
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("Responses").get(0).has("Item"));
+    }
+
+    private void seedTransactGetItem() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Users");
+        putRequest.set("Item", item("userId", "u1", "keep", "stay"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+    }
+
+    @Test
     void executeStatementRejectsATooDeepParameter() {
         createUsersTable("eu-west-1");
         var request = mapper.createObjectNode();
         request.put("Statement", "UPDATE \"Users\" SET deep=? WHERE userId=?");
-        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(32)).add(attributeValue("S", "u1")));
+        request.set("Parameters", mapper.createArrayNode().add(nestedMaps(33)).add(attributeValue("S", "u1")));
 
         var ex = assertThrows(AwsException.class,
                 () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
-        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
 
     @Test
-    void executeTransactionCancelsOnATooDeepParameterWithThatStatementsReason() throws Exception {
+    void executeStatementReadsAParameterWithALeafAtLevel33() throws Exception {
         createUsersTable("eu-west-1");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("Statement", "SELECT * FROM \"Users\" WHERE userId=? AND deep=?");
+        request.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "u1")).add(nestedMaps(32)));
+
+        Response response = handler.handle("ExecuteStatement", request, "eu-west-1");
+        assertEquals(200, response.getStatus());
+    }
+
+    @Test
+    void executeTransactionCancelsOnAnItemLeftTooDeepWithThatStatementsReason() throws Exception {
+        createUsersTable("eu-west-1");
+        service.putItem("Users", item("userId", "u1"), "eu-west-1");
         var fine = mapper.createObjectNode();
         fine.put("Statement", "UPDATE \"Users\" SET x=? WHERE userId=?");
         fine.set("Parameters", mapper.createArrayNode().add(attributeValue("S", "x")).add(attributeValue("S", "u1")));
@@ -1678,5 +1926,187 @@ class DynamoDbJsonHandlerTest {
         assertEquals("ValidationError", reasons.get(1).get("Code").asText());
         assertEquals("Nesting Levels have exceeded supported limits", reasons.get(1).get("Message").asText());
         assertNull(service.getItem("Users", item("userId", "u2"), "eu-west-1"));
+    }
+
+    private ObjectNode transactMember(String action, String tableName, String field, ObjectNode value) {
+        ObjectNode op = mapper.createObjectNode();
+        op.put("TableName", tableName);
+        op.set(field, value);
+        ObjectNode member = mapper.createObjectNode();
+        member.set(action, op);
+        return member;
+    }
+
+    private ObjectNode transactWriteOf(ObjectNode... members) {
+        ArrayNode items = mapper.createArrayNode();
+        for (ObjectNode member : members) {
+            items.add(member);
+        }
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", items);
+        return request;
+    }
+
+    private String onlyValidationErrorMessage(Response response) {
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("TransactionCanceledException", body.get("__type").asText());
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons [ValidationError]",
+                body.get("message").asText());
+        JsonNode reason = body.get("CancellationReasons").get(0);
+        assertEquals("ValidationError", reason.get("Code").asText());
+        return reason.get("Message").asText();
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutKeyOfTheWrongType() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutItemMissingItsKey() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Users", "Item", item("name", "x"))), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Missing the key userId in the item",
+                onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnADeleteKeyOfTheWrongTypeWithTheSchemaMessage() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("N", "5"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Delete", "Users", "Key", key)), "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAConditionCheckKeyMissingItsAttribute() throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("ConditionCheck", "Users", "Key", mapper.createObjectNode())),
+                "eu-west-1");
+
+        assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
+    }
+
+    // Checked against DynamoDB in eu-west-2: the failing condition and the duplicate pair report None.
+    @Test
+    void transactWriteItemsCancelsAtTheFirstKeyMismatchBeforeConditionsAndDuplicates() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", item("userId", "u9"));
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+        ObjectNode firstWrong = mapper.createObjectNode();
+        firstWrong.set("userId", attributeValue("N", "5"));
+        ObjectNode secondWrong = mapper.createObjectNode();
+        secondWrong.set("userId", attributeValue("N", "6"));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(check,
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", item("userId", "u1")),
+                transactMember("Put", "Users", "Item", firstWrong),
+                transactMember("Put", "Users", "Item", secondWrong)), "eu-west-1");
+
+        assertEquals(400, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertEquals("Transaction cancelled, please refer cancellation reasons for specific reasons "
+                + "[None, None, None, ValidationError, None]", body.get("message").asText());
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId expected: S actual: N",
+                body.get("CancellationReasons").get(3).get("Message").asText());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    // Checked against DynamoDB in eu-west-2: a CREATING table is not found before any key is checked.
+    @Test
+    void transactWriteItemsAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck() {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsFailsTheRequestOnAnEmptyKeyAheadOfAKeyMismatch() {
+        createUsersTable("eu-west-1");
+        ObjectNode wrong = mapper.createObjectNode();
+        wrong.set("userId", attributeValue("N", "5"));
+        ObjectNode request = transactWriteOf(
+                transactMember("Put", "Users", "Item", item("userId", "")),
+                transactMember("Put", "Users", "Item", wrong));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key attribute "
+                + "cannot contain an empty string value. Key: userId", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAPutIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode item = item("id", "m1");
+        item.set("title", attributeValue("N", "1"));
+
+        Response response = handler.handle("TransactWriteItems",
+                transactWriteOf(transactMember("Put", "Movies", "Item", item)), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+    }
+
+    @Test
+    void transactWriteItemsCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode update = transactMember("Update", "Movies", "Key", item("id", "m1"));
+        ((ObjectNode) update.get("Update")).put("UpdateExpression", "SET title = :t");
+        ((ObjectNode) update.get("Update")).set("ExpressionAttributeValues",
+                mapper.createObjectNode().set(":t", attributeValue("N", "1")));
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(update), "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertNull(service.getItem("Movies", item("id", "m1"), "eu-west-1"));
+    }
+
+    @Test
+    void executeTransactionCancelsOnAnUpdateSettingAnIndexKeyOfTheWrongType() throws Exception {
+        createProvisionedTableWithGsi("Movies", "eu-west-1");
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("TableName", "Movies");
+        putRequest.set("Item", item("id", "m1", "title", "Old"));
+        handler.handle("PutItem", putRequest, "eu-west-1");
+        ObjectNode statement = mapper.createObjectNode();
+        statement.put("Statement", "UPDATE \"Movies\" SET title = ? WHERE id = ?");
+        statement.set("Parameters", mapper.createArrayNode()
+                .add(attributeValue("N", "1")).add(attributeValue("S", "m1")));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactStatements", mapper.createArrayNode().add(statement));
+
+        Response response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+
+        assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
+                + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
+        assertEquals("Old", service.getItem("Movies", item("id", "m1"), "eu-west-1").get("title").get("S").asText());
     }
 }

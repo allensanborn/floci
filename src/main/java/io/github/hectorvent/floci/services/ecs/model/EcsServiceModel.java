@@ -34,6 +34,13 @@ public class EcsServiceModel {
     private Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
+    /**
+     * The Service Connect configuration given on CreateService or UpdateService, kept raw.
+     * DescribeServices reports it on each deployments[] entry, which is where AWS's model puts
+     * it; the Service shape itself has no member for it.
+     */
+    private Map<String, Object> serviceConnectConfiguration;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -101,4 +108,15 @@ public class EcsServiceModel {
     public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
         this.networkConfiguration = networkConfiguration;
     }
+
+    public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
+    public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
+        this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
+
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
+
 }

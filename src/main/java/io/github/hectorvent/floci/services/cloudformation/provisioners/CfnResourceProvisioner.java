@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * Provisions and deletes the CloudFormation resource types for a single service, replacing one
@@ -45,6 +47,26 @@ public interface CfnResourceProvisioner {
         return false;
     }
 
+    default boolean rollbackUpdate(StackResource resource, Consumer<StackEvent> progress) {
+        return rollbackUpdate(resource);
+    }
+
+    /**
+     * Whether a failed update still needs this provisioner's ownership-aware delete. Opt-in:
+     * a failed resource is not otherwise assumed to own a backing entity.
+     */
+    default boolean hasPendingRollbackCleanup(StackResource resource) {
+        return false;
+    }
+
+    /**
+     * True when this provisioner keeps the failed update attempt's own identity and tracking for
+     * its {@code rollbackUpdate}, so the engine must not restore the previous resource over it.
+     */
+    default boolean retainsFailedUpdateState(StackResource resource) {
+        return false;
+    }
+
     /**
      * The physical id of the entity this update's replacement displaced, or null when this type
      * owes no replacement cleanup. {@code CloudFormationService} announces it as DELETE_IN_PROGRESS
@@ -78,5 +100,15 @@ public interface CfnResourceProvisioner {
      */
     default void clearUpdate(StackResource resource) {
         // no-op by default: a type with no replacement cleanup records nothing to clear
+    }
+
+    /**
+     * Carries additive ownership tracking a failed update discovered onto the last known-good
+     * resource metadata CloudFormation restores, so entities the failed attempt created but could
+     * not remove are not orphaned. Only additive tracking belongs here; committed resource state
+     * must not be overwritten. The default has none to carry.
+     */
+    default void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        // no-op by default: only a provisioner that tracks generated sub-resources needs this
     }
 }

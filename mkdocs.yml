@@ -140,6 +140,7 @@ nav:
     - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
+    - Timestream for InfluxDB: services/timestream-influxdb.md
     - MSK (Kafka): services/msk.md
     - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
@@ -154,6 +155,7 @@ nav:
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
@@ -181,8 +183,10 @@ nav:
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
     - CodeDeploy: services/codedeploy.md
     - CodeGuru Reviewer: services/codegurureviewer.md
+    - CodeArtifact: services/codeartifact.md
     - CodePipeline: services/codepipeline.md
     - Service Quotas: services/servicequotas.md
     - AWS RAM: services/ram.md
@@ -220,5 +224,6 @@ nav:
     - Java: testcontainers/java.md
     - Node.js / TypeScript: testcontainers/nodejs.md
     - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
     - Go: testcontainers/go.md
   - Contributing: contributing.md
