@@ -251,6 +251,33 @@ class EcsFargateTaskIntegrationTest {
     }
 
     @Test
+    void createServiceReportsThePlatformAndExecCommandMembers() {
+        String family = seed("fargate-service-members");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"fargate-members-svc\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + ",\"platformVersion\":\"LATEST\",\"enableExecuteCommand\":true,"
+                + "\"enableECSManagedTags\":true,\"propagateTags\":\"SERVICE\","
+                + "\"healthCheckGracePeriodSeconds\":30,"
+                + "\"deploymentConfiguration\":{\"maximumPercent\":200,\"minimumHealthyPercent\":100}}", 200)
+                .then()
+                .body("service.platformVersion", equalTo("1.4.0"))
+                .body("service.platformFamily", equalTo("Linux"))
+                .body("service.enableExecuteCommand", equalTo(true))
+                .body("service.enableECSManagedTags", equalTo(true))
+                .body("service.propagateTags", equalTo("SERVICE"))
+                .body("service.healthCheckGracePeriodSeconds", equalTo(30))
+                .body("service.deploymentConfiguration.maximumPercent", equalTo(200))
+                .body("service.deploymentConfiguration.minimumHealthyPercent", equalTo(100));
+
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER
+                + "\",\"services\":[\"fargate-members-svc\"]}", 200)
+                .then()
+                .body("services[0].platformVersion", equalTo("1.4.0"))
+                .body("services[0].enableExecuteCommand", equalTo(true))
+                .body("services[0].deploymentConfiguration.minimumHealthyPercent", equalTo(100));
+    }
+
+    @Test
     void createServiceOnACapacityProviderStrategyReportsItInsteadOfALaunchType() {
         String family = seed("fargate-service-strategy");
         call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"fargate-spot-svc\","
