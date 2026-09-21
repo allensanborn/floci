@@ -1,22 +1,32 @@
 package io.github.hectorvent.floci.services.redshift;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
-import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -29,6 +39,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,27 +57,57 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Snapshot> snapshots;
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
+    private static final int MIN_INTEGRATION_RECORDS = 20;
+    private static final int MAX_INTEGRATION_RECORDS = 100;
+    private static final int MAX_INTEGRATION_DESCRIPTION = 1000;
+    private static final int MAX_INTEGRATION_NAME = 63;
+    // Modelled constraint on CreateIntegration.IntegrationName: a letter first, then alphanumeric
+    // groups joined by single hyphens. No leading digit, underscore, or trailing hyphen.
+    private static final String INTEGRATION_NAME_PATTERN = "^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$";
+    private static final Pattern INTEGRATION_NAME = Pattern.compile(INTEGRATION_NAME_PATTERN);
+
+    private final AccountAwareStorageBackend<Integration> integrations;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RedshiftProxyManager proxyManager;
     private final DockerHostResolver dockerHostResolver;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final SecretsManagerService secretsManagerService;
+    private final ObjectMapper objectMapper;
+    private final DynamoDbStreamService streamService;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
-                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver) {
+                            RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                            RedshiftCredentialBroker credentialBroker,
+                            SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                            DynamoDbStreamService streamService) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("redshift", "redshift-subnet-groups.json", new TypeReference<Map<String, ClusterSubnetGroup>>() {});
+        this.integrations = storageFactory.create("redshift", "redshift-integrations.json", new TypeReference<Map<String, Integration>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
         this.proxyManager = proxyManager;
         this.dockerHostResolver = dockerHostResolver;
+        this.credentialBroker = credentialBroker;
+        this.secretsManagerService = secretsManagerService;
+        this.objectMapper = objectMapper;
+        this.streamService = streamService;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver,
+                    RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                    RedshiftCredentialBroker credentialBroker) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, null, new ObjectMapper(), null);
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
@@ -97,7 +138,8 @@ public class RedshiftService {
                         relayKey(entry.accountId(), cluster.getClusterIdentifier()), proxyPort,
                         handle.getHost(), handle.getPort(), endpoint.getAddress(),
                         cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
-                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()));
+                        passwordValidatorFor(entry.accountId(), cluster.getClusterIdentifier()),
+                        cluster.getIamRoleArns());
                 cluster.setContainerHost(handle.getHost());
                 cluster.setContainerPort(handle.getPort());
                 cluster.setEndpoint(endpoint);
@@ -123,16 +165,26 @@ public class RedshiftService {
     }
 
     public Cluster createCluster(String identifier, String nodeType, String username, String password) {
-        return createCluster(identifier, nodeType, username, password, null, List.of());
+        return createCluster(identifier, nodeType, username, password, null, List.of(), List.of());
     }
 
     // synchronized like modify/reboot: the container + proxy + port steps must not
     // interleave with another admin call on the same cluster.
     public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
                                   String clusterSubnetGroupName, List<String> vpcSecurityGroupIds) {
+        return createCluster(identifier, nodeType, username, password, clusterSubnetGroupName,
+                vpcSecurityGroupIds, List.of());
+    }
+
+    public synchronized Cluster createCluster(String identifier, String nodeType, String username, String password,
+                                               String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
+                                               List<String> iamRoleArns) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
+        // A previous cluster with this identifier may have been deleted without its temp
+        // credentials being cleared; drop them so the new cluster starts with none.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
@@ -141,6 +193,7 @@ public class RedshiftService {
         cluster.setMasterPassword(password);
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
         cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds != null ? vpcSecurityGroupIds : List.of());
+        cluster.setIamRoleArns(iamRoleArns != null ? List.copyOf(iamRoleArns) : List.of());
         cluster.setClusterStatus("creating");
         clusters.put(identifier, cluster);
         clusters.flush();
@@ -158,7 +211,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, identifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, identifier));
+                    passwordValidatorFor(accountId, identifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -168,6 +221,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -179,6 +233,7 @@ public class RedshiftService {
             try { containerManager.stop(clusters.accountId(), identifier); } catch (Exception ex) { LOG.warnv(ex, "Failed to stop container during rollback of cluster {0}", identifier); }
             if (proxyStopped) {
                 clusters.delete(identifier);
+                credentialBroker.revokeCluster(clusters.accountId(), identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -192,6 +247,315 @@ public class RedshiftService {
         return cluster;
     }
 
+    public synchronized Cluster createClusterWithManagedMasterPassword(
+            String identifier, String nodeType, String username, String clusterSubnetGroupName,
+            List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
+            String kmsKeyId, String region) {
+        if (secretsManagerService == null) {
+            throw new AwsException("InternalFailure", "Secrets Manager is unavailable", 500);
+        }
+        String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
+        Cluster cluster = createCluster(identifier, nodeType, username, password,
+                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns);
+        String secretName = "redshift/" + identifier;
+        String secretString = managedMasterSecret(cluster, password);
+        Secret secret;
+        try {
+            secret = secretsManagerService.createSecret(secretName, secretString, null,
+                            "Managed master user secret for Redshift cluster " + identifier,
+                            kmsKeyId, List.of(), "redshift", region);
+        } catch (RuntimeException e) {
+            rollbackManagedMasterPasswordCluster(cluster);
+            throw e;
+        }
+        cluster.setMasterPasswordSecretArn(secret.getArn());
+        cluster.setMasterPasswordSecretKmsKeyId(kmsKeyId);
+        clusters.put(identifier, cluster);
+        clusters.flush();
+        return cluster;
+    }
+
+    private void rollbackManagedMasterPasswordCluster(Cluster cluster) {
+        boolean proxyStopped = stopProxyAndReleasePortSafely(
+                cluster.getClusterIdentifier(), cluster.getProxyPort());
+        try {
+            containerManager.stop(clusters.accountId(), cluster.getClusterIdentifier());
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to stop managed-password cluster container {0} during rollback",
+                    cluster.getClusterIdentifier());
+        }
+        if (proxyStopped) {
+            clusters.delete(cluster.getClusterIdentifier());
+            credentialBroker.revokeCluster(clusters.accountId(), cluster.getClusterIdentifier());
+        } else {
+            cluster.setClusterStatus("failed");
+            clusters.put(cluster.getClusterIdentifier(), cluster);
+        }
+        clusters.flush();
+    }
+
+    // ── Zero-ETL integrations ────────────────────────────────────
+    //
+    // Metadata only: no data is replicated from the source. The shape and the lower case status
+    // were captured from a live integration in us-west-2.
+
+    public synchronized Integration createIntegration(String integrationName, String sourceArn, String targetArn,
+                                                      String kmsKeyId, String description,
+                                                      Map<String, String> additionalEncryptionContext,
+                                                      Map<String, String> tags, String region) {
+        if (integrationName == null || integrationName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
+        }
+        if (integrationName.length() > MAX_INTEGRATION_NAME
+                || !INTEGRATION_NAME.matcher(integrationName).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "IntegrationName must match " + INTEGRATION_NAME_PATTERN
+                            + " and be at most " + MAX_INTEGRATION_NAME + " characters.", 400);
+        }
+        if (sourceArn == null || sourceArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);
+        }
+        if (targetArn == null || targetArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
+        }
+        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB stream");
+        if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")
+                || !source.resource().contains("/stream/")) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceArn must identify a DynamoDB stream.", 400);
+        }
+        if (streamService == null) {
+            throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
+        }
+        streamService.describeStream(sourceArn);
+        AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift cluster");
+        if (!"redshift".equals(target.service()) || !target.resource().startsWith("cluster:")) {
+            throw new AwsException("InvalidParameterValue",
+                    "TargetArn must identify a provisioned Redshift cluster.", 400);
+        }
+        String clusterIdentifier = target.resource().substring("cluster:".length());
+        if (clusterIdentifier.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "TargetArn must identify a Redshift cluster.", 400);
+        }
+        describeClusters(clusterIdentifier);
+        if (description != null && description.length() > MAX_INTEGRATION_DESCRIPTION) {
+            throw new AwsException("InvalidParameterValue",
+                    "Description must be at most " + MAX_INTEGRATION_DESCRIPTION + " characters.", 400);
+        }
+        // AdditionalEncryptionContext only means anything alongside a customer managed key.
+        if (additionalEncryptionContext != null && !additionalEncryptionContext.isEmpty()
+                && (kmsKeyId == null || kmsKeyId.isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "AdditionalEncryptionContext is only valid when KMSKeyId is supplied.", 400);
+        }
+
+        boolean nameTaken = integrations.scan(k -> true).stream()
+                .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
+        if (nameTaken) {
+            throw new AwsException("IntegrationAlreadyExistsFault",
+                    "The integration " + integrationName + " already exists.", 400);
+        }
+
+        String integrationId = UUID.randomUUID().toString();
+        Integration integration = new Integration();
+        integration.setAccountId(integrations.accountId());
+        integration.setIntegrationArn("arn:aws:redshift:" + region + ":" + regionResolver.getAccountId()
+                + ":integration:" + integrationId);
+        integration.setIntegrationName(integrationName);
+        integration.setSourceArn(sourceArn);
+        integration.setTargetArn(targetArn);
+        integration.setSourceStreamArn(sourceArn);
+        integration.setTargetClusterIdentifier(clusterIdentifier);
+        integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
+        integration.setCheckpointSequenceNumber(null);
+        integration.setRetryCount(0);
+        integration.setLastError(null);
+        integration.setPollingEnabled(true);
+        // Floci approximation: report `syncing` while the backfill scan runs, then `active`.
+        integration.setStatus("syncing");
+        integration.setKmsKeyId(kmsKeyId);
+        integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
+        integration.setDescription(description);
+        integration.setAdditionalEncryptionContext(additionalEncryptionContext);
+        integration.setTags(tags);
+        integrations.put(integrationId, integration);
+        LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
+        return integration;
+    }
+
+    private static AwsArnUtils.Arn parseZeroEtlArn(String arn, String resourceType) {
+        try {
+            return AwsArnUtils.parse(arn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue", resourceType + " ARN is invalid.", 400);
+        }
+    }
+
+    /**
+     * Lists integrations with the documented filters and marker pagination.
+     *
+     * <p>An unknown {@code IntegrationArn} is {@code IntegrationNotFoundFault}, measured against
+     * real Redshift. An account with no integrations at all is an empty list rather than an error,
+     * and no {@code Marker} is emitted on the terminal page.
+     */
+    public IntegrationPage describeIntegrations(String integrationArn, Integer maxRecords, String marker,
+                                                List<IntegrationFilter> filters) {
+        List<Integration> all = integrations.scan(k -> true).stream()
+                .sorted(Comparator.comparing(Integration::getIntegrationArn))
+                .toList();
+
+        if (integrationArn != null && !integrationArn.isBlank()) {
+            Integration match = all.stream()
+                    .filter(integration -> integrationArn.equals(integration.getIntegrationArn()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("IntegrationNotFoundFault",
+                            "The requested integration doesn't exist.", 404));
+            all = List.of(match);
+        }
+
+        for (IntegrationFilter filter : filters == null ? List.<IntegrationFilter>of() : filters) {
+            all = all.stream().filter(integration -> matchesFilter(integration, filter)).toList();
+        }
+
+        int pageSize = resolveMaxRecords(maxRecords);
+        int from = 0;
+        if (marker != null && !marker.isBlank()) {
+            int previous = -1;
+            for (int i = 0; i < all.size(); i++) {
+                if (marker.equals(all.get(i).getIntegrationArn())) {
+                    previous = i;
+                    break;
+                }
+            }
+            if (previous < 0) {
+                throw new AwsException("InvalidParameterValue", "Invalid Marker specified.", 400);
+            }
+            from = previous + 1;
+        }
+
+        List<Integration> page = all.subList(Math.min(from, all.size()), Math.min(from + pageSize, all.size()));
+        boolean more = from + pageSize < all.size();
+        // The marker is the last ARN already returned, so a page resumes after a known record
+        // rather than at an offset a concurrent create could shift.
+        String next = more && !page.isEmpty() ? page.get(page.size() - 1).getIntegrationArn() : null;
+        return new IntegrationPage(List.copyOf(page), next);
+    }
+
+    public List<Integration> listDynamoDbZeroEtlIntegrations() {
+        return integrations.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> entry.value().getSourceStreamArn() != null
+                        && !entry.value().getSourceStreamArn().isBlank())
+                .map(entry -> {
+                    Integration integration = entry.value();
+                    if (integration.getAccountId() == null) {
+                        integration.setAccountId(entry.accountId());
+                    }
+                    return integration;
+                })
+                .toList();
+    }
+
+    public synchronized void updateIntegrationRuntime(String accountId, String integrationArn,
+                                                       String checkpointSequenceNumber,
+                                                       boolean successful, String error) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            if (successful) {
+                integration.setCheckpointSequenceNumber(checkpointSequenceNumber);
+                integration.setRetryCount(0);
+                integration.setLastError(null);
+                integration.setStatus("active");
+            } else {
+                integration.setRetryCount(integration.getRetryCount() + 1);
+                integration.setLastError(error);
+                integration.setStatus("failed");
+            }
+            integrations.putForAccount(accountId, key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    public synchronized void updateIntegrationBackfillProgress(String accountId, String integrationArn,
+                                                                String backfillLastEvaluatedKey,
+                                                                boolean backfillCompleted) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            integration.setBackfillLastEvaluatedKey(backfillLastEvaluatedKey);
+            integration.setBackfillCompleted(backfillCompleted);
+            integration.setRetryCount(0);
+            integration.setLastError(null);
+            integration.setStatus(backfillCompleted ? "active" : "syncing");
+            integrations.putForAccount(accountId, key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    /** One page of integrations plus the marker to continue with, or {@code null} at the end. */
+    public record IntegrationPage(List<Integration> integrations, String marker) {}
+
+    /** One {@code Filters.DescribeIntegrationsFilter.N} entry. */
+    public record IntegrationFilter(String name, List<String> values) {}
+
+    private static boolean matchesFilter(Integration integration, IntegrationFilter filter) {
+        String name = filter.name() == null ? "" : filter.name();
+        List<String> values = filter.values() == null ? List.of() : filter.values();
+        String actual = switch (name) {
+            case "integration-arn" -> integration.getIntegrationArn();
+            case "source-arn" -> integration.getSourceArn();
+            case "status" -> integration.getStatus();
+            // source-types filters on the source's AWS service, which the ARN's third field names.
+            case "source-types" -> sourceType(integration.getSourceArn());
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Unrecognized filter name: " + name, 400);
+        };
+        return actual != null && values.contains(actual);
+    }
+
+    private static String sourceType(String sourceArn) {
+        if (sourceArn == null) {
+            return null;
+        }
+        String[] parts = sourceArn.split(":");
+        return parts.length > 2 ? parts[2] : null;
+    }
+
+    private static int resolveMaxRecords(Integer maxRecords) {
+        if (maxRecords == null) {
+            return MAX_INTEGRATION_RECORDS;
+        }
+        if (maxRecords < MIN_INTEGRATION_RECORDS || maxRecords > MAX_INTEGRATION_RECORDS) {
+            throw new AwsException("InvalidParameterValue",
+                    "MaxRecords must be between " + MIN_INTEGRATION_RECORDS + " and "
+                            + MAX_INTEGRATION_RECORDS + ".", 400);
+        }
+        return maxRecords;
+    }
+
+    public synchronized Integration deleteIntegration(String integrationArn) {
+        if (integrationArn == null || integrationArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationArn is required.", 400);
+        }
+        for (String key : integrations.keys()) {
+            Optional<Integration> stored = integrations.get(key);
+            if (stored.isPresent() && integrationArn.equals(stored.get().getIntegrationArn())) {
+                integrations.delete(key);
+                LOG.infov("Deleted Redshift zero-ETL integration: {0}", integrationArn);
+                return stored.get();
+            }
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
     public List<Cluster> describeClusters(String identifier) {
         if (identifier != null) {
             Optional<Cluster> cluster = clusters.get(identifier);
@@ -201,6 +565,17 @@ public class RedshiftService {
             return List.of(cluster.get());
         }
         return clusters.scan(k -> true);
+    }
+
+    public List<Cluster> describeClustersForAccount(String accountId, String identifier) {
+        if (identifier != null) {
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, identifier);
+            if (cluster.isEmpty()) {
+                throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
+            }
+            return List.of(cluster.get());
+        }
+        return clusters.scanForAccount(accountId, k -> true);
     }
 
     public synchronized Cluster deleteCluster(String identifier) {
@@ -220,7 +595,19 @@ public class RedshiftService {
         containerManager.stop(clusters.accountId(), identifier);
         clusters.delete(identifier);
         clusters.flush();
-        
+        // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
+        // identifier does not accept them as master-equivalent.
+        credentialBroker.revokeCluster(clusters.accountId(), identifier);
+
+        if (cluster.getMasterPasswordSecretArn() != null && secretsManagerService != null) {
+            try {
+                secretsManagerService.deleteSecret(cluster.getMasterPasswordSecretArn(), null, true,
+                        regionResolver.getRegion());
+            } catch (AwsException e) {
+                LOG.warnv(e, "Failed to remove managed master secret for cluster {0}", identifier);
+            }
+        }
+
         cluster.setClusterStatus("deleting");
         return cluster;
     }
@@ -240,6 +627,7 @@ public class RedshiftService {
             // Keep the proxy's password check in sync so new connections use the new secret.
             proxyManager.updateMasterPassword(
                     relayKey(clusters.accountId(), clusterIdentifier), masterUserPassword);
+            updateManagedMasterSecret(cluster, masterUserPassword);
         }
 
         // NodeType only updates metadata — it does not resize the underlying Postgres container
@@ -258,6 +646,30 @@ public class RedshiftService {
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
+    }
+
+    private void updateManagedMasterSecret(Cluster cluster, String password) {
+        if (cluster.getMasterPasswordSecretArn() == null || secretsManagerService == null) {
+            return;
+        }
+        secretsManagerService.putSecretValue(cluster.getMasterPasswordSecretArn(),
+                        managedMasterSecret(cluster, password), null, null, regionResolver.getRegion(),
+                        List.of("AWSCURRENT"));
+    }
+
+    private String managedMasterSecret(Cluster cluster, String password) {
+        try {
+            return objectMapper.createObjectNode()
+                    .put("engine", "redshift")
+                    .put("username", cluster.getMasterUsername())
+                    .put("password", password)
+                    .put("host", cluster.getEndpoint() == null ? "" : cluster.getEndpoint().getAddress())
+                    .put("port", cluster.getEndpoint() == null ? 0 : cluster.getEndpoint().getPort())
+                    .put("dbname", CLUSTER_DB_NAME)
+                    .toString();
+        } catch (RuntimeException e) {
+            throw new AwsException("InternalFailure", "Failed to encode managed master secret", 500);
+        }
     }
 
     public synchronized Cluster rebootCluster(String clusterIdentifier) {
@@ -302,7 +714,7 @@ public class RedshiftService {
             cluster.setProxyPort(proxyPort);
             proxyManager.startProxy(key, proxyPort, handle.getHost(), handle.getPort(),
                     endpoint.getAddress(), cluster.getMasterUsername(), password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier));
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -532,7 +944,7 @@ public class RedshiftService {
             proxyManager.startProxy(relayKey(accountId, clusterIdentifier), proxyPort,
                     handle.getHost(), handle.getPort(), endpoint.getAddress(),
                     username, password, CLUSTER_DB_NAME,
-                    passwordValidatorFor(accountId, clusterIdentifier));
+                    passwordValidatorFor(accountId, clusterIdentifier), cluster.getIamRoleArns());
             cluster.setContainerHost(handle.getHost());
             cluster.setContainerPort(handle.getPort());
             cluster.setEndpoint(endpoint);
@@ -936,11 +1348,40 @@ public class RedshiftService {
         return accountId + ":" + clusterIdentifier;
     }
 
-    // Validates the master password at the proxy against current cluster state, so a
-    // ModifyCluster password change is reflected for new connections without a proxy restart.
-    private RdsAuthProxy.PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
-        return (user, password) -> clusters.getForAccount(accountId, clusterIdentifier)
-                .map(c -> user.equals(c.getMasterUsername()) && password.equals(c.getMasterPassword()))
-                .orElse(false);
+    // Classifies a proxy login against current cluster state: the master pair and any live
+    // GetClusterCredentials credential both run the backend leg as the cluster master, a known
+    // broker user with a stale password is rejected, everyone else passes through to the backend.
+    // Reading cluster state per call means a ModifyCluster password change takes effect for new
+    // connections without a proxy restart.
+    private PasswordValidator passwordValidatorFor(String accountId, String clusterIdentifier) {
+        return (user, password) -> {
+            Optional<Cluster> cluster = clusters.getForAccount(accountId, clusterIdentifier);
+            if (cluster.isEmpty()) {
+                // No cluster row to validate against: vouch for nothing. Falling through to the
+                // broker would classify an unknown user as PASSTHROUGH, and the wire proxy reads
+                // isMaster from its own start-time config, so a PASSTHROUGH there still opens the
+                // backend as master, authenticating any password for the master username.
+                return PasswordValidator.AuthResult.REJECT;
+            }
+            Cluster c = cluster.get();
+            if (user.equals(c.getMasterUsername())) {
+                // The master username is authoritative here: a wrong password must be rejected,
+                // never handed to the broker (which only knows minted DbUsers) and never passed
+                // through as if the user were unknown.
+                return password.equals(c.getMasterPassword())
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
+            }
+            return switch (credentialBroker.classify(accountId, clusterIdentifier, user, password)) {
+                case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                case REJECT -> PasswordValidator.AuthResult.REJECT;
+                case PASSTHROUGH -> PasswordValidator.AuthResult.PASSTHROUGH;
+            };
+        };
+    }
+
+    // Package-private hook for tests: passwordValidatorFor is otherwise private.
+    PasswordValidator passwordValidatorForTesting(String accountId, String clusterIdentifier) {
+        return passwordValidatorFor(accountId, clusterIdentifier);
     }
 }

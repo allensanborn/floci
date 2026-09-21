@@ -804,7 +804,29 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", equalTo("Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided."));
+            .body("message", equalTo("1 validation error detected: Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
+    }
+
+    @Test
+    @Order(10)
+    void scanWithSelectSpecificAttributesRequiresProjectionParameters() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Select": "SPECIFIC_ATTRIBUTES"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Must specify the AttributesToGet or "
+                    + "ProjectionExpression when choosing to get SPECIFIC_ATTRIBUTES"));
     }
 
     @Test
@@ -1384,6 +1406,47 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(200)
             .body("TableDescription.TableStatus", equalTo("ACTIVE"));
+    }
+
+    @Test
+    @Order(26)
+    void transactWriteItemsRejectsRedundantConditionParentheses() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Put": {
+                            "TableName": "TestTable",
+                            "Item": {"pk": {"S": "transaction-parens"}, "sk": {"S": "row"}},
+                            "ConditionExpression": "((attribute_not_exists(pk)))"
+                        }
+                    }]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "Invalid ConditionExpression: The expression has redundant parentheses;"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "Key": {"pk": {"S": "transaction-parens"}, "sk": {"S": "row"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item", nullValue());
     }
 
     // --- Cleanup ---

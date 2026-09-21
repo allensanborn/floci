@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Vpc;
+import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -26,9 +28,14 @@ import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
+import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
+import io.github.hectorvent.floci.services.rds.model.RdsEvent;
+import io.github.hectorvent.floci.services.rds.model.ReadReplicaRequest;
 import io.github.hectorvent.floci.services.rds.proxy.RdsAuthProxy;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -39,6 +46,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -60,6 +69,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -69,6 +79,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class RdsServiceTest {
@@ -134,6 +145,7 @@ class RdsServiceTest {
         when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMysqlImage()).thenReturn(Optional.empty());
         when(rdsConfig.defaultMariadbImage()).thenReturn(Optional.empty());
+        when(rdsConfig.defaultSqlServerImage()).thenReturn("mcr.microsoft.com/mssql/server:2022-latest");
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -172,6 +184,64 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceSupportsSqlServerEngineIdentifiers() {
+        DbInstance instance = rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
+                "sa", "Password123!", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals(DatabaseEngine.SQLSERVER, instance.getEngine());
+        assertEquals("sqlserver-se", instance.getEngineIdentifier());
+        verify(containerManager).tryStart(any(), any(), any(), any(), eq(DatabaseEngine.SQLSERVER),
+                eq("mcr.microsoft.com/mssql/server:2022-latest"), eq("sa"), eq("Password123!"), isNull());
+    }
+
+    @Test
+    void createDbInstanceRejectsDbNameForSqlServer() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("sqlserver-db", "sqlserver-se", "15.00",
+                        "sa", "Password123!", "app", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("DBName must be null for SQL Server.", exception.getMessage());
+        verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void createDbInstanceMakesRequestedPasswordValidBeforeProxyStartsAcceptingConnections() {
+        doAnswer(invocation -> {
+            assertEquals(DbInstanceStatus.CREATING,
+                    rdsService.getDbInstance("mypostgres").getStatus());
+            RdsAuthProxy.MasterPasswordCheck passwordCheck = invocation.getArgument(10);
+            assertTrue(passwordCheck.validate("admin", "secret123"));
+            assertFalse(passwordCheck.validate("admin", "wrong"));
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any());
+
+        DbInstance instance = rdsService.createDbInstance("mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals(DbInstanceStatus.AVAILABLE,
+                rdsService.getDbInstance("mypostgres").getStatus());
+    }
+
+    @Test
+    void createDbInstanceRemovesVisibleRecordWhenProxyStartupFails() {
+        doThrow(new IllegalStateException("proxy down"))
+                .when(proxyManager).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.createDbInstance(
+                "mypostgres", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("mypostgres"));
+    }
+
+    @Test
     void createDbInstanceRejectsLegacyBareAuroraEngine() {
         // "aurora" (bare) is the retired Aurora MySQL 5.6 identifier; real AWS no
         // longer accepts it for new instances/clusters and rejects it outright
@@ -200,6 +270,68 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAndModifyDbInstancePersistPubliclyAccessible() {
+        DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), true);
+
+        assertTrue(instance.isPubliclyAccessible());
+        assertTrue(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+
+        DbInstance modified = rdsService.modifyDbInstance("pubdb", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), false);
+
+        assertFalse(modified.isPubliclyAccessible());
+        assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForNonAuroraWithNoSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("plain-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForAuroraWithNoSubnetGroup() {
+        rdsService.createDbCluster("aurora-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbInstance member = rdsService.createDbInstance("aurora-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.r5.large",
+                20, false, null, null, "aurora-cluster", null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(member.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForNamedNonDefaultSubnetGroup() {
+        rdsService.createDbSubnetGroup("custom-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+
+        DbInstance instance = rdsService.createDbInstance("custom-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "custom-subnets", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(instance.isPubliclyAccessible());
+    }
+
+    @Test
+    void createDbInstanceOmittedPubliclyAccessibleDefaultsTrueForDefaultSubnetGroup() {
+        DbInstance instance = rdsService.createDbInstance("default-subnet-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, "default", null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertTrue(instance.isPubliclyAccessible());
+    }
+
+    @Test
     void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
@@ -209,6 +341,18 @@ class RdsServiceTest {
                 RdsService.imageForRequestedVersion("postgres", "18.1"));
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1-alpine"));
+    }
+
+    @Test
+    void auroraMysqlImageUsesTheMysqlVersionInFrontOfTheAuroraSuffix() {
+        assertEquals("mysql:8.0",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.0.mysql_aurora.3.08.0"));
+        assertEquals("mysql:5.7",
+                RdsService.imageForRequestedVersion("mysql:8.0", "5.7.mysql_aurora.2.12.5"));
+        assertEquals("mysql:8.4",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.4.mysql_aurora.3.10.0"));
+        assertEquals("mysql:8.0.36",
+                RdsService.imageForRequestedVersion("mysql:8.0", "8.0.36"));
     }
 
     @Test
@@ -1022,6 +1166,9 @@ class RdsServiceTest {
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+        verify(proxyManager).updateIamEnabled(anyString(), eq(true));
+        verify(proxyManager, never()).updateMasterPassword(anyString(), anyString());
+        verify(proxyManager, never()).stopProxy(anyString());
     }
 
     @Test
@@ -1205,8 +1352,13 @@ class RdsServiceTest {
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:pg:some-parameter-group"));
         assertEquals("DBParameterGroupNotFound", absentGroup.getErrorCode());
 
-        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+        // Snapshots are tagged now too, so an absent one is a missing resource as well.
+        AwsException absentSnapshot = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:snapshot:some-snapshot"));
+        assertEquals("DBSnapshotNotFound", absentSnapshot.getErrorCode());
+
+        AwsException unsupportedType = assertThrows(AwsException.class, () ->
+                rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:ri:some-reserved-instance"));
         assertEquals("InvalidParameterValue", unsupportedType.getErrorCode());
         // The type is valid on real AWS; the message must present this as a Floci limitation.
         assertTrue(unsupportedType.getMessage().contains("not yet implemented by Floci"));
@@ -2639,9 +2791,42 @@ class RdsServiceTest {
 
         AwsException ex4 = assertThrows(AwsException.class, () ->
                 rdsService.createDbInstance("mydb4", "postgres", "13",
-                        "a1234567890123456", "password", "dbname", "db.t3.micro",
+                        "a" + "b".repeat(63), "password", "dbname", "db.t3.micro",
                         20, false, null, null, null, null, false));
         assertEquals("InvalidParameterValue", ex4.getErrorCode());
+    }
+
+    @Test
+    void createDbInstanceAcceptsTheLongestMasterUsernameEachEngineAllows() {
+        DbInstance postgres = rdsService.createDbInstance("pg63", "postgres", "13",
+                "a" + "b".repeat(62), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(63, postgres.getMasterUsername().length());
+
+        DbInstance mysql = rdsService.createDbInstance("my32", "mysql", "8.0",
+                "a" + "b".repeat(31), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(32, mysql.getMasterUsername().length());
+
+        DbInstance mariadb = rdsService.createDbInstance("mar16", "mariadb", "11.4",
+                "a" + "b".repeat(15), "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(16, mariadb.getMasterUsername().length());
+    }
+
+    @Test
+    void createDbInstanceRejectsMasterUsernameLongerThanTheEngineAllows() {
+        AwsException mysql = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("my33", "mysql", "8.0",
+                        "a" + "b".repeat(32), "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", mysql.getErrorCode());
+
+        AwsException mariadb = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("mar17", "mariadb", "11.4",
+                        "a" + "b".repeat(16), "password", "dbname", "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InvalidParameterValue", mariadb.getErrorCode());
     }
 
     @Test
@@ -2670,7 +2855,151 @@ class RdsServiceTest {
         assertEquals("mydb", snapshot.getDbInstanceIdentifier());
         assertEquals(DatabaseEngine.POSTGRES, snapshot.getEngine());
         assertEquals("available", snapshot.getStatus());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
         verify(containerManager).createPostgresSnapshot(any(), eq("admin"));
+    }
+
+    @Test
+    void deleteDbSnapshotReturnsDeletedSnapshotAndRemovesItsData() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbSnapshot deleted = rdsService.deleteDbSnapshot("mysnap", "us-east-1");
+
+        assertEquals("deleted", deleted.getStatus());
+        assertThrows(AwsException.class,
+                () -> rdsService.describeDbSnapshots("mysnap", null, "us-east-1"));
+        assertThrows(AwsException.class,
+                () -> rdsService.restoreDbInstanceFromDbSnapshot(
+                        "restored", "mysnap", "db.t3.micro", null, false,
+                        null, null, Map.of(), "us-east-1"));
+    }
+
+    @Test
+    void copyDbSnapshotCopiesDataTagsAndSourceArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb", Map.of("owner", "platform"));
+        rdsService.modifyDbSnapshotAttribute(
+                "source", "restore", List.of("123456789012"), List.of(), "us-east-1");
+
+        DbSnapshot copy = rdsService.copyDbSnapshot(
+                source.getDbSnapshotArn(), "copy", true,
+                Map.of("Name", "copy"), "custom-options", "kms-key", "us-east-1");
+
+        assertEquals("copy", copy.getDbSnapshotIdentifier());
+        assertEquals("manual", copy.getSnapshotType());
+        assertEquals(source.getDbSnapshotArn(), copy.getSourceDbSnapshotIdentifier());
+        assertEquals(Map.of("owner", "platform", "Name", "copy"), copy.getTags());
+        assertEquals("custom-options", copy.getOptionGroupName());
+        assertEquals("kms-key", copy.getKmsKeyId());
+        assertTrue(copy.getRestoreAccountIds().isEmpty());
+
+        rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "copy", "db.t3.micro", null, false,
+                null, null, Map.of(), "us-east-1");
+        verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
+    }
+
+    @Test
+    void copyDbSnapshotRejectsDuplicateTargetsAndUnavailableSources() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb");
+        rdsService.copyDbSnapshot("source", "copy", false, Map.of(), null, null, "us-east-1");
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                        Map.of(), null, null, "us-east-1"));
+        assertEquals("DBSnapshotAlreadyExists", duplicate.getErrorCode());
+
+        source.setStatus("creating");
+        AwsException unavailable = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot("source", "other", false,
+                        Map.of(), null, null, "us-east-1"));
+        assertEquals("InvalidDBSnapshotState", unavailable.getErrorCode());
+    }
+
+    @Test
+    void modifyDbSnapshotUpdatesEngineVersionAndOptionGroup() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        DbSnapshot modified = rdsService.modifyDbSnapshot(
+                "mysnap", "14", "new-options", "us-east-1");
+
+        assertEquals("14", modified.getEngineVersion());
+        assertEquals("new-options", modified.getOptionGroupName());
+        AwsException missingChange = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshot("mysnap", null, null, "us-east-1"));
+        assertEquals("InvalidParameterCombination", missingChange.getErrorCode());
+    }
+
+    @Test
+    void createDbSnapshotStoresTagsGivenAtCreation() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "platform"));
+
+        assertEquals(Map.of("owner", "platform"), snapshot.getTags());
+        assertEquals(Map.of("owner", "platform"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotTagsRoundTripAndMutateByArn() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb");
+
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "mysnap"));
+        assertEquals(Map.of("Name", "mysnap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+
+        rdsService.removeTagsFromResource(snapshot.getDbSnapshotArn(), List.of("Name"));
+        assertEquals(Map.of(), rdsService.listTagsForResource(snapshot.getDbSnapshotArn()));
+    }
+
+    @Test
+    void dbSnapshotArnAndTagsAreScopedToTheRequestRegion() {
+        rdsService.createDbInstance("mydb", "postgres", "13", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), "us-west-2");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.createDbSnapshot("mysnap", "mydb", Map.of("owner", "west-team"), "us-west-2");
+
+        assertEquals("arn:aws:rds:us-west-2:123456789012:snapshot:mysnap", snapshot.getDbSnapshotArn());
+
+        // Reachable and taggable through the region it was created in.
+        assertEquals(1, rdsService.describeDbSnapshots("mysnap", null, "us-west-2").size());
+        assertEquals(Map.of("owner", "west-team"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+        rdsService.addTagsToResource(snapshot.getDbSnapshotArn(), Map.of("Name", "west-snap"), "us-west-2");
+        assertEquals(Map.of("owner", "west-team", "Name", "west-snap"),
+                rdsService.listTagsForResource(snapshot.getDbSnapshotArn(), "us-west-2"));
+
+        // A different region must not see or resolve another region's snapshot.
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshots("mysnap", null, "us-east-1"));
+        assertTrue(rdsService.describeDbSnapshots(null, null, "us-east-1").isEmpty());
     }
 
     @Test
@@ -2755,6 +3084,42 @@ class RdsServiceTest {
         Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> inst1Result = rdsService.describeDbSnapshots(null, "mydb1");
         assertEquals(1, inst1Result.size());
         assertEquals("snap1", inst1Result.iterator().next().getDbSnapshotIdentifier());
+    }
+
+    @Test
+    void describeDbSnapshotAttributesDefaultsToNoSharedAccounts() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+                rdsService.describeDbSnapshotAttributes("mysnap");
+        assertEquals(List.of(), snapshot.getRestoreAccountIds());
+
+        assertThrows(AwsException.class, () -> rdsService.describeDbSnapshotAttributes("missing-snap"));
+    }
+
+    @Test
+    void modifyDbSnapshotAttributeAddsAndRemovesRestoreAccountIds() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot added = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of("111111111111", "222222222222"), List.of());
+        assertEquals(List.of("111111111111", "222222222222"), added.getRestoreAccountIds());
+
+        io.github.hectorvent.floci.services.rds.model.DbSnapshot removed = rdsService.modifyDbSnapshotAttribute(
+                "mysnap", "restore", List.of(), List.of("111111111111"));
+        assertEquals(List.of("222222222222"), removed.getRestoreAccountIds());
+
+        AwsException badAttribute = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshotAttribute("mysnap", "share", List.of("333333333333"), List.of()));
+        assertEquals("InvalidParameterValue", badAttribute.getErrorCode());
     }
 
     @Test
@@ -3079,6 +3444,74 @@ class RdsServiceTest {
                         List.of("subnet-vpc-a", "subnet-vpc-b"),
                         List.of(), PROXY_AUTH, Map.of()));
         assertEquals("InvalidSubnet", mixedVpc.getErrorCode());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenVpcHasNoIpv6CidrBlock() {
+        // PROXY_SUBNET_IDS resolves to vpc-default, which the default ec2Service stub gives no
+        // IPv6 CIDR block association, matching real AWS's IPv4-only VPC rejection.
+        AwsException endpointRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", endpointRejected.getErrorCode());
+        assertTrue(endpointRejected.getMessage().contains("IPv6 CIDR block"));
+
+        AwsException targetRejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("ipv4-only-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", null, "IPV6"));
+        assertEquals("InvalidParameterValue", targetRejected.getErrorCode());
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
+    }
+
+    @Test
+    void createDbProxyAcceptsIpv6NetworkTypeWhenVpcHasIpv6CidrBlock() {
+        List<String> dualStackSubnetIds = List.of("subnet-dualstack-a", "subnet-dualstack-b");
+        Subnet subnetA = subnet("subnet-dualstack-a", "vpc-dualstack", "us-east-1a");
+        subnetA.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-a", "2600:1f18:1::/64", null));
+        Subnet subnetB = subnet("subnet-dualstack-b", "vpc-dualstack", "us-east-1b");
+        subnetB.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("subnet-cidr-assoc-b", "2600:1f18:2::/64", null));
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(dualStackSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(subnetA, subnetB));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-dualstack");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-test", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-dualstack")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        DbProxy proxy = rdsService.createDbProxy("dualstack-proxy", "POSTGRESQL", true, false, "NONE",
+                PROXY_ROLE_ARN, dualStackSubnetIds, List.of(), PROXY_AUTH,
+                1800, false, Map.of(), "us-east-1", "DUAL", "IPV6");
+
+        assertEquals("DUAL", proxy.getEndpointNetworkType());
+        assertEquals("IPV6", proxy.getTargetConnectionNetworkType());
+    }
+
+    @Test
+    void createDbProxyRejectsIpv6NetworkTypeWhenSubnetsHaveNoIpv6CidrBlock() {
+        List<String> mixedSubnetIds = List.of("subnet-mixed-a", "subnet-mixed-b");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(mixedSubnetIds), eq(Map.of())))
+                .thenReturn(List.of(
+                        subnet("subnet-mixed-a", "vpc-mixed", "us-east-1a"),
+                        subnet("subnet-mixed-b", "vpc-mixed", "us-east-1b")));
+        Vpc dualStackVpc = new Vpc();
+        dualStackVpc.setVpcId("vpc-mixed");
+        dualStackVpc.getIpv6CidrBlockAssociationSet().add(
+                new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-mixed", "2600:1f18::/56", "us-east-1"));
+        when(ec2Service.describeVpcs(eq("us-east-1"), eq(List.of("vpc-mixed")), eq(Map.of())))
+                .thenReturn(List.of(dualStackVpc));
+
+        AwsException rejected = assertThrows(AwsException.class, () ->
+                rdsService.createDbProxy("mixed-proxy", "POSTGRESQL", true, false, "NONE",
+                        PROXY_ROLE_ARN, mixedSubnetIds, List.of(), PROXY_AUTH,
+                        1800, false, Map.of(), "us-east-1", "DUAL", null));
+        assertEquals("InvalidParameterValue", rejected.getErrorCode());
+        assertTrue(rejected.getMessage().contains("VpcSubnetIds"));
+        assertTrue(rdsService.listDbProxies(null).isEmpty());
     }
 
     @Test
@@ -5032,8 +5465,8 @@ class RdsServiceTest {
 
         restoredService.restorePersistedRuntime();
 
-        ArgumentCaptor<RdsAuthProxy.PasswordValidator> validator =
-                ArgumentCaptor.forClass(RdsAuthProxy.PasswordValidator.class);
+        ArgumentCaptor<RdsAuthProxy.MasterPasswordCheck> validator =
+                ArgumentCaptor.forClass(RdsAuthProxy.MasterPasswordCheck.class);
         verify(restoredProxyManager).startProxy(eq("db-proxy:" + proxy.getDbProxyArn()),
                 eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(5432), eq("127.0.0.1"), eq(15432), any(), eq("admin"),
@@ -5470,6 +5903,51 @@ class RdsServiceTest {
                 "mydb", null, null, null, List.of(), "og1", "us-east-1");
 
         assertEquals("og1", modified.getOptionGroupName());
+    }
+
+    @Test
+    void refreshRuntimeHealthMarksDeadContainerFailedAndStopsProxy() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.isContainerRunning("cont-id")).thenReturn(false);
+        DbInstance instance = rdsService.createDbInstance(
+                "dead-db", "postgres", "16", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, null, true);
+
+        DbInstance refreshed = rdsService.refreshDbInstanceRuntimeHealth(instance);
+
+        assertEquals(DbInstanceStatus.FAILED, refreshed.getStatus());
+        verify(proxyManager).stopProxy("rds-resource:" + refreshed.getDbInstanceArn());
+        var events = rdsService.describeEvents("dead-db", "db-instance", null, null, 60);
+        assertEquals(1, events.size());
+        assertEquals(List.of("availability"), events.getFirst().eventCategories());
+        assertEquals(refreshed.getDbInstanceArn(), events.getFirst().sourceArn());
+
+        // Repeated health reads do not duplicate the transition event.
+        rdsService.refreshDbInstanceRuntimeHealth(refreshed);
+        assertEquals(1, rdsService.describeEvents("dead-db", "db-instance", null, null, 60).size());
+    }
+
+    @Test
+    void describeEventsPrunesEventsOlderThanFourteenDays() throws Exception {
+        InMemoryStorage<String, RdsEvent> eventStore = new InMemoryStorage<>();
+        Field eventsField = RdsService.class.getDeclaredField("events");
+        eventsField.setAccessible(true);
+        eventsField.set(rdsService, eventStore);
+        Instant now = Instant.now();
+        RdsEvent expired = new RdsEvent("expired", "old-db", "db-instance", "old",
+                List.of("availability"), now.minus(Duration.ofDays(15)), "old-arn");
+        RdsEvent retained = new RdsEvent("retained", "recent-db", "db-instance", "recent",
+                List.of("availability"), now.minus(Duration.ofDays(13)), "recent-arn");
+        eventStore.put(expired.id(), expired);
+        eventStore.put(retained.id(), retained);
+
+        List<RdsEvent> result = rdsService.describeEvents(
+                null, null, now.minus(Duration.ofDays(20)), now.plusSeconds(1), null);
+
+        assertEquals(List.of(retained), result);
+        assertTrue(eventStore.get("retained").isPresent());
+        assertTrue(eventStore.get("expired").isEmpty());
     }
 
     @Test
@@ -6092,5 +6570,539 @@ class RdsServiceTest {
         assertNull(modifyOutcome.get(), "modify completed before the delete");
         assertThrows(AwsException.class, () -> service.getDbInstance("mydb"),
                 "the deleted instance must not come back from the modify");
+    }
+
+    // ── Read replicas ─────────────────────────────────────────────────────────
+
+    private DbInstance createPostgresSource(String id) {
+        return rdsService.createDbInstance(id, "postgres", "16.3",
+                "admin", "password", "appdb", "db.t3.medium",
+                50, false, null, null, null, null, false);
+    }
+
+    private static ReadReplicaRequest replicaRequest(String id, String source) {
+        return new ReadReplicaRequest(id, source, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, Map.of());
+    }
+
+    @Test
+    void createReadReplicaInheritsTheSourceAndLinksBothEnds() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 5432));
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot("cont-primary", "admin")).thenReturn("DUMP");
+
+        DbInstance replica = rdsService.createDbInstanceReadReplica(
+                replicaRequest("primary-replica", "primary"), null);
+
+        assertEquals("primary", replica.getReadReplicaSourceDbInstanceIdentifier());
+        assertTrue(replica.hasReadReplicaSource());
+        assertEquals(DatabaseEngine.POSTGRES, replica.getEngine());
+        assertEquals("16.3", replica.getEngineVersion());
+        assertEquals("admin", replica.getMasterUsername());
+        assertEquals("password", replica.getMasterPassword());
+        assertEquals("appdb", replica.getDbName());
+        assertEquals("db.t3.medium", replica.getDbInstanceClass());
+        assertEquals(50, replica.getAllocatedStorage());
+        assertEquals(0, replica.getBackupRetentionPeriod(), "a replica starts with backups off");
+        assertEquals(DbInstanceStatus.AVAILABLE, replica.getStatus());
+        assertNotEquals(rdsService.getDbInstance("primary").getEndpoint().port(),
+                replica.getEndpoint().port(), "a replica has its own endpoint");
+        assertEquals(List.of("primary-replica"),
+                rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers());
+        // The backing copy is a dump of the source restored into the replica's own container.
+        verify(containerManager).restorePostgresSnapshot("cont-primary-replica", "admin", "DUMP");
+    }
+
+    @Test
+    void createReadReplicaHonoursOverridesAndResolvesAnArnSource() {
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+
+        DbInstance replica = rdsService.createDbInstanceReadReplica(new ReadReplicaRequest(
+                "big-replica", "arn:aws:rds:us-east-1:123456789012:db:primary",
+                "db.r6g.large", "us-east-1b", false, false, null, null, true, null,
+                List.of("sg-replica"), true, true, 100, null, Map.of("role", "reader")), null);
+
+        assertEquals("primary", replica.getReadReplicaSourceDbInstanceIdentifier(),
+                "a same-Region source named by ARN is still reported by identifier");
+        assertEquals("db.r6g.large", replica.getDbInstanceClass());
+        assertEquals(100, replica.getAllocatedStorage());
+        assertEquals("us-east-1b", replica.getAvailabilityZone());
+        assertFalse(replica.isMultiAz());
+        assertFalse(replica.isAutoMinorVersionUpgrade());
+        assertTrue(replica.isPubliclyAccessible());
+        assertTrue(replica.isIamDatabaseAuthenticationEnabled());
+        assertTrue(replica.isCopyTagsToSnapshot());
+        assertEquals(List.of("sg-replica"), replica.getVpcSecurityGroupIds());
+        assertEquals(Map.of("role", "reader"), replica.getTags());
+    }
+
+    @Test
+    void sameRegionReplicaInheritsGroupsAndCrossRegionReplicaGetsDefaultsAndArnLinks() {
+        rdsService.createDbParameterGroup("primary-pg", "postgres16", "source group");
+        rdsService.createDbInstance("primary", "postgres", "16.3", "admin", "password", "appdb",
+                "db.t3.medium", 50, true, "primary-pg", null, null, null, false, false, null,
+                Map.of(), List.of("sg-source"), null, null, true,
+                new DbInstanceSettings(null, null, null, null, null, true));
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+
+        DbInstance local = rdsService.createDbInstanceReadReplica(
+                replicaRequest("local-replica", "primary"), null);
+        assertEquals("primary-pg", local.getParameterGroupName());
+        assertEquals(List.of("sg-source"), local.getVpcSecurityGroupIds());
+        assertFalse(local.isIamDatabaseAuthenticationEnabled(),
+                "IAM authentication is off unless the request enables it");
+        assertFalse(local.isCopyTagsToSnapshot(), "tags are not copied unless the request says so");
+
+        DbInstance remote = rdsService.createDbInstanceReadReplica(
+                replicaRequest("remote-replica", "arn:aws:rds:us-east-1:123456789012:db:primary"),
+                "eu-west-1");
+        assertEquals("arn:aws:rds:eu-west-1:123456789012:db:remote-replica", remote.getDbInstanceArn());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:db:primary",
+                remote.getReadReplicaSourceDbInstanceIdentifier(),
+                "a cross-Region link names the source by ARN");
+        assertNull(remote.getParameterGroupName(), "a cross-Region replica gets the default group");
+        assertTrue(remote.getVpcSecurityGroupIds().isEmpty(), "and the default security group");
+        assertEquals(List.of("local-replica", "arn:aws:rds:eu-west-1:123456789012:db:remote-replica"),
+                rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers());
+
+        // A subnet group goes with a source named by ARN; with a plain identifier AWS refuses it.
+        AwsException subnetGroup = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(new ReadReplicaRequest("third", "primary",
+                        null, null, null, null, null, null, null, "some-subnet-group", null, null,
+                        null, null, null, Map.of()), null));
+        assertEquals("DBSubnetGroupNotAllowedFault", subnetGroup.getErrorCode());
+    }
+
+    @Test
+    void createReadReplicaRefusesWhatAwsRefuses() {
+        createPostgresSource("primary");
+        rdsService.createDbInstance("nobackups", "postgres", "16.3", "admin", "password", "appdb",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 0, null, null, null));
+        rdsService.createDbInstance("maria", "mariadb", "11.2", "admin", "password", "appdb",
+                "db.t3.micro", 20, false, null, null, null, null, false);
+
+        AwsException noSource = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("r", null), null));
+        assertEquals("InvalidParameterCombination", noSource.getErrorCode());
+
+        AwsException unknown = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("r", "missing"), null));
+        assertEquals("DBInstanceNotFound", unknown.getErrorCode());
+
+        AwsException backupsOff = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("r", "nobackups"), null));
+        assertEquals("InvalidDBInstanceState", backupsOff.getErrorCode());
+        assertTrue(backupsOff.getMessage().contains("Automated backups are not enabled"));
+
+        AwsException otherEngine = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("r", "maria"), null));
+        assertEquals("InvalidDBInstanceState", otherEngine.getErrorCode());
+
+        AwsException replicaMode = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(new ReadReplicaRequest("r", "primary",
+                        null, null, null, null, null, null, null, null, null, null, null, null,
+                        "mounted", Map.of()), null));
+        assertEquals("InvalidParameterCombination", replicaMode.getErrorCode());
+
+        AwsException sameName = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("primary", "primary"), null));
+        assertEquals("DBInstanceAlreadyExists", sameName.getErrorCode());
+        assertTrue(rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers().isEmpty(),
+                "a refused request leaves no dangling link on the source");
+    }
+
+    @Test
+    void createReadReplicaRollsBackWhenTheCopyFails() {
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        doThrow(new RuntimeException("restore exploded"))
+                .when(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("DUMP"));
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstanceReadReplica(replicaRequest("primary-replica", "primary"), null));
+
+        assertEquals("InvalidDBInstanceState", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("restore exploded"));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("primary-replica"));
+        assertTrue(rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers().isEmpty());
+    }
+
+    @Test
+    void promoteReadReplicaDetachesItAndTurnsBackupsOn() {
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        rdsService.createDbInstanceReadReplica(replicaRequest("primary-replica", "primary"), null);
+
+        DbInstance promoted = rdsService.promoteReadReplica("primary-replica", 7, "03:00-03:30", null);
+
+        assertFalse(promoted.hasReadReplicaSource());
+        assertNull(promoted.getReadReplicationStatus());
+        assertEquals(7, promoted.getBackupRetentionPeriod());
+        assertEquals("03:00-03:30", promoted.getPreferredBackupWindow());
+        assertEquals(DbInstanceStatus.AVAILABLE, promoted.getStatus());
+        assertTrue(rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers().isEmpty());
+        assertFalse(rdsService.getDbInstance("primary-replica").hasReadReplicaSource());
+        // AWS reboots the promoted instance before it is available again.
+        verify(containerManager).stop(any());
+        verify(containerManager, times(3)).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+        // Omitted retention means one day, as on AWS; a standalone instance cannot be promoted.
+        rdsService.createDbInstanceReadReplica(replicaRequest("second-replica", "primary"), null);
+        assertEquals(1, rdsService.promoteReadReplica("second-replica", null, null, null)
+                .getBackupRetentionPeriod());
+        AwsException notReplica = assertThrows(AwsException.class, () ->
+                rdsService.promoteReadReplica("primary", null, null, null));
+        assertEquals("InvalidDBInstanceState", notReplica.getErrorCode());
+        AwsException badRetention = assertThrows(AwsException.class, () -> {
+            rdsService.createDbInstanceReadReplica(replicaRequest("third-replica", "primary"), null);
+            rdsService.promoteReadReplica("third-replica", 36, null, null);
+        });
+        assertEquals("InvalidParameterValue", badRetention.getErrorCode());
+        assertTrue(rdsService.getDbInstance("third-replica").hasReadReplicaSource(),
+                "a refused promotion leaves the replica attached");
+
+        // A replica that has replicas of its own (backups on, as AWS requires of any source)
+        // cannot turn backups off when promoted.
+        rdsService.modifyDbInstance("third-replica", null, null, null, null, null, null, null,
+                new DbInstanceSettings(null, null, 3, null, null, null), null);
+        rdsService.createDbInstanceReadReplica(replicaRequest("cascade", "third-replica"), null);
+        AwsException zeroWithReplicas = assertThrows(AwsException.class, () ->
+                rdsService.promoteReadReplica("third-replica", 0, null, null));
+        assertEquals("InvalidParameterCombination", zeroWithReplicas.getErrorCode());
+    }
+
+    @Test
+    void deletingEitherEndOfAReplicationLinkDropsTheLink() {
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        rdsService.createDbInstanceReadReplica(replicaRequest("replica-a", "primary"), null);
+        rdsService.createDbInstanceReadReplica(replicaRequest("replica-b", "primary"), null);
+
+        rdsService.deleteDbInstance("replica-a");
+        assertEquals(List.of("replica-b"),
+                rdsService.getDbInstance("primary").getReadReplicaDbInstanceIdentifiers());
+
+        rdsService.createDbInstanceReadReplica(
+                replicaRequest("replica-c", "arn:aws:rds:us-east-1:123456789012:db:primary"),
+                "eu-west-1");
+
+        // Deleting the source promotes the same-Region replica; the cross-Region PostgreSQL
+        // replica keeps its link with replication terminated, both as AWS documents.
+        rdsService.deleteDbInstance("primary");
+        DbInstance promoted = rdsService.getDbInstance("replica-b");
+        assertFalse(promoted.hasReadReplicaSource());
+        assertEquals(DbInstanceStatus.AVAILABLE, promoted.getStatus());
+        DbInstance terminated = rdsService.getDbInstance("replica-c", "eu-west-1");
+        assertEquals("arn:aws:rds:us-east-1:123456789012:db:primary",
+                terminated.getReadReplicaSourceDbInstanceIdentifier());
+        assertEquals(RdsService.READ_REPLICATION_TERMINATED, terminated.getReadReplicationStatus());
+        // It can still be promoted by hand.
+        assertFalse(rdsService.promoteReadReplica("replica-c", null, null, "eu-west-1")
+                .hasReadReplicaSource());
+    }
+
+    @Test
+    void switchoverAndClusterPromotionAnswerWithTheApiReferenceErrors() {
+        createPostgresSource("primary");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        rdsService.createDbInstanceReadReplica(replicaRequest("primary-replica", "primary"), null);
+
+        AwsException missing = assertThrows(AwsException.class, () ->
+                rdsService.switchoverReadReplica("nope", null));
+        assertEquals("DBInstanceNotFound", missing.getErrorCode());
+        AwsException standalone = assertThrows(AwsException.class, () ->
+                rdsService.switchoverReadReplica("primary", null));
+        assertEquals("InvalidDBInstanceState", standalone.getErrorCode());
+        AwsException engine = assertThrows(AwsException.class, () ->
+                rdsService.switchoverReadReplica("primary-replica", null));
+        assertEquals("InvalidDBInstanceState", engine.getErrorCode());
+        assertTrue(engine.getMessage().contains("Oracle"));
+
+        AwsException noCluster = assertThrows(AwsException.class, () ->
+                rdsService.promoteReadReplicaDbCluster("nope", null));
+        assertEquals("DBClusterNotFoundFault", noCluster.getErrorCode());
+        rdsService.createDbCluster("aurora", "aurora-postgresql", "16.3",
+                "admin", "password", "appdb", false, null);
+        AwsException notReplicaCluster = assertThrows(AwsException.class, () ->
+                rdsService.promoteReadReplicaDbCluster("aurora", null));
+        assertEquals("InvalidDBClusterStateFault", notReplicaCluster.getErrorCode());
+    }
+
+    // ── Global clusters ───────────────────────────────────────────────────────
+
+    private static final String PRIMARY_ARN = "arn:aws:rds:us-east-1:123456789012:cluster:gdb-primary";
+    private static final String SECONDARY_ARN = "arn:aws:rds:eu-west-1:123456789012:cluster:gdb-secondary";
+
+    private DbCluster createGlobalMember(String globalId, String clusterId, String region,
+                                         String masterUsername, String masterPassword) {
+        return rdsService.createDbClusterInGlobalCluster(globalId, clusterId, "aurora-postgresql", null,
+                masterUsername, masterPassword, null, false, null, null, null, false, region,
+                null, null, null, false, null, null, false);
+    }
+
+    private static List<String> writers(GlobalCluster global) {
+        return global.getMembers().stream().filter(GlobalClusterMember::isWriter)
+                .map(GlobalClusterMember::getDbClusterArn).toList();
+    }
+
+    @Test
+    void globalClusterGrowsFromEmptyToPrimaryAndSecondary() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 5432));
+        GlobalCluster global = rdsService.createGlobalCluster("gdb", null, "aurora-postgresql", null,
+                "appdb", true, null, Map.of("team", "data"), null);
+        assertEquals("gdb", global.getGlobalClusterIdentifier());
+        assertEquals("arn:aws:rds::123456789012:global-cluster:gdb", global.getGlobalClusterArn());
+        assertEquals("available", global.getStatus());
+        assertEquals("aurora-postgresql", global.getEngine());
+        assertEquals("16.3", global.getEngineVersion(), "the engine's default version when none is given");
+        assertTrue(global.isStorageEncrypted());
+        assertTrue(global.getMembers().isEmpty());
+
+        DbCluster primary = createGlobalMember("gdb", "gdb-primary", null, "admin", "password");
+        assertEquals("gdb", primary.getGlobalClusterIdentifier());
+        assertEquals("appdb", primary.getDatabaseName(), "the global cluster's database name");
+        assertTrue(primary.isStorageEncrypted());
+        assertEquals(List.of(PRIMARY_ARN), writers(rdsService.describeGlobalCluster("gdb")));
+
+        when(containerManager.createPostgresSnapshot("cont-gdb-primary", "admin")).thenReturn("DUMP");
+        DbCluster secondary = createGlobalMember("gdb", "gdb-secondary", "eu-west-1", null, null);
+        assertEquals("gdb", secondary.getGlobalClusterIdentifier());
+        assertEquals("admin", secondary.getMasterUsername(), "a secondary takes the primary's credentials");
+        assertEquals("password", secondary.getMasterPassword());
+        assertEquals("appdb", secondary.getDatabaseName());
+        assertEquals(SECONDARY_ARN, secondary.getDbClusterArn());
+        verify(containerManager).restorePostgresSnapshot("cont-gdb-secondary", "admin", "DUMP");
+        global = rdsService.describeGlobalCluster("gdb");
+        assertEquals(2, global.getMembers().size());
+        assertEquals(List.of(PRIMARY_ARN), writers(global));
+        assertEquals(List.of(global), rdsService.listGlobalClusters());
+
+        // What AWS refuses on a secondary: the primary's Region, a Region already used, its own
+        // credentials, a different engine.
+        AwsException sameRegion = assertThrows(AwsException.class, () ->
+                createGlobalMember("gdb", "gdb-third", null, null, null));
+        assertEquals("InvalidParameterCombination", sameRegion.getErrorCode());
+        AwsException usedRegion = assertThrows(AwsException.class, () ->
+                createGlobalMember("gdb", "gdb-third", "eu-west-1", null, null));
+        assertEquals("InvalidParameterCombination", usedRegion.getErrorCode());
+        AwsException credentials = assertThrows(AwsException.class, () ->
+                createGlobalMember("gdb", "gdb-third", "ap-south-1", "admin", "password"));
+        assertEquals("InvalidParameterCombination", credentials.getErrorCode());
+        assertTrue(credentials.getMessage().contains("Cannot specify user name"));
+        AwsException engine = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterInGlobalCluster("gdb", "gdb-third", "aurora-mysql", null,
+                        null, null, null, false, null, null, null, false, "ap-south-1",
+                        null, null, null, false, null, null, false));
+        assertEquals("InvalidParameterCombination", engine.getErrorCode());
+        AwsException unknownGlobal = assertThrows(AwsException.class, () ->
+                createGlobalMember("nope", "gdb-third", "ap-south-1", null, null));
+        assertEquals("GlobalClusterNotFoundFault", unknownGlobal.getErrorCode());
+        assertThrows(AwsException.class, () -> rdsService.getDbCluster("gdb-third", "ap-south-1"),
+                "a refused secondary leaves no cluster behind");
+    }
+
+    /**
+     * The membership checks run before the container starts, outside the lock, so two joins can
+     * both pass them. The container start is the interleaving point: while one join's container
+     * is starting, a competing join completes. The late one must be refused when it attaches, and
+     * the cluster it created must be gone.
+     */
+    @Test
+    void concurrentJoinsCannotProduceTwoPrimariesOrTwoSecondariesInOneRegion() {
+        rdsService.createGlobalCluster("gdb", null, "aurora-postgresql", null, null, null, null, Map.of(), null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> {
+                    String id = invocation.getArgument(1);
+                    if ("primary-a".equals(id)) {
+                        createGlobalMember("gdb", "primary-b", null, "admin", "password");
+                    } else if ("secondary-a".equals(id)) {
+                        createGlobalMember("gdb", "secondary-b", "eu-west-1", null, null);
+                    }
+                    return new RdsContainerHandle("cont-" + id, id, "localhost", 5432);
+                });
+
+        AwsException twoPrimaries = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterInGlobalCluster("gdb", "primary-a", "aurora-postgresql", null,
+                        "admin", "password", null, false, null, null, null, false, "us-west-2",
+                        null, null, null, false, null, null, false));
+        assertEquals("InvalidParameterCombination", twoPrimaries.getErrorCode());
+        assertEquals(List.of("arn:aws:rds:us-east-1:123456789012:cluster:primary-b"),
+                writers(rdsService.describeGlobalCluster("gdb")));
+        assertThrows(AwsException.class, () -> rdsService.getDbCluster("primary-a", "us-west-2"),
+                "the losing join's cluster is deleted");
+
+        AwsException twoSecondaries = assertThrows(AwsException.class, () ->
+                createGlobalMember("gdb", "secondary-a", "eu-west-1", null, null));
+        assertEquals("InvalidParameterCombination", twoSecondaries.getErrorCode());
+        assertEquals(2, rdsService.describeGlobalCluster("gdb").getMembers().size());
+        assertEquals("gdb", rdsService.getDbCluster("secondary-b", "eu-west-1").getGlobalClusterIdentifier());
+        assertThrows(AwsException.class, () -> rdsService.getDbCluster("secondary-a", "eu-west-1"));
+    }
+
+    @Test
+    void globalClusterFromAnExistingClusterTakesItsSettings() {
+        rdsService.createDbCluster("existing", "aurora-mysql", "8.0.mysql_aurora.3.05.2",
+                "admin", "password", "shop", false, null);
+        rdsService.createDbCluster("plain", "postgres", "16.3", "admin", "password", "shop", false, null);
+
+        AwsException withEngine = assertThrows(AwsException.class, () -> rdsService.createGlobalCluster(
+                "gdb", "arn:aws:rds:us-east-1:123456789012:cluster:existing", "aurora-mysql", null,
+                null, null, null, Map.of(), null));
+        assertEquals("InvalidParameterCombination", withEngine.getErrorCode());
+        AwsException notAurora = assertThrows(AwsException.class, () -> rdsService.createGlobalCluster(
+                "gdb", "plain", null, null, null, null, null, Map.of(), null));
+        assertEquals("InvalidParameterValue", notAurora.getErrorCode());
+        AwsException noEngine = assertThrows(AwsException.class, () -> rdsService.createGlobalCluster(
+                "gdb", null, null, null, null, null, null, Map.of(), null));
+        assertEquals("InvalidParameterCombination", noEngine.getErrorCode());
+
+        GlobalCluster global = rdsService.createGlobalCluster("gdb",
+                "arn:aws:rds:us-east-1:123456789012:cluster:existing", null, null, null, null, null,
+                Map.of(), null);
+        assertEquals("aurora-mysql", global.getEngine());
+        assertEquals("8.0.mysql_aurora.3.05.2", global.getEngineVersion());
+        assertEquals("shop", global.getDatabaseName());
+        assertEquals(List.of("arn:aws:rds:us-east-1:123456789012:cluster:existing"), writers(global));
+        assertEquals("gdb", rdsService.getDbCluster("existing").getGlobalClusterIdentifier());
+
+        AwsException duplicate = assertThrows(AwsException.class, () -> rdsService.createGlobalCluster(
+                "gdb", null, "aurora-postgresql", null, null, null, null, Map.of(), null));
+        assertEquals("GlobalClusterAlreadyExistsFault", duplicate.getErrorCode());
+        AwsException alreadyMember = assertThrows(AwsException.class, () -> rdsService.createGlobalCluster(
+                "gdb2", "existing", null, null, null, null, null, Map.of(), null));
+        assertEquals("InvalidDBClusterStateFault", alreadyMember.getErrorCode());
+    }
+
+    @Test
+    void switchoverAndFailoverPromoteTheNamedSecondary() {
+        rdsService.createGlobalCluster("gdb", null, "aurora-postgresql", null, null, null, null, Map.of(), null);
+        createGlobalMember("gdb", "gdb-primary", null, "admin", "password");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+
+        AwsException noSecondary = assertThrows(AwsException.class, () ->
+                rdsService.switchoverGlobalCluster("gdb", PRIMARY_ARN, null));
+        assertEquals("InvalidGlobalClusterStateFault", noSecondary.getErrorCode());
+
+        createGlobalMember("gdb", "gdb-secondary", "eu-west-1", null, null);
+        GlobalCluster switched = rdsService.switchoverGlobalCluster("gdb", SECONDARY_ARN, null);
+        assertEquals(List.of(SECONDARY_ARN), writers(switched));
+        assertEquals(2, switched.getMembers().size(), "the old primary stays as a secondary");
+
+        AwsException alreadyPrimary = assertThrows(AwsException.class, () ->
+                rdsService.switchoverGlobalCluster("gdb", SECONDARY_ARN, null));
+        assertEquals("InvalidDBClusterStateFault", alreadyPrimary.getErrorCode());
+        AwsException notMember = assertThrows(AwsException.class, () ->
+                rdsService.failoverGlobalCluster("gdb", "arn:aws:rds:us-east-1:123456789012:cluster:nope",
+                        true, null, null));
+        assertEquals("DBClusterNotFoundFault", notMember.getErrorCode());
+        AwsException bothFlags = assertThrows(AwsException.class, () ->
+                rdsService.failoverGlobalCluster("gdb", PRIMARY_ARN, true, true, null));
+        assertEquals("InvalidParameterCombination", bothFlags.getErrorCode());
+
+        GlobalCluster failedOver = rdsService.failoverGlobalCluster("gdb", "gdb-primary", true, null, null);
+        assertEquals(List.of(PRIMARY_ARN), writers(failedOver), "a plain identifier resolves in the request Region");
+    }
+
+    @Test
+    void removalAndDeletionFollowTheDocumentedOrder() {
+        rdsService.createGlobalCluster("gdb", null, "aurora-postgresql", null, null, null, true, Map.of(), null);
+        createGlobalMember("gdb", "gdb-primary", null, "admin", "password");
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+        createGlobalMember("gdb", "gdb-secondary", "eu-west-1", null, null);
+
+        AwsException primaryFirst = assertThrows(AwsException.class, () ->
+                rdsService.removeFromGlobalCluster("gdb", PRIMARY_ARN, null));
+        assertEquals("InvalidGlobalClusterStateFault", primaryFirst.getErrorCode());
+        AwsException deletePrimary = assertThrows(AwsException.class, () ->
+                rdsService.deleteDbCluster("gdb-primary"));
+        assertEquals("InvalidDBClusterStateFault", deletePrimary.getErrorCode());
+        AwsException withMembers = assertThrows(AwsException.class, () -> rdsService.deleteGlobalCluster("gdb"));
+        assertEquals("InvalidGlobalClusterStateFault", withMembers.getErrorCode());
+
+        GlobalCluster afterSecondary = rdsService.removeFromGlobalCluster("gdb", SECONDARY_ARN, null);
+        assertEquals(1, afterSecondary.getMembers().size());
+        assertNull(rdsService.getDbCluster("gdb-secondary", "eu-west-1").getGlobalClusterIdentifier(),
+                "a removed cluster is standalone");
+        AwsException notMember = assertThrows(AwsException.class, () ->
+                rdsService.removeFromGlobalCluster("gdb", SECONDARY_ARN, null));
+        assertEquals("DBClusterNotFoundFault", notMember.getErrorCode());
+
+        // Deleting a member cluster detaches it; the primary is last and deletion protection holds.
+        rdsService.deleteDbCluster("gdb-primary");
+        assertTrue(rdsService.describeGlobalCluster("gdb").getMembers().isEmpty());
+        AwsException protectedGlobal = assertThrows(AwsException.class, () -> rdsService.deleteGlobalCluster("gdb"));
+        assertEquals("InvalidGlobalClusterStateFault", protectedGlobal.getErrorCode());
+        assertTrue(protectedGlobal.getMessage().contains("deletion protection"));
+        rdsService.modifyGlobalCluster("gdb", null, false, null, null);
+        assertEquals("deleting", rdsService.deleteGlobalCluster("gdb").getStatus());
+        AwsException gone = assertThrows(AwsException.class, () -> rdsService.describeGlobalCluster("gdb"));
+        assertEquals("GlobalClusterNotFoundFault", gone.getErrorCode());
+        assertTrue(rdsService.listGlobalClusters().isEmpty());
+    }
+
+    @Test
+    void modifyGlobalClusterRenamesAndUpgradesItsMembers() {
+        rdsService.createGlobalCluster("gdb", null, "aurora-postgresql", "15.4", null, null, null, Map.of(), null);
+        createGlobalMember("gdb", "gdb-primary", null, "admin", "password");
+
+        GlobalCluster renamed = rdsService.modifyGlobalCluster("gdb", "GDB-Renamed", true, null, null);
+        assertEquals("gdb-renamed", renamed.getGlobalClusterIdentifier());
+        assertEquals("arn:aws:rds::123456789012:global-cluster:gdb-renamed", renamed.getGlobalClusterArn());
+        assertTrue(renamed.isDeletionProtection());
+        assertEquals("gdb-renamed", rdsService.getDbCluster("gdb-primary").getGlobalClusterIdentifier());
+        assertThrows(AwsException.class, () -> rdsService.describeGlobalCluster("gdb"));
+
+        AwsException major = assertThrows(AwsException.class, () ->
+                rdsService.modifyGlobalCluster("gdb-renamed", null, null, "16.3", null));
+        assertEquals("InvalidParameterCombination", major.getErrorCode());
+        GlobalCluster upgraded = rdsService.modifyGlobalCluster("gdb-renamed", null, null, "16.3", true);
+        assertEquals("16.3", upgraded.getEngineVersion());
+        assertEquals("16.3", rdsService.getDbCluster("gdb-primary").getEngineVersion());
+
+        rdsService.createGlobalCluster("other", null, "aurora-mysql", null, null, null, null, Map.of(), null);
+        AwsException taken = assertThrows(AwsException.class, () ->
+                rdsService.modifyGlobalCluster("gdb-renamed", "other", null, null, null));
+        assertEquals("GlobalClusterAlreadyExistsFault", taken.getErrorCode());
+    }
+
+    @Test
+    void failoverDbClusterMovesTheWriterRole() {
+        rdsService.createDbCluster("aurora", "aurora-postgresql", "16.3", "admin", "password", "appdb", false, null);
+        AwsException noMembers = assertThrows(AwsException.class, () ->
+                rdsService.failoverDbCluster("aurora", null, null));
+        assertEquals("InvalidDBClusterStateFault", noMembers.getErrorCode());
+
+        rdsService.createDbInstance("writer", "aurora-postgresql", "16.3", null, null, null,
+                "db.r6g.large", 0, false, null, null, "aurora", null, false);
+        assertEquals("writer", rdsService.getDbCluster("aurora").resolveWriterIdentifier());
+        AwsException noReader = assertThrows(AwsException.class, () ->
+                rdsService.failoverDbCluster("aurora", null, null));
+        assertEquals("InvalidDBClusterStateFault", noReader.getErrorCode());
+
+        rdsService.createDbInstance("reader", "aurora-postgresql", "16.3", null, null, null,
+                "db.r6g.large", 0, false, null, null, "aurora", null, false);
+        assertEquals("writer", rdsService.getDbCluster("aurora").resolveWriterIdentifier(),
+                "a second member joins as a reader");
+        assertEquals("reader", rdsService.failoverDbCluster("aurora", null, null).resolveWriterIdentifier());
+        assertEquals("writer", rdsService.failoverDbCluster("aurora", "writer", null).resolveWriterIdentifier());
+
+        AwsException alreadyWriter = assertThrows(AwsException.class, () ->
+                rdsService.failoverDbCluster("aurora", "writer", null));
+        assertEquals("InvalidDBInstanceState", alreadyWriter.getErrorCode());
+        AwsException stranger = assertThrows(AwsException.class, () ->
+                rdsService.failoverDbCluster("aurora", "nope", null));
+        assertEquals("InvalidDBInstanceState", stranger.getErrorCode());
+
+        // Losing the writer promotes the remaining member.
+        rdsService.deleteDbInstance("writer");
+        assertEquals("reader", rdsService.getDbCluster("aurora").resolveWriterIdentifier());
     }
 }

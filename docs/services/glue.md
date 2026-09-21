@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1
 **Endpoint:** `http://localhost:4566/`
 
-Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
+Floci emulates the AWS Glue Data Catalog (databases, tables, partitions, functions, connections) and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
 
 ## Supported Actions
 
@@ -25,7 +25,14 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 | CreateTable | Creates a table definition in the local Glue Data Catalog. |
 | GetTable | Returns a stored table definition and resolves schema references when possible. |
 | GetTables | Lists table definitions for a database. |
+| UpdateTable | Replaces a table definition; the previous version is archived unless `SkipArchive` is set. |
 | DeleteTable | Deletes a table definition from a database. |
+| BatchDeleteTable | Deletes several tables of a database, reporting the missing ones in `Errors`. |
+| GetTableVersions | Lists the current and archived versions of a table, newest first. |
+| GetTableVersion | Returns one version by `VersionId`, or the current version when none is given. |
+| DeleteTableVersion | Deletes an archived version; the current version cannot be deleted, as on AWS. |
+| BatchDeleteTableVersion | Deletes several archived versions, reporting the ones not deleted in `Errors`. |
+| SearchTables | Searches every table of the catalog by `SearchText` (substring, or exact when quoted), property `Filters` (string keys use the tokenised match of the API reference, time keys honour `Comparator`, other keys read table parameters) and `SortCriteria`, paged by `MaxResults` and `NextToken`. |
 
 #### Partitions
 
@@ -33,6 +40,19 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
 | GetPartitions | Lists partitions stored for a Data Catalog table. |
+| BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
+| CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
+| GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
+| DeletePartitionIndex | Removes a partition index from a table. The index reports `DELETING` before it disappears. |
+
+Partition indexes carry the AWS lifecycle. A new index reports `CREATING` and then `ACTIVE`; a
+deleted one reports `DELETING` and then disappears. As on AWS, only one index per table may be
+created or deleted at a time, and an index that is still `CREATING` cannot be deleted yet.
+
+The transitions are driven by reads rather than by a timer, so they are deterministic: each
+`GetPartitionIndexes` reports the current state and settles it, and a client that polls (as the
+Terraform provider does) converges on its next call. The `FAILED` state is not emulated, since it
+only arises from a backfill failure.
 
 #### User-defined Functions
 
@@ -43,6 +63,66 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 | GetUserDefinedFunctions | Lists user-defined functions for a database. |
 | UpdateUserDefinedFunction | Updates a stored user-defined function. |
 | DeleteUserDefinedFunction | Deletes a user-defined function from a database. |
+
+#### Connections
+
+| Action | Description |
+|--------|-------------|
+| CreateConnection | Creates a connection definition from a `ConnectionInput`, with optional `Tags`, and answers `CreateConnectionStatus: READY`. |
+| GetConnection | Returns a stored connection. `HidePassword` omits `PASSWORD` and `ENCRYPTED_PASSWORD` from `ConnectionProperties`. |
+| GetConnections | Lists connections, narrowed by `Filter.MatchCriteria`, `Filter.ConnectionType` and `Filter.ConnectionSchemaVersion`, paged by `MaxResults` and `NextToken`. |
+| UpdateConnection | Redefines a connection from a full `ConnectionInput`, as on AWS: members left out of the input are dropped; the name and `CreationTime` are kept. |
+| DeleteConnection | Deletes a connection and its tags. |
+| BatchDeleteConnection | Deletes up to 25 connections, reporting the ones not found in `Errors`. |
+| TestConnection | Accepts a connection name or an inline `TestConnectionInput` and answers with an empty body. |
+
+`ConnectionInput` is validated against the API reference: `Name` (1 to 255 characters), `ConnectionType`
+(the documented enumeration) and `ConnectionProperties` (the documented key list, at most 100 entries, and
+empty for a `NETWORK` connection) are required; `MatchCriteria` holds at most 10 entries. Credentials given
+under `AuthenticationConfiguration` are accepted and never returned by a read. A connection that uses
+`AuthenticationConfiguration` or the `SparkProperties`, `AthenaProperties` or `PythonProperties` maps reports
+`ConnectionSchemaVersion` 2; the classic JDBC, Kafka and network shape reports 1.
+
+`HidePassword` removes `PASSWORD` and `ENCRYPTED_PASSWORD`, the two members the API reference defines as the
+connection's password. The Kafka credentials (`KAFKA_CLIENT_KEYSTORE_PASSWORD`, `KAFKA_CLIENT_KEY_PASSWORD`,
+`KAFKA_SASL_PLAIN_PASSWORD`, `KAFKA_SASL_SCRAM_PASSWORD` and their `ENCRYPTED_` forms) are returned as stored: the
+reference does not say whether the flag covers them, so Floci does not guess. The `ENCRYPTED_` forms are what the
+catalog's `ConnectionPasswordEncryption` setting produces (see Encryption settings below).
+
+`TestConnection` is asynchronous on AWS and returns nothing; Floci checks the request's shape and accepts it
+without opening a socket to the data store, since no job or crawler runs against a connection yet.
+
+#### Resource policy
+
+| Action | Description |
+|--------|-------------|
+| PutResourcePolicy | Sets the catalog's resource policy from `PolicyInJson` and returns its `PolicyHash`. `PolicyExistsCondition` (`NOT_EXIST`, `MUST_EXIST`, `NONE`) and `PolicyHashCondition` are checked against the stored policy and fail with `ConditionCheckFailureException`. |
+| GetResourcePolicy | Returns the catalog policy with its hash and timestamps, or `EntityNotFoundException` when none is set. |
+| GetResourcePolicies | Lists the catalog policy (zero or one entry) under `GetResourcePoliciesResponseList`, paged. |
+| DeleteResourcePolicy | Deletes the catalog policy; honours `PolicyHashCondition`; `EntityNotFoundException` when none is set. |
+
+The catalog holds one policy, as on AWS. `PolicyInJson` must be a JSON object. AWS documents `PolicyHash` only as
+an opaque value to echo back; Floci derives it from the document, so the same policy always has the same hash.
+`ResourceArn` ("for internal use only" in the reference) and `EnableHybrid` are accepted. Per-resource policies
+that Resource Access Manager creates on AWS are not emulated, so `GetResourcePolicies` never has more than one entry.
+
+#### Encryption settings
+
+| Action | Description |
+|--------|-------------|
+| GetDataCatalogEncryptionSettings | Returns the catalog's security configuration: `EncryptionAtRest` (`CatalogEncryptionMode` `DISABLED` by default) and `ConnectionPasswordEncryption` (`ReturnConnectionPasswordEncrypted` false by default). |
+| PutDataCatalogEncryptionSettings | Replaces the configuration. `CatalogEncryptionMode` is `DISABLED`, `SSE-KMS` or `SSE-KMS-WITH-SERVICE-ROLE`; `ReturnConnectionPasswordEncrypted` is required inside its block. A block left out keeps its default. |
+
+`EncryptionAtRest` is stored and reported; catalog metadata is not encrypted on disk, which nothing observes through
+the API. `ConnectionPasswordEncryption` is applied: while `ReturnConnectionPasswordEncrypted` is true, a connection
+created or updated has each password property encrypted with `AwsKmsKeyId` through Floci's KMS and stored under the
+name the `Connection` structure documents for it (`PASSWORD` as `ENCRYPTED_PASSWORD`, and the four Kafka passwords as
+their `ENCRYPTED_KAFKA_*` forms). Reads return the ciphertext, base64-encoded, which `KMS.Decrypt` turns back into
+the password. A missing key, or none configured, fails the create or update with `GlueEncryptionException`, the error
+`CreateConnection` and `UpdateConnection` list for a failed encryption operation. Connections created before the setting
+was switched on keep their plaintext: the developer guide ("Encrypting connection passwords") states that whether a
+password is encrypted "was determined when the connection was created or updated", so the setting is not applied
+retroactively.
 
 #### Jobs
 
@@ -63,6 +143,16 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 | GetCrawlers | Retrieves metadata for all crawlers defined in the customer account. |
 | UpdateCrawler | Updates a crawler. |
 | DeleteCrawler | Removes a specified crawler from the AWS Glue Data Catalog. |
+
+#### Classifiers
+
+| Action | Description |
+|--------|-------------|
+| CreateClassifier | Creates a Grok, XML, JSON, or CSV classifier. |
+| GetClassifier | Retrieves a classifier by name. |
+| GetClassifiers | Lists classifiers, paged by `MaxResults` and `NextToken`. |
+| UpdateClassifier | Partially updates a classifier without changing its type. |
+| DeleteClassifier | Deletes a classifier by name. |
 
 ### Schema Registry
 
@@ -123,7 +213,9 @@ The Glue Data Catalog is automatically used by **Athena** to resolve table names
 
 Tables can reference a Schema Registry schema version through `StorageDescriptor.SchemaReference`. On `GetTable` and `GetTables`, Floci resolves the schema definition into Glue columns when possible.
 
-The DuckDB read function is selected based on the table's `StorageDescriptor.InputFormat` and `StorageDescriptor.SerdeInfo.SerializationLibrary`:
+A table whose `Parameters.table_type` is `ICEBERG` (case-insensitive), as set by `pyiceberg`'s `GlueCatalog` and AWS's own Glue-Iceberg integration, is read via `iceberg_scan` against `Parameters.metadata_location` instead, following the table's real manifest list rather than its `StorageDescriptor`. See [Athena's format inference](athena.md#format-inference) for the full explanation.
+
+For every other table, the DuckDB read function is selected based on the table's `StorageDescriptor.InputFormat` and `StorageDescriptor.SerdeInfo.SerializationLibrary`:
 
 | Condition | DuckDB function |
 |---|---|

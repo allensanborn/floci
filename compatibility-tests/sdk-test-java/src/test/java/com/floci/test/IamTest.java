@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.iam.model.CreateGroupRequest;
 import software.amazon.awssdk.services.iam.model.CreateGroupResponse;
 import software.amazon.awssdk.services.iam.model.CreateInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.CreateInstanceProfileResponse;
+import software.amazon.awssdk.services.iam.model.CreateLoginProfileRequest;
+import software.amazon.awssdk.services.iam.model.CreateLoginProfileResponse;
 import software.amazon.awssdk.services.iam.model.CreatePolicyRequest;
 import software.amazon.awssdk.services.iam.model.CreatePolicyResponse;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
@@ -21,6 +23,7 @@ import software.amazon.awssdk.services.iam.model.CreateUserResponse;
 import software.amazon.awssdk.services.iam.model.DeleteAccessKeyRequest;
 import software.amazon.awssdk.services.iam.model.DeleteGroupRequest;
 import software.amazon.awssdk.services.iam.model.DeleteInstanceProfileRequest;
+import software.amazon.awssdk.services.iam.model.DeleteLoginProfileRequest;
 import software.amazon.awssdk.services.iam.model.DeletePolicyRequest;
 import software.amazon.awssdk.services.iam.model.DeleteRoleRequest;
 import software.amazon.awssdk.services.iam.model.DeleteRolePolicyRequest;
@@ -33,8 +36,12 @@ import software.amazon.awssdk.services.iam.model.GetGroupRequest;
 import software.amazon.awssdk.services.iam.model.GetGroupResponse;
 import software.amazon.awssdk.services.iam.model.GetInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.GetInstanceProfileResponse;
+import software.amazon.awssdk.services.iam.model.GetLoginProfileRequest;
+import software.amazon.awssdk.services.iam.model.GetLoginProfileResponse;
 import software.amazon.awssdk.services.iam.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iam.model.GetPolicyResponse;
+import software.amazon.awssdk.services.iam.model.GetPolicyVersionRequest;
+import software.amazon.awssdk.services.iam.model.GetPolicyVersionResponse;
 import software.amazon.awssdk.services.iam.model.GetRoleRequest;
 import software.amazon.awssdk.services.iam.model.GetRoleResponse;
 import software.amazon.awssdk.services.iam.model.GetRolePolicyRequest;
@@ -58,6 +65,7 @@ import software.amazon.awssdk.services.iam.model.ListUserTagsRequest;
 import software.amazon.awssdk.services.iam.model.ListUserTagsResponse;
 import software.amazon.awssdk.services.iam.model.ListUsersResponse;
 import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
+import software.amazon.awssdk.services.iam.model.PolicyScopeType;
 import software.amazon.awssdk.services.iam.model.PutRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.RemoveRoleFromInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.RemoveUserFromGroupRequest;
@@ -66,6 +74,11 @@ import software.amazon.awssdk.services.iam.model.StatusType;
 import software.amazon.awssdk.services.iam.model.TagUserRequest;
 import software.amazon.awssdk.services.iam.model.UntagUserRequest;
 import software.amazon.awssdk.services.iam.model.UpdateAccessKeyRequest;
+import software.amazon.awssdk.services.iam.model.UpdateLoginProfileRequest;
+
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -79,10 +92,16 @@ class IamTest {
     private static final String ROLE_NAME = "sdk-test-role";
     private static final String POLICY_NAME = "sdk-test-policy";
     private static final String INSTANCE_PROFILE_NAME = "sdk-test-profile";
+    private static final String AWS_MANAGED_POLICY_PREFIX = "arn:aws:iam::aws:policy/";
+    private static final String ADMIN_POLICY_ARN = AWS_MANAGED_POLICY_PREFIX + "AdministratorAccess";
+    private static final String READ_ONLY_POLICY_ARN = AWS_MANAGED_POLICY_PREFIX + "ReadOnlyAccess";
+    private static final String LAMBDA_BASIC_POLICY_ARN =
+            AWS_MANAGED_POLICY_PREFIX + "service-role/AWSLambdaBasicExecutionRole";
     private static final String TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
     private static final String POLICY_DOCUMENT = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+    private static final String LOGIN_PROFILE_PASSWORD = "Sdk-Test-P4ssword!";
     private static String policyArn;
     private static String accessKeyId;
 
@@ -130,6 +149,12 @@ class IamTest {
                 try {
                     iam.deletePolicy(DeletePolicyRequest.builder().policyArn(policyArn).build());
                 } catch (Exception ignored) {}
+            }
+            try {
+                iam.detachUserPolicy(DetachUserPolicyRequest.builder()
+                        .userName(USER_NAME).policyArn(READ_ONLY_POLICY_ARN).build());
+            } catch (Exception ignored) {
+                // The policy may not have been attached if the test failed before reaching cleanup.
             }
             try {
                 iam.removeUserFromGroup(RemoveUserFromGroupRequest.builder()
@@ -515,6 +540,54 @@ class IamTest {
                 .anyMatch(p -> INSTANCE_PROFILE_NAME.equals(p.instanceProfileName()));
     }
 
+    // ── Login Profile ──────────────────────────────────────────────────
+
+    @Test
+    @Order(39)
+    void createLoginProfile() {
+        CreateLoginProfileResponse response = iam.createLoginProfile(CreateLoginProfileRequest.builder()
+                .userName(USER_NAME).password(LOGIN_PROFILE_PASSWORD).passwordResetRequired(false).build());
+
+        assertThat(response.loginProfile().userName()).isEqualTo(USER_NAME);
+        assertThat(response.loginProfile().passwordResetRequired()).isFalse();
+        assertThat(response.loginProfile().createDate()).isNotNull();
+    }
+
+    @Test
+    @Order(40)
+    void getLoginProfile() {
+        GetLoginProfileResponse response = iam.getLoginProfile(GetLoginProfileRequest.builder()
+                .userName(USER_NAME).build());
+
+        assertThat(response.loginProfile().userName()).isEqualTo(USER_NAME);
+        assertThat(response.loginProfile().passwordResetRequired()).isFalse();
+    }
+
+    @Test
+    @Order(41)
+    void updateLoginProfile() {
+        iam.updateLoginProfile(UpdateLoginProfileRequest.builder()
+                .userName(USER_NAME).passwordResetRequired(true).build());
+
+        GetLoginProfileResponse response = iam.getLoginProfile(GetLoginProfileRequest.builder()
+                .userName(USER_NAME).build());
+        assertThat(response.loginProfile().passwordResetRequired()).isTrue();
+    }
+
+    @Test
+    @Order(42)
+    void deleteLoginProfile() {
+        iam.deleteLoginProfile(DeleteLoginProfileRequest.builder().userName(USER_NAME).build());
+    }
+
+    @Test
+    @Order(43)
+    void getLoginProfileAfterDeleteThrows() {
+        assertThatThrownBy(() -> iam.getLoginProfile(GetLoginProfileRequest.builder()
+                .userName(USER_NAME).build()))
+                .isInstanceOf(NoSuchEntityException.class);
+    }
+
     // ── Error Cases ────────────────────────────────────────────────────
 
     @Test
@@ -522,6 +595,82 @@ class IamTest {
     void getUserNotFoundThrows() {
         assertThatThrownBy(() -> iam.getUser(GetUserRequest.builder()
                 .userName("nonexistent-user-xyz").build()))
+                .isInstanceOf(NoSuchEntityException.class);
+    }
+
+    // ── AWS managed policies ───────────────────────────────────────────
+    // The catalog is parsed while the native image is built and lives in its
+    // heap, so only a run against a native binary proves the documents survived.
+
+    @Test
+    @Order(33)
+    void getAwsManagedPolicy() {
+        GetPolicyResponse response = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build());
+
+        assertThat(response.policy().policyName()).isEqualTo("AdministratorAccess");
+        assertThat(response.policy().arn()).isEqualTo(ADMIN_POLICY_ARN);
+        assertThat(response.policy().path()).isEqualTo("/");
+        assertThat(response.policy().defaultVersionId()).matches("v[1-9][0-9]*");
+        assertThat(response.policy().isAttachable()).isTrue();
+    }
+
+    @Test
+    @Order(34)
+    void getAwsManagedPolicyWithServiceRolePath() {
+        GetPolicyResponse response =
+                iam.getPolicy(GetPolicyRequest.builder().policyArn(LAMBDA_BASIC_POLICY_ARN).build());
+
+        assertThat(response.policy().policyName()).isEqualTo("AWSLambdaBasicExecutionRole");
+        assertThat(response.policy().path()).isEqualTo("/service-role/");
+    }
+
+    @Test
+    @Order(35)
+    void getAwsManagedPolicyVersionDocument() {
+        String versionId = iam.getPolicy(GetPolicyRequest.builder().policyArn(ADMIN_POLICY_ARN).build())
+                .policy().defaultVersionId();
+        GetPolicyVersionResponse response = iam.getPolicyVersion(GetPolicyVersionRequest.builder()
+                .policyArn(ADMIN_POLICY_ARN).versionId(versionId).build());
+
+        assertThat(response.policyVersion().versionId()).isEqualTo(versionId);
+        assertThat(response.policyVersion().isDefaultVersion()).isTrue();
+        String document = URLDecoder.decode(response.policyVersion().document(), StandardCharsets.UTF_8);
+        assertThat(document).startsWith("{").contains("\"Statement\"").contains("\"Effect\"");
+    }
+
+    @Test
+    @Order(36)
+    void listAwsManagedPolicies() {
+        List<String> names = iam.listPoliciesPaginator(request -> request.scope(PolicyScopeType.AWS))
+                .policies().stream().map(policy -> policy.policyName()).toList();
+
+        assertThat(names).hasSizeGreaterThan(1000)
+                .contains("AdministratorAccess", "ReadOnlyAccess", "AWSLambdaBasicExecutionRole");
+    }
+
+    @Test
+    @Order(37)
+    void attachAwsManagedPolicyToUser() {
+        iam.attachUserPolicy(AttachUserPolicyRequest.builder()
+                .userName(USER_NAME).policyArn(READ_ONLY_POLICY_ARN).build());
+
+        ListAttachedUserPoliciesResponse response = iam.listAttachedUserPolicies(ListAttachedUserPoliciesRequest.builder()
+                .userName(USER_NAME).build());
+
+        assertThat(response.attachedPolicies())
+                .anyMatch(p -> READ_ONLY_POLICY_ARN.equals(p.policyArn())
+                        && "ReadOnlyAccess".equals(p.policyName()));
+
+        iam.detachUserPolicy(DetachUserPolicyRequest.builder()
+                .userName(USER_NAME).policyArn(READ_ONLY_POLICY_ARN).build());
+    }
+
+    @Test
+    @Order(38)
+    void attachUnknownAwsManagedPolicyThrows() {
+        assertThatThrownBy(() -> iam.attachUserPolicy(AttachUserPolicyRequest.builder()
+                .userName(USER_NAME)
+                .policyArn(AWS_MANAGED_POLICY_PREFIX + "NoSuchManagedPolicyXyz").build()))
                 .isInstanceOf(NoSuchEntityException.class);
     }
 }

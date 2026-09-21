@@ -126,6 +126,8 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
+An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted, and Floci logs a warning at startup when hot-reload is enabled that way.
+
 **Docker Compose setup**: enable the feature and share the Docker socket:
 
 ```yaml
@@ -200,13 +202,34 @@ architecture. `Marker` is opaque and signed with a key generated at startup, so 
 edited or previous-run token is rejected with `InvalidParameterValueException` rather than
 applied as a cursor. One divergence: a parameter sent with an empty value
 (`?CompatibleRuntime=`) is treated as absent rather than rejected, because RESTEasy binds an
-empty query value as null. `CreateFunction`/`UpdateFunctionConfiguration`
-validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
-is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
-published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
-Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
-Floci for fetching real AWS content - publish your own copy of the layer's content locally under
-a name you control and reference that ARN instead.
+empty query value as null. Resolution honours the ARN's
+account and partition: an ARN naming another account resolves to nothing rather than to a
+same-named layer of the caller's own, matching the live service, which answers that case with
+`AccessDeniedException` and never substitutes. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
+real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
+... does not exist.`, not silently accepted.
+
+An ARN naming another account or another partition is answered on the live service by the layer's
+resource policy: an AWS-managed public layer resolves, and everything else is
+`AccessDeniedException`. Measured on `CreateFunction` in ap-southeast-1, a foreign-account ARN and
+a cross-partition ARN return the same `AccessDeniedException`, so Floci returns that for both.
+Floci implements no layer permissions and cannot fetch real AWS content, so it cannot tell a
+public layer from a private one; refusing is the faithful default, being the answer AWS gives to
+every foreign ARN except a public one.
+
+Set `floci.services.lambda.accept-external-layer-arns: true`
+(`FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS`) to record a same-partition foreign ARN on the
+function instead of refusing it, which is what a stack attaching Powertools, the AppConfig
+extension or a vendor-published layer needs. The trade is explicit: with it on, Floci also accepts
+an ARN AWS would refuse with `AccessDeniedException`, so a typo or a private third-party layer
+passes here and fails on deploy. The content is never mounted at `/opt` either way, and a warning
+is logged at attach time and again at invoke; publish your own copy of the content locally under a
+name you control if the handler needs it at runtime.
+
+A layer ARN outside the `aws` partition is refused whatever that setting says. Partitions are
+isolated, so no resource policy can ever make such a layer readable, and `GetLayerVersionByArn`
+rejects one outright with `InvalidParameterValueException: Invalid layer version ...`.
 
 ## Not Implemented
 
@@ -244,6 +267,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
@@ -731,6 +755,8 @@ aws lambda update-function-code \
 ## Event Source Mappings
 
 Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
+
+For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS or SNS `DestinationConfig.OnFailure` destinations.
 
 ```bash
 # SQS trigger

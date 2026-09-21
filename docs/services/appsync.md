@@ -5,6 +5,14 @@
 
 Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
 
+## OIDC issuer network policy
+
+AppSync OIDC authentication uses the shared JWT issuer policy. By default, issuer discovery and
+JWKS requests require HTTPS and reject local, private, link-local, and other non-public addresses.
+For an isolated development environment, set `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
+This also applies to API Gateway HTTP API JWT authorizers. The option permits private HTTPS
+targets and HTTP URLs that use a literal private or loopback address.
+
 ## Supported Operations
 
 ### GraphQL API
@@ -21,7 +29,7 @@ Floci implements the AWS AppSync Management API, providing local emulation of Gr
 
 | Operation | Description |
 |---|---|
-| `StartSchemaCreation` | Start schema creation — validates and parses SDL using graphql-java (invalid SDL returns 400) |
+| `StartSchemaCreation` | Start schema creation: validates and parses SDL via the GraphQL sidecar (invalid SDL returns 400) |
 | `GetSchemaCreationStatus` | Get schema creation status |
 | `GetIntrospectionSchema` | Get the introspection schema |
 
@@ -135,9 +143,41 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 ## Schema Registry
 
-`StartSchemaCreation` validates the provided GraphQL SDL using [graphql-java](https://github.com/graphql-java/graphql-java). Invalid schemas are rejected asynchronously (status `FAILED` with details after `PROCESSING`). Valid schemas are registered in an in-memory `SchemaRegistry` and persisted to the schema store.
+Schema parsing and query execution run in the **GraphQL sidecar** (issue #2917), not in Floci's
+own process: [graphql-java](https://github.com/graphql-java/graphql-java) is a ~3.8MB dependency
+used only by AppSync, so keeping it out of Floci's JVM/native image altogether, mirroring the
+Cedar sidecar pattern already used for Verified Permissions, avoids paying that cost in every
+build regardless of whether AppSync is ever used. The sidecar is `floci/floci-sidecar-graphql`,
+published from [floci-io/floci-sidecars](https://github.com/floci-io/floci-sidecars) and pinned to
+an exact version (a cached `latest` is never re-pulled): pull it ahead of time on an air-gapped
+host with `docker pull floci/floci-sidecar-graphql:0.2.0`. `GraphqlSidecarManager` lazily starts
+the sidecar container on first use and checks the contract version it reports on `/health`; a
+sidecar speaking another contract major is refused immediately with an `InternalServerException`
+naming the image and the variable to change. `floci.services.appsync.graphql-url` points at an
+already-running instance instead (Docker Compose setups) and is checked the same way.
 
-On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across restarts (memory/persistent/hybrid/wal).
+The sidecar itself carries no AppSync-specific knowledge: no `@aws_auth`, no IAM, no directive
+semantics, and no AWS scalar vocabulary either. `StartSchemaCreation` sends the SDL (with
+AppSync's directive declarations and the 17 custom scalar types injected, customers never declare
+those themselves) plus a `scalars` mapping (each AppSync scalar name onto one of the sidecar's
+generic coercion kinds, e.g. `AWSDateTime` onto `date-time`) to the sidecar's
+`/v1/schema/validate`, which parses and compiles it generically. Invalid schemas are rejected
+asynchronously (status `FAILED` with details after `PROCESSING`), using the sidecar's structured,
+per-problem errors to build the same `codeErrors` shape this API always returned. Valid schemas
+are registered in Floci's own `SchemaRegistry` (now just a raw-SDL cache; nothing is compiled
+in-process) and persisted to the schema store.
+
+At execution time, Floci calls the sidecar's `/v1/plan` to learn which `(type, field)` coordinates
+a query will visit and what directives are on each, computes `@aws_auth`/IAM/Cognito/Lambda
+authorization decisions itself (this AWS-specific logic never runs in the sidecar), and passes any
+denied coordinates to `/v1/execute` as an opaque list; the sidecar nulls those fields out with the
+given error, without ever knowing why.
+
+On emulator startup, after storage load and orphan recovery, Floci **rehydrates** SUCCESS SDLs
+from the schema store into `SchemaRegistry` so `POST /v1/apis/{apiId}/graphql` works across
+restarts (memory/persistent/hybrid/wal), without re-validating against the sidecar, since a
+persisted SDL already passed validation once and restarts shouldn't eagerly start a container that
+might otherwise never be needed.
 
 The following **AWS scalar types** are pre-registered and available in any schema without requiring explicit `scalar` declarations:
 
@@ -176,7 +216,7 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 
 Unknown directives are rejected during schema registration.
 
-Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java.
+Schema extensions (`extend type Query { ... }`) are supported natively through graphql-java, running in the sidecar.
 
 ## GraphQL execute (data-plane)
 
@@ -222,8 +262,8 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 | Mode | Emulator notes |
 |---|---|
 | API_KEY | Lookup by `ApiKey.id`, which is the key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
-| AWS_IAM | Parses `Credential=` access key; no HMAC. Known keys evaluate `appsync:GraphQL`. Unknown/`test` keys are emulator ALLOW. |
-| Cognito / OIDC | JWT payload decode only (no JWKS). OIDC as the sole mode skips the `iss` check. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
+| AWS_IAM | Verifies a real header-signed SigV4 request (`appsync` service, fixed `/v1/apis/{apiId}/graphql` canonical path, 5-minute clock skew): the `Credential=` access key must resolve to a secret via `IamService`, and the signature must match. The legacy `test`/`test` pair is still emulator ALLOW, but it must be signed with secret `test` like any other key, and it is not a bypass. A temporary (`ASIA...`) credential must also present the `X-Amz-Security-Token` header matching the one issued for it. An unknown or unsigned key is always 401 and never becomes the account-root identity. Known keys additionally evaluate `appsync:GraphQL`. |
+| Cognito / OIDC | JWT signature is verified, not just decoded. Cognito checks the token against the issuing user pool's own RS256 signing key (`alg`, `kid`, issuer, audience/`clientId`, expiry); OIDC checks it against the configured issuer's published JWKS (via OIDC discovery), the same way the HTTP API JWT authorizer does. Both fail closed: an unreachable issuer, unsupported algorithm (including `none`), unmatched `kid`, or bad signature is 401. OIDC as the sole mode still skips the token's own `iss` claim check, but the signature is always verified against the configured issuer's keys. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
 | Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
 
 SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
@@ -286,6 +326,18 @@ These AWS AppSync capabilities are not yet implemented and are tracked in future
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_APPSYNC_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_LOOPS` | `10000` | Maximum `#foreach` iterations a VTL resolver template may execute |
+| `FLOCI_SERVICES_APPSYNC_VTL_MAX_OUTPUT_CHARS` | `1048576` | Maximum characters a VTL resolver template may render |
+| `FLOCI_SERVICES_APPSYNC_VTL_TIMEOUT_MILLIS` | `5000` | Maximum wall-clock time a VTL resolver template may spend evaluating |
+
+Request/response mapping templates render inside the same VTL reflection sandbox described for
+API Gateway in [api-gateway.md](api-gateway.md#configuration) (`SecureUberspector`, with `Class`,
+`ClassLoader`, `Runtime`, `ProcessBuilder`, `System`, `Thread`, `java.io.File` and related
+classes/packages blocked), and are subject to the same three limits above. The loop cap truncates
+a `#foreach` at the configured iteration count and lets the template finish rendering with
+whatever output it produced up to that point; it does not fail the resolver. Exceeding the
+output-size or execution-time limit does fail the resolver, the same way any other VTL evaluation
+error does.
 
 ## Examples
 

@@ -14,8 +14,11 @@ import io.github.hectorvent.floci.services.wafv2.model.WebAcl;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -130,6 +133,7 @@ public class WafV2Service {
         if (findByName(ipSetStore, scope, name) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate IPSet name: " + name, 400);
         }
+        validateAddresses(ipSet.getAddresses(), ipSet.getIpAddressVersion());
         ipSet.setId(UUID.randomUUID().toString());
         ipSet.setName(name);
         ipSet.setScope(scope);
@@ -148,6 +152,7 @@ public class WafV2Service {
                               List<String> addresses, String name, String lockToken) {
         IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
+        validateAddresses(addresses, existing.getIpAddressVersion());
         existing.setDescription(description);
         existing.setAddresses(addresses);
         return rotate(existing, ipSetStore, scope);
@@ -328,58 +333,67 @@ public class WafV2Service {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return taggable(resourceArn).getTags();
+        return tagsOf(taggable(resourceArn));
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = taggable(resourceArn);
-        applyTagged(resource, r -> r.getTags().putAll(tags));
+        tagsOf(resource).putAll(tags);
+        persistTagged(resource);
     }
 
     public void untagResource(String resourceArn, List<String> keys) {
         Object resource = taggable(resourceArn);
-        applyTagged(resource, r -> keys.forEach(r.getTags()::remove));
+        keys.forEach(tagsOf(resource)::remove);
+        persistTagged(resource);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private interface Tagged { Map<String, String> getTags(); }
-
-    private Tagged taggable(String resourceArn) {
+    private Object taggable(String resourceArn) {
         if (resourceArn == null) {
             throw new AwsException("WAFInvalidParameterException", "ResourceARN is required.", 400);
         }
         WebAcl acl = scanArn(webAclStore, resourceArn);
         if (acl != null) {
-            return acl::getTags;
+            return acl;
         }
         IpSet ip = scanArn(ipSetStore, resourceArn);
         if (ip != null) {
-            return ip::getTags;
+            return ip;
         }
         RegexPatternSet rx = scanArn(regexStore, resourceArn);
         if (rx != null) {
-            return rx::getTags;
+            return rx;
         }
         RuleGroup rg = scanArn(ruleGroupStore, resourceArn);
         if (rg != null) {
-            return rg::getTags;
+            return rg;
         }
         throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 404);
     }
 
-    private void applyTagged(Object resource, java.util.function.Consumer<Tagged> mutation) {
+    private Map<String, String> tagsOf(Object resource) {
         if (resource instanceof WebAcl a) {
-            mutation.accept(a::getTags);
+            return a.getTags();
+        } else if (resource instanceof IpSet i) {
+            return i.getTags();
+        } else if (resource instanceof RegexPatternSet r) {
+            return r.getTags();
+        } else if (resource instanceof RuleGroup g) {
+            return g.getTags();
+        }
+        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 404);
+    }
+
+    private void persistTagged(Object resource) {
+        if (resource instanceof WebAcl a) {
             webAclStore.put(key(a.getScope(), a.getId()), a);
         } else if (resource instanceof IpSet i) {
-            mutation.accept(i::getTags);
             ipSetStore.put(key(i.getScope(), i.getId()), i);
         } else if (resource instanceof RegexPatternSet r) {
-            mutation.accept(r::getTags);
             regexStore.put(key(r.getScope(), r.getId()), r);
         } else if (resource instanceof RuleGroup g) {
-            mutation.accept(g::getTags);
             ruleGroupStore.put(key(g.getScope(), g.getId()), g);
         }
     }
@@ -479,6 +493,74 @@ public class WafV2Service {
         if (name == null || name.isBlank()) {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
         }
+    }
+
+    /**
+     * Validates that every entry in an IPSet's {@code Addresses} is a CIDR block matching
+     * the declared {@code IPAddressVersion}, per the {@code CreateIPSet}/{@code UpdateIPSet}
+     * contract: a bare IP address with no prefix is rejected, as is a prefix outside
+     * 1-32 for IPv4 or 1-128 for IPv6 (AWS WAF supports all CIDR ranges except {@code /0}).
+     */
+    private void validateAddresses(List<String> addresses, String ipAddressVersion) {
+        boolean ipv6 = "IPV6".equals(ipAddressVersion);
+        if (!ipv6 && !"IPV4".equals(ipAddressVersion)) {
+            throw invalidParameter("IP_ADDRESS_VERSION", ipAddressVersion, "must be IPV4 or IPV6.");
+        }
+        if (addresses == null || addresses.isEmpty()) {
+            return;
+        }
+        for (String address : addresses) {
+            validateCidrAddress(address, ipv6);
+        }
+    }
+
+    private void validateCidrAddress(String address, boolean ipv6) {
+        int maxPrefix = ipv6 ? 128 : 32;
+        int slash = address == null ? -1 : address.lastIndexOf('/');
+        if (slash < 1 || slash == address.length() - 1) {
+            throw invalidAddress(address,
+                    "must be specified in CIDR notation, e.g. \"203.0.113.10/32\" (a bare IP address is not valid).");
+        }
+        String addressPart = address.substring(0, slash);
+        int prefixLength;
+        try {
+            prefixLength = Integer.parseInt(address.substring(slash + 1));
+        } catch (NumberFormatException e) {
+            throw invalidAddress(address, "the CIDR prefix length must be an integer.");
+        }
+        InetAddress parsed;
+        try {
+            parsed = InetAddress.ofLiteral(addressPart);
+        } catch (IllegalArgumentException e) {
+            throw invalidAddress(address, "the address portion is not a valid IP literal.");
+        }
+        boolean isIpv4Address = parsed instanceof Inet4Address;
+        if (ipv6 == isIpv4Address) {
+            throw invalidAddress(address,
+                    "the address does not match the IPSet's IPAddressVersion (" + (ipv6 ? "IPV6" : "IPV4") + ").");
+        }
+        if (prefixLength < 1 || prefixLength > maxPrefix) {
+            throw invalidAddress(address,
+                    "the CIDR prefix length must be between 1 and " + maxPrefix + ".");
+        }
+    }
+
+    private AwsException invalidAddress(String address, String reason) {
+        return invalidParameter("IP_ADDRESS", address, reason);
+    }
+
+    /**
+     * Builds a {@code WAFInvalidParameterException} with the Field/Parameter/Reason triple
+     * carried as structured extendedData, matching the real WAFV2 {@code ParameterExceptionField}
+     * enum (e.g. {@code IP_ADDRESS}, {@code IP_ADDRESS_VERSION}) rather than a free-text message.
+     */
+    private AwsException invalidParameter(String field, String parameter, String reason) {
+        Map<String, Object> extendedData = new LinkedHashMap<>();
+        extendedData.put("Field", field);
+        extendedData.put("Parameter", parameter);
+        extendedData.put("Reason", reason);
+        return new AwsException("WAFInvalidParameterException",
+                "Field: " + field + ", Parameter: " + parameter + ", Reason: " + reason, 400, extendedData);
     }
 
     private String key(String scope, String id) {

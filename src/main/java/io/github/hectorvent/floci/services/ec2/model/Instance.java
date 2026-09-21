@@ -22,6 +22,7 @@ public class Instance {
     private String subnetId;
     private String vpcId;
     private String privateIpAddress;
+    private String logicalPrivateIpAddress;
     private String publicIpAddress;
     private String privateDnsName;
     private String publicDnsName;
@@ -61,6 +62,15 @@ public class Instance {
     // AWS's launch defaults through effectiveMetadataOptions().
     private LaunchTemplateData.MetadataOptions metadataOptions;
 
+    // The credit option this instance acquired, at launch from the request or from its burstable
+    // family's default, or at a resize onto a burstable type. Stored rather than derived from the
+    // current instance type on read, because AWS keeps reporting the unlimited option of an
+    // instance that was configured as a T2, T3 or T3a and then resized onto another family. Null
+    // for an instance that never acquired one. CreditSpecification is not a member of the Instance
+    // shape DescribeInstances returns, so this reaches the wire only through
+    // DescribeInstanceCreditSpecifications.
+    private String creditSpecificationCpuCredits;
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -73,6 +83,7 @@ public class Instance {
      */
     private String imdsSourceIp;
     private String userData;
+    private String encodedUserData;
     private int sshHostPort;
     private long terminatedAt;
 
@@ -108,6 +119,10 @@ public class Instance {
 
     public String getPrivateIpAddress() { return privateIpAddress; }
     public void setPrivateIpAddress(String privateIpAddress) { this.privateIpAddress = privateIpAddress; }
+    public String getLogicalPrivateIpAddress() { return logicalPrivateIpAddress; }
+    public void setLogicalPrivateIpAddress(String logicalPrivateIpAddress) {
+        this.logicalPrivateIpAddress = logicalPrivateIpAddress;
+    }
 
     public String getPublicIpAddress() { return publicIpAddress; }
     public void setPublicIpAddress(String publicIpAddress) { this.publicIpAddress = publicIpAddress; }
@@ -183,6 +198,8 @@ public class Instance {
     public String getDockerContainerId() { return dockerContainerId; }
     public void setDockerContainerId(String dockerContainerId) { this.dockerContainerId = dockerContainerId; }
 
+    public String getEncodedUserData() { return encodedUserData; }
+    public void setEncodedUserData(String encodedUserData) { this.encodedUserData = encodedUserData; }
     public String getUserData() { return userData; }
     public void setUserData(String userData) { this.userData = userData; }
 
@@ -217,6 +234,9 @@ public class Instance {
 
     public LaunchTemplateData.MetadataOptions getMetadataOptions() { return metadataOptions; }
     public void setMetadataOptions(LaunchTemplateData.MetadataOptions metadataOptions) { this.metadataOptions = metadataOptions; }
+
+    public String getCreditSpecificationCpuCredits() { return creditSpecificationCpuCredits; }
+    public void setCreditSpecificationCpuCredits(String creditSpecificationCpuCredits) { this.creditSpecificationCpuCredits = creditSpecificationCpuCredits; }
 
     /** The stored metadata options, or AWS's launch defaults for a record that has none. */
     public LaunchTemplateData.MetadataOptions effectiveMetadataOptions() {

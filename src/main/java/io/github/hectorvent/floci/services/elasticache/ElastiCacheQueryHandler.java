@@ -3,15 +3,15 @@ package io.github.hectorvent.floci.services.elasticache;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.BackupWindows;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheParameterGroup;
-import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
+import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
@@ -24,6 +24,9 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -184,7 +187,7 @@ public class ElastiCacheQueryHandler {
         String filterId = params.getFirst("ReplicationGroupId");
         try {
             Collection<ReplicationGroup> groups = service.listReplicationGroups(filterId);
-            var xml = new XmlBuilder().start("ReplicationGroups");
+            XmlBuilder xml = new XmlBuilder().start("ReplicationGroups");
             for (ReplicationGroup g : groups) {
                 xml.raw(replicationGroupXml(g));
             }
@@ -273,7 +276,7 @@ public class ElastiCacheQueryHandler {
         String filterEngine = params.getFirst("Engine");
         try {
             Collection<ElastiCacheUser> users = service.listUsers(filterId, filterEngine);
-            var xml = new XmlBuilder().start("Users");
+            XmlBuilder xml = new XmlBuilder().start("Users");
             for (ElastiCacheUser u : users) {
                 xml.start("member").raw(userXml(u)).end("member");
             }
@@ -384,7 +387,7 @@ public class ElastiCacheQueryHandler {
             if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
                 clusterList.addAll(memcachedService.listCacheClusters(filterId));
             }
-            var xml = new XmlBuilder().start("CacheClusters");
+            XmlBuilder xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {
                 xml.raw(cacheClusterXml(c, showNodeInfo));
             }
@@ -401,7 +404,7 @@ public class ElastiCacheQueryHandler {
     private String memberCacheClusterXml(ElastiCacheService.MemberCacheCluster member, boolean showNodeInfo) {
         ReplicationGroup g = member.group();
         boolean authTokenEnabled = g.getAuthMode() == AuthMode.PASSWORD;
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("CacheCluster")
                   .elem("CacheClusterId", member.cacheClusterId())
                   .elem("CacheClusterStatus", memberCacheClusterStatus(g))
@@ -483,7 +486,7 @@ public class ElastiCacheQueryHandler {
                     params.getFirst("CacheSubnetGroupDescription"),
                     parseSubnetIds(params),
                     parseTags(params));
-            var xml = new XmlBuilder();
+            XmlBuilder xml = new XmlBuilder();
             appendSubnetGroup(xml, group);
             return Response.ok(AwsQueryResponse.envelope("CreateCacheSubnetGroup", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
@@ -495,7 +498,7 @@ public class ElastiCacheQueryHandler {
         try {
             List<CacheSubnetGroup> groups =
                     service.describeCacheSubnetGroups(params.getFirst("CacheSubnetGroupName"));
-            var xml = new XmlBuilder().start("CacheSubnetGroups");
+            XmlBuilder xml = new XmlBuilder().start("CacheSubnetGroups");
             groups.forEach(group -> appendSubnetGroup(xml, group));
             xml.end("CacheSubnetGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeCacheSubnetGroups", AwsNamespaces.EC, xml.build())).build();
@@ -510,7 +513,7 @@ public class ElastiCacheQueryHandler {
                     params.getFirst("CacheSubnetGroupName"),
                     params.getFirst("CacheSubnetGroupDescription"),
                     parseSubnetIds(params));
-            var xml = new XmlBuilder();
+            XmlBuilder xml = new XmlBuilder();
             appendSubnetGroup(xml, group);
             return Response.ok(AwsQueryResponse.envelope("ModifyCacheSubnetGroup", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
@@ -583,7 +586,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                     params.getFirst("CacheParameterGroupFamily"),
                     params.getFirst("Description"),
                     parseTags(params));
-            var xml = new XmlBuilder();
+            XmlBuilder xml = new XmlBuilder();
             appendParameterGroup(xml, group);
             return Response.ok(AwsQueryResponse.envelope("CreateCacheParameterGroup", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
@@ -595,7 +598,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         try {
             List<CacheParameterGroup> groups =
                     service.describeCacheParameterGroups(params.getFirst("CacheParameterGroupName"));
-            var xml = new XmlBuilder().start("CacheParameterGroups");
+            XmlBuilder xml = new XmlBuilder().start("CacheParameterGroups");
             groups.forEach(group -> appendParameterGroup(xml, group));
             xml.end("CacheParameterGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeCacheParameterGroups", AwsNamespaces.EC, xml.build())).build();
@@ -608,7 +611,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         try {
             String name = params.getFirst("CacheParameterGroupName");
             service.modifyCacheParameterGroup(name, parseParameterNameValues(params));
-            var xml = new XmlBuilder().elem("CacheParameterGroupName", name);
+            XmlBuilder xml = new XmlBuilder().elem("CacheParameterGroupName", name);
             return Response.ok(AwsQueryResponse.envelope("ModifyCacheParameterGroup", AwsNamespaces.EC, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
@@ -623,7 +626,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             String source = params.getFirst("Source");
             boolean includeUserParameters = source == null || source.isBlank() || "user".equals(source);
 
-            var xml = new XmlBuilder().start("Parameters");
+            XmlBuilder xml = new XmlBuilder().start("Parameters");
             if (includeUserParameters) {
                 group.getParameters().forEach((name, value) -> xml
                         .start("Parameter")
@@ -706,7 +709,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                                 arn[6] + " is not present", 404))
                         .getTags();
             }
-            var xml = new XmlBuilder().start("TagList");
+            XmlBuilder xml = new XmlBuilder().start("TagList");
             tags.forEach((key, value) -> xml.start("Tag")
                     .elem("Key", key)
                     .elem("Value", value)
@@ -813,7 +816,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
      */
     private String cacheClusterXml(CacheCluster c, boolean showNodeInfo) {
         Endpoint ep = c.getConfigurationEndpoint();
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("CacheCluster")
                   .elem("CacheClusterId", c.getCacheClusterId())
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().name().toLowerCase())
@@ -920,7 +923,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         Endpoint ep = g.getConfigurationEndpoint();
         boolean authTokenEnabled = g.getAuthMode() == AuthMode.PASSWORD;
         List<ElastiCacheService.MemberCacheCluster> members = service.memberCacheClusters(g);
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("ReplicationGroup")
                   .elem("ReplicationGroupId", g.getReplicationGroupId())
                   .elem("Description", g.getDescription())
@@ -1060,7 +1063,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
 
     private static String extractUriHost(String token) {
         try {
-            return java.net.URI.create("http://" + token).getHost();
+            return URI.create("http://" + token).getHost();
         } catch (Exception e) {
             return "";
         }
@@ -1068,15 +1071,15 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
 
     private static String extractQueryParam(String token, String name) {
         try {
-            String rawQuery = java.net.URI.create("http://" + token).getRawQuery();
+            String rawQuery = URI.create("http://" + token).getRawQuery();
             if (rawQuery == null) {
                 return "";
             }
             for (String pair : rawQuery.split("&")) {
                 int eq = pair.indexOf('=');
                 if (eq >= 0 && name.equals(pair.substring(0, eq))) {
-                    return java.net.URLDecoder.decode(pair.substring(eq + 1),
-                            java.nio.charset.StandardCharsets.UTF_8);
+                    return URLDecoder.decode(pair.substring(eq + 1),
+                            StandardCharsets.UTF_8);
                 }
             }
         } catch (Exception ignored) {}

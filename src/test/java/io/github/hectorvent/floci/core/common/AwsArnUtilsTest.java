@@ -6,7 +6,10 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link AwsArnUtils} is the emulator's shared ARN helper and had no test of its own, despite
@@ -159,6 +162,66 @@ class AwsArnUtilsTest {
         assertEquals("arn:aws-cn:secretsmanager:us-east-1:000000000000:secret:s",
                 new AwsArnUtils.Arn("aws-cn", "secretsmanager", "us-east-1", "000000000000",
                         "secret:s").toString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:sqs:us-east-1:000000000000:my-queue",
+            "arn:aws-us-gov:sqs:us-gov-west-1:000000000000:my-queue",
+            "arn:aws-cn:s3:::bucket",
+            "arn:aws:lambda:us-east-1:000000000000:function:f:PROD"})
+    void isArnAcceptsAnyPartition(String value) {
+        assertTrue(AwsArnUtils.isArn(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"my-queue", "arn:aws:sqs:us-east-1:000000000000", "arn:", "", "  "})
+    void isArnRejectsNonArns(String value) {
+        assertFalse(AwsArnUtils.isArn(value));
+    }
+
+    @Test
+    void isArnRejectsNullRatherThanThrowing() {
+        assertFalse(AwsArnUtils.isArn(null));
+    }
+
+    /**
+     * The shape the {@code startsWith("arn:aws:dynamodb:")} probes were reaching for: is this
+     * identifier an ARN for my service, whatever partition it came from.
+     */
+    @Test
+    void isArnForMatchesTheServiceInAnyPartition() {
+        assertTrue(AwsArnUtils.isArnFor("arn:aws:dynamodb:us-east-1:000000000000:table/t",
+                "dynamodb"));
+        assertTrue(AwsArnUtils.isArnFor("arn:aws-cn:dynamodb:cn-north-1:000000000000:table/t",
+                "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor("arn:aws:kinesis:us-east-1:000000000000:stream/s",
+                "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor("my-table", "dynamodb"));
+        assertFalse(AwsArnUtils.isArnFor(null, "dynamodb"));
+    }
+
+    @Test
+    void s3ObjectArnSplitsBucketAndKey() {
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "firelens/extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/firelens/extra.conf"));
+        assertEquals(new AwsArnUtils.S3ObjectRef("logs", "extra.conf"),
+                AwsArnUtils.parseS3ObjectArn("arn:aws:s3:us-east-1:000000000000:logs/extra.conf"));
+    }
+
+    /**
+     * Everything ECS rejects as "Invalid arn syntax" for a FireLens {@code config-file-value}:
+     * not an ARN at all (the {@code s3://bucket/key} form users try), another service's ARN, and
+     * an ARN with no key or no bucket. Null rather than an exception, because the same helper
+     * backs the defensive path at task launch.
+     */
+    @Test
+    void s3ObjectArnIsNullForAnythingThatIsNotAnS3Object() {
+        assertNull(AwsArnUtils.parseS3ObjectArn("s3://logs/extra.conf"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:s3:::logs/"));
+        assertNull(AwsArnUtils.parseS3ObjectArn("arn:aws:sqs:us-east-1:000000000000:my-queue"));
+        assertNull(AwsArnUtils.parseS3ObjectArn(null));
     }
 
     @Test

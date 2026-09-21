@@ -13,6 +13,7 @@ import java.security.NoSuchAlgorithmException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -485,6 +486,68 @@ class S3IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("InvalidLocationConstraint"));
+    }
+
+    @Test
+    void createBucketRejectsOverlyLongBucketName() {
+        String longBucketName = "30388849b0eaef3dfba3aa83849d28987be6fb7920bdbf3233bdc8e966f73870.json";
+        given()
+        .when()
+            .put("/" + longBucketName)
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidBucketName"));
+    }
+
+    @Test
+    void createBucketRejectsNonXmlPayload() {
+        given()
+            .contentType("application/json")
+            .body("{\"key\":\"value\"}")
+        .when()
+            .put("/malformed-xml-bucket")
+        .then()
+            .statusCode(400)
+            .body(containsString("MalformedXML"));
+    }
+
+    @Test
+    void createBucketReroutesMisplacedVirtualHostedPutObject() {
+        String targetBucket = "reroute-target-bucket";
+        String objectKey = "misplaced-file.json";
+        String content = "{\"message\":\"hello from misplaced put\"}";
+
+        given().put("/" + targetBucket).then().statusCode(200);
+
+        // PutObject request arriving on single path segment with custom Host
+        given()
+            .header("Host", targetBucket + ".floci.apps.custom.com")
+            .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+            .contentType("application/json")
+            .body(content)
+        .when()
+            .put("/" + objectKey)
+        .then()
+            .statusCode(200);
+
+        // Verify stored in targetBucket
+        given()
+        .when()
+            .get("/" + targetBucket + "/" + objectKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo(content));
+
+        // Verify objectKey was not created as bucket
+        given()
+        .when()
+            .head("/" + objectKey)
+        .then()
+            .statusCode(404);
+
+        // Clean up
+        given().delete("/" + targetBucket + "/" + objectKey).then().statusCode(204);
+        given().delete("/" + targetBucket).then().statusCode(204);
     }
 
     @Test
@@ -2244,6 +2307,51 @@ class S3IntegrationTest {
     }
 
     // --- ListObjectsV2 pagination ---
+
+    @Test
+    @Order(100)
+    void listObjectsValidatesMaxKeys() {
+        String bucket = "max-keys-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("a").when().put("/" + bucket + "/a.txt").then().statusCode(200);
+        try {
+            // max-keys=0 is a valid request for an empty page: no keys, and IsTruncated stays false
+            // even though the bucket has objects.
+            for (String query : List.of("?max-keys=0", "?list-type=2&max-keys=0")) {
+                given()
+                .when()
+                    .get("/" + bucket + query)
+                .then()
+                    .statusCode(200)
+                    .body(containsString("<MaxKeys>0</MaxKeys>"))
+                    .body(containsString("<IsTruncated>false</IsTruncated>"))
+                    .body(not(containsString("<Key>")))
+                    .body(not(containsString("<NextContinuationToken>")));
+            }
+            given()
+            .when()
+                .get("/" + bucket + "?versions&max-keys=0")
+            .then()
+                .statusCode(200)
+                .body(containsString("<MaxKeys>0</MaxKeys>"))
+                .body(containsString("<IsTruncated>false</IsTruncated>"))
+                .body(not(containsString("<Version>")));
+
+            for (String invalid : List.of("-1", "abc", "2147483648")) {
+                given()
+                .when()
+                    .get("/" + bucket + "?list-type=2&max-keys=" + invalid)
+                .then()
+                    .statusCode(400)
+                    .body(containsString("<Code>InvalidArgument</Code>"))
+                    .body(containsString("<ArgumentName>maxKeys</ArgumentName>"))
+                    .body(containsString("<ArgumentValue>" + invalid + "</ArgumentValue>"));
+            }
+        } finally {
+            given().when().delete("/" + bucket + "/a.txt");
+            given().when().delete("/" + bucket);
+        }
+    }
 
     @Test
     @Order(101)

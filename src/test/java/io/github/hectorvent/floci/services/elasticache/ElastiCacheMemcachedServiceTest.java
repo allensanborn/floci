@@ -170,7 +170,6 @@ class ElastiCacheMemcachedServiceTest {
 
         // Delete must not reach for a container that was never created.
         service.deleteCacheCluster("no-docker-cluster");
-        org.mockito.Mockito.verify(containerManager, org.mockito.Mockito.never())
-                .stop(org.mockito.ArgumentMatchers.any());
+        verify(containerManager, never()).stop(any());
     }
 }

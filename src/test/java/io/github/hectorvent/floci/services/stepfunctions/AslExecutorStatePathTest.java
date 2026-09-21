@@ -123,6 +123,16 @@ class AslExecutorStatePathTest {
     }
 
     @Test
+    void passOutputPathSupportsFilterExpressions() throws Exception {
+        assertOutput("""
+                {"StartAt":"Pass","States":{
+                  "Pass":{"Type":"Pass","OutputPath":"$.Payload[?(@.title)]","End":true}}}
+                """,
+                "{\"Payload\":[{\"title\":\"first\"},{\"title\":false},{\"other\":1}]}",
+                "[{\"title\":\"first\"},{\"title\":false}]");
+    }
+
+    @Test
     void succeedAppliesInputPathBeforeOutputPath() throws Exception {
         assertOutput("""
                 {"StartAt":"Done","States":{
@@ -163,6 +173,21 @@ class AslExecutorStatePathTest {
                 """,
                 "{\"ids\":[1,2]}",
                 "[{},{}]");
+    }
+
+    @Test
+    void mapItemsPathCanReadOriginalExecutionInputFromContext() throws Exception {
+        assertOutput("""
+                {"StartAt":"Each","States":{
+                  "Each":{"Type":"Map","InputPath":"$.scoped",
+                    "ItemsPath":"$$.Execution.Input.ids","MaxConcurrency":1,
+                    "ItemSelector":{"id.$":"$$.Map.Item.Value"},
+                    "Iterator":{"StartAt":"Pass","States":{
+                      "Pass":{"Type":"Pass","End":true}}},
+                    "End":true}}}
+                """,
+                "{\"ids\":[1,2],\"scoped\":{\"ignored\":true}}",
+                "[{\"id\":1},{\"id\":2}]");
     }
 
     @Test

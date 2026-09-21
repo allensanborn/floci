@@ -69,9 +69,14 @@ public class ResourceArnBuilder {
         if (stripped.isEmpty()) {
             return AwsArnUtils.Arn.of("s3", "", "", "*").toString();
         }
-        int slash = stripped.indexOf('/');
-        if (slash < 0) {
-            return AwsArnUtils.Arn.of("s3", "", "", stripped).toString();
+        // S3VirtualHostFilter rewrites a bucket-level virtual-hosted request (GET /) to
+        // /bucket/, and the empty key after that separator is not part of the resource.
+        // A policy names the bucket as arn:aws:s3:::bucket, so the trailing slash has to
+        // go or a bucket-level ARN never matches. A key that itself ends in a slash
+        // (a folder marker such as folder/) keeps it, because there the slash is key data.
+        int firstSlash = stripped.indexOf('/');
+        if (firstSlash == stripped.length() - 1) {
+            stripped = stripped.substring(0, firstSlash);
         }
         return AwsArnUtils.Arn.of("s3", "", "", stripped).toString();
     }
@@ -263,7 +268,7 @@ public class ResourceArnBuilder {
     }
 
     private String toDynamoDbTableArn(String tableName, String region, String accountId) {
-        if (tableName.startsWith("arn:aws:dynamodb:")) {
+        if (AwsArnUtils.isArnFor(tableName, "dynamodb")) {
             return tableName;
         }
         return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
@@ -282,7 +287,7 @@ public class ResourceArnBuilder {
             if (json.hasNonNull("StreamName")) {
                 String streamName = json.get("StreamName").asText().trim();
                 if (!streamName.isEmpty()) {
-                    if (streamName.startsWith("arn:aws:kinesis:")) {
+                    if (AwsArnUtils.isArnFor(streamName, "kinesis")) {
                         return streamName;
                     }
                     return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/" + streamName).toString();
@@ -305,7 +310,7 @@ public class ResourceArnBuilder {
             if (json.hasNonNull("SecretId")) {
                 String secretId = json.get("SecretId").asText().trim();
                 if (!secretId.isEmpty()) {
-                    if (secretId.startsWith("arn:aws:secretsmanager:")) {
+                    if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
                         return secretId;
                     }
                     return AwsArnUtils.Arn.of("secretsmanager", region, accountId, "secret:" + secretId).toString();
@@ -322,7 +327,7 @@ public class ResourceArnBuilder {
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {
-                    if (name.startsWith("arn:aws:ssm:")) {
+                    if (AwsArnUtils.isArnFor(name, "ssm")) {
                         return name;
                     }
                     String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;

@@ -239,9 +239,33 @@ nothing here performs the TLS handshake they describe.
 
 | Action | Description |
 |--------|-------------|
-| CreateLoginProfile | Creates a password login profile for a user. |
+| CreateLoginProfile | Creates a console password login profile for a user. |
+| GetLoginProfile | Returns a user's login profile. |
+| UpdateLoginProfile | Updates a user's login profile password and/or reset-required flag. |
 | DeleteLoginProfile | Deletes a user's login profile. |
-| UpdateLoginProfile | Updates a user's login profile password settings. |
+
+`UserName` is optional on `CreateLoginProfile`, `GetLoginProfile` and `DeleteLoginProfile`: it
+defaults to the user resolved from the signing access key, the same fallback `GetUser` uses. It is
+required on `UpdateLoginProfile`, matching the AWS API.
+
+A user holds at most one login profile: `CreateLoginProfile` on a user that already has one
+returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user with none return
+`NoSuchEntity`. `Password` is required on `CreateLoginProfile` and optional on
+`UpdateLoginProfile`; an omitted field on `UpdateLoginProfile` (`Password` or
+`PasswordResetRequired`) leaves that field unchanged, unlike `UpdateAccountPasswordPolicy`'s
+wholesale replace. A password must be 1–128 characters from AWS's documented password character
+class, and when the account has an [account password policy](#account-password-policy) set, it is
+also checked against that policy's length and character-class requirements, with
+`PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
+echoed back by any of these actions, matching AWS.
+
+`DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
+keys, inline policies, attached managed policies, or group memberships: remove those first. Floci
+has no actions that create signing certificates, SSH public keys, Git credentials, or MFA devices,
+so there is nothing of those kinds to block on. Renaming a user with `UpdateUser` carries its login
+profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
+policy documents that name the user's ARN, so a resource or trust policy that referred to the old
+name still refers to it after a rename.
 
 ### Policy Simulation
 
@@ -310,7 +334,9 @@ Requests signed with the seeded access key return the deployer user ARN from `st
 
 By default Floci accepts any credentials without enforcing IAM policies — all requests are allowed through regardless of what policies are attached to the calling identity. This preserves backward compatibility and keeps the default setup frictionless.
 
-Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS request filter. Every inbound request is then evaluated against the identity-based policies of the calling IAM user or assumed role before it reaches the service handler.
+Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS request filter. Every inbound request is then evaluated against the identity-based policies of the calling IAM user or assumed role before it reaches the service handler. This includes IAM's own management actions (`iam:CreateUser`, `iam:CreateGroup`, `iam:AttachUserPolicy`, `iam:DeleteUser`, ...): a user whose policies only grant, say, `s3:*` receives `AccessDenied` when calling them.
+
+The startup banner reports the effective state (`IAM: policy enforcement enabled` / `disabled`). If requests you expect to be denied keep succeeding, check that line first: the flag is only read under the name below, and any other spelling (for example `FLOCI_IAM_STRICT_VALIDATION`, which does not exist) is silently ignored, leaving the permissive default in place.
 
 ### Enable enforcement
 
@@ -335,6 +361,15 @@ Policy evaluation follows the standard AWS precedence:
 4. If a session policy is present, it must also explicitly allow the request
 5. If a permission boundary is present, it must also explicitly allow the request
 6. No matching effective allow → implicit deny (HTTP 403)
+
+### Resource-based policies
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
+
+- Resource policy statements are matched against the caller's principal ARN (`Principal` and `NotPrincipal` clauses), supporting wildcard, user, role, account root, and service principals.
+- An explicit **Deny** in a resource policy overrides any allows.
+- In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
+- For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
 
 ### Service control policies (SCPs)
 
@@ -396,6 +431,7 @@ account key carries no identity policies of its own.
 - **Session policies**: inline policies passed during `sts:AssumeRole`.
 - **Permission boundaries**: managed policies used to cap maximum permissions.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
+  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
 - **Conditions**: support for `Condition` blocks with multiple operators.
 - **Effects**: `Allow` and `Deny`.
 

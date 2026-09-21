@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
 import java.util.ArrayList;
@@ -39,6 +40,21 @@ public class CloudFrontController {
     private static final String RESTRICTIONS = "Restrictions";
     private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
     private static final int EMPTY_QUANTITY = 0;
+
+    /**
+     * Origin timeout constraints from the CloudFront {@code CustomOriginConfig} and
+     * {@code Origin} API references. {@code OriginReadTimeout} accepts 1-120 seconds, default 30.
+     * {@code OriginKeepaliveTimeout} accepts 1-300 seconds, default 5. {@code ResponseCompletionTimeout}
+     * has no enforced maximum when unset (represented here as 0), but when set must be at least
+     * {@code OriginReadTimeout}.
+     */
+    private static final int DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS = 30;
+    private static final int MIN_ORIGIN_READ_TIMEOUT_SECONDS = 1;
+    private static final int MAX_ORIGIN_READ_TIMEOUT_SECONDS = 120;
+    private static final int DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 5;
+    private static final int MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 1;
+    private static final int MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS = 300;
+    private static final int DEFAULT_RESPONSE_COMPLETION_TIMEOUT_SECONDS = 0;
 
     private final CloudFrontService service;
 
@@ -286,13 +302,13 @@ public class CloudFrontController {
     public Response getCachePolicyConfig(@PathParam("Id") String id) {
         try {
             CachePolicy policy = service.getCachePolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("CachePolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("CachePolicyConfig")
-                    .build();
-            return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            CloudFrontPolicyConfigCodec.serializeCachePolicy(xml, policy.getConfig());
+            return Response.ok(xml.end("CachePolicyConfig").build(), XML)
+                    .header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -398,13 +414,13 @@ public class CloudFrontController {
     public Response getOriginRequestPolicyConfig(@PathParam("Id") String id) {
         try {
             OriginRequestPolicy policy = service.getOriginRequestPolicy(id);
-            String xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder()
                     .start("OriginRequestPolicyConfig", NS)
                     .elem("Name", policy.getName())
-                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                    .end("OriginRequestPolicyConfig")
-                    .build();
-            return Response.ok(xml, XML).header("ETag", policy.getEtag()).build();
+                    .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+            CloudFrontPolicyConfigCodec.serializeOriginRequestPolicy(xml, policy.getConfig());
+            return Response.ok(xml.end("OriginRequestPolicyConfig").build(), XML)
+                    .header("ETag", policy.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -1920,7 +1936,11 @@ public class CloudFrontController {
                 .elem("DomainName", o.getDomainName())
                 .elem("OriginPath", o.getOriginPath() != null ? o.getOriginPath() : "")
                 .elem("ConnectionAttempts", o.getConnectionAttempts())
-                .elem("ConnectionTimeout", o.getConnectionTimeout());
+                .elem("ConnectionTimeout", o.getConnectionTimeout())
+                .elem("ResponseCompletionTimeout",
+                        o.getResponseCompletionTimeout() != null
+                                ? o.getResponseCompletionTimeout()
+                                : DEFAULT_RESPONSE_COMPLETION_TIMEOUT_SECONDS);
 
         if (o.getOriginAccessControlId() != null && !o.getOriginAccessControlId().isEmpty()) {
             xml.elem("OriginAccessControlId", o.getOriginAccessControlId());
@@ -1942,6 +1962,11 @@ public class CloudFrontController {
                     .elem("HTTPSPort", coc.getOrDefault("HTTPSPort", "443").toString())
                     .elem("OriginProtocolPolicy",
                             coc.getOrDefault("OriginProtocolPolicy", "https-only").toString())
+                    .elem("OriginReadTimeout",
+                            coc.getOrDefault("OriginReadTimeout", DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS).toString())
+                    .elem("OriginKeepaliveTimeout",
+                            coc.getOrDefault("OriginKeepaliveTimeout", DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS)
+                                    .toString())
                     .raw(xmlOriginSslProtocols(coc.get("OriginSslProtocols")))
                     .end("CustomOriginConfig");
         }
@@ -1977,6 +2002,7 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", dcb.getResponseHeadersPolicyId())
                 .elem("FieldLevelEncryptionId",
                         dcb.getFieldLevelEncryptionId() != null ? dcb.getFieldLevelEncryptionId() : "")
+                .elem("RealtimeLogConfigArn", dcb.getRealtimeLogConfigArn())
                 .elem("Compress", dcb.isCompress())
                 .elem("SmoothStreaming", dcb.isSmoothStreaming());
 
@@ -2008,6 +2034,7 @@ public class CloudFrontController {
                 .elem("ResponseHeadersPolicyId", cb.getResponseHeadersPolicyId())
                 .elem("FieldLevelEncryptionId",
                         cb.getFieldLevelEncryptionId() != null ? cb.getFieldLevelEncryptionId() : "")
+                .elem("RealtimeLogConfigArn", cb.getRealtimeLogConfigArn())
                 .elem("Compress", cb.isCompress())
                 .elem("SmoothStreaming", cb.isSmoothStreaming());
 
@@ -2284,29 +2311,31 @@ public class CloudFrontController {
     }
 
     private String xmlCachePolicyResponse(CachePolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("CachePolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("CachePolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("CachePolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        CloudFrontPolicyConfigCodec.serializeCachePolicy(xml, policy.getConfig());
+        return xml.end("CachePolicyConfig")
                 .end("CachePolicy")
                 .build();
     }
 
     private String xmlOriginRequestPolicyResponse(OriginRequestPolicy policy) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("OriginRequestPolicy")
                 .elem("Id", policy.getId())
                 .elem("LastModifiedTime",
                         policy.getLastModifiedTime() != null ? policy.getLastModifiedTime().toString() : "")
                 .start("OriginRequestPolicyConfig")
                 .elem("Name", policy.getName())
-                .elem("Comment", policy.getComment() != null ? policy.getComment() : "")
-                .end("OriginRequestPolicyConfig")
+                .elem("Comment", policy.getComment() != null ? policy.getComment() : "");
+        CloudFrontPolicyConfigCodec.serializeOriginRequestPolicy(xml, policy.getConfig());
+        return xml.end("OriginRequestPolicyConfig")
                 .end("OriginRequestPolicy")
                 .build();
     }
@@ -2673,6 +2702,8 @@ public class CloudFrontController {
             Map<String, String> s3Config = null;
             Map<String, Object> customConfig = null;
             List<String> sslProtocols = null;
+            Integer sslProtocolsQuantity = null;
+            Integer originReadTimeoutSeconds = null;
             boolean inCustomHeaders = false;
             boolean inCustomHeaderItems = false;
             boolean customHeaderItemsSeen = false;
@@ -2773,6 +2804,12 @@ public class CloudFrontController {
                                 }
                             }
                         }
+                        case "ResponseCompletionTimeout" -> {
+                            if (inOrigin && !inS3OriginConfig && !inCustomOriginConfig && current != null) {
+                                current.setResponseCompletionTimeout(
+                                        parseNonNegativeTimeout("ResponseCompletionTimeout", r.getElementText()));
+                            }
+                        }
                         case "OriginAccessIdentity" -> {
                             if (inS3OriginConfig && s3Config != null) {
                                 s3Config.put("OriginAccessIdentity", r.getElementText());
@@ -2793,6 +2830,23 @@ public class CloudFrontController {
                                 customConfig.put("OriginProtocolPolicy", r.getElementText());
                             }
                         }
+                        case "OriginKeepaliveTimeout" -> {
+                            if (inCustomOriginConfig && customConfig != null) {
+                                customConfig.put("OriginKeepaliveTimeout", parseBoundedTimeout(
+                                        "InvalidOriginKeepaliveTimeout", "OriginKeepaliveTimeout",
+                                        r.getElementText(), MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                                        MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS));
+                            }
+                        }
+                        case "OriginReadTimeout" -> {
+                            if (inCustomOriginConfig && customConfig != null) {
+                                originReadTimeoutSeconds = parseBoundedTimeout(
+                                        "InvalidOriginReadTimeout", "OriginReadTimeout",
+                                        r.getElementText(), MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                                        MAX_ORIGIN_READ_TIMEOUT_SECONDS);
+                                customConfig.put("OriginReadTimeout", originReadTimeoutSeconds);
+                            }
+                        }
                         case "CustomHeaders" -> {
                             if (inOrigin) {
                                 inCustomHeaders = true;
@@ -2806,6 +2860,12 @@ public class CloudFrontController {
                             if (inCustomHeaders && currentHeader == null) {
                                 try {
                                     customHeadersQuantity = Integer.parseInt(r.getElementText());
+                                } catch (NumberFormatException e) {
+                                    throw inconsistentQuantities();
+                                }
+                            } else if (inOriginSslProtocols) {
+                                try {
+                                    sslProtocolsQuantity = Integer.parseInt(r.getElementText());
                                 } catch (NumberFormatException e) {
                                     throw inconsistentQuantities();
                                 }
@@ -2846,10 +2906,14 @@ public class CloudFrontController {
                         }
                         case "OriginSslProtocols" -> {
                             if (inCustomOriginConfig && customConfig != null && sslProtocols != null) {
+                                if (sslProtocolsQuantity == null || sslProtocolsQuantity != sslProtocols.size()) {
+                                    throw inconsistentQuantities();
+                                }
                                 customConfig.put("OriginSslProtocols", sslProtocols);
                             }
                             inOriginSslProtocols = false;
                             sslProtocols = null;
+                            sslProtocolsQuantity = null;
                         }
                         case "CustomOriginConfig" -> {
                             if (inCustomOriginConfig && current != null) {
@@ -2891,10 +2955,23 @@ public class CloudFrontController {
                         }
                         case "Origin" -> {
                             if (inOrigin && current != null) {
+                                Integer completionTimeout = current.getResponseCompletionTimeout();
+                                int effectiveReadTimeout = originReadTimeoutSeconds != null
+                                        ? originReadTimeoutSeconds
+                                        : DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
+                                if (completionTimeout != null && completionTimeout > 0
+                                        && completionTimeout < effectiveReadTimeout) {
+                                    throw new AwsException(
+                                            "InvalidArgument",
+                                            "The parameter ResponseCompletionTimeout must be greater than or "
+                                                    + "equal to OriginReadTimeout.",
+                                            400);
+                                }
                                 result.add(current);
                             }
                             inOrigin = false;
                             current = null;
+                            originReadTimeoutSeconds = null;
                         }
                         case "Origins" -> inOrigins = false;
                         default -> {
@@ -2927,6 +3004,36 @@ public class CloudFrontController {
                 "InvalidArgument",
                 "The origin custom headers structure is invalid.",
                 400);
+    }
+
+    private static int parseBoundedTimeout(String errorCode, String field, String rawValue, int min, int max) {
+        int value = parseNonNegativeTimeout(errorCode, field, rawValue);
+        if (value < min || value > max) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be between " + min + " and " + max + " seconds.",
+                    400);
+        }
+        return value;
+    }
+
+    private static int parseNonNegativeTimeout(String field, String rawValue) {
+        return parseNonNegativeTimeout("InvalidArgument", field, rawValue);
+    }
+
+    private static int parseNonNegativeTimeout(String errorCode, String field, String rawValue) {
+        try {
+            int value = Integer.parseInt(rawValue);
+            if (value < 0) {
+                throw new NumberFormatException(rawValue);
+            }
+            return value;
+        } catch (NumberFormatException e) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be a non-negative integer.",
+                    400);
+        }
     }
 
     // Event types accepted by AWS for each association kind. Lambda@Edge runs at all
@@ -3022,272 +3129,15 @@ public class CloudFrontController {
         }
         try {
             XMLStreamReader r = XmlParser.newStreamReader(body);
-            boolean inDcb = false;
-            boolean inAllowedMethods = false;
-            boolean inCachedMethods = false;
-            boolean inTrustedKeyGroups = false;
-            boolean sawTrustedKeyGroups = false;
-            Boolean trustedKeyGroupsEnabled = null;
-            Integer trustedKeyGroupsQuantity = null;
-            List<String> allowedMethods = new ArrayList<>();
-            List<String> cachedMethods = new ArrayList<>();
-            List<String> trustedKeyGroups = new ArrayList<>();
-            boolean inForwardedValues = false;
-            boolean inForwardedCookies = false;
-            boolean inForwardedCookieNames = false;
-            boolean inForwardedHeaders = false;
-            boolean inForwardedQueryStringCacheKeys = false;
-            boolean sawForwardedValues = false;
-            Boolean forwardedQueryString = null;
-            String forwardedCookiesForward = null;
-            List<String> forwardedCookieNames = new ArrayList<>();
-            List<String> forwardedHeaders = new ArrayList<>();
-            List<String> forwardedQueryStringCacheKeys = new ArrayList<>();
-            boolean inLambdaAssociations = false;
-            boolean inFunctionAssociations = false;
-            Map<String, Object> currentLambdaAssociation = null;
-            Map<String, String> currentFunctionAssociation = null;
-            List<Map<String, Object>> lambdaAssociations = new ArrayList<>();
-            List<Map<String, String>> functionAssociations = new ArrayList<>();
-            Integer lambdaAssociationsQuantity = null;
-            Integer functionAssociationsQuantity = null;
-
             while (r.hasNext()) {
                 int event = r.next();
-                if (event == XMLStreamConstants.START_ELEMENT) {
-                    String local = r.getLocalName();
-                    switch (local) {
-                        case "DefaultCacheBehavior" -> inDcb = true;
-                        case "LambdaFunctionAssociations" -> {
-                            if (inDcb) {
-                                inLambdaAssociations = true;
-                            }
-                        }
-                        case "FunctionAssociations" -> {
-                            if (inDcb) {
-                                inFunctionAssociations = true;
-                            }
-                        }
-                        case "LambdaFunctionAssociation" -> {
-                            if (inLambdaAssociations) {
-                                currentLambdaAssociation = new LinkedHashMap<>();
-                            }
-                        }
-                        case "FunctionAssociation" -> {
-                            if (inFunctionAssociations) {
-                                currentFunctionAssociation = new LinkedHashMap<>();
-                            }
-                        }
-                        case "LambdaFunctionARN" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put("LambdaFunctionARN", r.getElementText());
-                            }
-                        }
-                        case "FunctionARN" -> {
-                            if (currentFunctionAssociation != null) {
-                                currentFunctionAssociation.put("FunctionARN", r.getElementText());
-                            }
-                        }
-                        case "IncludeBody" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put(
-                                        "IncludeBody", "true".equalsIgnoreCase(r.getElementText()));
-                            }
-                        }
-                        case "EventType" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put("EventType", r.getElementText());
-                            } else if (currentFunctionAssociation != null) {
-                                currentFunctionAssociation.put("EventType", r.getElementText());
-                            }
-                        }
-                        case "TrustedKeyGroups" -> {
-                            if (inDcb) {
-                                inTrustedKeyGroups = true;
-                                sawTrustedKeyGroups = true;
-                            }
-                        }
-                        case "Enabled" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroupsEnabled =
-                                        parseTrustedKeyGroupsEnabled(r.getElementText());
-                            }
-                        }
-                        case "Quantity" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroupsQuantity =
-                                        parseTrustedKeyGroupsQuantity(r.getElementText());
-                            } else if (inLambdaAssociations && currentLambdaAssociation == null) {
-                                lambdaAssociationsQuantity =
-                                        parseAssociationsQuantity(r.getElementText());
-                            } else if (inFunctionAssociations && currentFunctionAssociation == null) {
-                                functionAssociationsQuantity =
-                                        parseAssociationsQuantity(r.getElementText());
-                            }
-                        }
-                        case "KeyGroup" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroups.add(r.getElementText());
-                            }
-                        }
-                        case "AllowedMethods" -> {
-                            if (inDcb) inAllowedMethods = true;
-                        }
-                        case "CachedMethods" -> {
-                            if (inAllowedMethods) inCachedMethods = true;
-                        }
-                        case "ForwardedValues" -> {
-                            if (inDcb) {
-                                inForwardedValues = true;
-                                sawForwardedValues = true;
-                            }
-                        }
-                        case "Cookies" -> {
-                            if (inForwardedValues) inForwardedCookies = true;
-                        }
-                        case "WhitelistedNames" -> {
-                            if (inForwardedCookies) inForwardedCookieNames = true;
-                        }
-                        case "Headers" -> {
-                            if (inForwardedValues) inForwardedHeaders = true;
-                        }
-                        case "QueryStringCacheKeys" -> {
-                            if (inForwardedValues) inForwardedQueryStringCacheKeys = true;
-                        }
-                        case "Name" -> {
-                            if (inForwardedCookieNames) {
-                                forwardedCookieNames.add(r.getElementText());
-                            } else if (inForwardedHeaders) {
-                                forwardedHeaders.add(r.getElementText());
-                            } else if (inForwardedQueryStringCacheKeys) {
-                                forwardedQueryStringCacheKeys.add(r.getElementText());
-                            }
-                        }
-                        case "QueryString" -> {
-                            if (inForwardedValues && !inForwardedCookies) {
-                                forwardedQueryString = "true".equalsIgnoreCase(r.getElementText());
-                            }
-                        }
-                        case "Forward" -> {
-                            if (inForwardedCookies) forwardedCookiesForward = r.getElementText();
-                        }
-                        case "TargetOriginId" -> {
-                            if (inDcb) dcb.setTargetOriginId(r.getElementText());
-                        }
-                        case "ViewerProtocolPolicy" -> {
-                            if (inDcb) dcb.setViewerProtocolPolicy(r.getElementText());
-                        }
-                        case "CachePolicyId" -> {
-                            if (inDcb) dcb.setCachePolicyId(r.getElementText());
-                        }
-                        case "OriginRequestPolicyId" -> {
-                            if (inDcb) dcb.setOriginRequestPolicyId(r.getElementText());
-                        }
-                        case "ResponseHeadersPolicyId" -> {
-                            if (inDcb) dcb.setResponseHeadersPolicyId(r.getElementText());
-                        }
-                        case "FieldLevelEncryptionId" -> {
-                            if (inDcb) dcb.setFieldLevelEncryptionId(r.getElementText());
-                        }
-                        case "RealtimeLogConfigArn" -> {
-                            if (inDcb) dcb.setRealtimeLogConfigArn(r.getElementText());
-                        }
-                        case "Compress" -> {
-                            if (inDcb) dcb.setCompress("true".equalsIgnoreCase(r.getElementText()));
-                        }
-                        case "SmoothStreaming" -> {
-                            if (inDcb) dcb.setSmoothStreaming("true".equalsIgnoreCase(r.getElementText()));
-                        }
-                        case "MinTTL" -> {
-                            if (inDcb) dcb.setMinTTL(parseLongOrZero(r.getElementText()));
-                        }
-                        case "DefaultTTL" -> {
-                            if (inDcb) dcb.setDefaultTTL(parseLongOrZero(r.getElementText()));
-                        }
-                        case "MaxTTL" -> {
-                            if (inDcb) dcb.setMaxTTL(parseLongOrZero(r.getElementText()));
-                        }
-                        case "Method" -> {
-                            if (inCachedMethods) {
-                                cachedMethods.add(r.getElementText());
-                            } else if (inAllowedMethods) {
-                                allowedMethods.add(r.getElementText());
-                            }
-                        }
-                        default -> {
-                        }
-                    }
-                } else if (event == XMLStreamConstants.END_ELEMENT) {
-                    switch (r.getLocalName()) {
-                        case "CachedMethods" -> inCachedMethods = false;
-                        case "AllowedMethods" -> inAllowedMethods = false;
-                        case "WhitelistedNames" -> inForwardedCookieNames = false;
-                        case "Headers" -> inForwardedHeaders = false;
-                        case "QueryStringCacheKeys" -> inForwardedQueryStringCacheKeys = false;
-                        case "Cookies" -> inForwardedCookies = false;
-                        case "ForwardedValues" -> inForwardedValues = false;
-                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
-                        case "DefaultCacheBehavior" -> inDcb = false;
-                        case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
-                        case "FunctionAssociations" -> inFunctionAssociations = false;
-                        case "LambdaFunctionAssociation" -> {
-                            if (currentLambdaAssociation != null) {
-                                lambdaAssociations.add(currentLambdaAssociation);
-                                currentLambdaAssociation = null;
-                            }
-                        }
-                        case "FunctionAssociation" -> {
-                            if (currentFunctionAssociation != null) {
-                                functionAssociations.add(currentFunctionAssociation);
-                                currentFunctionAssociation = null;
-                            }
-                        }
-                        default -> {
-                        }
-                    }
+                if (event == XMLStreamConstants.START_ELEMENT
+                        && "DefaultCacheBehavior".equals(r.getLocalName())) {
+                    parseCacheBehaviorScope(r, "DefaultCacheBehavior", dcb);
+                    break;
                 }
             }
             r.close();
-            if (!allowedMethods.isEmpty()) {
-                dcb.setAllowedMethods(allowedMethods);
-            }
-            if (!cachedMethods.isEmpty()) {
-                dcb.setCachedMethods(cachedMethods);
-            }
-            if (sawForwardedValues) {
-                dcb.setForwardedValues(forwardedValuesModel(
-                        forwardedQueryString,
-                        forwardedCookiesForward,
-                        forwardedCookieNames,
-                        forwardedHeaders,
-                        forwardedQueryStringCacheKeys));
-            }
-            if (!trustedKeyGroups.isEmpty()) {
-                dcb.setTrustedKeyGroups(trustedKeyGroups);
-            }
-            validateAssociationsQuantity(lambdaAssociationsQuantity, lambdaAssociations.size());
-            validateAssociationsQuantity(functionAssociationsQuantity, functionAssociations.size());
-            validateLambdaFunctionAssociations(lambdaAssociations);
-            validateFunctionAssociations(functionAssociations);
-            if (!lambdaAssociations.isEmpty()) {
-                dcb.setLambdaFunctionAssociations(lambdaAssociations);
-            }
-            if (!functionAssociations.isEmpty()) {
-                dcb.setFunctionAssociations(functionAssociations);
-            }
-            if (sawTrustedKeyGroups) {
-                if (trustedKeyGroupsEnabled == null) {
-                    throw new AwsException(
-                            "InvalidArgument",
-                            "TrustedKeyGroups must include Enabled.",
-                            400);
-                }
-                validateTrustedKeyGroupsQuantity(
-                        trustedKeyGroupsQuantity, trustedKeyGroups.size());
-                validateEnabledTrustedKeyGroups(
-                        trustedKeyGroupsEnabled, trustedKeyGroups.size());
-                dcb.setTrustedKeyGroupsEnabled(trustedKeyGroupsEnabled);
-            }
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -3306,317 +3156,21 @@ public class CloudFrontController {
         try {
             XMLStreamReader r = XmlParser.newStreamReader(body);
             boolean inCacheBehaviors = false;
-            boolean inCacheBehavior = false;
-            boolean inAllowedMethods = false;
-            boolean inCachedMethods = false;
-            boolean inTrustedKeyGroups = false;
-            CacheBehavior current = null;
-            boolean sawTrustedKeyGroups = false;
-            Boolean trustedKeyGroupsEnabled = null;
-            Integer trustedKeyGroupsQuantity = null;
-            List<String> allowedMethods = new ArrayList<>();
-            List<String> cachedMethods = new ArrayList<>();
-            List<String> trustedKeyGroups = new ArrayList<>();
-            boolean inForwardedValues = false;
-            boolean inForwardedCookies = false;
-            boolean inForwardedCookieNames = false;
-            boolean inForwardedHeaders = false;
-            boolean inForwardedQueryStringCacheKeys = false;
-            boolean sawForwardedValues = false;
-            Boolean forwardedQueryString = null;
-            String forwardedCookiesForward = null;
-            List<String> forwardedCookieNames = new ArrayList<>();
-            List<String> forwardedHeaders = new ArrayList<>();
-            List<String> forwardedQueryStringCacheKeys = new ArrayList<>();
-            boolean inLambdaAssociations = false;
-            boolean inFunctionAssociations = false;
-            Map<String, Object> currentLambdaAssociation = null;
-            Map<String, String> currentFunctionAssociation = null;
-            List<Map<String, Object>> lambdaAssociations = new ArrayList<>();
-            List<Map<String, String>> functionAssociations = new ArrayList<>();
-            Integer lambdaAssociationsQuantity = null;
-            Integer functionAssociationsQuantity = null;
 
             while (r.hasNext()) {
                 int event = r.next();
                 if (event == XMLStreamConstants.START_ELEMENT) {
                     String local = r.getLocalName();
-                    switch (local) {
-                        case "CacheBehaviors" -> inCacheBehaviors = true;
-                        case "CacheBehavior" -> {
-                            if (inCacheBehaviors) {
-                                inCacheBehavior = true;
-                                current = new CacheBehavior();
-                                sawTrustedKeyGroups = false;
-                                trustedKeyGroupsEnabled = null;
-                                trustedKeyGroupsQuantity = null;
-                                allowedMethods = new ArrayList<>();
-                                cachedMethods = new ArrayList<>();
-                                trustedKeyGroups = new ArrayList<>();
-                                sawForwardedValues = false;
-                                forwardedQueryString = null;
-                                forwardedCookiesForward = null;
-                                forwardedCookieNames = new ArrayList<>();
-                                forwardedHeaders = new ArrayList<>();
-                                forwardedQueryStringCacheKeys = new ArrayList<>();
-                                lambdaAssociations = new ArrayList<>();
-                                functionAssociations = new ArrayList<>();
-                                lambdaAssociationsQuantity = null;
-                                functionAssociationsQuantity = null;
-                            }
-                        }
-                        case "LambdaFunctionAssociations" -> {
-                            if (inCacheBehavior) {
-                                inLambdaAssociations = true;
-                            }
-                        }
-                        case "FunctionAssociations" -> {
-                            if (inCacheBehavior) {
-                                inFunctionAssociations = true;
-                            }
-                        }
-                        case "LambdaFunctionAssociation" -> {
-                            if (inLambdaAssociations) {
-                                currentLambdaAssociation = new LinkedHashMap<>();
-                            }
-                        }
-                        case "FunctionAssociation" -> {
-                            if (inFunctionAssociations) {
-                                currentFunctionAssociation = new LinkedHashMap<>();
-                            }
-                        }
-                        case "LambdaFunctionARN" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put("LambdaFunctionARN", r.getElementText());
-                            }
-                        }
-                        case "FunctionARN" -> {
-                            if (currentFunctionAssociation != null) {
-                                currentFunctionAssociation.put("FunctionARN", r.getElementText());
-                            }
-                        }
-                        case "IncludeBody" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put(
-                                        "IncludeBody", "true".equalsIgnoreCase(r.getElementText()));
-                            }
-                        }
-                        case "EventType" -> {
-                            if (currentLambdaAssociation != null) {
-                                currentLambdaAssociation.put("EventType", r.getElementText());
-                            } else if (currentFunctionAssociation != null) {
-                                currentFunctionAssociation.put("EventType", r.getElementText());
-                            }
-                        }
-                        case "TrustedKeyGroups" -> {
-                            if (inCacheBehavior) {
-                                inTrustedKeyGroups = true;
-                                sawTrustedKeyGroups = true;
-                            }
-                        }
-                        case "Enabled" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroupsEnabled =
-                                        parseTrustedKeyGroupsEnabled(r.getElementText());
-                            }
-                        }
-                        case "Quantity" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroupsQuantity =
-                                        parseTrustedKeyGroupsQuantity(r.getElementText());
-                            } else if (inLambdaAssociations && currentLambdaAssociation == null) {
-                                lambdaAssociationsQuantity =
-                                        parseAssociationsQuantity(r.getElementText());
-                            } else if (inFunctionAssociations && currentFunctionAssociation == null) {
-                                functionAssociationsQuantity =
-                                        parseAssociationsQuantity(r.getElementText());
-                            }
-                        }
-                        case "KeyGroup" -> {
-                            if (inTrustedKeyGroups) {
-                                trustedKeyGroups.add(r.getElementText());
-                            }
-                        }
-                        case "AllowedMethods" -> {
-                            if (inCacheBehavior) inAllowedMethods = true;
-                        }
-                        case "CachedMethods" -> {
-                            if (inAllowedMethods) inCachedMethods = true;
-                        }
-                        case "ForwardedValues" -> {
-                            if (inCacheBehavior) {
-                                inForwardedValues = true;
-                                sawForwardedValues = true;
-                            }
-                        }
-                        case "Cookies" -> {
-                            if (inForwardedValues) inForwardedCookies = true;
-                        }
-                        case "WhitelistedNames" -> {
-                            if (inForwardedCookies) inForwardedCookieNames = true;
-                        }
-                        case "Headers" -> {
-                            if (inForwardedValues) inForwardedHeaders = true;
-                        }
-                        case "QueryStringCacheKeys" -> {
-                            if (inForwardedValues) inForwardedQueryStringCacheKeys = true;
-                        }
-                        case "Name" -> {
-                            if (inForwardedCookieNames) {
-                                forwardedCookieNames.add(r.getElementText());
-                            } else if (inForwardedHeaders) {
-                                forwardedHeaders.add(r.getElementText());
-                            } else if (inForwardedQueryStringCacheKeys) {
-                                forwardedQueryStringCacheKeys.add(r.getElementText());
-                            }
-                        }
-                        case "QueryString" -> {
-                            if (inForwardedValues && !inForwardedCookies) {
-                                forwardedQueryString = "true".equalsIgnoreCase(r.getElementText());
-                            }
-                        }
-                        case "Forward" -> {
-                            if (inForwardedCookies) forwardedCookiesForward = r.getElementText();
-                        }
-                        case "PathPattern" -> {
-                            if (inCacheBehavior && current != null) current.setPathPattern(r.getElementText());
-                        }
-                        case "TargetOriginId" -> {
-                            if (inCacheBehavior && current != null) current.setTargetOriginId(r.getElementText());
-                        }
-                        case "ViewerProtocolPolicy" -> {
-                            if (inCacheBehavior && current != null) current.setViewerProtocolPolicy(r.getElementText());
-                        }
-                        case "CachePolicyId" -> {
-                            if (inCacheBehavior && current != null) current.setCachePolicyId(r.getElementText());
-                        }
-                        case "OriginRequestPolicyId" -> {
-                            if (inCacheBehavior && current != null)
-                                current.setOriginRequestPolicyId(r.getElementText());
-                        }
-                        case "ResponseHeadersPolicyId" -> {
-                            if (inCacheBehavior && current != null)
-                                current.setResponseHeadersPolicyId(r.getElementText());
-                        }
-                        case "FieldLevelEncryptionId" -> {
-                            if (inCacheBehavior && current != null)
-                                current.setFieldLevelEncryptionId(r.getElementText());
-                        }
-                        case "Compress" -> {
-                            if (inCacheBehavior && current != null) {
-                                current.setCompress("true".equalsIgnoreCase(r.getElementText()));
-                            }
-                        }
-                        case "SmoothStreaming" -> {
-                            if (inCacheBehavior && current != null) {
-                                current.setSmoothStreaming("true".equalsIgnoreCase(r.getElementText()));
-                            }
-                        }
-                        case "MinTTL" -> {
-                            if (inCacheBehavior && current != null) {
-                                current.setMinTTL(parseLongOrZero(r.getElementText()));
-                            }
-                        }
-                        case "DefaultTTL" -> {
-                            if (inCacheBehavior && current != null) {
-                                current.setDefaultTTL(parseLongOrZero(r.getElementText()));
-                            }
-                        }
-                        case "MaxTTL" -> {
-                            if (inCacheBehavior && current != null) {
-                                current.setMaxTTL(parseLongOrZero(r.getElementText()));
-                            }
-                        }
-                        case "Method" -> {
-                            if (inCachedMethods) {
-                                cachedMethods.add(r.getElementText());
-                            } else if (inAllowedMethods) {
-                                allowedMethods.add(r.getElementText());
-                            }
-                        }
-                        default -> {
-                        }
+                    if ("CacheBehaviors".equals(local)) {
+                        inCacheBehaviors = true;
+                    } else if ("CacheBehavior".equals(local) && inCacheBehaviors) {
+                        CacheBehavior current = new CacheBehavior();
+                        parseCacheBehaviorScope(r, "CacheBehavior", current);
+                        result.add(current);
                     }
-                } else if (event == XMLStreamConstants.END_ELEMENT) {
-                    switch (r.getLocalName()) {
-                        case "CachedMethods" -> inCachedMethods = false;
-                        case "AllowedMethods" -> inAllowedMethods = false;
-                        case "WhitelistedNames" -> inForwardedCookieNames = false;
-                        case "Headers" -> inForwardedHeaders = false;
-                        case "QueryStringCacheKeys" -> inForwardedQueryStringCacheKeys = false;
-                        case "Cookies" -> inForwardedCookies = false;
-                        case "ForwardedValues" -> inForwardedValues = false;
-                        case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
-                        case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
-                        case "FunctionAssociations" -> inFunctionAssociations = false;
-                        case "LambdaFunctionAssociation" -> {
-                            if (currentLambdaAssociation != null) {
-                                lambdaAssociations.add(currentLambdaAssociation);
-                                currentLambdaAssociation = null;
-                            }
-                        }
-                        case "FunctionAssociation" -> {
-                            if (currentFunctionAssociation != null) {
-                                functionAssociations.add(currentFunctionAssociation);
-                                currentFunctionAssociation = null;
-                            }
-                        }
-                        case "CacheBehavior" -> {
-                            if (inCacheBehavior && current != null) {
-                                if (!allowedMethods.isEmpty()) {
-                                    current.setAllowedMethods(allowedMethods);
-                                }
-                                if (!cachedMethods.isEmpty()) {
-                                    current.setCachedMethods(cachedMethods);
-                                }
-                                if (sawForwardedValues) {
-                                    current.setForwardedValues(forwardedValuesModel(
-                                            forwardedQueryString,
-                                            forwardedCookiesForward,
-                                            forwardedCookieNames,
-                                            forwardedHeaders,
-                                            forwardedQueryStringCacheKeys));
-                                }
-                                if (!trustedKeyGroups.isEmpty()) {
-                                    current.setTrustedKeyGroups(trustedKeyGroups);
-                                }
-                                validateAssociationsQuantity(
-                                        lambdaAssociationsQuantity, lambdaAssociations.size());
-                                validateAssociationsQuantity(
-                                        functionAssociationsQuantity, functionAssociations.size());
-                                validateLambdaFunctionAssociations(lambdaAssociations);
-                                validateFunctionAssociations(functionAssociations);
-                                if (!lambdaAssociations.isEmpty()) {
-                                    current.setLambdaFunctionAssociations(lambdaAssociations);
-                                }
-                                if (!functionAssociations.isEmpty()) {
-                                    current.setFunctionAssociations(functionAssociations);
-                                }
-                                if (sawTrustedKeyGroups) {
-                                    if (trustedKeyGroupsEnabled == null) {
-                                        throw new AwsException(
-                                                "InvalidArgument",
-                                            "TrustedKeyGroups must include Enabled.",
-                                            400);
-                                    }
-                                    validateTrustedKeyGroupsQuantity(
-                                            trustedKeyGroupsQuantity,
-                                            trustedKeyGroups.size());
-                                    validateEnabledTrustedKeyGroups(
-                                            trustedKeyGroupsEnabled,
-                                            trustedKeyGroups.size());
-                                    current.setTrustedKeyGroupsEnabled(
-                                            trustedKeyGroupsEnabled);
-                                }
-                                result.add(current);
-                            }
-                            inCacheBehavior = false;
-                            current = null;
-                        }
-                        case "CacheBehaviors" -> inCacheBehaviors = false;
-                        default -> {
-                        }
-                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT
+                        && "CacheBehaviors".equals(r.getLocalName())) {
+                    inCacheBehaviors = false;
                 }
             }
             r.close();
@@ -3628,6 +3182,240 @@ public class CloudFrontController {
                     "InvalidArgument", "The CacheBehaviors configuration is invalid.", 400);
         }
         return result;
+    }
+
+    /**
+     * Parses one {@code DefaultCacheBehavior} or {@code CacheBehavior} element into
+     * {@code target}. The reader must have just produced the {@code START_ELEMENT} for
+     * {@code scopeElement}; this consumes everything up to and including its matching
+     * {@code END_ELEMENT}.
+     */
+    private void parseCacheBehaviorScope(
+            XMLStreamReader r, String scopeElement, CacheBehaviorSettings target)
+            throws XMLStreamException {
+        boolean inAllowedMethods = false;
+        boolean inCachedMethods = false;
+        boolean inTrustedKeyGroups = false;
+        boolean sawTrustedKeyGroups = false;
+        Boolean trustedKeyGroupsEnabled = null;
+        Integer trustedKeyGroupsQuantity = null;
+        List<String> allowedMethods = new ArrayList<>();
+        List<String> cachedMethods = new ArrayList<>();
+        List<String> trustedKeyGroups = new ArrayList<>();
+        boolean inForwardedValues = false;
+        boolean inForwardedCookies = false;
+        boolean inForwardedCookieNames = false;
+        boolean inForwardedHeaders = false;
+        boolean inForwardedQueryStringCacheKeys = false;
+        boolean sawForwardedValues = false;
+        Boolean forwardedQueryString = null;
+        String forwardedCookiesForward = null;
+        List<String> forwardedCookieNames = new ArrayList<>();
+        List<String> forwardedHeaders = new ArrayList<>();
+        List<String> forwardedQueryStringCacheKeys = new ArrayList<>();
+        boolean inLambdaAssociations = false;
+        boolean inFunctionAssociations = false;
+        Map<String, Object> currentLambdaAssociation = null;
+        Map<String, String> currentFunctionAssociation = null;
+        List<Map<String, Object>> lambdaAssociations = new ArrayList<>();
+        List<Map<String, String>> functionAssociations = new ArrayList<>();
+        Integer lambdaAssociationsQuantity = null;
+        Integer functionAssociationsQuantity = null;
+
+        while (r.hasNext()) {
+            int event = r.next();
+            if (event == XMLStreamConstants.START_ELEMENT) {
+                String local = r.getLocalName();
+                switch (local) {
+                    case "LambdaFunctionAssociations" -> inLambdaAssociations = true;
+                    case "FunctionAssociations" -> inFunctionAssociations = true;
+                    case "LambdaFunctionAssociation" -> {
+                        if (inLambdaAssociations) {
+                            currentLambdaAssociation = new LinkedHashMap<>();
+                        }
+                    }
+                    case "FunctionAssociation" -> {
+                        if (inFunctionAssociations) {
+                            currentFunctionAssociation = new LinkedHashMap<>();
+                        }
+                    }
+                    case "LambdaFunctionARN" -> {
+                        if (currentLambdaAssociation != null) {
+                            currentLambdaAssociation.put("LambdaFunctionARN", r.getElementText());
+                        }
+                    }
+                    case "FunctionARN" -> {
+                        if (currentFunctionAssociation != null) {
+                            currentFunctionAssociation.put("FunctionARN", r.getElementText());
+                        }
+                    }
+                    case "IncludeBody" -> {
+                        if (currentLambdaAssociation != null) {
+                            currentLambdaAssociation.put(
+                                    "IncludeBody", "true".equalsIgnoreCase(r.getElementText()));
+                        }
+                    }
+                    case "EventType" -> {
+                        if (currentLambdaAssociation != null) {
+                            currentLambdaAssociation.put("EventType", r.getElementText());
+                        } else if (currentFunctionAssociation != null) {
+                            currentFunctionAssociation.put("EventType", r.getElementText());
+                        }
+                    }
+                    case "TrustedKeyGroups" -> {
+                        inTrustedKeyGroups = true;
+                        sawTrustedKeyGroups = true;
+                    }
+                    case "Enabled" -> {
+                        if (inTrustedKeyGroups) {
+                            trustedKeyGroupsEnabled = parseTrustedKeyGroupsEnabled(r.getElementText());
+                        }
+                    }
+                    case "Quantity" -> {
+                        if (inTrustedKeyGroups) {
+                            trustedKeyGroupsQuantity = parseTrustedKeyGroupsQuantity(r.getElementText());
+                        } else if (inLambdaAssociations && currentLambdaAssociation == null) {
+                            lambdaAssociationsQuantity = parseAssociationsQuantity(r.getElementText());
+                        } else if (inFunctionAssociations && currentFunctionAssociation == null) {
+                            functionAssociationsQuantity = parseAssociationsQuantity(r.getElementText());
+                        }
+                    }
+                    case "KeyGroup" -> {
+                        if (inTrustedKeyGroups) {
+                            trustedKeyGroups.add(r.getElementText());
+                        }
+                    }
+                    case "AllowedMethods" -> inAllowedMethods = true;
+                    case "CachedMethods" -> {
+                        if (inAllowedMethods) inCachedMethods = true;
+                    }
+                    case "ForwardedValues" -> {
+                        inForwardedValues = true;
+                        sawForwardedValues = true;
+                    }
+                    case "Cookies" -> {
+                        if (inForwardedValues) inForwardedCookies = true;
+                    }
+                    case "WhitelistedNames" -> {
+                        if (inForwardedCookies) inForwardedCookieNames = true;
+                    }
+                    case "Headers" -> {
+                        if (inForwardedValues) inForwardedHeaders = true;
+                    }
+                    case "QueryStringCacheKeys" -> {
+                        if (inForwardedValues) inForwardedQueryStringCacheKeys = true;
+                    }
+                    case "Name" -> {
+                        if (inForwardedCookieNames) {
+                            forwardedCookieNames.add(r.getElementText());
+                        } else if (inForwardedHeaders) {
+                            forwardedHeaders.add(r.getElementText());
+                        } else if (inForwardedQueryStringCacheKeys) {
+                            forwardedQueryStringCacheKeys.add(r.getElementText());
+                        }
+                    }
+                    case "QueryString" -> {
+                        if (inForwardedValues && !inForwardedCookies) {
+                            forwardedQueryString = "true".equalsIgnoreCase(r.getElementText());
+                        }
+                    }
+                    case "Forward" -> {
+                        if (inForwardedCookies) forwardedCookiesForward = r.getElementText();
+                    }
+                    case "PathPattern" -> target.setPathPattern(r.getElementText());
+                    case "TargetOriginId" -> target.setTargetOriginId(r.getElementText());
+                    case "ViewerProtocolPolicy" -> target.setViewerProtocolPolicy(r.getElementText());
+                    case "CachePolicyId" -> target.setCachePolicyId(r.getElementText());
+                    case "OriginRequestPolicyId" -> target.setOriginRequestPolicyId(r.getElementText());
+                    case "ResponseHeadersPolicyId" -> target.setResponseHeadersPolicyId(r.getElementText());
+                    case "FieldLevelEncryptionId" -> target.setFieldLevelEncryptionId(r.getElementText());
+                    case "RealtimeLogConfigArn" -> target.setRealtimeLogConfigArn(r.getElementText());
+                    case "Compress" -> target.setCompress("true".equalsIgnoreCase(r.getElementText()));
+                    case "SmoothStreaming" ->
+                            target.setSmoothStreaming("true".equalsIgnoreCase(r.getElementText()));
+                    case "MinTTL" -> target.setMinTTL(parseLongOrZero(r.getElementText()));
+                    case "DefaultTTL" -> target.setDefaultTTL(parseLongOrZero(r.getElementText()));
+                    case "MaxTTL" -> target.setMaxTTL(parseLongOrZero(r.getElementText()));
+                    case "Method" -> {
+                        if (inCachedMethods) {
+                            cachedMethods.add(r.getElementText());
+                        } else if (inAllowedMethods) {
+                            allowedMethods.add(r.getElementText());
+                        }
+                    }
+                    default -> {
+                    }
+                }
+            } else if (event == XMLStreamConstants.END_ELEMENT) {
+                String local = r.getLocalName();
+                if (scopeElement.equals(local)) {
+                    break;
+                }
+                switch (local) {
+                    case "CachedMethods" -> inCachedMethods = false;
+                    case "AllowedMethods" -> inAllowedMethods = false;
+                    case "WhitelistedNames" -> inForwardedCookieNames = false;
+                    case "Headers" -> inForwardedHeaders = false;
+                    case "QueryStringCacheKeys" -> inForwardedQueryStringCacheKeys = false;
+                    case "Cookies" -> inForwardedCookies = false;
+                    case "ForwardedValues" -> inForwardedValues = false;
+                    case "TrustedKeyGroups" -> inTrustedKeyGroups = false;
+                    case "LambdaFunctionAssociations" -> inLambdaAssociations = false;
+                    case "FunctionAssociations" -> inFunctionAssociations = false;
+                    case "LambdaFunctionAssociation" -> {
+                        if (currentLambdaAssociation != null) {
+                            lambdaAssociations.add(currentLambdaAssociation);
+                            currentLambdaAssociation = null;
+                        }
+                    }
+                    case "FunctionAssociation" -> {
+                        if (currentFunctionAssociation != null) {
+                            functionAssociations.add(currentFunctionAssociation);
+                            currentFunctionAssociation = null;
+                        }
+                    }
+                    default -> {
+                    }
+                }
+            }
+        }
+
+        if (!allowedMethods.isEmpty()) {
+            target.setAllowedMethods(allowedMethods);
+        }
+        if (!cachedMethods.isEmpty()) {
+            target.setCachedMethods(cachedMethods);
+        }
+        if (sawForwardedValues) {
+            target.setForwardedValues(forwardedValuesModel(
+                    forwardedQueryString,
+                    forwardedCookiesForward,
+                    forwardedCookieNames,
+                    forwardedHeaders,
+                    forwardedQueryStringCacheKeys));
+        }
+        if (!trustedKeyGroups.isEmpty()) {
+            target.setTrustedKeyGroups(trustedKeyGroups);
+        }
+        validateAssociationsQuantity(lambdaAssociationsQuantity, lambdaAssociations.size());
+        validateAssociationsQuantity(functionAssociationsQuantity, functionAssociations.size());
+        validateLambdaFunctionAssociations(lambdaAssociations);
+        validateFunctionAssociations(functionAssociations);
+        if (!lambdaAssociations.isEmpty()) {
+            target.setLambdaFunctionAssociations(lambdaAssociations);
+        }
+        if (!functionAssociations.isEmpty()) {
+            target.setFunctionAssociations(functionAssociations);
+        }
+        if (sawTrustedKeyGroups) {
+            if (trustedKeyGroupsEnabled == null) {
+                throw new AwsException(
+                        "InvalidArgument", "TrustedKeyGroups must include Enabled.", 400);
+            }
+            validateTrustedKeyGroupsQuantity(trustedKeyGroupsQuantity, trustedKeyGroups.size());
+            validateEnabledTrustedKeyGroups(trustedKeyGroupsEnabled, trustedKeyGroups.size());
+            target.setTrustedKeyGroupsEnabled(trustedKeyGroupsEnabled);
+        }
     }
 
     private static boolean parseTrustedKeyGroupsEnabled(String value) {
@@ -3752,6 +3540,7 @@ public class CloudFrontController {
         CachePolicy policy = new CachePolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(CloudFrontPolicyConfigCodec.parseCachePolicy(body));
         return policy;
     }
 
@@ -3759,6 +3548,7 @@ public class CloudFrontController {
         OriginRequestPolicy policy = new OriginRequestPolicy();
         policy.setName(XmlParser.extractFirst(body, "Name", null));
         policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        policy.setConfig(CloudFrontPolicyConfigCodec.parseOriginRequestPolicy(body));
         return policy;
     }
 

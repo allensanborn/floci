@@ -4,25 +4,35 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.IpPermission;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.AccessConfig;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
-import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateFargateProfileRequest;
 import io.github.hectorvent.floci.services.eks.model.CreateNodeGroupRequest;
+import io.github.hectorvent.floci.services.eks.model.EncryptionConfig;
 import io.github.hectorvent.floci.services.eks.model.FargateProfile;
 import io.github.hectorvent.floci.services.eks.model.FargateProfileStatus;
 import io.github.hectorvent.floci.services.eks.model.KubernetesNetworkConfig;
+import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Logging;
 import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.NodegroupScalingConfig;
 import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
+import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
+import io.github.hectorvent.floci.services.eks.model.Provider;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
@@ -34,27 +44,39 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
-import java.util.Set;
 
 @ApplicationScoped
 public class EksService implements TagHandler, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
 
+    private static final List<String> ALL_LOG_TYPES = List.of(
+            "api", "audit", "authenticator", "controllerManager", "scheduler"
+    );
+
     /** The AWS charset for EKS cluster names. It admits no dot, which the Docker-name account
      *  qualifier relies on — see EksClusterManager#accountQualifiedName. */
     static final String CLUSTER_NAME_REGEX = "[0-9A-Za-z][A-Za-z0-9\\-_]*";
+
+    private static final String CLUSTER_SG_DESCRIPTION =
+            "EKS created security group applied to ENI that is attached to EKS Control Plane master nodes, as well as any managed workloads.";
 
     private final StorageBackend<String, Cluster> storage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
@@ -64,12 +86,15 @@ public class EksService implements TagHandler, ResourceProvider {
     private final EksClusterManager clusterManager;
     private final Ec2Service ec2Service;
     private final EksOidcService oidcService;
+    private final EksAccessEntryService accessEntries;
+    private final EksPodIdentityAssociationService podIdentityAssociations;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
-            EksOidcService oidcService) {
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -84,11 +109,22 @@ public class EksService implements TagHandler, ResourceProvider {
         this.clusterManager = clusterManager;
         this.ec2Service = ec2Service;
         this.oidcService = oidcService;
+        this.accessEntries = accessEntries;
+        this.podIdentityAssociations = podIdentityAssociations;
+    }
+
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, null);
     }
 
     @PostConstruct
     public void init() {
         backfillOidcIdentities();
+        backfillClusterSecurityGroups();
+        backfillLogging();
         if (!config.services().eks().mock()) {
             restorePersistedClusters();
             startReadinessPoller();
@@ -197,12 +233,149 @@ public class EksService implements TagHandler, ResourceProvider {
         }
     }
 
-    private void putClusterForAccount(String accountId, Cluster cluster) {
+    void putClusterForAccount(String accountId, Cluster cluster) {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             aware.putForAccount(accountId, cluster.getName(), cluster);
             return;
         }
         storage.put(cluster.getName(), cluster);
+    }
+
+    void deleteClusterForAccount(String accountId, String clusterName) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            aware.deleteForAccount(accountId, clusterName);
+            return;
+        }
+        storage.delete(clusterName);
+    }
+
+    private SecurityGroup createClusterSecurityGroup(String region, String clusterName, String vpcId) {
+        String suffix = randomHex(8);
+        String groupName = "eks-cluster-sg-" + clusterName + "-" + suffix;
+        SecurityGroup sg = ec2Service.createSecurityGroup(region, groupName, CLUSTER_SG_DESCRIPTION, vpcId);
+        try {
+            List<Tag> tags = List.of(
+                    new Tag("Name", groupName),
+                    new Tag("kubernetes.io/cluster/" + clusterName, "owned"),
+                    new Tag("aws:eks:cluster-name", clusterName)
+            );
+            ec2Service.createTags(region, List.of(sg.getGroupId()), tags);
+
+            UserIdGroupPair selfPair = new UserIdGroupPair();
+            selfPair.setGroupId(sg.getGroupId());
+
+            IpPermission selfIngress = new IpPermission();
+            selfIngress.setIpProtocol("-1");
+            selfIngress.setUserIdGroupPairs(List.of(selfPair));
+            ec2Service.authorizeSecurityGroupIngress(region, sg.getGroupId(), List.of(selfIngress));
+
+            IpPermission selfEgress = new IpPermission();
+            selfEgress.setIpProtocol("-1");
+            selfEgress.setUserIdGroupPairs(List.of(selfPair));
+            ec2Service.authorizeSecurityGroupEgress(region, sg.getGroupId(), List.of(selfEgress));
+
+            return sg;
+        } catch (RuntimeException e) {
+            try {
+                ec2Service.deleteSecurityGroup(region, sg.getGroupId());
+            } catch (Exception cleanupEx) {
+                LOG.warnv("Failed to clean up cluster security group {0} after configuration failure: {1}",
+                        sg.getGroupId(), cleanupEx.getMessage());
+            }
+            throw e;
+        }
+    }
+
+    private void deleteClusterSecurityGroup(Cluster cluster) {
+        if (ec2Service == null || cluster.getResourcesVpcConfig() == null) {
+            return;
+        }
+        String sgId = cluster.getResourcesVpcConfig().getClusterSecurityGroupId();
+        if (sgId == null || sgId.isBlank()) {
+            return;
+        }
+        String region = resolveClusterRegion(cluster);
+        try {
+            ec2Service.deleteSecurityGroup(region, sgId);
+        } catch (AwsException e) {
+            if ("InvalidGroup.NotFound".equals(e.getErrorCode())) {
+                LOG.debugv("Cluster security group {0} already gone, treating as deleted", sgId);
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    void backfillClusterSecurityGroups() {
+        if (ec2Service == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            String accountId = entry.accountId();
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+
+            ResourcesVpcConfig vpcConfig = cluster.getResourcesVpcConfig();
+            if (vpcConfig == null) {
+                continue;
+            }
+            if (vpcConfig.getClusterSecurityGroupId() != null && !vpcConfig.getClusterSecurityGroupId().isBlank()) {
+                continue;
+            }
+            if (vpcConfig.getVpcId() == null || vpcConfig.getVpcId().isBlank()) {
+                continue;
+            }
+
+            try {
+                RequestScopes.runAs(accountId, () -> {
+                    String region = resolveClusterRegion(cluster);
+                    SecurityGroup sg = createClusterSecurityGroup(region, cluster.getName(), vpcConfig.getVpcId());
+                    vpcConfig.setClusterSecurityGroupId(sg.getGroupId());
+                    putClusterForAccount(accountId, cluster);
+                    LOG.infov("Backfilled cluster security group {0} for existing EKS cluster {1} in account {2}",
+                            sg.getGroupId(), cluster.getName(), accountId);
+                });
+            } catch (Exception e) {
+                LOG.warnv("Could not backfill cluster security group for existing EKS cluster {0} in account {1}: {2}",
+                        cluster.getName(), accountId, e.getMessage());
+            }
+        }
+    }
+
+    void backfillLogging() {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            if (cluster.getLogging() != null) {
+                continue;
+            }
+            String accountId = entry.accountId();
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(accountId);
+            }
+            cluster.setLogging(defaultLogging());
+            putClusterForAccount(accountId, cluster);
+            LOG.infov("Backfilled default logging for existing EKS cluster {0} in account {1}",
+                    cluster.getName(), accountId);
+        }
+    }
+
+    private String resolveClusterRegion(Cluster cluster) {
+        if (cluster.getArn() != null && !cluster.getArn().isBlank()) {
+            try {
+                return AwsArnUtils.parse(cluster.getArn()).region();
+            } catch (IllegalArgumentException ignored) {
+                // Not a valid ARN, fall back to configured region
+            }
+        }
+        return config != null ? config.defaultRegion() : regionResolver.getRegion();
+    }
+
+    private static String randomHex(int len) {
+        byte[] bytes = new byte[(len + 1) / 2];
+        ThreadLocalRandom.current().nextBytes(bytes);
+        return HexFormat.of().formatHex(bytes).substring(0, len);
     }
 
     @PreDestroy
@@ -235,6 +408,15 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Cluster already exists: " + name, 409);
         }
 
+        AccessConfig requestedAccess = request.getAccessConfig();
+        String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
+                ? "CONFIG_MAP" : requestedAccess.authenticationMode();
+        if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(authenticationMode)) {
+            throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
+        }
+        AccessConfig accessConfig = new AccessConfig(authenticationMode,
+                requestedAccess == null || requestedAccess.bootstrapClusterCreatorAdminPermissions() == null
+                        || requestedAccess.bootstrapClusterCreatorAdminPermissions());
         String region = regionResolver.getRegion();
         String resolvedVpcId = validateSubnetsAndResolveVpcId(region, request.getResourcesVpcConfig());
         String accountId = regionResolver.getAccountId();
@@ -242,39 +424,69 @@ public class EksService implements TagHandler, ResourceProvider {
 
         Cluster cluster = new Cluster();
         cluster.setName(name);
+        cluster.setAccessConfig(accessConfig);
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
         cluster.setVersion(request.getVersion() != null ? request.getVersion() : "1.29");
         cluster.setRoleArn(request.getRoleArn());
-        cluster.setResourcesVpcConfig(buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId));
+        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        SecurityGroup clusterSg = null;
+        if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
+            try {
+                clusterSg = createClusterSecurityGroup(region, name, vpcConfig.getVpcId());
+                vpcConfig.setClusterSecurityGroupId(clusterSg.getGroupId());
+            } catch (AwsException e) {
+                if ("InvalidVpcID.NotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("InvalidParameterException",
+                            "VPC '" + vpcConfig.getVpcId() + "' does not exist", 400);
+                }
+                throw e;
+            }
+        }
+        cluster.setResourcesVpcConfig(vpcConfig);
         cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig()));
+        cluster.setLogging(buildLogging(request.getLogging()));
+        cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
-        String issuer = oidcService.newIssuerUrl(region);
-        cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
-        oidcService.ensureKey(name, issuer);
+        try {
+            String issuer = oidcService.newIssuerUrl(region);
+            cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+            oidcService.ensureKey(name, issuer);
 
-        if (config.services().eks().mock()) {
-            markMetadataOnlyActive(cluster);
-        } else {
-            try {
-                if (!clusterManager.tryStartCluster(cluster)) {
-                    // No Docker daemon: the k3s control plane cannot run, but the cluster record is
-                    // metadata that stands on its own. FAILED is reserved for provisioning errors
-                    // AWS would also report, and would strand every IaC apply that polls for ACTIVE.
-                    markMetadataOnlyActive(cluster);
+            if (config.services().eks().mock()) {
+                markMetadataOnlyActive(cluster);
+            } else {
+                try {
+                    if (!clusterManager.tryStartCluster(cluster)) {
+                        // No Docker daemon: the k3s control plane cannot run, but the cluster record is
+                        // metadata that stands on its own. FAILED is reserved for provisioning errors
+                        // AWS would also report, and would strand every IaC apply that polls for ACTIVE.
+                        markMetadataOnlyActive(cluster);
+                    }
+                } catch (Exception e) {
+                    LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
+                    cluster.setStatus(ClusterStatus.FAILED);
                 }
-            } catch (Exception e) {
-                LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
-                cluster.setStatus(ClusterStatus.FAILED);
             }
+
+            storage.put(name, cluster);
+        } catch (RuntimeException e) {
+            if (clusterSg != null) {
+                try {
+                    ec2Service.deleteSecurityGroup(region, clusterSg.getGroupId());
+                } catch (Exception cleanupEx) {
+                    LOG.warnv("Failed to clean up cluster security group {0} after cluster creation failure: {1}",
+                            clusterSg.getGroupId(), cleanupEx.getMessage());
+                }
+            }
+            throw e;
         }
 
-        storage.put(name, cluster);
         return cluster;
     }
 
@@ -289,10 +501,19 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
     }
 
+    public Optional<Cluster> findAuthenticationCluster(String accountId, String name) {
+        return storage instanceof AccountAwareStorageBackend<Cluster> aware
+                ? aware.getForAccount(accountId, name) : storage.get(name);
+    }
+
     public Cluster describeCluster(String name) {
-        return storage.get(name)
+        Cluster cluster = storage.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
+        if (cluster.getLogging() == null) {
+            cluster.setLogging(defaultLogging());
+        }
+        return cluster;
     }
 
     public List<String> listClusters() {
@@ -309,6 +530,11 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setStatus(ClusterStatus.DELETING);
         if (!config.services().eks().mock()) {
             clusterManager.stopCluster(cluster);
+        }
+        deleteClusterSecurityGroup(cluster);
+        accessEntries.deleteClusterEntries(cluster);
+        if (podIdentityAssociations != null) {
+            podIdentityAssociations.deleteClusterAssociations(cluster);
         }
         storage.delete(name);
         oidcService.deleteKey(name);
@@ -602,6 +828,81 @@ public class EksService implements TagHandler, ResourceProvider {
             config.setIpFamily("ipv4");
         }
         return config;
+    }
+
+    static Logging defaultLogging() {
+        return new Logging(List.of(new LogSetup(new ArrayList<>(ALL_LOG_TYPES), false)));
+    }
+
+    private Logging buildLogging(Logging requestedLogging) {
+        if (requestedLogging == null || requestedLogging.getClusterLogging() == null
+                || requestedLogging.getClusterLogging().isEmpty()) {
+            return defaultLogging();
+        }
+
+        Set<String> enabledTypes = new LinkedHashSet<>();
+        Set<String> specifiedTypes = new HashSet<>();
+
+        for (LogSetup setup : requestedLogging.getClusterLogging()) {
+            if (setup == null || setup.getTypes() == null) {
+                continue;
+            }
+            for (String type : setup.getTypes()) {
+                if (!ALL_LOG_TYPES.contains(type)) {
+                    throw new AwsException("InvalidParameterException",
+                            "'" + type + "' is not a valid log type", 400);
+                }
+                specifiedTypes.add(type);
+                if (Boolean.TRUE.equals(setup.getEnabled())) {
+                    enabledTypes.add(type);
+                } else {
+                    enabledTypes.remove(type);
+                }
+            }
+        }
+
+        if (specifiedTypes.isEmpty()) {
+            return defaultLogging();
+        }
+
+        List<String> enabledList = ALL_LOG_TYPES.stream()
+                .filter(enabledTypes::contains)
+                .collect(Collectors.toList());
+        List<String> disabledList = ALL_LOG_TYPES.stream()
+                .filter(t -> !enabledTypes.contains(t))
+                .collect(Collectors.toList());
+
+        List<LogSetup> entries = new ArrayList<>();
+        if (!enabledList.isEmpty()) {
+            entries.add(new LogSetup(enabledList, true));
+        }
+        if (!disabledList.isEmpty()) {
+            entries.add(new LogSetup(disabledList, false));
+        }
+
+        return new Logging(entries);
+    }
+
+    private List<EncryptionConfig> buildEncryptionConfig(List<EncryptionConfig> requestedConfigs) {
+        if (requestedConfigs == null || requestedConfigs.isEmpty()) {
+            return null;
+        }
+        if (requestedConfigs.size() > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Only one encryption configuration is allowed", 400);
+        }
+        EncryptionConfig config = requestedConfigs.getFirst();
+        if (config == null || config.getResources() == null || config.getResources().isEmpty()
+                || !List.of("secrets").equals(config.getResources())) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid k8s resource and provider for encryption", 400);
+        }
+        if (config.getProvider() == null || config.getProvider().getKeyArn() == null
+                || config.getProvider().getKeyArn().isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid k8s resource and provider for encryption", 400);
+        }
+        return List.of(new EncryptionConfig(List.of("secrets"), new Provider(config.getProvider().getKeyArn())));
     }
 
     private String nodeGroupKey(String clusterName, String nodegroupName) {

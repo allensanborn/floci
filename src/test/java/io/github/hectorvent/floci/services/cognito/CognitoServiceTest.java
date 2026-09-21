@@ -22,7 +22,9 @@ import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -54,6 +56,7 @@ class CognitoServiceTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private CognitoService service;
+    private InMemoryStorage<String, UserPool> poolStore;
     private InMemoryStorage<String, CognitoUser> userStore;
     private InMemoryStorage<String, CognitoGroup> groupStore;
     private InMemoryStorage<String, RevokedTokenInfo> revokedTokenStore;
@@ -62,6 +65,7 @@ class CognitoServiceTest {
 
     @BeforeEach
     void setUp() {
+        poolStore = new InMemoryStorage<>();
         userStore = new InMemoryStorage<>();
         groupStore = new InMemoryStorage<>();
         revokedTokenStore = new InMemoryStorage<>();
@@ -71,7 +75,7 @@ class CognitoServiceTest {
         when(acmService.describeCertificate(anyString(), eq("us-east-1")))
                 .thenAnswer(inv -> issuedCertificate(inv.getArgument(0)));
         service = new CognitoService(
-                new InMemoryStorage<>(),
+                poolStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 userStore,
@@ -128,7 +132,10 @@ class CognitoServiceTest {
         assertNotNull(pool.getId());
         assertEquals("FullConfigPool", pool.getName());
         assertEquals("arn:aws:cognito-idp:us-east-1:000000000000:userpool/" + pool.getId(), pool.getArn());
-        assertEquals(schema, pool.getSchemaAttributes());
+        assertEquals(
+                List.of(Map.of("Name", "custom:my-attr", "AttributeDataType", "String")),
+                pool.getSchemaAttributes(),
+                "a non-standard Schema attribute is stored under the custom: namespace");
         // A supplied PasswordPolicy is normalized with AWS's defaults for the fields left unset
         // (MinimumLength here was explicit; the rest were not), matching what DescribeUserPool
         // returns on real Cognito for a policy submitted this way.
@@ -141,6 +148,173 @@ class CognitoServiceTest {
         expectedPasswordPolicy.put("TemporaryPasswordValidityDays", 7);
         assertEquals(Map.of("PasswordPolicy", expectedPasswordPolicy), pool.getPolicies());
         assertEquals(List.of("email"), pool.getUsernameAttributes());
+    }
+
+    @Test
+    void initiateAuthRejectsUnrecognizedAuthFlowWithoutIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "UNKNOWN_FLOW", Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthRejectsUnrecognizedAuthFlowWithoutIssuingTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "UNKNOWN_FLOW",
+                        Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthNoSrpFlowRequiresTheCorrectPassword() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_NO_SRP_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "wrong")));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
+
+        Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                "ADMIN_NO_SRP_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertTrue(result.containsKey("AuthenticationResult"));
+    }
+
+    @Test
+    void adminInitiateAuthAcceptsTheSdkSpellingOfSrpAuth() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "client", false, false, List.of(), List.of());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_SRP_AUTH",
+                        Map.of("USERNAME", "alice")));
+
+        assertEquals("USERNAME and SRP_A are required", exception.getMessage());
+    }
+
+    @Test
+    void initiateAuthRejectsFlowsTheClientDoesNotAllow() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
+        Map<String, String> passwordParams = Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", passwordParams));
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+        assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", exception.getMessage());
+
+        assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "CUSTOM_AUTH", Map.of("USERNAME", "alice")));
+    }
+
+    @Test
+    void initiateAuthAllowsFlowsTheClientEnables() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_PASSWORD_AUTH");
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        assertTrue(result.containsKey("AuthenticationResult"));
+    }
+
+    @Test
+    void initiateAuthHonorsLegacyExplicitAuthFlowValues() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "USER_PASSWORD_AUTH");
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        assertTrue(result.containsKey("AuthenticationResult"));
+    }
+
+    @Test
+    void refreshTokenAuthRequiresAllowRefreshTokenAuthWhenClientUsesAllowValues() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_PASSWORD_AUTH");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "REFRESH_TOKEN_AUTH",
+                        Map.of("REFRESH_TOKEN", "irrelevant")));
+
+        assertEquals("REFRESH_TOKEN_AUTH flow not enabled for this client", exception.getMessage());
+    }
+
+    @Test
+    void adminInitiateAuthRejectsFlowsTheClientDoesNotAllow() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_SRP_AUTH");
+        Map<String, String> passwordParams = Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!");
+
+        for (String flow : List.of("ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH", "USER_PASSWORD_AUTH")) {
+            AwsException exception = assertThrows(AwsException.class, () ->
+                    service.adminInitiateAuth(pool.getId(), client.getClientId(), flow, passwordParams));
+            assertEquals("InvalidParameterException", exception.getErrorCode());
+            assertEquals(flow + " flow not enabled for this client", exception.getMessage());
+        }
+    }
+
+    @Test
+    void adminInitiateAuthAllowsAdminPasswordFlowWhenEnabled() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_ADMIN_USER_PASSWORD_AUTH");
+        Map<String, String> passwordParams = Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!");
+
+        for (String flow : List.of("ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH")) {
+            Map<String, Object> result = service.adminInitiateAuth(pool.getId(), client.getClientId(), flow,
+                    passwordParams);
+            assertTrue(result.containsKey("AuthenticationResult"));
+        }
+    }
+
+    @Test
+    void userAuthRequiresAllowUserAuthWhenClientListsFlows() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_PASSWORD_AUTH", "ALLOW_USER_SRP_AUTH");
+        Map<String, String> params = Map.of("USERNAME", "alice");
+
+        AwsException initiate = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_AUTH", params));
+        assertEquals("InvalidParameterException", initiate.getErrorCode());
+        assertEquals("USER_AUTH flow not enabled for this client", initiate.getMessage());
+
+        AwsException admin = assertThrows(AwsException.class, () ->
+                service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH", params));
+        assertEquals("InvalidParameterException", admin.getErrorCode());
+        assertEquals("USER_AUTH flow not enabled for this client", admin.getMessage());
+    }
+
+    @Test
+    void userAuthAllowedWhenClientEnablesAllowUserAuth() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = clientWithFlows(pool, "ALLOW_USER_AUTH");
+        Map<String, String> params = Map.of("USERNAME", "alice");
+
+        Map<String, Object> initiate = service.initiateAuth(client.getClientId(), "USER_AUTH", params);
+        assertEquals("SELECT_CHALLENGE", initiate.get("ChallengeName"));
+
+        Map<String, Object> admin = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
+                params);
+        assertEquals("SELECT_CHALLENGE", admin.get("ChallengeName"));
+    }
+
+    private UserPoolClient clientWithFlows(UserPool pool, String... explicitAuthFlows) {
+        return service.createUserPoolClient(pool.getId(), "flows-client", false, false, List.of(), List.of(),
+                null, List.of(), null, List.of(explicitAuthFlows), null, null, List.of(), null, List.of(), null,
+                null, null, List.of(), null, null);
     }
 
     @ParameterizedTest
@@ -286,6 +460,83 @@ class CognitoServiceTest {
         assertDoesNotThrow(() -> service.signUp(
                 client.getClientId(), "bob@example.com", "Eightplus1!", Map.of(
                         "email", "bob@example.com", "phone_number", "+4915112345679")));
+    }
+
+    @Test
+    void createUserPoolNamespacesNonStandardSchemaAttributes() {
+        // The Schema property carries custom attributes unprefixed - it is what CloudFormation
+        // and the SDKs send - and AWS files them under custom: on the way in. A pool that stored
+        // the bare name answered DescribeUserPool with an attribute no client ever asks for.
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "CustomAttrPool");
+        request.put("Schema", List.of(
+                Map.of("Name", "EmployeeId", "AttributeDataType", "String", "Mutable", true),
+                Map.of("Name", "Seniority", "AttributeDataType", "Number")));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("custom:EmployeeId", "custom:Seniority"), schemaNames(pool));
+        assertEquals(Boolean.TRUE, findSchemaAttribute(pool, "custom:EmployeeId").get("Mutable"),
+                "the rest of the attribute definition is carried through unchanged");
+    }
+
+    @Test
+    void createUserPoolLeavesStandardSchemaAttributesUnprefixed() {
+        // A standard attribute travels in the same list to override its default, typically to make
+        // email required. Namespacing it would file a second, custom attribute and leave the
+        // non-required default in force.
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "StandardOverridePool");
+        request.put("Schema", List.of(
+                Map.of("Name", "email", "AttributeDataType", "String", "Required", true),
+                Map.of("Name", "Department", "AttributeDataType", "String")));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("email", "custom:Department"), schemaNames(pool));
+        assertEquals(Boolean.TRUE, findSchemaAttribute(pool, "email").get("Required"));
+    }
+
+    @Test
+    void createUserPoolLeavesAlreadyNamespacedSchemaAttributesAlone() {
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "PrefixedAttrPool");
+        request.put("Schema", List.of(
+                Map.of("Name", "custom:tenant_id", "AttributeDataType", "String"),
+                Map.of("Name", "internal", "AttributeDataType", "String",
+                        "DeveloperOnlyAttribute", true)));
+
+        UserPool pool = service.createUserPool(request, "us-east-1");
+
+        assertEquals(List.of("custom:tenant_id", "dev:internal"), schemaNames(pool));
+    }
+
+    @Test
+    void updateUserPoolResendingTheSameSchemaDoesNotPrefixTwice() {
+        // CloudFormation re-sends the whole template on every UpdateStack, so the same Schema
+        // arrives again through updateUserPool. A second pass must be a no-op, not custom:custom:.
+        Map<String, Object> create = new HashMap<>();
+        create.put("PoolName", "ReappliedSchemaPool");
+        create.put("Schema", List.of(Map.of("Name", "EmployeeId", "AttributeDataType", "String")));
+        UserPool pool = service.createUserPool(create, "us-east-1");
+
+        Map<String, Object> update = new HashMap<>();
+        update.put("UserPoolId", pool.getId());
+        update.put("Schema", pool.getSchemaAttributes());
+        UserPool updated = service.updateUserPool(update, "us-east-1");
+
+        assertEquals(List.of("custom:EmployeeId"), schemaNames(updated));
+    }
+
+    private static List<String> schemaNames(UserPool pool) {
+        return pool.getSchemaAttributes().stream().map(attr -> (String) attr.get("Name")).toList();
+    }
+
+    private static Map<String, Object> findSchemaAttribute(UserPool pool, String name) {
+        return pool.getSchemaAttributes().stream()
+                .filter(attr -> name.equals(attr.get("Name")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no schema attribute named " + name));
     }
 
     @Test
@@ -1527,7 +1778,23 @@ class CognitoServiceTest {
     }
 
     @Test
-    void confirmSignUpNamesDeletedUserPoolInResourceNotFoundMessage() {
+    void confirmSignUpNamesMissingUserPoolInResourceNotFoundMessage() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "test-client", false, false, List.of(), List.of());
+        // DeleteUserPool takes the pool's clients with it, so an orphaned client cannot be
+        // produced through the API. Drop the pool record alone to reach the defensive path.
+        poolStore.delete(pool.getId());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp(client.getClientId(), "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void confirmSignUpRejectsAClientIdBelongingToADeletedUserPool() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "test-client", false, false, List.of(), List.of());
@@ -1536,7 +1803,7 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.confirmSignUp(client.getClientId(), "carol", "123456"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
-        assertEquals("User pool " + pool.getId() + " does not exist.", ex.getMessage());
+        assertEquals("Client not found", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -1569,6 +1836,236 @@ class CognitoServiceTest {
                 pool.getId(), "alice", Map.of(verificationStatusAttribute, "true"));
         assertEquals("true", service.adminGetUser(pool.getId(), "alice")
                 .getAttributes().get(verificationStatusAttribute));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void expiredPendingEmailCodeLeavesActiveAttributeAndVerifiedFlagUnchanged() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn("123456");
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class));
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "PendingEmailExpiryPool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "pending-email-expiry-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+
+        serviceWithVerification.updateUserAttributes(
+                accessToken, Map.of("email", "new@example.com"));
+        doThrow(new VerificationCodeException(
+                VerificationCodeException.Kind.EXPIRED,
+                "Invalid code provided, please request code again"))
+                .when(verificationCodeService)
+                .consume(pool.getId(), "alice",
+                        VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "123456");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> serviceWithVerification.verifyUserAttribute(accessToken, "email", "123456"));
+
+        assertEquals("ExpiredCodeException", error.getErrorCode());
+        CognitoUser unchanged = serviceWithVerification.adminGetUser(pool.getId(), "alice");
+        assertEquals("old@example.com", unchanged.getAttributes().get("email"));
+        assertEquals("true", unchanged.getAttributes().get("email_verified"));
+        assertEquals("new@example.com", unchanged.getPendingAttributes().get("email"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void verificationCodeForRequiredEmailUpdateUsesPendingDestination() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION), any()))
+                .thenReturn("123456");
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class));
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "PendingEmailDeliveryPool",
+                "AutoVerifiedAttributes", List.of("email"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "pending-email-delivery-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+        serviceWithVerification.updateUserAttributes(
+                accessToken, Map.of("email", "new@example.com"));
+        clearInvocations(messageDispatcher);
+
+        Map<String, Object> delivery = serviceWithVerification
+                .getUserAttributeVerificationCode(accessToken, "email");
+
+        assertEquals("n***@e***", delivery.get("Destination"));
+        ArgumentCaptor<CognitoUser> deliveryUser = ArgumentCaptor.forClass(CognitoUser.class);
+        verify(messageDispatcher).dispatch(
+                eq(pool), deliveryUser.capture(),
+                eq(VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION),
+                eq("123456"), eq(List.of("EMAIL")));
+        assertEquals("new@example.com", deliveryUser.getValue().getAttributes().get("email"));
+        assertEquals("old@example.com",
+                serviceWithVerification.adminGetUser(pool.getId(), "alice").getAttributes().get("email"));
+    }
+
+    @Test
+    void adminContactUpdateClearsOnlyMatchingPendingValueAndVerificationCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(
+                verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService);
+
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", "admin@example.com",
+                "custom:note", "updated"));
+        fixture.service().adminUpdateUserAttributes(fixture.pool().getId(), "alice", Map.of(
+                "email", "admin@example.com"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertEquals("admin@example.com", updated.getAttributes().get("email"));
+        assertEquals("updated", updated.getAttributes().get("custom:note"));
+        assertFalse(updated.getPendingAttributes().containsKey("email"));
+        assertEquals("+12025550101", updated.getPendingAttributes().get("phone_number"));
+        verify(verificationCodeService, times(2)).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+    }
+
+    @Test
+    void adminContactDeleteClearsOnlyMatchingPendingValueAndVerificationCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        PendingContactFixture fixture = createPendingContactFixture(
+                verificationCodeService, messageDispatcher);
+        clearInvocations(verificationCodeService);
+
+        fixture.service().adminDeleteUserAttributes(
+                fixture.pool().getId(), "alice", List.of("phone_number", "custom:note"));
+        fixture.service().adminDeleteUserAttributes(
+                fixture.pool().getId(), "alice", List.of("phone_number"));
+
+        CognitoUser updated = fixture.service().adminGetUser(fixture.pool().getId(), "alice");
+        assertFalse(updated.getAttributes().containsKey("phone_number"));
+        assertFalse(updated.getAttributes().containsKey("custom:note"));
+        assertFalse(updated.getPendingAttributes().containsKey("phone_number"));
+        assertEquals("new@example.com", updated.getPendingAttributes().get("email"));
+        verify(verificationCodeService, times(2)).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.PHONE_ATTRIBUTE_VERIFICATION);
+        verify(verificationCodeService, never()).invalidatePrevious(
+                fixture.pool().getId(), "alice",
+                VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION);
+    }
+
+    @SuppressWarnings("unchecked")
+    private PendingContactFixture createPendingContactFixture(
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher) {
+        when(verificationCodeService.issue(any(), any(), any(), any())).thenReturn("123456");
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class));
+        UserPool pool = serviceWithVerification.createUserPool(Map.of(
+                "PoolName", "AdminPendingContactPool",
+                "AutoVerifiedAttributes", List.of("email", "phone_number"),
+                "UserAttributeUpdateSettings", Map.of(
+                        "AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))),
+                "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(
+                pool.getId(), "admin-pending-contact-client", false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice", Map.of(
+                "email", "old@example.com",
+                "email_verified", "true",
+                "phone_number", "+12025550100",
+                "phone_number_verified", "true",
+                "custom:note", "original"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(
+                pool.getId(), "alice", "Permanent1!", true);
+        Map<String, Object> authResult = serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Permanent1!"));
+        String accessToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult"))
+                .get("AccessToken");
+        serviceWithVerification.updateUserAttributes(accessToken, Map.of(
+                "email", "new@example.com",
+                "phone_number", "+12025550101"));
+        return new PendingContactFixture(serviceWithVerification, pool);
+    }
+
+    private record PendingContactFixture(CognitoService service, UserPool pool) {
     }
 
     @Test
@@ -1774,6 +2271,531 @@ class CognitoServiceTest {
                                 "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
                         )));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    // =========================================================================
+    // USER_AUTH (choice-based) flow
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserAuthNoPreferredChallengeReturnsSelectChallenge() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+
+        assertEquals("SELECT_CHALLENGE", result.get("ChallengeName"));
+        assertNotNull(result.get("Session"));
+        List<String> available = (List<String>) result.get("AvailableChallenges");
+        assertTrue(available.contains("PASSWORD"), "PASSWORD should be available: " + available);
+        assertTrue(available.contains("PASSWORD_SRP"), "PASSWORD_SRP should be available: " + available);
+        assertFalse(available.contains("EMAIL_OTP"),
+                "EMAIL_OTP should not be offered when verification services are not configured");
+    }
+
+    @Test
+    void initiateAuthWithUserAuthRejectsMissingUsername() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.initiateAuth(client.getClientId(), "USER_AUTH", Map.of()));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthRejectsLiteTier() {
+        UserPool pool = createPoolAndUser();
+        pool.setUserPoolTier("LITE");
+        poolStore.put(pool.getId(), pool);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
+                client.getClientId(), "USER_AUTH", Map.of("USERNAME", "alice")));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthRejectsAnUnavailablePreferredChallenge() {
+        // alice has neither a password nor an SRP verifier at this point: not confirmed yet.
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
+                client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP")));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthPreferredChallengePasswordThenRespondCompletesAuth() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        assertEquals("PASSWORD", initResult.get("ChallengeName"));
+        String session = (String) initResult.get("Session");
+        assertNotNull(session);
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        assertNotNull(result.get("AuthenticationResult"),
+                "responding to the PASSWORD challenge with the right password should issue tokens");
+    }
+
+    @Test
+    void initiateAuthWithUserAuthPreferredChallengePasswordSrpThenRespondReturnsPasswordVerifier() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD_SRP"));
+        assertEquals("PASSWORD_SRP", initResult.get("ChallengeName"));
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "PASSWORD_SRP", session,
+                Map.of("USERNAME", "alice", "SRP_A", "ABCDEF1234567890"));
+
+        assertEquals("PASSWORD_VERIFIER", result.get("ChallengeName"),
+                "responding to PASSWORD_SRP with SRP_A should hand off to the existing SRP flow");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void selectChallengeWithPasswordAnswerAndPasswordCompletesInOneRoundTrip() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "SELECT_CHALLENGE",
+                session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD", "PASSWORD", "Perm1234!"));
+
+        assertNotNull(result.get("AuthenticationResult"),
+                "selecting PASSWORD with the password already attached should complete sign-in immediately");
+    }
+
+    @Test
+    void selectChallengeResponseDoesNotCarryAvailableChallenges() {
+        // Only InitiateAuthResponse and AdminInitiateAuthResponse declare AvailableChallenges;
+        // RespondToAuthChallengeResponse is AuthenticationResult, ChallengeName,
+        // ChallengeParameters and Session only.
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertNotNull(initResult.get("AvailableChallenges"),
+                "InitiateAuth should still advertise AvailableChallenges on SELECT_CHALLENGE");
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "SELECT_CHALLENGE",
+                session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD"));
+
+        assertEquals("PASSWORD", result.get("ChallengeName"));
+        assertFalse(result.containsKey("AvailableChallenges"),
+                "RespondToAuthChallenge does not declare AvailableChallenges: " + result.keySet());
+    }
+
+    @Test
+    void adminSelectChallengeResponseDoesNotCarryAvailableChallenges() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertNotNull(initResult.get("AvailableChallenges"),
+                "AdminInitiateAuth should still advertise AvailableChallenges on SELECT_CHALLENGE");
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                "SELECT_CHALLENGE", session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP"));
+
+        assertEquals("PASSWORD_SRP", result.get("ChallengeName"));
+        assertFalse(result.containsKey("AvailableChallenges"),
+                "AdminRespondToAuthChallenge does not declare AvailableChallenges: " + result.keySet());
+    }
+
+    @Test
+    void selectChallengeWithPasswordSrpAnswerAndSrpAReturnsPasswordVerifier() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.respondToAuthChallenge(client.getClientId(), "SELECT_CHALLENGE",
+                session, Map.of("USERNAME", "alice", "ANSWER", "PASSWORD_SRP", "SRP_A", "ABCDEF1234567890"));
+
+        assertEquals("PASSWORD_VERIFIER", result.get("ChallengeName"));
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsPasswordWithNoSessionEverIssued() {
+        // This is the bypass hectorvent flagged: without a tracked session, RespondToAuthChallenge
+        // would accept any USERNAME/PASSWORD pair with ChallengeName=PASSWORD and never run
+        // handleUserAuth's tier gate or availability check at all.
+        UserPool pool = createPoolAndUser();
+        pool.setUserPoolTier("LITE");
+        poolStore.put(pool.getId(), pool);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", "made-up-session",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsPasswordWithNullSession() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", null,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsSelectChallengeWithNoSessionEverIssued() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), "SELECT_CHALLENGE", "made-up-session",
+                Map.of("USERNAME", "alice", "ANSWER", "PASSWORD", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsASessionIssuedForADifferentChallenge() {
+        // A session minted for SELECT_CHALLENGE must not be redeemable against PASSWORD directly;
+        // that would let a caller answer PASSWORD without ever going through SELECT_CHALLENGE's
+        // requireSignInEligible/availableUserAuthChallenges checks.
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        assertEquals("SELECT_CHALLENGE", initResult.get("ChallengeName"));
+        String session = (String) initResult.get("Session");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsASessionAlreadyConsumed() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> first = service.respondToAuthChallenge(client.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertNotNull(first.get("AuthenticationResult"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                client.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode(), "a consumed session must not be replayable");
+    }
+
+    @Test
+    void respondToAuthChallengeRejectsASessionRedeemedAgainstADifferentClient() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+        UserPoolClient otherClient = service.createUserPoolClient(pool.getId(), "other", false, false,
+                List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        String session = (String) initResult.get("Session");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
+                otherClient.getClientId(), "PASSWORD", session,
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void adminInitiateAuthWithUserAuthPreferredChallengePasswordWorks() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "PASSWORD"));
+        assertEquals("PASSWORD", initResult.get("ChallengeName"));
+        String session = (String) initResult.get("Session");
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                "PASSWORD", session, Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        assertNotNull(result.get("AuthenticationResult"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserAuthOffersEmailOtpWhenVerificationIsConfiguredAndEmailVerified() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
+                false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> initResult = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        List<String> available = (List<String>) initResult.get("AvailableChallenges");
+        assertTrue(available.contains("EMAIL_OTP"), "EMAIL_OTP should be offered for a verified email: " + available);
+
+        Map<String, Object> challenge = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+        assertEquals("EMAIL_OTP", challenge.get("ChallengeName"));
+        Map<String, String> params = (Map<String, String>) challenge.get("ChallengeParameters");
+        assertEquals("EMAIL", params.get("CODE_DELIVERY_DELIVERY_MEDIUM"));
+        assertTrue(params.get("CODE_DELIVERY_DESTINATION").contains("***"),
+                "the destination email should be masked: " + params.get("CODE_DELIVERY_DESTINATION"));
+        verify(messageDispatcher).dispatch(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP),
+                eq("654321"), eq(List.of("EMAIL")), any());
+        String session = (String) challenge.get("Session");
+
+        Map<String, Object> result = serviceWithVerification.respondToAuthChallenge(
+                client.getClientId(), "EMAIL_OTP", session,
+                Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "654321"));
+        assertNotNull(result.get("AuthenticationResult"),
+                "responding with the correct EMAIL_OTP_CODE should issue tokens");
+        verify(verificationCodeService).consume(pool.getId(), "alice", VerificationCode.Purpose.EMAIL_OTP, "654321");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserAuthOffersSmsOtpWhenVerificationIsConfiguredAndPhoneVerified() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SMS_OTP), any()))
+                .thenReturn("135790");
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
+                false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of("phone_number", "+15551234567", "phone_number_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> initResult = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice"));
+        List<String> available = (List<String>) initResult.get("AvailableChallenges");
+        assertTrue(available.contains("SMS_OTP"), "SMS_OTP should be offered for a verified phone: " + available);
+
+        Map<String, Object> challenge = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "SMS_OTP"));
+        assertEquals("SMS_OTP", challenge.get("ChallengeName"));
+        Map<String, String> params = (Map<String, String>) challenge.get("ChallengeParameters");
+        assertEquals("SMS", params.get("CODE_DELIVERY_DELIVERY_MEDIUM"));
+        assertTrue(params.get("CODE_DELIVERY_DESTINATION").contains("***"),
+                "the destination phone number should be masked: " + params.get("CODE_DELIVERY_DESTINATION"));
+        verify(messageDispatcher).dispatch(any(), any(), eq(VerificationCode.Purpose.SMS_OTP),
+                eq("135790"), eq(List.of("SMS")), any());
+        String session = (String) challenge.get("Session");
+
+        Map<String, Object> result = serviceWithVerification.respondToAuthChallenge(
+                client.getClientId(), "SMS_OTP", session,
+                Map.of("USERNAME", "alice", "SMS_OTP_CODE", "135790"));
+        assertNotNull(result.get("AuthenticationResult"),
+                "responding with the correct SMS_OTP_CODE should issue tokens");
+        verify(verificationCodeService).consume(pool.getId(), "alice", VerificationCode.Purpose.SMS_OTP, "135790");
+    }
+
+    @Test
+    void respondToEmailOtpChallengeRejectsWrongCode() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("654321");
+        doThrow(new VerificationCodeException(VerificationCodeException.Kind.MISMATCH, "nope"))
+                .when(verificationCodeService).consume(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP),
+                        eq("000000"));
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
+                false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        Map<String, Object> challenge = serviceWithVerification.initiateAuth(client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP"));
+        String session = (String) challenge.get("Session");
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithVerification.respondToAuthChallenge(
+                client.getClientId(), "EMAIL_OTP", session,
+                Map.of("USERNAME", "alice", "EMAIL_OTP_CODE", "000000")));
+        assertEquals("CodeMismatchException", ex.getErrorCode());
+    }
+
+    @Test
+    void initiateAuthWithUserAuthRejectsMissingSecretHashWhenClientHasSecret() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", true, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.initiateAuth(
+                client.getClientId(), "USER_AUTH", Map.of("USERNAME", "alice")));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("SECRET_HASH"));
+    }
+
+    @Test
+    void issueOtpChallengeSurfacesRateLimitInsteadOfAGenericDeliveryFailure() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenThrow(new VerificationCodeException(
+                        VerificationCodeException.Kind.RATE_LIMIT, "Attempt limit exceeded"));
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
+                false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP")));
+        assertEquals("LimitExceededException", ex.getErrorCode(),
+                "a rate-limited code issue must surface as LimitExceededException, not a generic "
+                        + "InternalErrorException that hides the real cause");
+        verify(messageDispatcher, never()).dispatch(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void issueOtpChallengeInvalidatesTheIssuedCodeWhenDispatchFails() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), any()))
+                .thenReturn("777888");
+        doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.EMAIL_OTP), eq("777888"), any(), any());
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                acmService,
+                verificationCodeService,
+                messageDispatcher,
+                mock(TlsCertificateManager.class)
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "c",
+                false, false, List.of(), List.of());
+        serviceWithVerification.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "alice@example.com", "email_verified", "true"), "TempPass1!");
+        serviceWithVerification.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+
+        AwsException ex = assertThrows(AwsException.class, () -> serviceWithVerification.initiateAuth(
+                client.getClientId(), "USER_AUTH",
+                Map.of("USERNAME", "alice", "PREFERRED_CHALLENGE", "EMAIL_OTP")));
+        assertEquals("InternalErrorException", ex.getErrorCode());
+        // The stored code must be invalidated, or the rate limiter would block a retry for a
+        // code the user never actually received.
+        verify(verificationCodeService).invalidatePrevious(pool.getId(), "alice", VerificationCode.Purpose.EMAIL_OTP);
     }
 
     // =========================================================================
@@ -2962,6 +3984,86 @@ class CognitoServiceTest {
                     messageDispatcher,
                     mock(TlsCertificateManager.class)
             );
+        }
+    }
+
+    // KenkoGeek review, PR #2018: VerifyUserAttribute must require an access token (not an
+    // ID token) carrying the aws.cognito.signin.user.admin scope.
+    @Nested
+    class VerifyUserAttributeAuthorization {
+
+        private CognitoService svc;
+        private VerificationCodeService verificationCodeService;
+        private UserPool pool;
+        private UserPoolClient client;
+        private CognitoUser user;
+
+        @BeforeEach
+        void setUpVerification() {
+            verificationCodeService = mock(VerificationCodeService.class);
+            CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+            svc = new CognitoService(
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    new InMemoryStorage<>(),
+                    "http://localhost:4566",
+                    regionResolver,
+                    null,
+                    acmService,
+                    verificationCodeService,
+                    messageDispatcher,
+                    mock(TlsCertificateManager.class)
+            );
+            pool = svc.createUserPool(Map.of("PoolName", "ScopeTestPool"), "us-east-1");
+            client = svc.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+            svc.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), "TempPass1!");
+            svc.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
+            user = svc.adminGetUser(pool.getId(), "alice");
+        }
+
+        @Test
+        void rejectsIdTokenEvenThoughItSharesTheSameClaims() {
+            // ID tokens never carry a scope claim (matching real Cognito), so this must be
+            // rejected on token_use alone, before the scope check ever runs.
+            String idToken = svc.generateSignedJwt(user, pool, "id", client, null);
+
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> svc.verifyUserAttribute(idToken, "email", "123456"));
+
+            assertEquals("NotAuthorizedException", ex.getErrorCode());
+            verify(verificationCodeService, never()).consume(any(), any(), any(), any());
+        }
+
+        @Test
+        void rejectsAccessTokenMissingTheRequiredScope() {
+            // Access tokens carry aws.cognito.signin.user.admin by default (generateSignedJwt),
+            // so building one that lacks it means explicitly suppressing the default and
+            // substituting something else, the way a Pre-Token-Generation V2 Lambda trigger would.
+            String accessToken = svc.generateSignedJwt(user, pool, "access", client,
+                    new CognitoService.ClaimsOverride(null, null, null, null,
+                            List.of("openid"), List.of("aws.cognito.signin.user.admin"),
+                            null, null, null));
+
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> svc.verifyUserAttribute(accessToken, "email", "123456"));
+
+            assertEquals("NotAuthorizedException", ex.getErrorCode());
+            verify(verificationCodeService, never()).consume(any(), any(), any(), any());
+        }
+
+        @Test
+        void acceptsDefaultAccessTokenSinceItAlreadyCarriesTheRequiredScope() {
+            String accessToken = svc.generateSignedJwt(user, pool, "access", client, null);
+
+            svc.verifyUserAttribute(accessToken, "email", "123456");
+
+            verify(verificationCodeService).consume(pool.getId(), user.getUsername(),
+                    VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION, "123456");
         }
     }
 

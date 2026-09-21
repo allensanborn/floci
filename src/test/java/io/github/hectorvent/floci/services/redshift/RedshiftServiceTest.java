@@ -6,15 +6,21 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
+import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
+import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -29,7 +35,9 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
@@ -42,10 +50,14 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<String> snapshotDumpBackend;
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
+    private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
     private RegionResolver regionResolver;
     private RedshiftProxyManager proxyManager;
     private DockerHostResolver dockerHostResolver;
+    private RedshiftCredentialBroker credentialBroker;
+    private SecretsManagerService secretsManagerService;
+    private DynamoDbStreamService streamService;
     private RedshiftService service;
 
     @BeforeEach
@@ -57,6 +69,7 @@ class RedshiftServiceTest {
         snapshotDumpBackend = mock(AccountAwareStorageBackend.class);
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
+        integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
         proxyManager = mock(RedshiftProxyManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
@@ -81,17 +94,139 @@ class RedshiftServiceTest {
         when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshots.json"), any())).thenReturn(snapshotBackend);
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
+        when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
-        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver);
+        credentialBroker = new RedshiftCredentialBroker();
+        secretsManagerService = mock(SecretsManagerService.class);
+        streamService = mock(DynamoDbStreamService.class);
+
+        service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, new com.fasterxml.jackson.databind.ObjectMapper(),
+                streamService);
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRequiresExistingProvisionedResources() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        StreamDescription stream = new StreamDescription();
+        stream.setStreamArn(streamArn);
+        stream.setTableName("orders");
+        stream.setStreamStatus("ENABLED");
+        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertEquals(streamArn, integration.getSourceStreamArn());
+        assertEquals("warehouse", integration.getTargetClusterIdentifier());
+        assertNotNull(integration.getLandingTableName());
+        assertEquals("syncing", integration.getStatus());
+        assertFalse(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressPersistsCheckpointAndFlipsStatusOnCompletion() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+        StreamDescription stream = new StreamDescription();
+        stream.setStreamArn(streamArn);
+        stream.setTableName("orders");
+        stream.setStreamStatus("ENABLED");
+        when(streamService.describeStream(streamArn)).thenReturn(stream);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(integrationBackend).put(keyCaptor.capture(), eq(integration));
+        String storageKey = keyCaptor.getValue();
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of(storageKey));
+        when(integrationBackend.getForAccount("111111111111", storageKey)).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(),
+                "{\"id\":{\"S\":\"1\"}}", false);
+        assertEquals("syncing", integration.getStatus());
+        assertEquals("{\"id\":{\"S\":\"1\"}}", integration.getBackfillLastEvaluatedKey());
+        assertFalse(integration.isBackfillCompleted());
+
+        service.updateIntegrationBackfillProgress("111111111111", integration.getIntegrationArn(), null, true);
+        assertEquals("active", integration.getStatus());
+        assertNull(integration.getBackfillLastEvaluatedKey());
+        assertTrue(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void updateIntegrationBackfillProgressOnUnknownIntegrationThrows() {
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(java.util.Set.of());
+
+        assertThrows(AwsException.class, () -> service.updateIntegrationBackfillProgress(
+                "111111111111", "arn:aws:redshift:us-east-1:111111111111:integration:missing", null, true));
+    }
+
+    @Test
+    void createDynamoDbZeroEtlIntegrationRejectsServerlessTarget() {
+        assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-serverless",
+                "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000",
+                "arn:aws:redshift-serverless:us-east-1:111111111111:workgroup/analytics",
+                null, null, Map.of(), Map.of(), "us-east-1"));
     }
 
     /** Absolute dump path as {@code createSnapshot} now stores it: under {@code <persistentPath>/redshift-dumps/<accountId>}. */
     private static String dumpPath(String snapshotId) {
         return Paths.get("target/test-data", "redshift-dumps", "111111111111", snapshotId + ".sql")
                 .toAbsolutePath().normalize().toString();
+    }
+
+    @Test
+    void managedMasterPasswordCreatesOwnedSecretAndExposesItsMetadata() {
+        when(cm.start(eq("111111111111"), eq("managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "managed-cluster", "localhost", 5432));
+
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        secret.setCurrentVersionId("version-1");
+        when(secretsManagerService.createSecret(eq("redshift/managed-cluster"), anyString(), isNull(),
+                anyString(), eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(),
+                eq("redshift"), eq("us-east-1"))).thenReturn(secret);
+
+        Cluster cluster = service.createClusterWithManagedMasterPassword("managed-cluster", "dc2.large",
+                "admin", null, List.of(), List.of(),
+                "arn:aws:kms:us-east-1:111111111111:key/key-1", "us-east-1");
+
+        assertEquals(secret.getArn(), cluster.getMasterPasswordSecretArn());
+        assertEquals("arn:aws:kms:us-east-1:111111111111:key/key-1", cluster.getMasterPasswordSecretKmsKeyId());
+        verify(secretsManagerService).createSecret(eq("redshift/managed-cluster"),
+                contains("\"username\":\"admin\""), isNull(), anyString(),
+                eq("arn:aws:kms:us-east-1:111111111111:key/key-1"), anyList(), eq("redshift"), eq("us-east-1"));
+    }
+
+    @Test
+    void managedMasterPasswordRollsBackClusterWhenSecretCreationFails() {
+        when(cm.start(eq("111111111111"), eq("failed-managed-cluster"), eq("admin"), anyString()))
+                .thenReturn(new RedshiftContainerHandle("container", "failed-managed-cluster", "localhost", 5432));
+        when(secretsManagerService.createSecret(eq("redshift/failed-managed-cluster"), anyString(), isNull(),
+                anyString(), isNull(), anyList(), eq("redshift"), eq("us-east-1")))
+                .thenThrow(new AwsException("InternalFailure", "secret store unavailable", 500));
+
+        assertThrows(AwsException.class, () -> service.createClusterWithManagedMasterPassword(
+                "failed-managed-cluster", "dc2.large", "admin", null, List.of(), List.of(), null, "us-east-1"));
+
+        verify(cm).stop("111111111111", "failed-managed-cluster");
+        verify(clusterBackend).delete("failed-managed-cluster");
+        assertThrows(AwsException.class, () -> service.describeClusters("failed-managed-cluster"));
     }
 
     @Test
@@ -187,7 +322,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7108),
                 eq("172.17.0.12"), eq(32830), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -235,7 +370,7 @@ class RedshiftServiceTest {
 
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(cluster.getProxyPort()),
                 eq("172.17.0.9"), eq(32800), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -250,14 +385,21 @@ class RedshiftServiceTest {
     void createClusterRemovesMetadataOnFailure() {
         when(clusterBackend.accountId()).thenReturn("111111111111");
         when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        // Simulate a concurrent GetClusterCredentials landing while the row exists, then fail
+        // container startup so the rollback path runs.
         when(cm.start(eq("111111111111"), eq("c1"), eq("admin"), eq("password123")))
-                .thenThrow(new RuntimeException("startup failed"));
+                .thenAnswer(inv -> {
+                    credentialBroker.issue("111111111111", "c1", "analyst", List.of(), 900);
+                    throw new RuntimeException("startup failed");
+                });
 
         assertThrows(AwsException.class, () ->
                 service.createCluster("c1", "dc2.large", "admin", "password123"));
 
         verify(clusterBackend).delete("c1");
         verify(clusterBackend, atLeastOnce()).flush();
+        // The rollback that removes the cluster row must also drop that credential.
+        assertTrue(credentialBroker.resolve("111111111111", "c1", "analyst").isEmpty());
     }
 
     @Test
@@ -336,6 +478,19 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void describeClustersForAccountUsesTheRequestedAccount() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-c");
+        when(clusterBackend.getForAccount("222222222222", "test-c")).thenReturn(Optional.of(cluster));
+
+        List<Cluster> list = service.describeClustersForAccount("222222222222", "test-c");
+
+        assertEquals(List.of(cluster), list);
+        verify(clusterBackend).getForAccount("222222222222", "test-c");
+        verify(clusterBackend, never()).get("test-c");
+    }
+
+    @Test
     void testDeleteCluster() {
         Cluster c = new Cluster();
         c.setClusterIdentifier("test-c");
@@ -345,6 +500,18 @@ class RedshiftServiceTest {
         assertEquals("deleting", deleted.getClusterStatus());
         verify(cm).stop("111111111111", "test-c");
         verify(clusterBackend).delete("test-c");
+    }
+
+    @Test
+    void deleteClusterRevokesItsGetClusterCredentialsCredentials() {
+        Cluster c = new Cluster();
+        c.setClusterIdentifier("test-c");
+        when(clusterBackend.get("test-c")).thenReturn(Optional.of(c));
+        credentialBroker.issue("111111111111", "test-c", "analyst", List.of(), 900);
+
+        service.deleteCluster("test-c");
+
+        assertTrue(credentialBroker.resolve("111111111111", "test-c", "analyst").isEmpty());
     }
 
     @Test
@@ -432,7 +599,7 @@ class RedshiftServiceTest {
         verify(proxyManager).stopProxy("111111111111:c1");
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107),
                 eq("172.17.0.11"), eq(32820), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -463,7 +630,7 @@ class RedshiftServiceTest {
         // replacement container must be stopped too — once before the restart, once in
         // rollback — so it is not left running behind a "failed" cluster.
         verify(proxyManager).startProxy(eq("111111111111:c1"), eq(7107), any(), anyInt(),
-                any(), any(), any(), any(), any());
+                any(), any(), any(), any(), any(), any());
         verify(proxyManager, times(2)).stopProxy("111111111111:c1");
         verify(cm, times(2)).stop("111111111111", "c1");
     }
@@ -836,7 +1003,7 @@ class RedshiftServiceTest {
         assertEquals(restored.getEndpoint().getPort(), restored.getProxyPort());
         verify(proxyManager).startProxy(eq("111111111111:restored"), anyInt(),
                 eq("172.17.0.10"), eq(32810), eq("localhost"),
-                eq("admin"), eq("Secret123"), eq("dev"), any());
+                eq("admin"), eq("Secret123"), eq("dev"), any(), any());
     }
 
     @Test
@@ -1100,5 +1267,78 @@ class RedshiftServiceTest {
     private static String extractResourceId(String arn) {
         String resource = arn.substring(arn.lastIndexOf(':') + 1);
         return resource.contains("/") ? resource.substring(resource.lastIndexOf('/') + 1) : resource;
+    }
+
+    // ── passwordValidatorFor / GetClusterCredentials broker wiring ─────────────
+
+    private void seedCluster(String accountId, String clusterId) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(clusterId);
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("SecretPass1");
+        when(clusterBackend.getForAccount(accountId, clusterId)).thenReturn(Optional.of(cluster));
+    }
+
+    @Test
+    void passwordValidatorAcceptsMasterPair() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("admin", "SecretPass1"));
+    }
+
+    @Test
+    void passwordValidatorRejectsEverythingWhenClusterRowIsAbsent() {
+        when(clusterBackend.getForAccount("acc", "gone")).thenReturn(Optional.empty());
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "gone");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("admin", "SecretPass1"));
+        assertEquals(PasswordValidator.AuthResult.REJECT, validator.validate("analyst", "anything"));
+    }
+
+    @Test
+    void passwordValidatorRejectsMasterUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+
+        PasswordValidator validator = service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("admin", "not-the-master-password"));
+    }
+
+    @Test
+    void passwordValidatorAcceptsLiveBrokerCredentialAsMasterEquivalent() {
+        seedCluster("acc", "c1");
+        TempCredential cred = credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                validator.validate("analyst", cred.password()));
+    }
+
+    @Test
+    void passwordValidatorRejectsKnownBrokerUserWithWrongPassword() {
+        seedCluster("acc", "c1");
+        credentialBroker.issue("acc", "c1", "analyst", List.of(), 900);
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.REJECT,
+                validator.validate("analyst", "nope"));
+    }
+
+    @Test
+    void passwordValidatorPassesThroughUnknownUser() {
+        seedCluster("acc", "c1");
+        PasswordValidator validator =
+                service.passwordValidatorForTesting("acc", "c1");
+
+        assertEquals(PasswordValidator.AuthResult.PASSTHROUGH,
+                validator.validate("someone-else", "whatever"));
     }
 }
