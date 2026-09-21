@@ -22,6 +22,13 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `ListPodIdentityAssociations` | List pod identity associations in a cluster with optional filtering and pagination |
 | `UpdatePodIdentityAssociation` | Update the IAM role, target role, or session tags for a pod identity association |
 | `DeletePodIdentityAssociation` | Delete a pod identity association |
+| `CreateAddon` | Create an addon for an EKS cluster |
+| `DescribeAddon` | Describe an addon by cluster and addon name |
+| `ListAddons` | List addon names installed in a cluster with pagination |
+| `UpdateAddon` | Update addon configuration, version, or service account role |
+| `DescribeUpdate` | Describe an update for an addon |
+| `DeleteAddon` | Delete an addon from a cluster |
+| `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -91,6 +98,24 @@ Credentials delivery directly into pods is not yet supported:
 - The link-local metadata credential endpoint (`169.254.170.23`) is not implemented.
 
 Applications running inside pods cannot currently exchange tokens for temporary AWS credentials via the link-local endpoint. Use access entries, node credentials, or explicit credential configuration until the pod identity agent endpoint is added.
+
+## Addon management
+
+Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform (`aws_eks_addon` resource).
+
+### Supported operations
+
+- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, and `eks-pod-identity-agent`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
+- **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
+- **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
+- **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
+- **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
+- **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
+- **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination.
+
+### Metadata recording only
+
+Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container.
 
 ## Cluster security group
 
@@ -175,6 +200,54 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **Scope**: Floci stores and returns control plane logging configuration. Shipping log streams to Amazon CloudWatch Logs log groups is out of scope.
 
+## Node group inputs
+
+`CreateNodegroup` accepts the full documented input set and stores every member, so `CreateNodegroup` and `DescribeNodegroup` both return exactly what was supplied.
+
+### Scalar and collection inputs
+
+`nodegroupName`, `nodeRole`, `subnets`, `version`, `releaseVersion`, `amiType`, `capacityType`, `diskSize`, `instanceTypes`, `scalingConfig`, `labels`, `tags`, and `clientRequestToken`. Several of these receive an AWS-shaped default when omitted: `capacityType` becomes `ON_DEMAND`, `amiType` becomes `AL2_x86_64`, `diskSize` becomes `20`, `instanceTypes` becomes `["t3.medium"]`, `version` is inherited from the cluster, and `releaseVersion` becomes `<version>-eks-1`.
+
+### Structured inputs
+
+`launchTemplate`, `remoteAccess`, `taints`, `updateConfig`, `nodeRepairConfig`, and `warmPoolConfig` are recorded as supplied and echoed back verbatim, including nested members:
+
+```json
+{
+  "nodegroupName": "my-nodegroup",
+  "nodeRole": "arn:aws:iam::000000000000:role/eks-node-role",
+  "subnets": ["subnet-123"],
+  "launchTemplate": {
+    "id": "lt-0a1b2c3d4e5f60718",
+    "version": "3"
+  },
+  "remoteAccess": {
+    "ec2SshKey": "my-keypair",
+    "sourceSecurityGroups": ["sg-0123456789abcdef0"]
+  },
+  "taints": [
+    {"key": "dedicated", "value": "gpu", "effect": "NO_SCHEDULE"}
+  ],
+  "nodeRepairConfig": {"enabled": true},
+  "warmPoolConfig": {"enabled": true, "minSize": 2, "poolState": "Stopped"}
+}
+```
+
+- **Omission**: When a structured input is not supplied, it is omitted from `CreateNodegroup` and `DescribeNodegroup` responses rather than serialized as an explicit `null`. The exception is `updateConfig`, which receives the AWS default of `{"maxUnavailable": 1}`.
+- **Validation**: Floci does not validate these structures. A `launchTemplate` is not resolved against EC2, so a reference to a launch template that does not exist is accepted where real EKS would reject it.
+- **No backfill**: Node groups created before this was supported genuinely had no launch template, taints, remote access, node repair config, or warm pool config, so there is nothing to reconstruct. They continue to omit those members, which is the correct answer for them.
+
+### Metadata only
+
+**These inputs are recorded as metadata and have no effect on the cluster.** Floci does not act on any of them:
+
+- A `launchTemplate` association is stored and returned, but **its user data is never executed** and its AMI, instance type, block device mappings, and network settings are not applied to anything Floci runs.
+- `remoteAccess` does not open SSH access, and the referenced key pair and security groups are not wired up.
+- `taints` are not applied to Kubernetes nodes, so pods are not repelled from them.
+- `nodeRepairConfig` starts no repair loop, and `warmPoolConfig` pre-initializes no instances.
+
+The value of storing them is state fidelity: infrastructure tools read `DescribeNodegroup` back and compare it against their declared configuration. Dropping `launchTemplate` in particular made the OpenTofu AWS provider see a node group with no launch template where one was declared, which is a `ForceNew` difference and caused a destroy and recreate on every plan.
+
 ## Modes
 
 ### Mock mode (`mock: true`)
@@ -256,7 +329,8 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 |---|---|---|
 | `FLOCI_SERVICES_EKS_ENABLED` | `true` | Enable the EKS service |
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
-| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image |
+| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
+| `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT` | `6599` | Last port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_DATA_PATH` | `./data/eks` | Host bind-mount root for cluster data |
@@ -267,6 +341,35 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
+
+### Kubernetes versions and network configuration
+
+Floci supports standard AWS EKS Kubernetes versions (`1.xx`, 1.28 and above). Known releases are mapped to stable pinned k3s images, while newer or unpinned versions dynamically resolve to upstream k3s release images (`rancher/k3s:v<version>.0-k3s1`):
+
+- `1.28` (`rancher/k3s:v1.28.15-k3s1`)
+- `1.29` (`rancher/k3s:v1.29.14-k3s1`, default version metadata)
+- `1.30` (`rancher/k3s:v1.30.10-k3s1`)
+- `1.31` (`rancher/k3s:v1.31.5-k3s1`)
+- `1.32` (`rancher/k3s:v1.32.2-k3s1`)
+- `1.33` (`rancher/k3s:v1.33.1-k3s1`)
+- `1.34` (`rancher/k3s:v1.34.1-k3s1`)
+- `1.35` (`rancher/k3s:v1.35.0-k3s1`)
+- `1.36` (`rancher/k3s:v1.36.0-k3s1`)
+- `1.37+` (dynamically resolved to `rancher/k3s:v<version>.0-k3s1`)
+
+When `--version` is omitted, the cluster version defaults to `1.29` and the container image resolution uses `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` (`rancher/k3s:latest` by default). When a version is explicitly requested, it maps to the corresponding pinned image or template.
+
+You can specify standard EKS `version` and `kubernetesNetworkConfig.serviceIpv4Cidr` when creating a cluster:
+
+```bash
+aws --endpoint-url http://localhost:4566 eks create-cluster \
+  --name my-cluster \
+  --role-arn arn:aws:iam::000000000000:role/eks-role \
+  --version 1.31 \
+  --kubernetes-network-config serviceIpv4Cidr=172.20.0.0/16
+```
+
+Floci validates that `serviceIpv4Cidr` falls within RFC 1918 private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`), has a prefix length between `/12` and `/24`, and does not overlap with the VPC CIDR. When omitted, Floci defaults `serviceIpv4Cidr` to `10.100.0.0/16` (or `172.20.0.0/16` if `10.100.0.0/16` overlaps with the VPC). Internal pod CIDR (`--cluster-cidr`) defaults to `10.42.0.0/16` to avoid collisions with Docker bridge networks.
 
 ### Pulling images from Floci ECR
 
@@ -345,11 +448,14 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 The link-local proxy attaches to the loopback interface of the k3s container network namespace (the node network namespace).
 
 - **Reachable from node network namespace:** Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
-- **Not reachable from ordinary pods:** Pods running in separate pod network namespaces cannot reach `169.254.169.254` through this loopback alias because link-local addresses are non-routable across network namespaces. Pod-CIDR DNAT routing is not implemented.
+- **Default isolation for ordinary pods:** By default, pods running in separate pod network namespaces cannot reach `169.254.169.254`. CNI portmap rules on the node intercept local traffic, preserving node credential isolation for multi-tenant or untrusted workloads.
+- **Opt-in pod network routing:** When `floci.services.eks.imds-pod-network=true` is set alongside `floci.services.eks.imds=true`, iptables DNAT rules are programmed in a custom `FLOCI-LINK-LOCAL` chain at the head of `PREROUTING`. Traffic originating from the pod CIDR (`10.42.0.0/16`) targeting `169.254.169.254:80` matches first and is routed directly to the local node listener, preempting CNI portmap rules. This enables standard AWS SDK credential resolution inside ordinary pods without requiring `hostNetwork: true`.
 
 ### Configuration
 
 IMDS proxy initialization is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to enable the proxy setup inside the k3s container.
+
+Pod network reachability is also disabled by default (`floci.services.eks.imds-pod-network=false`) to maintain pod isolation. Set `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK=true` together with `FLOCI_SERVICES_EKS_IMDS=true` to route pod traffic to the link-local proxy.
 
 A failure to configure the proxy (for example on custom minimal images lacking network utilities) logs a warning and allows cluster startup to continue.
 
@@ -638,6 +744,7 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 The following EKS features are not yet supported:
 
 - `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs
 - Access policies
