@@ -388,6 +388,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Default MySQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Default MariaDB Docker image |
+| `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Default SQL Server Docker image |
 | `FLOCI_SERVICES_RDS_DOCKER_NETWORK` | _(none)_ | Docker network for RDS containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable the RDS Data API service. Requires `FLOCI_SERVICES_RDS_ENABLED=true` |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
@@ -465,6 +466,7 @@ These services spawn Docker containers. They require access to the Docker socket
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable the ECS service |
 | `FLOCI_SERVICES_ECS_MOCK` | `false` | When `true`, tasks are registered but not actually run |
+| `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST` | `false` | Publish `awsvpc` task ports on stable Docker host ports for host-side clients |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default task memory when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default task CPU units when not specified in the task definition |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | _(none)_ | Docker network for ECS task containers |

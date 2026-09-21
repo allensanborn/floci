@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
-import io.github.hectorvent.floci.core.common.RdsFamilyQuerySupport;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
@@ -15,13 +14,17 @@ import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
+import io.github.hectorvent.floci.services.rds.model.LogExportChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTarget;
 import io.github.hectorvent.floci.services.rds.model.DbProxyTargetGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
+import io.github.hectorvent.floci.services.rds.model.GlobalCluster;
+import io.github.hectorvent.floci.services.rds.model.GlobalClusterMember;
 import io.github.hectorvent.floci.services.rds.model.OptionGroup;
 import io.github.hectorvent.floci.services.rds.model.OptionGroupOption;
 import io.github.hectorvent.floci.services.rds.model.RdsEvent;
@@ -107,6 +110,9 @@ public class RdsQueryHandler {
                 case "ModifyOptionGroup" -> handleModifyOptionGroup(params, region);
                 case "DeleteOptionGroup" -> handleDeleteOptionGroup(params, region);
                 case "CreateDBSnapshot" -> handleCreateDbSnapshot(params, region);
+                case "DeleteDBSnapshot" -> handleDeleteDbSnapshot(params, region);
+                case "CopyDBSnapshot" -> handleCopyDbSnapshot(params, region);
+                case "ModifyDBSnapshot" -> handleModifyDbSnapshot(params, region);
                 case "RestoreDBInstanceFromDBSnapshot" -> handleRestoreDbInstanceFromDbSnapshot(params, region);
                 case "DescribeDBSnapshots" -> handleDescribeDbSnapshots(params, region);
                 case "DescribeDBSnapshotAttributes" -> handleDescribeDbSnapshotAttributes(params, region);
@@ -122,6 +128,13 @@ public class RdsQueryHandler {
                 case "DescribeDBProxyTargets" -> handleDescribeDbProxyTargets(params, region);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
+                case "CreateGlobalCluster" -> handleCreateGlobalCluster(params, region);
+                case "ModifyGlobalCluster" -> handleModifyGlobalCluster(params);
+                case "DeleteGlobalCluster" -> handleDeleteGlobalCluster(params);
+                case "RemoveFromGlobalCluster" -> handleRemoveFromGlobalCluster(params, region);
+                case "FailoverGlobalCluster" -> handleFailoverGlobalCluster(params, region);
+                case "SwitchoverGlobalCluster" -> handleSwitchoverGlobalCluster(params, region);
+                case "FailoverDBCluster" -> handleFailoverDbCluster(params, region);
                 case "AddTagsToResource" -> handleAddTagsToResource(params, region);
                 case "ListTagsForResource" -> handleListTagsForResource(params, region);
                 case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
@@ -411,8 +424,44 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("BackupRetentionPeriod")),
                 params.getFirst("PreferredBackupWindow"),
                 params.getFirst("PreferredMaintenanceWindow"),
-                optionalBoolean(params.getFirst("CopyTagsToSnapshot")));
+                optionalBoolean(params.getFirst("CopyTagsToSnapshot")),
+                optionalInt(params.getFirst("MonitoringInterval")),
+                params.getFirst("MonitoringRoleArn"),
+                optionalBoolean(params.getFirst("EnablePerformanceInsights")),
+                optionalInt(params.getFirst("PerformanceInsightsRetentionPeriod")),
+                params.getFirst("EngineLifecycleSupport"),
+                includeEncryption ? cloudwatchLogsExports(params) : null,
+                includeEncryption ? null : cloudwatchLogsExportChanges(params),
+                optionalInt(params.getFirst("MaxAllocatedStorage")));
     }
+
+    /**
+     * CreateDBInstance names the log types once, as EnableCloudwatchLogsExports.member.N. The
+     * response member is EnabledCloudwatchLogsExports, so the two never line up on the wire.
+     * An absent list is null (leave it alone) rather than empty (clear it).
+     */
+    private static List<String> cloudwatchLogsExports(MultivaluedMap<String, String> params) {
+        List<String> types = memberList(params, "EnableCloudwatchLogsExports");
+        return types.isEmpty() ? null : types;
+    }
+
+    /**
+     * ModifyDBInstance has no EnableCloudwatchLogsExports at all. It carries
+     * CloudwatchLogsExportConfiguration with an EnableLogTypes list and a DisableLogTypes list,
+     * which are applied to the stored set as deltas rather than as a replacement. Reading the
+     * create-only key here is why an SDK request to change exports on a live instance did nothing.
+     */
+    private static LogExportChanges cloudwatchLogsExportChanges(MultivaluedMap<String, String> params) {
+        List<String> enable = memberList(params,
+                "CloudwatchLogsExportConfiguration.EnableLogTypes");
+        List<String> disable = memberList(params,
+                "CloudwatchLogsExportConfiguration.DisableLogTypes");
+        if (enable.isEmpty() && disable.isEmpty()) {
+            return null;
+        }
+        return new LogExportChanges(enable, disable);
+    }
+
 
     private static Boolean optionalBoolean(String value) {
         return value == null ? null : Boolean.parseBoolean(value);
@@ -441,7 +490,7 @@ public class RdsQueryHandler {
                .elem("Engine", option.get("engine"))
                .elem("EngineVersion", option.get("engineVersion"))
                .elem("DBInstanceClass", option.get("dbInstanceClass"))
-               .elem("LicenseModel", "postgresql-license")
+               .elem("LicenseModel", licenseModel(option.get("engine")))
                .start("AvailabilityZones")
                  .start("AvailabilityZone")
                    .elem("Name", config.defaultAvailabilityZone())
@@ -452,6 +501,13 @@ public class RdsQueryHandler {
         xml.end("OrderableDBInstanceOptions").start("Marker").end("Marker");
         return Response.ok(AwsQueryResponse.envelope("DescribeOrderableDBInstanceOptions",
                 AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private static String licenseModel(String engine) {
+        if (engine != null && engine.regionMatches(true, 0, "sqlserver", 0, 9)) {
+            return "license-included";
+        }
+        return "postgresql-license";
     }
 
     private Response handleAddTagsToResource(MultivaluedMap<String, String> params, String region) {
@@ -675,11 +731,18 @@ public class RdsQueryHandler {
             Double serverlessV2Max = parseDoubleParam(params, "ServerlessV2ScalingConfiguration.MaxCapacity");
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
-            DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, paramGroupName,
-                    dbSubnetGroupName, availabilityZone, multiAz, region,
-                    serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted);
+            String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
+            DbCluster cluster = globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()
+                    ? service.createDbClusterInGlobalCluster(globalClusterIdentifier, id, engine,
+                            params.getFirst("EngineVersion"), masterUsername, masterPassword, databaseName,
+                            iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, region,
+                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
+                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, paramGroupName,
+                            dbSubnetGroupName, availabilityZone, multiAz, region,
+                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1285,6 +1348,47 @@ public class RdsQueryHandler {
         }
     }
 
+    private Response handleDeleteDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        Response missing = firstMissingParam("DBSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbSnapshot snapshot = service.deleteDbSnapshot(snapshotId, region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "DeleteDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleCopyDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String sourceId = params.getFirst("SourceDBSnapshotIdentifier");
+        String targetId = params.getFirst("TargetDBSnapshotIdentifier");
+        Response missing = firstMissingParam(
+                "SourceDBSnapshotIdentifier", sourceId,
+                "TargetDBSnapshotIdentifier", targetId);
+        if (missing != null) {
+            return missing;
+        }
+        Boolean copyTags = parseOptionalBoolean(params, "CopyTags");
+        DbSnapshot snapshot = service.copyDbSnapshot(
+                sourceId, targetId, Boolean.TRUE.equals(copyTags), parseTags(params),
+                params.getFirst("OptionGroupName"), params.getFirst("KmsKeyId"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "CopyDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
+    private Response handleModifyDbSnapshot(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBSnapshotIdentifier");
+        Response missing = firstMissingParam("DBSnapshotIdentifier", snapshotId);
+        if (missing != null) {
+            return missing;
+        }
+        DbSnapshot snapshot = service.modifyDbSnapshot(
+                snapshotId, params.getFirst("EngineVersion"),
+                params.getFirst("OptionGroupName"), region);
+        return Response.ok(AwsQueryResponse.envelope(
+                "ModifyDBSnapshot", AwsNamespaces.RDS, dbSnapshotXml(snapshot))).build();
+    }
+
     private Response handleRestoreDbInstanceFromDbSnapshot(MultivaluedMap<String, String> params, String region) {
         String instanceId = params.getFirst("DBInstanceIdentifier");
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
@@ -1644,8 +1748,207 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
+    // ── Global clusters ───────────────────────────────────────────────────────
+
     private Response handleDescribeGlobalClusters(MultivaluedMap<String, String> params) {
-        return RdsFamilyQuerySupport.handleDescribeGlobalClusters(LOG, params);
+        String maxRecords = params.getFirst("MaxRecords");
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            int max = -1;
+            try {
+                max = Integer.parseInt(maxRecords.trim());
+            } catch (NumberFormatException e) {
+                LOG.debugv("Non-numeric MaxRecords {0} on DescribeGlobalClusters", maxRecords);
+            }
+            if (max < 20 || max > 100) {
+                return AwsQueryResponse.error("InvalidParameterValue",
+                        "Invalid value " + maxRecords + " for MaxRecords. Must be between 20 and 100",
+                        AwsNamespaces.RDS, 400);
+            }
+        }
+        try {
+            // AWS resolves the identifier before it looks at the marker, so a bad marker with an
+            // unknown identifier answers not found.
+            String identifier = params.getFirst("GlobalClusterIdentifier");
+            List<GlobalCluster> result = identifier != null && !identifier.isBlank()
+                    ? List.of(service.describeGlobalCluster(identifier))
+                    : service.listGlobalClusters();
+            String marker = params.getFirst("Marker");
+            if (marker != null && !marker.isBlank()) {
+                return AwsQueryResponse.error("InvalidParameterValue", "The request token is invalid.", AwsNamespaces.RDS, 400);
+            }
+            XmlBuilder xml = new XmlBuilder().start("GlobalClusters");
+            for (GlobalCluster global : result) {
+                xml.raw(globalClusterXml(global, "GlobalClusterMember"));
+            }
+            xml.end("GlobalClusters");
+            return Response.ok(AwsQueryResponse.envelope("DescribeGlobalClusters", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleCreateGlobalCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.createGlobalCluster(id,
+                    params.getFirst("SourceDBClusterIdentifier"),
+                    params.getFirst("Engine"),
+                    params.getFirst("EngineVersion"),
+                    params.getFirst("DatabaseName"),
+                    parseOptionalBoolean(params, "StorageEncrypted"),
+                    parseOptionalBoolean(params, "DeletionProtection"),
+                    parseTags(params), region);
+            return Response.ok(AwsQueryResponse.envelope("CreateGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyGlobalCluster(MultivaluedMap<String, String> params) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.modifyGlobalCluster(id,
+                    params.getFirst("NewGlobalClusterIdentifier"),
+                    parseOptionalBoolean(params, "DeletionProtection"),
+                    params.getFirst("EngineVersion"),
+                    parseOptionalBoolean(params, "AllowMajorVersionUpgrade"));
+            return Response.ok(AwsQueryResponse.envelope("ModifyGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteGlobalCluster(MultivaluedMap<String, String> params) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.deleteGlobalCluster(id);
+            return Response.ok(AwsQueryResponse.envelope("DeleteGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRemoveFromGlobalCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        String clusterId = params.getFirst("DbClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (clusterId == null || clusterId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DbClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.removeFromGlobalCluster(id, clusterId, region);
+            return Response.ok(AwsQueryResponse.envelope("RemoveFromGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleFailoverGlobalCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        String target = params.getFirst("TargetDbClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (target == null || target.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "TargetDbClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.failoverGlobalCluster(id, target,
+                    parseOptionalBoolean(params, "AllowDataLoss"),
+                    parseOptionalBoolean(params, "Switchover"), region);
+            return Response.ok(AwsQueryResponse.envelope("FailoverGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleSwitchoverGlobalCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("GlobalClusterIdentifier");
+        String target = params.getFirst("TargetDbClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "GlobalClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        if (target == null || target.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "TargetDbClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            GlobalCluster global = service.switchoverGlobalCluster(id, target, region);
+            return Response.ok(AwsQueryResponse.envelope("SwitchoverGlobalCluster", AwsNamespaces.RDS,
+                    globalClusterXml(global, "GlobalCluster"))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleFailoverDbCluster(MultivaluedMap<String, String> params, String region) {
+        String id = params.getFirst("DBClusterIdentifier");
+        if (id == null || id.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbCluster cluster = service.failoverDbCluster(id, params.getFirst("TargetDBInstanceIdentifier"), region);
+            return Response.ok(AwsQueryResponse.envelope("FailoverDBCluster", AwsNamespaces.RDS,
+                    dbClusterXml(cluster))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    /**
+     * The GlobalCluster shape. The list element of DescribeGlobalClusters is named
+     * GlobalClusterMember by the service model, the same name as the entries of GlobalClusterMembers.
+     */
+    private static String globalClusterXml(GlobalCluster g, String elementName) {
+        XmlBuilder xml = new XmlBuilder().start(elementName)
+                .elem("GlobalClusterIdentifier", g.getGlobalClusterIdentifier())
+                .elem("GlobalClusterResourceId", g.getGlobalClusterResourceId())
+                .elem("GlobalClusterArn", g.getGlobalClusterArn())
+                .elem("Status", g.getStatus())
+                .elem("Engine", g.getEngine())
+                .elem("EngineVersion", g.getEngineVersion());
+        if (g.getDatabaseName() != null && !g.getDatabaseName().isBlank()) {
+            xml.elem("DatabaseName", g.getDatabaseName());
+        }
+        xml.elem("StorageEncrypted", g.isStorageEncrypted())
+           .elem("DeletionProtection", g.isDeletionProtection());
+        List<String> readerArns = g.getMembers().stream()
+                .filter(member -> !member.isWriter())
+                .map(GlobalClusterMember::getDbClusterArn)
+                .toList();
+        xml.start("GlobalClusterMembers");
+        for (GlobalClusterMember member : g.getMembers()) {
+            xml.start("GlobalClusterMember")
+               .elem("DBClusterArn", member.getDbClusterArn());
+            xml.start("Readers");
+            if (member.isWriter()) {
+                readerArns.forEach(arn -> xml.elem("member", arn));
+            }
+            xml.end("Readers");
+            xml.elem("IsWriter", member.isWriter())
+               .elem("SynchronizationStatus", "connected")
+               .end("GlobalClusterMember");
+        }
+        xml.end("GlobalClusterMembers");
+        xml.start("TagList");
+        writeTags(xml, g.getTags());
+        xml.end("TagList");
+        return xml.end(elementName).build();
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
@@ -1662,7 +1965,7 @@ public class RdsQueryHandler {
         return new XmlBuilder().start("DBInstance").raw(dbInstanceInnerXml(i)).end("DBInstance").build();
     }
 
-    private String dbSnapshotXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+    private String dbSnapshotXml(DbSnapshot s) {
         String engineStr = s.getEngine() != null ? s.getEngine().name().toLowerCase() : "";
         XmlBuilder xml = new XmlBuilder().start("DBSnapshot")
                 .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier())
@@ -1672,7 +1975,19 @@ public class RdsQueryHandler {
                 .elem("EngineVersion", s.getEngineVersion())
                 .elem("AllocatedStorage", s.getAllocatedStorage())
                 .elem("Status", s.getStatus())
-                .elem("MasterUsername", s.getMasterUsername());
+                .elem("MasterUsername", s.getMasterUsername())
+                .elem("SnapshotType", s.getSnapshotType() != null
+                        && !s.getSnapshotType().isBlank() ? s.getSnapshotType() : "manual");
+        if (s.getSourceDbSnapshotIdentifier() != null
+                && !s.getSourceDbSnapshotIdentifier().isBlank()) {
+            xml.elem("SourceDBSnapshotIdentifier", s.getSourceDbSnapshotIdentifier());
+        }
+        if (s.getOptionGroupName() != null && !s.getOptionGroupName().isBlank()) {
+            xml.elem("OptionGroupName", s.getOptionGroupName());
+        }
+        if (s.getKmsKeyId() != null && !s.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", s.getKmsKeyId());
+        }
         if (s.getAvailabilityZone() != null) xml.elem("AvailabilityZone", s.getAvailabilityZone());
         if (s.getVpcId() != null) xml.elem("VpcId", s.getVpcId());
         xml.elem("InstanceCreateTime", s.getInstanceCreateTime() != null ? s.getInstanceCreateTime().toString() : "")
@@ -1738,7 +2053,24 @@ public class RdsQueryHandler {
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
-           .elem("DBInstanceArn", i.getDbInstanceArn());
+           .elem("DBInstanceArn", i.getDbInstanceArn())
+           .elem("MonitoringInterval", i.getMonitoringInterval())
+           .elem("PerformanceInsightsEnabled", i.isPerformanceInsightsEnabled())
+           .elem("EngineLifecycleSupport", i.getEngineLifecycleSupport());
+        if (i.getMonitoringRoleArn() != null && !i.getMonitoringRoleArn().isBlank()) {
+            xml.elem("MonitoringRoleArn", i.getMonitoringRoleArn());
+        }
+        if (i.isPerformanceInsightsEnabled()) {
+            xml.elem("PerformanceInsightsRetentionPeriod", i.getPerformanceInsightsRetentionPeriod());
+        }
+        if (i.getMaxAllocatedStorage() != null) {
+            xml.elem("MaxAllocatedStorage", i.getMaxAllocatedStorage());
+        }
+        if (i.getEnabledCloudwatchLogsExports() != null && !i.getEnabledCloudwatchLogsExports().isEmpty()) {
+            xml.start("EnabledCloudwatchLogsExports");
+            i.getEnabledCloudwatchLogsExports().forEach(t -> xml.elem("member", t));
+            xml.end("EnabledCloudwatchLogsExports");
+        }
         if (i.getKmsKeyId() != null && !i.getKmsKeyId().isBlank()) {
             xml.elem("KmsKeyId", i.getKmsKeyId());
         }
@@ -1945,12 +2277,16 @@ public class RdsQueryHandler {
             }
             xml.end("ServerlessV2ScalingConfiguration");
         }
+        if (c.getGlobalClusterIdentifier() != null && !c.getGlobalClusterIdentifier().isBlank()) {
+            xml.elem("GlobalClusterIdentifier", c.getGlobalClusterIdentifier());
+        }
         xml.start("DBClusterMembers");
         if (c.getDbClusterMembers() != null) {
+            String writer = c.resolveWriterIdentifier();
             for (String memberId : c.getDbClusterMembers()) {
                 xml.start("member")
                    .elem("DBInstanceIdentifier", memberId)
-                   .elem("IsClusterWriter", true)
+                   .elem("IsClusterWriter", memberId.equals(writer))
                    .end("member");
             }
         }
@@ -2381,6 +2717,7 @@ public class RdsQueryHandler {
             case "postgres", "aurora-postgresql" -> "16.3";
             case "mysql", "aurora-mysql", "aurora" -> "8.0.36";
             case "mariadb" -> "11.2";
+            case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> "15.00";
             default -> "1.0";
         };
     }

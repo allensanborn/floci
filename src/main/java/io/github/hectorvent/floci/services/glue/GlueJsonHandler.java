@@ -26,6 +26,7 @@ import java.util.Objects;
 public class GlueJsonHandler {
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
+    private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
     private static final TypeReference<List<Map<String, Object>>> MAP_LIST = new TypeReference<>() {};
     private static final TypeReference<List<Partition>> PARTITION_LIST = new TypeReference<>() {};
 
@@ -124,6 +125,26 @@ public class GlueJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableVersions", glueService.getTableVersions(dbName, tableName))).build();
             }
+            case "GetTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableVersion", glueService.getTableVersion(
+                        dbName, tableName, request.path("VersionId").asText(null)))).build();
+            }
+            case "DeleteTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                glueService.deleteTableVersion(dbName, tableName, request.path("VersionId").asText(null));
+                yield Response.ok().build();
+            }
+            case "BatchDeleteTableVersion" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                List<String> versionIds = mapper.convertValue(request.get("VersionIds"), STRING_LIST);
+                yield Response.ok(Map.of("Errors", glueService.batchDeleteTableVersions(
+                        dbName, tableName, versionIds == null ? List.of() : versionIds))).build();
+            }
+            case "SearchTables" -> handleSearchTables(request);
             case "DeleteTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
@@ -156,6 +177,7 @@ public class GlueJsonHandler {
                 yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName, expression))).build();
             }
             case "DeletePartition" -> handleDeletePartition(request);
+            case "BatchDeletePartition" -> handleBatchDeletePartition(request);
             case "UpdatePartition" -> handleUpdatePartition(request);
             case "UpdateColumnStatisticsForPartition" -> handleUpdateColumnStatisticsForPartition(request);
             case "GetColumnStatisticsForPartition" -> handleGetColumnStatisticsForPartition(request);
@@ -214,6 +236,27 @@ public class GlueJsonHandler {
                 glueService.deleteJob(req.getJobName(), region);
                 yield Response.ok(new DeleteJobResponse(req.getJobName())).build();
             }
+            case "CreateClassifier" -> {
+                Classifier classifier = mapper.treeToValue(request, Classifier.class);
+                glueService.createClassifier(classifier);
+                yield Response.ok().build();
+            }
+            case "GetClassifier" -> Response.ok(Map.of(
+                    "Classifier", glueService.getClassifier(request.path("Name").asText(null)))).build();
+            case "GetClassifiers" -> {
+                GlueService.Page<Classifier> page = glueService.getClassifiers(
+                        readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("Classifiers", page.items(), page.nextToken())).build();
+            }
+            case "UpdateClassifier" -> {
+                Classifier classifier = mapper.treeToValue(request, Classifier.class);
+                glueService.updateClassifier(classifier);
+                yield Response.ok().build();
+            }
+            case "DeleteClassifier" -> {
+                glueService.deleteClassifier(request.path("Name").asText(null));
+                yield Response.ok().build();
+            }
             case "CreateCrawler" -> {
                 CreateCrawlerRequest req = mapper.treeToValue(request, CreateCrawlerRequest.class);
                 Crawler crawler = toDomain(req);
@@ -242,6 +285,48 @@ public class GlueJsonHandler {
                 DeleteCrawlerRequest req = mapper.treeToValue(request, DeleteCrawlerRequest.class);
                 glueService.deleteCrawler(req.getName(), region);
                 yield Response.ok().build();
+            }
+            case "CreateConnection" -> handleCreateConnection(request, region);
+            case "GetConnection" -> handleGetConnection(request);
+            case "GetConnections" -> handleGetConnections(request);
+            case "UpdateConnection" -> handleUpdateConnection(request, region);
+            case "DeleteConnection" -> {
+                glueService.deleteConnection(request.path("ConnectionName").asText(null), region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "BatchDeleteConnection" -> {
+                List<String> names = request.hasNonNull("ConnectionNameList")
+                        ? mapper.convertValue(request.get("ConnectionNameList"), STRING_LIST)
+                        : null;
+                yield Response.ok(glueService.batchDeleteConnections(names, region)).build();
+            }
+            case "TestConnection" -> handleTestConnection(request);
+            case "PutResourcePolicy" -> {
+                String hash = glueService.putResourcePolicy(
+                        request.path("PolicyInJson").asText(null),
+                        request.path("PolicyHashCondition").asText(null),
+                        request.path("PolicyExistsCondition").asText(null),
+                        request.path("EnableHybrid").asText(null));
+                yield Response.ok(Map.of("PolicyHash", hash)).build();
+            }
+            case "GetResourcePolicy" -> Response.ok(glueService.getResourcePolicy()).build();
+            case "GetResourcePolicies" -> {
+                GlueService.Page<GluePolicy> page =
+                        glueService.getResourcePolicies(readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("GetResourcePoliciesResponseList", page.items(), page.nextToken())).build();
+            }
+            case "DeleteResourcePolicy" -> {
+                glueService.deleteResourcePolicy(request.path("PolicyHashCondition").asText(null));
+                yield Response.ok(Map.of()).build();
+            }
+            case "GetDataCatalogEncryptionSettings" -> Response.ok(Map.of(
+                    "DataCatalogEncryptionSettings", glueService.getDataCatalogEncryptionSettings())).build();
+            case "PutDataCatalogEncryptionSettings" -> {
+                DataCatalogEncryptionSettings settings = request.hasNonNull("DataCatalogEncryptionSettings")
+                        ? mapper.treeToValue(request.get("DataCatalogEncryptionSettings"), DataCatalogEncryptionSettings.class)
+                        : null;
+                glueService.putDataCatalogEncryptionSettings(settings);
+                yield Response.ok(Map.of()).build();
             }
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
@@ -317,6 +402,31 @@ public class GlueJsonHandler {
                 "Partitions", glueService.batchGetPartitions(dbName, tableName, partitionValues),
                 "UnprocessedKeys", List.of()))
                 .build();
+    }
+
+    private Response handleBatchDeletePartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Map<String, Object>> partitionsToDelete = mapper.convertValue(request.get("PartitionsToDelete"), MAP_LIST);
+        List<List<String>> partitionValues = (partitionsToDelete == null ? List.<Map<String, Object>>of() : partitionsToDelete)
+                .stream()
+                .map(partition -> mapper.convertValue(partition.get("Values"), STRING_LIST))
+                .toList();
+        return Response.ok(Map.of(
+                "Errors", glueService.batchDeletePartitions(dbName, tableName, partitionValues))).build();
+    }
+
+    private Response handleSearchTables(JsonNode request) {
+        List<GlueService.SearchFilter> filters = request.hasNonNull("Filters")
+                ? mapper.convertValue(request.get("Filters"), new TypeReference<List<GlueService.SearchFilter>>() {})
+                : null;
+        List<GlueService.SearchSort> sortCriteria = request.hasNonNull("SortCriteria")
+                ? mapper.convertValue(request.get("SortCriteria"), new TypeReference<List<GlueService.SearchSort>>() {})
+                : null;
+        GlueService.Page<Table> page = glueService.searchTables(
+                request.path("SearchText").asText(null), filters, sortCriteria,
+                readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("TableList", page.items(), page.nextToken())).build();
     }
 
     private Response handleDeletePartition(JsonNode request) {
@@ -789,6 +899,59 @@ public class GlueJsonHandler {
                 : null;
         glueService.untagResource(arn, tagsToRemove, region);
         return Response.ok().build();
+    }
+
+    private Response handleCreateConnection(JsonNode request, String region) throws Exception {
+        ConnectionInput input = request.hasNonNull("ConnectionInput")
+                ? mapper.treeToValue(request.get("ConnectionInput"), ConnectionInput.class)
+                : null;
+        Map<String, String> tags = request.hasNonNull("Tags")
+                ? mapper.convertValue(request.get("Tags"), STRING_MAP)
+                : null;
+        String status = glueService.createConnection(input, tags, region);
+        return Response.ok(Map.of("CreateConnectionStatus", status)).build();
+    }
+
+    private Response handleGetConnection(JsonNode request) {
+        Connection connection = glueService.getConnection(
+                request.path("Name").asText(null), request.path("HidePassword").asBoolean(false));
+        return Response.ok(Map.of("Connection", connection)).build();
+    }
+
+    private Response handleGetConnections(JsonNode request) {
+        JsonNode filter = request.path("Filter");
+        List<String> matchCriteria = filter.hasNonNull("MatchCriteria")
+                ? mapper.convertValue(filter.get("MatchCriteria"), STRING_LIST)
+                : null;
+        String connectionType = filter.path("ConnectionType").asText(null);
+        Integer schemaVersion = filter.hasNonNull("ConnectionSchemaVersion")
+                ? filter.get("ConnectionSchemaVersion").asInt()
+                : null;
+        GlueService.Page<Connection> page = glueService.getConnections(
+                matchCriteria, connectionType, schemaVersion,
+                request.path("HidePassword").asBoolean(false),
+                readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("ConnectionList", page.items(), page.nextToken())).build();
+    }
+
+    private Response handleUpdateConnection(JsonNode request, String region) throws Exception {
+        ConnectionInput input = request.hasNonNull("ConnectionInput")
+                ? mapper.treeToValue(request.get("ConnectionInput"), ConnectionInput.class)
+                : null;
+        glueService.updateConnection(request.path("Name").asText(null), input, region);
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response handleTestConnection(JsonNode request) {
+        JsonNode input = request.path("TestConnectionInput");
+        Map<String, String> properties = input.hasNonNull("ConnectionProperties")
+                ? mapper.convertValue(input.get("ConnectionProperties"), STRING_MAP)
+                : null;
+        glueService.testConnection(
+                request.path("ConnectionName").asText(null),
+                input.path("ConnectionType").asText(null),
+                properties);
+        return Response.ok(Map.of()).build();
     }
 
     private Response handleGetTags(JsonNode request, String region) {

@@ -426,7 +426,11 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:sfn:sendTaskFailure` | `{}` | `Sfn.InvalidTokenException` |
 | `arn:aws:states:::aws-sdk:scheduler:createSchedule` | `{ScheduleArn}` | `Scheduler.ConflictException` when the name is taken |
 | `arn:aws:states:::aws-sdk:scheduler:updateSchedule` | `{ScheduleArn}` | `Scheduler.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
+
+Scheduler create and update tasks accept `StartDate` and `EndDate` as RFC 3339 strings, including
+offsets and fractional seconds. The direct Scheduler API continues to use numeric epoch seconds.
 
 `sendTaskSuccess` and `sendTaskFailure` resolve a token a `.waitForTaskToken` task is parked on. A
 token nobody is waiting for fails the calling task rather than reporting a delivery that never
@@ -470,6 +474,10 @@ cause is the response serialized as a string, so a `Catch` can read which entry 
 ```json
 {"FailedEntryCount":1,"Entries":[{"EventId":"08cbdc46-…"},{"ErrorCode":"InvalidArgument","ErrorMessage":"EventBus not found: no-such-bus"}]}
 ```
+
+The optimized integration accepts `Detail` as a JSON object in JSONPath and JSONata workflows. It
+serializes that object once for the EventBridge request, preserving nested values and escaped text.
+The direct EventBridge API continues to accept its native string-valued `Detail` field.
 
 One deviation, and it belongs to EventBridge rather than to the integration: Floci rejects an entry
 addressed to an event bus that does not exist, while AWS accepts it and returns an `EventId`.

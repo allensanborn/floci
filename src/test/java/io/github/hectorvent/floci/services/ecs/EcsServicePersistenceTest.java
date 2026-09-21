@@ -7,12 +7,15 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
@@ -47,7 +50,7 @@ class EcsServicePersistenceTest {
                 NetworkMode.awsvpc, "256", "512", null, null, List.of("FARGATE"),
                 Map.of("tier", "web"), REGION);
         EcsServiceModel svc = first.createService("app-cluster", "web-svc", td.getTaskDefinitionArn(),
-                0, LaunchType.FARGATE, List.of(), null, Map.of("team", "payments"), REGION);
+                0, LaunchType.FARGATE, List.of(), awsvpcConfiguration(), Map.of("team", "payments"), REGION);
         first.putAttributes("app-cluster",
                 List.of(new Attribute("stack", "prod", "container-instance", "ci-1")), REGION);
         first.putAccountSetting("containerInsights", "enabled");
@@ -102,6 +105,15 @@ class EcsServicePersistenceTest {
         cd.setName(name);
         cd.setImage(image);
         return cd;
+    }
+
+    /** An awsvpc service needs the subnets its tasks get an ENI in, as it does on AWS. */
+    private static NetworkConfiguration awsvpcConfiguration() {
+        AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
+        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a")));
+        NetworkConfiguration networkConfiguration = new NetworkConfiguration();
+        networkConfiguration.setAwsvpcConfiguration(awsvpc);
+        return networkConfiguration;
     }
 
     private static EcsService serviceWithStorage(StorageFactory storage) {

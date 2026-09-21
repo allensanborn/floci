@@ -40,6 +40,7 @@ public class EcsServiceModel {
      * it; the Service shape itself has no member for it.
      */
     private Map<String, Object> serviceConnectConfiguration;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -112,4 +113,10 @@ public class EcsServiceModel {
     public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
         this.serviceConnectConfiguration = serviceConnectConfiguration;
     }
+
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
+
 }

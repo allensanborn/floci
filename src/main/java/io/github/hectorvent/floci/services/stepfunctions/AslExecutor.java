@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.MockedResponseSte
 import io.github.hectorvent.floci.services.stepfunctions.model.MockedTestCase;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -71,6 +72,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -82,6 +84,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -1151,7 +1154,7 @@ public class AslExecutor {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         flattenQueryParams(input, "", params);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = cloudFormationHandler.handle(pascalAction, params, region);
         } catch (AwsException e) {
@@ -1372,21 +1375,26 @@ public class AslExecutor {
     }
 
     /**
-     * AWS SDK integrations for {@code scheduler:createSchedule} and {@code scheduler:updateSchedule}.
-     * The Task {@code Arguments} are the CreateSchedule body with {@code Name} folded in, so they go
-     * through the controller's parse, and both actions answer with the schedule ARN alone. The parse
-     * rejects a malformed {@code Target} with the same {@code AwsException} the service raises, so it
-     * belongs inside the translation that makes those failures reachable for {@code Retry} and
-     * {@code Catch}.
+     * AWS SDK integrations for Scheduler. Create and update parse the full schedule request and
+     * return its ARN. Delete accepts only the schedule identity and returns the empty SDK response.
+     * Service and parsing failures stay inside the translation that makes them reachable for
+     * {@code Retry} and {@code Catch}.
      */
     private JsonNode invokeAwsSdkScheduler(String action, JsonNode input, String region) {
+        boolean deleting = "deleteSchedule".equals(action);
         boolean creating = "createSchedule".equals(action);
-        if (!creating && !"updateSchedule".equals(action)) {
+        if (!creating && !deleting && !"updateSchedule".equals(action)) {
             throw new FailStateException("States.TaskFailed",
                     "Unsupported resource: " + AWS_SDK_SCHEDULER_PREFIX + action);
         }
         try {
-            ScheduleRequest request = schedulerController.parseScheduleRequest(input);
+            if (deleting) {
+                schedulerService.deleteSchedule(input.path("Name").asText(null),
+                        input.path("GroupName").asText(null), region);
+                return objectMapper.createObjectNode();
+            }
+            ScheduleRequest request = schedulerController.parseScheduleRequest(
+                    normalizeAwsSdkSchedulerInput(input));
             request.setName(input.path("Name").asText(null));
             Schedule schedule = creating
                     ? schedulerService.createSchedule(request, region)
@@ -1399,6 +1407,37 @@ public class AslExecutor {
         }
     }
 
+    /** Converts the SDK's RFC 3339 timestamps to the epoch-second values used by the wire parser. */
+    private JsonNode normalizeAwsSdkSchedulerInput(JsonNode input) {
+        JsonNode normalized = input.deepCopy();
+        if (normalized instanceof ObjectNode object) {
+            normalizeAwsSdkSchedulerTimestamp(object, "StartDate");
+            normalizeAwsSdkSchedulerTimestamp(object, "EndDate");
+        }
+        return normalized;
+    }
+
+    private void normalizeAwsSdkSchedulerTimestamp(ObjectNode input, String field) {
+        JsonNode value = input.get(field);
+        if (value == null || value.isNull() || value.isNumber()) {
+            return;
+        }
+        if (!value.isTextual()) {
+            throw malformedAwsSdkSchedulerTimestamp(field);
+        }
+        try {
+            Instant instant = Instant.parse(value.textValue());
+            input.put(field, instant.getEpochSecond() + instant.getNano() / 1_000_000_000d);
+        } catch (DateTimeParseException ignored) {
+            // AWS exposes SDK timestamp deserialization failures as SerializationException.
+            throw malformedAwsSdkSchedulerTimestamp(field);
+        }
+    }
+
+    private static AwsException malformedAwsSdkSchedulerTimestamp(String field) {
+        return new AwsException("SerializationException", field + " must be an RFC 3339 timestamp.", 400);
+    }
+
     /**
      * Optimized EventBridge integration for {@code events:putEvents}. The task result is the
      * PutEvents response itself, and one failed entry fails the whole task with
@@ -1406,9 +1445,9 @@ public class AslExecutor {
      * which entry it was.
      */
     private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
-            response = eventBridgeHandler.handle("PutEvents", input, region);
+            response = eventBridgeHandler.handle("PutEvents", normalizeOptimizedPutEventsInput(input), region);
         } catch (AwsException e) {
             throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
         }
@@ -1419,6 +1458,20 @@ public class AslExecutor {
             throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
         }
         return result;
+    }
+
+    private JsonNode normalizeOptimizedPutEventsInput(JsonNode input) throws JsonProcessingException {
+        JsonNode normalized = input.deepCopy();
+        JsonNode entries = normalized.path("Entries");
+        if (entries.isArray()) {
+            for (JsonNode entry : entries) {
+                JsonNode detail = entry.get("Detail");
+                if (entry.isObject() && detail != null && detail.isObject()) {
+                    ((ObjectNode) entry).put("Detail", objectMapper.writeValueAsString(detail));
+                }
+            }
+        }
+        return normalized;
     }
 
     /**
@@ -1875,7 +1928,7 @@ public class AslExecutor {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
@@ -1933,7 +1986,7 @@ public class AslExecutor {
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix, boolean awsSdkStyleErrors) {
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = sqsJsonHandler.handle(action, input, region);
         } catch (AwsException e) {
@@ -1981,7 +2034,7 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
-        jakarta.ws.rs.core.Response response;
+        Response response;
         try {
             response = snsJsonHandler.handle("Publish", request, region);
         } catch (AwsException e) {

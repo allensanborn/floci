@@ -452,6 +452,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "%s",
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
@@ -541,6 +542,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "empty-containers-task",
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME))
@@ -639,6 +641,48 @@ class EcsIntegrationTest {
             .body("taskDefinition.containerDefinitions[0]", not(hasKey("logConfiguration")));
     }
 
+    @Test
+    @Order(27)
+    void registerTaskDefinitionRoundTripsVolumesFrom() {
+        String volumesFromTaskDefArn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "task-with-volumes-from",
+                    "containerDefinitions": [
+                        {"name": "source", "image": "sidecar:latest"},
+                        {
+                            "name": "app",
+                            "image": "app:latest",
+                            "volumesFrom": [
+                                {"sourceContainer": "source", "readOnly": true}
+                            ]
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[1].volumesFrom", hasSize(1))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("source"))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(volumesFromTaskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[1].volumesFrom", hasSize(1))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("source"))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0].readOnly", equalTo(true));
+    }
+
     // ── Services ──────────────────────────────────────────────────────────────
 
     @Test
@@ -652,6 +696,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "tags": [
                         {"key": "Environment", "value": "dev"},
                         {"key": "Project", "value": "project1"}
@@ -745,7 +790,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 2,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -766,7 +812,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 99,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -789,7 +836,8 @@ class EcsIntegrationTest {
                     "serviceName": "negative-count-svc",
                     "taskDefinition": "%s",
                     "desiredCount": -5,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -831,7 +879,8 @@ class EcsIntegrationTest {
                     "serviceName": "zero-count-svc",
                     "taskDefinition": "%s",
                     "desiredCount": 0,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -1032,7 +1081,8 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
                 }
                 """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
         .when()
@@ -1118,6 +1168,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-a/1234",
@@ -1142,6 +1193,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-DIFFERENT/9999",

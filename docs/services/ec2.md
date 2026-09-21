@@ -194,7 +194,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Returns an empty local VPC endpoint service catalog. |
@@ -202,9 +202,16 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
+| DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
+| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
+
+The two describe-only network actions above provide discovery compatibility when no
+resources exist. Egress-only gateway discovery validates its pagination parameters before
+returning an empty page. Neither models virtual private gateway or egress-only internet
+gateway lifecycles.
 
 ### Subnets
 
@@ -248,6 +255,14 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
+
+Every resource EC2 creates is owned by the account the request resolves to, the same account
+[STS](sts.md) reports for those credentials, and that account is what `ownerId` and the resource ARN
+carry. So `DescribeImages` with `--owners <your account id>` matches the AMIs that account
+registered, and `--owners self` resolves to the same account. This is what lets a Terraform
+`aws_ami` data source pin `owners` to the account under test instead of the emulator's default
+`000000000000`. The `amazon` and `aws-marketplace` aliases still resolve to the AWS-owned accounts
+that publish those images.
 
 ### Tags
 
@@ -596,8 +611,10 @@ starts from empty data and is how a template moves between the two selection mod
 Two behaviours worth calling out, because they are what Terraform reads back:
 
 - **`IamInstanceProfile` keeps the form it was given.** A profile submitted as `Name` reads back as
-  `Name`, not rewritten to `Arn`. The instance-profile ARN is derived at launch time instead, so
-  `aws_launch_template.iam_instance_profile.name` converges.
+  `Name`, not rewritten to `Arn`. At launch time, Floci resolves that name against IAM in the
+  caller's account and preserves the profile's full path in its ARN. A name missing from that
+  account is rejected with `InvalidParameterValue`. This also applies to direct `RunInstances`
+  requests and `CreateFleet` launches, so `aws_launch_template.iam_instance_profile.name` converges.
 - **`NetworkInterfaces` stays a `NetworkInterfaces` block.** Its `Groups` are not hoisted into
   top-level `SecurityGroupIds`; on AWS the two are mutually exclusive. A launch from the template
   resolves its security groups from whichever of the two is populated.

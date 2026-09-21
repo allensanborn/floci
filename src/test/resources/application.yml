@@ -188,6 +188,7 @@ floci:
       enabled: true
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900
@@ -199,6 +200,7 @@ floci:
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
       proxy-handshake-timeout-millis: 10000
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 100
@@ -314,6 +316,7 @@ floci:
       mock: true
       ecr-registry-mirror: true
       imds: false
+      irsa-signing-key: true
     mwaa:
       enabled: true
       mock: true
@@ -331,6 +334,18 @@ floci:
     sagemaker:
       enabled: true
       # docker-network: floci-network
+      gpu:
+        # Off by default: an existing deployment keeps launching CPU-only
+        # containers. How many GPUs an ml.* type has is shipped in
+        # sagemaker/instance-type-catalog.yaml; this is only about which of
+        # this machine's devices Floci may hand out.
+        enabled: false
+        # cdi | device-ids | count. Podman resolves only cdi, and accepts
+        # count while attaching no device, so cdi fails loudly instead.
+        mode: cdi
+        # Required for cdi and device-ids modes; unset allows no device.
+        # devices:
+        #   - nvidia.com/gpu=GPU-<uuid>
     batch:
       enabled: true
       runner-mode: immediate
@@ -370,6 +385,9 @@ floci:
       emit-mode: off
     bcm-pricing-calculator:
       enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off

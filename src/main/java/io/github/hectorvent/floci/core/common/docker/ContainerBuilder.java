@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Volume;
+import com.github.dockerjava.api.model.VolumesFrom;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -126,12 +127,16 @@ public class ContainerBuilder {
         private List<String> entrypoint;
         private String workingDir;
         private Long memoryBytes;
+        private Long nanoCpus;
+        private Integer cpuShares;
+        private boolean readonlyRootfs;
         private final Map<Integer, Integer> portBindings = new HashMap<>();
         private final List<Integer> loopbackPortBindings = new ArrayList<>();
         private final List<Integer> exposedPorts = new ArrayList<>();
         private String networkMode;
         private final List<Mount> mounts = new ArrayList<>();
         private final List<Bind> binds = new ArrayList<>();
+        private final List<VolumesFrom> volumesFrom = new ArrayList<>();
         private final List<String> extraHosts = new ArrayList<>();
         private final Map<String, String> labels = new HashMap<>();
         private LogConfig logConfig;
@@ -221,6 +226,30 @@ public class ContainerBuilder {
          */
         public Builder withMemoryBytes(long memoryBytes) {
             this.memoryBytes = memoryBytes;
+            return this;
+        }
+
+        /**
+         * Caps the container at a fraction of the host's CPUs, expressed the way ECS expresses it:
+         * 1024 CPU units is one vCPU.
+         */
+        public Builder withCpuUnits(int cpuUnits) {
+            this.nanoCpus = cpuUnits * 1_000_000_000L / 1024L;
+            return this;
+        }
+
+        /**
+         * Sets the container's relative CPU weight, which is what a container-level {@code cpu}
+         * means when several containers share a task's CPU allocation.
+         */
+        public Builder withCpuShares(int cpuShares) {
+            this.cpuShares = cpuShares;
+            return this;
+        }
+
+        /** Mounts the container's own filesystem read only. */
+        public Builder withReadonlyRootfs() {
+            this.readonlyRootfs = true;
             return this;
         }
 
@@ -316,6 +345,14 @@ public class ContainerBuilder {
                     .withSource(volumeName)
                     .withTarget(containerPath)
                     .withReadOnly(readOnly));
+            return this;
+        }
+
+        /**
+         * Inherits every volume declared by another container.
+         */
+        public Builder withVolumesFrom(String sourceContainerId, boolean readOnly) {
+            volumesFrom.add(new VolumesFrom(sourceContainerId, readOnly ? AccessMode.ro : AccessMode.rw));
             return this;
         }
 
@@ -592,6 +629,7 @@ public class ContainerBuilder {
                     networkMode,
                     List.copyOf(mounts),
                     List.copyOf(binds),
+                    List.copyOf(volumesFrom),
                     List.copyOf(extraHosts),
                     Map.copyOf(labels),
                     logConfig,
@@ -601,7 +639,10 @@ public class ContainerBuilder {
                     workingDir,
                     user,
                     List.copyOf(groupAdd),
-                    List.copyOf(deviceRequests)
+                    List.copyOf(deviceRequests),
+                    nanoCpus,
+                    cpuShares,
+                    readonlyRootfs
             );
         }
     }
