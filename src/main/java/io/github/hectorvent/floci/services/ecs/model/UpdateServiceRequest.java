@@ -23,6 +23,15 @@ public class UpdateServiceRequest {
     private boolean forceNewDeployment;
     private Map<String, Object> serviceConnectConfiguration;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
+    private String platformVersion;
+    private Boolean enableExecuteCommand;
+    private Boolean enableECSManagedTags;
+    private String propagateTags;
+    private Integer healthCheckGracePeriodSeconds;
+    private Map<String, Object> deploymentConfiguration;
+    private List<EcsLoadBalancer> loadBalancers;
+    private List<Map<String, Object>> serviceRegistries;
+    private Map<String, Object> unparsed;
 
     public String getCluster() { return cluster; }
     public void setCluster(String cluster) { this.cluster = cluster; }
@@ -59,4 +68,40 @@ public class UpdateServiceRequest {
         this.capacityProviderStrategy = capacityProviderStrategy;
     }
 
+    public String getPlatformVersion() { return platformVersion; }
+    public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
+
+    public Boolean getEnableExecuteCommand() { return enableExecuteCommand; }
+    public void setEnableExecuteCommand(Boolean enableExecuteCommand) {
+        this.enableExecuteCommand = enableExecuteCommand;
+    }
+
+    public Boolean getEnableECSManagedTags() { return enableECSManagedTags; }
+    public void setEnableECSManagedTags(Boolean enableECSManagedTags) {
+        this.enableECSManagedTags = enableECSManagedTags;
+    }
+
+    public String getPropagateTags() { return propagateTags; }
+    public void setPropagateTags(String propagateTags) { this.propagateTags = propagateTags; }
+
+    public Integer getHealthCheckGracePeriodSeconds() { return healthCheckGracePeriodSeconds; }
+    public void setHealthCheckGracePeriodSeconds(Integer healthCheckGracePeriodSeconds) {
+        this.healthCheckGracePeriodSeconds = healthCheckGracePeriodSeconds;
+    }
+
+    public Map<String, Object> getDeploymentConfiguration() { return deploymentConfiguration; }
+    public void setDeploymentConfiguration(Map<String, Object> deploymentConfiguration) {
+        this.deploymentConfiguration = deploymentConfiguration;
+    }
+
+    public List<EcsLoadBalancer> getLoadBalancers() { return loadBalancers; }
+    public void setLoadBalancers(List<EcsLoadBalancer> loadBalancers) { this.loadBalancers = loadBalancers; }
+
+    public List<Map<String, Object>> getServiceRegistries() { return serviceRegistries; }
+    public void setServiceRegistries(List<Map<String, Object>> serviceRegistries) {
+        this.serviceRegistries = serviceRegistries;
+    }
+
+    public Map<String, Object> getUnparsed() { return unparsed; }
+    public void setUnparsed(Map<String, Object> unparsed) { this.unparsed = unparsed; }
 }
