@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -434,7 +435,7 @@ class ElastiCacheQueryHandlerTest {
         cluster.setPreferredAvailabilityZone("us-east-1b");
         cluster.setNetworkType("ipv4");
         cluster.setIpDiscovery("ipv4");
-        cluster.setSecurityGroupIds(new java.util.ArrayList<>(List.of("sg-123")));
+        cluster.setSecurityGroupIds(new ArrayList<>(List.of("sg-123")));
         return cluster;
     }
 
@@ -629,7 +630,7 @@ class ElastiCacheQueryHandlerTest {
     @Test
     void listTagsForResource_readsTagsOffACacheClusterArn() {
         CacheCluster cluster = redisCacheCluster("tf-redis");
-        cluster.setTags(new java.util.LinkedHashMap<>(Map.of("Name", "cache")));
+        cluster.setTags(new LinkedHashMap<>(Map.of("Name", "cache")));
         when(service.findCacheClusters("tf-redis")).thenReturn(List.of(cluster));
 
         MultivaluedMap<String, String> p = params();
@@ -660,7 +661,7 @@ class ElastiCacheQueryHandlerTest {
         // region is not the one this ARN names
         CacheCluster elsewhere = redisCacheCluster("tf-redis");
         elsewhere.setArn("arn:aws:elasticache:eu-west-1:000000000000:cluster:tf-redis");
-        elsewhere.setTags(new java.util.LinkedHashMap<>(Map.of("Name", "west")));
+        elsewhere.setTags(new LinkedHashMap<>(Map.of("Name", "west")));
         when(service.findCacheClusters("tf-redis")).thenReturn(List.of(elsewhere));
 
         MultivaluedMap<String, String> p = params();
