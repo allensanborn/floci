@@ -14,6 +14,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -21,6 +26,7 @@ import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -690,6 +696,79 @@ public class RedshiftOperationsTest {
             .header("Authorization", AUTH_HEADER)
             .formParam("Action", "DeleteCluster")
             .formParam("ClusterIdentifier", "cluster-tags")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    /**
+     * CreateSnapshotCopyGrant checks the name is free and then writes. Both steps run under the
+     * service lock, so of two concurrent creates of one name exactly one wins and the other sees
+     * SnapshotCopyGrantAlreadyExistsFault -- the loser must not overwrite the winner's grant.
+     */
+    @Test
+    @Order(8)
+    void concurrentCreatesOfOneGrantNameLeaveExactlyOneGrant() throws Exception {
+        int threads = 2;
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(threads);
+        AtomicInteger created = new AtomicInteger();
+        AtomicInteger rejected = new AtomicInteger();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int i = 0; i < threads; i++) {
+                pool.execute(() -> {
+                    try {
+                        release.await();
+                        int status = given()
+                            .contentType("application/x-www-form-urlencoded")
+                            .header("Authorization", AUTH_HEADER)
+                            .formParam("Action", "CreateSnapshotCopyGrant")
+                            .formParam("SnapshotCopyGrantName", "race-grant")
+                        .when()
+                            .post("/")
+                        .then()
+                            .extract().statusCode();
+                        if (status == 200) {
+                            created.incrementAndGet();
+                        } else if (status == 400) {
+                            rejected.incrementAndGet();
+                        }
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        done.countDown();
+                    }
+                });
+            }
+            release.countDown();
+            assertTrue(done.await(30, TimeUnit.SECONDS), "concurrent creates did not finish");
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(1, created.get(), "exactly one create should succeed");
+        assertEquals(1, rejected.get(), "the losing create should be rejected, not silently accepted");
+
+        String names = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeSnapshotCopyGrants")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+        assertEquals(1, names.split("<SnapshotCopyGrantName>race-grant</SnapshotCopyGrantName>", -1).length - 1,
+                "the grant should be stored once");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteSnapshotCopyGrant")
+            .formParam("SnapshotCopyGrantName", "race-grant")
         .when()
             .post("/")
         .then()

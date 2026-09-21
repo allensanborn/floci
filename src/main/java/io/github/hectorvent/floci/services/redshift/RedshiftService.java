@@ -1170,7 +1170,9 @@ public class RedshiftService {
         }
     }
 
-    public SnapshotCopyGrant createSnapshotCopyGrant(String name, String kmsKeyId, Map<String, String> tags) {
+    // synchronized like createCluster: the free-name check and the write must not interleave,
+    // or two concurrent creates of the same name both succeed and the second overwrites the first.
+    public synchronized SnapshotCopyGrant createSnapshotCopyGrant(String name, String kmsKeyId, Map<String, String> tags) {
         validateSnapshotCopyGrantName(name);
         if (snapshotCopyGrants.get(name).isPresent()) {
             throw new AwsException("SnapshotCopyGrantAlreadyExistsFault",
@@ -1222,7 +1224,7 @@ public class RedshiftService {
                 "InvalidParameterValue");
     }
 
-    public SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {
+    public synchronized SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {
         SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
                 .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
                         "Snapshot copy grant " + name + " not found", 400));
@@ -1407,14 +1409,16 @@ public class RedshiftService {
                 });
             }
             case "snapshotcopygrant" -> {
-                // 404 here, unlike the 400 that describeSnapshotCopyGrants and
-                // deleteSnapshotCopyGrant return for the same fault code. The status
-                // belongs to the action, not the code: this path is only reached from
-                // CreateTags/DeleteTags/DescribeTags, whose documented missing-resource
-                // error is ResourceNotFoundFault at 404 -- matching every sibling case
-                // in this switch.
+                // ResourceNotFoundFault, not SnapshotCopyGrantNotFoundFault: this path is only
+                // reached from CreateTags/DeleteTags/DescribeTags, and those three list
+                // ResourceNotFoundFault (404) for a missing resource and do not list the
+                // grant-specific fault at all. The three sibling cases above are consistent
+                // for the same reason -- ClusterNotFound, ClusterSnapshotNotFound and
+                // ClusterParameterGroupNotFound are each modelled at 404. The grant fault is
+                // modelled at 400, so emitting it here would pair a code with a status the
+                // model never gives it.
                 SnapshotCopyGrant grant = snapshotCopyGrants.get(id)
-                        .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault", "Snapshot copy grant " + id + " not found", 404));
+                        .orElseThrow(() -> new AwsException("ResourceNotFoundFault", "Snapshot copy grant " + id + " not found", 404));
                 yield new TagHandle(grant.getTags(), updated -> {
                     grant.setTags(updated);
                     snapshotCopyGrants.put(id, grant);

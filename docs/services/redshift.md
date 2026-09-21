@@ -51,6 +51,21 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
+### Snapshot copy grants
+
+- **`KmsKeyId` defaults to an alias ARN.** Floci has no per-account AWS-managed key, so
+  `CreateSnapshotCopyGrant` without `KmsKeyId` stores
+  `arn:aws:kms:<region>:<account>:alias/aws/redshift` where AWS would store the key ARN it
+  resolves to. The value only has to round-trip through `DescribeSnapshotCopyGrants`, which is
+  what Terraform reads back.
+- **Tag limits are not validated.** The 50-tag count and the AWS key/value length limits are not
+  enforced on grants, as elsewhere in Floci's Redshift tagging.
+- **A missing grant reports different faults on different actions**, because AWS models them
+  that way. `DescribeSnapshotCopyGrants` and `DeleteSnapshotCopyGrant` return
+  `SnapshotCopyGrantNotFoundFault`, which the Redshift model pins at HTTP 400.
+  `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
+  `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
+
 ## DynamoDB zero-ETL
 
 The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN

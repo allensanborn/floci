@@ -1545,9 +1545,10 @@ class RedshiftServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:missing",
                         Map.of("env", "prod")));
-        assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
-        // Deliberately 404, unlike the Describe/Delete grant actions: the tagging
-        // actions document their missing-resource error at 404.
+        // ResourceNotFoundFault, not the grant-specific fault: CreateTags/DeleteTags/
+        // DescribeTags list ResourceNotFoundFault (404) for a missing resource and never
+        // list SnapshotCopyGrantNotFoundFault, which the model pins at 400.
+        assertEquals("ResourceNotFoundFault", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
     }
 
