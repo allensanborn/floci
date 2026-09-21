@@ -22,6 +22,13 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `ListPodIdentityAssociations` | List pod identity associations in a cluster with optional filtering and pagination |
 | `UpdatePodIdentityAssociation` | Update the IAM role, target role, or session tags for a pod identity association |
 | `DeletePodIdentityAssociation` | Delete a pod identity association |
+| `CreateAddon` | Create an addon for an EKS cluster |
+| `DescribeAddon` | Describe an addon by cluster and addon name |
+| `ListAddons` | List addon names installed in a cluster with pagination |
+| `UpdateAddon` | Update addon configuration, version, or service account role |
+| `DescribeUpdate` | Describe an update for an addon |
+| `DeleteAddon` | Delete an addon from a cluster |
+| `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
 | `DescribeNodegroup` | Describe a node group by cluster and name |
 | `ListNodegroups` | List node group names for a cluster |
@@ -91,6 +98,24 @@ Credentials delivery directly into pods is not yet supported:
 - The link-local metadata credential endpoint (`169.254.170.23`) is not implemented.
 
 Applications running inside pods cannot currently exchange tokens for temporary AWS credentials via the link-local endpoint. Use access entries, node credentials, or explicit credential configuration until the pod identity agent endpoint is added.
+
+## Addon management
+
+Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform (`aws_eks_addon` resource).
+
+### Supported operations
+
+- **Creation**: `CreateAddon` creates an addon on an ACTIVE cluster. Supported addons include `vpc-cni`, `coredns`, `kube-proxy`, and `eks-pod-identity-agent`. If `addonVersion` is omitted, the default version compatible with the cluster Kubernetes version is resolved automatically. Referenced `serviceAccountRoleArn` must exist in IAM. Idempotency is supported via `clientRequestToken`.
+- **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
+- **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
+- **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
+- **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
+- **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
+- **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination.
+
+### Metadata recording only
+
+Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container.
 
 ## Cluster security group
 
@@ -256,7 +281,8 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 |---|---|---|
 | `FLOCI_SERVICES_EKS_ENABLED` | `true` | Enable the EKS service |
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
-| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image |
+| `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
+| `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT` | `6599` | Last port in the k3s API server range |
 | `FLOCI_SERVICES_EKS_DATA_PATH` | `./data/eks` | Host bind-mount root for cluster data |
@@ -267,6 +293,35 @@ back (for example Docker is unavailable), the cluster is marked `FAILED` instead
 | `FLOCI_SERVICES_EKS_ECR_REGISTRY_MIRROR` | `true` | Inject a containerd `registries.yaml` so pods can pull images pushed to [Floci ECR](ecr.md) |
 | `FLOCI_SERVICES_EKS_IRSA_SIGNING_KEY` | `true` | Pass the cluster OIDC signing key to k3s so in-cluster projected service account tokens can assume IAM roles via Floci STS |
 | `FLOCI_SERVICES_EKS_IMDS` | `false` | Enable link-local IMDS (`169.254.169.254`) proxy in cluster containers |
+
+### Kubernetes versions and network configuration
+
+Floci supports standard AWS EKS Kubernetes versions (`1.xx`, 1.28 and above). Known releases are mapped to stable pinned k3s images, while newer or unpinned versions dynamically resolve to upstream k3s release images (`rancher/k3s:v<version>.0-k3s1`):
+
+- `1.28` (`rancher/k3s:v1.28.15-k3s1`)
+- `1.29` (`rancher/k3s:v1.29.14-k3s1`, default version metadata)
+- `1.30` (`rancher/k3s:v1.30.10-k3s1`)
+- `1.31` (`rancher/k3s:v1.31.5-k3s1`)
+- `1.32` (`rancher/k3s:v1.32.2-k3s1`)
+- `1.33` (`rancher/k3s:v1.33.1-k3s1`)
+- `1.34` (`rancher/k3s:v1.34.1-k3s1`)
+- `1.35` (`rancher/k3s:v1.35.0-k3s1`)
+- `1.36` (`rancher/k3s:v1.36.0-k3s1`)
+- `1.37+` (dynamically resolved to `rancher/k3s:v<version>.0-k3s1`)
+
+When `--version` is omitted, the cluster version defaults to `1.29` and the container image resolution uses `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` (`rancher/k3s:latest` by default). When a version is explicitly requested, it maps to the corresponding pinned image or template.
+
+You can specify standard EKS `version` and `kubernetesNetworkConfig.serviceIpv4Cidr` when creating a cluster:
+
+```bash
+aws --endpoint-url http://localhost:4566 eks create-cluster \
+  --name my-cluster \
+  --role-arn arn:aws:iam::000000000000:role/eks-role \
+  --version 1.31 \
+  --kubernetes-network-config serviceIpv4Cidr=172.20.0.0/16
+```
+
+Floci validates that `serviceIpv4Cidr` falls within RFC 1918 private address ranges (`10.0.0.0/8`, `172.16.0.0/12`, or `192.168.0.0/16`), has a prefix length between `/12` and `/24`, and does not overlap with the VPC CIDR. When omitted, Floci defaults `serviceIpv4Cidr` to `10.100.0.0/16` (or `172.20.0.0/16` if `10.100.0.0/16` overlaps with the VPC). Internal pod CIDR (`--cluster-cidr`) defaults to `10.42.0.0/16` to avoid collisions with Docker bridge networks.
 
 ### Pulling images from Floci ECR
 
