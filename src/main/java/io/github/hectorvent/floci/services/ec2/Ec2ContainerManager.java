@@ -1240,9 +1240,12 @@ public class Ec2ContainerManager {
      * exists, the daemon refuses to delete the image, and with no later attempt the layer stays
      * on disk for the lifetime of the emulator.
      *
-     * <p>The callback runs on the teardown executor after the instance reaches terminated, and
-     * in a finally block so a failure earlier in teardown does not skip it. Anything it throws is
-     * logged and swallowed rather than killing the executor task.
+     * <p>The callback runs on the teardown executor, and only once the container is established
+     * to be gone: removed, already absent, or never launched. Everything after removal can fail
+     * without making the callback wrong, so it runs from a finally block, but running it when
+     * removal itself failed would attempt work Docker is bound to refuse with no later retry
+     * behind it. A skip is logged. Anything the callback throws is logged and swallowed rather
+     * than killing the executor task.
      */
     public void terminate(Instance instance, Runnable afterTeardown) {
         String containerId;
@@ -1257,13 +1260,24 @@ public class Ec2ContainerManager {
             instance.setState(InstanceState.shuttingDown());
         }
         executor.submit(() -> {
+            // Whether the container is actually gone, which is the only precondition the
+            // post-teardown hook needs. Anything after removal can fail without making a
+            // reclaim wrong, but running the hook when removal itself failed would attempt a
+            // reclaim Docker is bound to refuse, with no later retry behind it.
+            boolean containerGone = false;
             try {
                 portForwardManager.unpublishAll(instance);
+                if (containerId == null) {
+                    // Nothing was ever launched, so there is no container to hold the image.
+                    containerGone = true;
+                }
                 if (containerId != null) {
                     try {
                         dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+                        containerGone = true;
                     } catch (NotFoundException e) {
                         // already gone
+                        containerGone = true;
                     } catch (Exception e) {
                         LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
                     }
@@ -1292,13 +1306,17 @@ public class Ec2ContainerManager {
                 instance.setState(InstanceState.terminated());
                 instance.setTerminatedAt(System.currentTimeMillis());
             } finally {
-                if (afterTeardown != null) {
+                if (afterTeardown != null && containerGone) {
                     try {
                         afterTeardown.run();
                     } catch (Exception e) {
                         LOG.warnv("Post-teardown hook failed for instance {0}: {1}",
                                 instance.getInstanceId(), e.getMessage());
                     }
+                } else if (afterTeardown != null) {
+                    LOG.warnv("Skipping post-teardown hook for instance {0}: its container could "
+                            + "not be removed, so anything waiting on the container being gone "
+                            + "would fail", instance.getInstanceId());
                 }
             }
         });

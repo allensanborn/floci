@@ -40,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import java.io.InputStream;
 import java.io.Closeable;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -1777,6 +1778,41 @@ class Ec2ContainerManagerTest {
         harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void theTeardownHookRunsOnceTheContainerIsGone() throws Exception {
+        // The hook exists so callers can do work that is only valid after the container has
+        // released its Docker resources, so it must actually fire on the ordinary path.
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+        Instance instance = instance("i-teardown-hook");
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+        AtomicBoolean ran = new AtomicBoolean(false);
+
+        harness.manager().terminate(instance, () -> ran.set(true));
+
+        awaitUntil(ran::get, Duration.ofSeconds(2));
+    }
+
+    @Test
+    void theTeardownHookIsSkippedWhenTheContainerCouldNotBeRemoved() throws Exception {
+        // Running it anyway would start work that depends on the container being gone while it
+        // demonstrably is not, and nothing retries behind it. Skipping and logging is the
+        // honest outcome.
+        LaunchHarness harness = launchHarness();
+        stubDockerPing(harness.dockerClient(), false);
+        Instance instance = instance("i-teardown-hook-refused");
+        harness.manager().launch(instance, "ubuntu:24.04", null, "us-west-2");
+        instance.setDockerContainerId("c-stuck");
+        when(harness.dockerClient().removeContainerCmd("c-stuck"))
+                .thenThrow(new RuntimeException("daemon refused"));
+        AtomicBoolean ran = new AtomicBoolean(false);
+
+        harness.manager().terminate(instance, () -> ran.set(true));
+
+        awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        assertFalse(ran.get(), "the hook must not run when the container is still present");
     }
 
     @Test
