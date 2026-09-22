@@ -2370,17 +2370,37 @@ public class CloudFormationService implements ResourceProvider {
         if (normalizedHost.equals("s3")) {
             return true;
         }
-        if (!normalizedHost.startsWith("s3.")) {
+        int firstDot = normalizedHost.indexOf('.');
+        if (firstDot <= 0 || !isS3ServiceLabel(normalizedHost.substring(0, firstDot))) {
             return false;
         }
-        String remainder = normalizedHost.substring("s3.".length());
-        String withoutRegion = remainder;
+        String remainder = stripLeadingLabel(normalizedHost.substring(firstDot + 1), "dualstack");
         int dot = remainder.indexOf('.');
         if (dot > 0 && isRegionLabel(remainder.substring(0, dot))) {
-            withoutRegion = remainder.substring(dot + 1);
+            remainder = remainder.substring(dot + 1);
         }
-        return isEndpointSuffix(remainder, hostnameSuffix)
-                || isEndpointSuffix(withoutRegion, hostnameSuffix);
+        return isEndpointSuffix(remainder, hostnameSuffix);
+    }
+
+    /**
+     * The first label of an S3 service endpoint, in the forms
+     * {@code S3VirtualHostFilter} recognizes: {@code s3}, {@code s3-fips},
+     * {@code s3-accelerate}, {@code s3-website} and {@code s3-website-<region>}, and the
+     * legacy {@code s3-<region>}.
+     */
+    private static boolean isS3ServiceLabel(String label) {
+        if (label.equals("s3") || label.equals("s3-fips")
+                || label.equals("s3-accelerate") || label.equals("s3-website")) {
+            return true;
+        }
+        if (label.startsWith("s3-website-")) {
+            return isRegionLabel(label.substring("s3-website-".length()));
+        }
+        return label.startsWith("s3-") && isRegionLabel(label.substring("s3-".length()));
+    }
+
+    private static String stripLeadingLabel(String host, String label) {
+        return host.startsWith(label + ".") ? host.substring(label.length() + 1) : host;
     }
 
     private static boolean isEndpointSuffix(String candidate, String hostnameSuffix) {

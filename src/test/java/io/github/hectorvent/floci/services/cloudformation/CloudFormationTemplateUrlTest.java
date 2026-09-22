@@ -141,4 +141,49 @@ class CloudFormationTemplateUrlTest {
         assertThat(ref.bucket(), equalTo("bucket"));
         assertThat(ref.key(), equalTo("key.json"));
     }
+
+    @Test
+    void theDualstackServiceHost_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3.dualstack.us-east-1.localhost.floci.io:4566/bucket/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
+
+    @Test
+    void theFipsDualstackServiceHost_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3-fips.dualstack.us-west-2.localhost.floci.io:4566/bucket/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
+
+    @Test
+    void theLegacyDashRegionServiceHost_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3-us-east-1.localhost.floci.io:4566/bucket/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
+
+    @Test
+    void theWebsiteServiceHost_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3-website-us-east-1.localhost.floci.io:4566/bucket/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
+
+    @Test
+    void aBucketWhoseNameMerelyStartsWithS3_staysVirtualHosted() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3-logs.localhost.floci.io:4566/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("s3-logs"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
 }
