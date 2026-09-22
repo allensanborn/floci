@@ -90,6 +90,17 @@ type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExh
 `functionError` member is present only on a failure record. Since retries are not applied, a
 failure reaches its destination once and `approximateInvokeCount` is always 1.
 
+Two limits are worth knowing:
+
+- **A destination configured on an alias does not fire.** The configuration is matched against the
+  version the invocation actually ran, so one stored for `$LATEST` or for an explicit version is
+  found, while one stored for an alias (`Qualifier: prod`) is not, and nothing is delivered. The
+  CDK `onSuccess` and `onFailure` properties store theirs under `$LATEST`, so a destination
+  declared that way is unaffected.
+- **A chain of Lambda destinations stops at 16 hops.** A function whose destination leads back into
+  itself would otherwise invoke forever. AWS halts such a chain at about the same depth through
+  recursive loop detection; here the record at the sixteenth hop is dropped with a warning.
+
 ## Hot-Reloading via Reactive S3 Sync
 
 Floci supports an automatic hot-reloading mechanism when functions are deployed via S3. This follows the standard AWS behavior where S3 and Lambda interact, but is optimized for a seamless local development experience.
