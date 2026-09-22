@@ -504,6 +504,148 @@ class ElastiCacheServiceTest {
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
     }
 
+    private static void stubSingleNodeContainer(ElastiCacheContainerManager containerManager) {
+        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv ->
+                new ElastiCacheContainerHandle("cid-" + inv.getArgument(0, String.class),
+                        inv.getArgument(0, String.class), "localhost", 6379));
+    }
+
+    private static StorageFactory storageWithSingleNodeGroup(String groupId) {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        serviceWith(storageFactory, beforeRestart, mock(ElastiCacheProxyManager.class),
+                mock(ValkeyClusterFormation.class))
+                .createReplicationGroup(groupId, "test", AuthMode.PASSWORD, null, "us-east-1");
+        return storageFactory;
+    }
+
+    @Test
+    void restorePersistedRuntimeReprovisionsSingleNodeGroups() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(restartedContainers).tryStart(eq("grp"), anyString());
+        verify(restartedProxies).startProxy(eq("grp"), eq(AuthMode.PASSWORD), eq(16379),
+                eq("localhost"), eq(6379), any());
+        ReplicationGroup restored = restarted.getReplicationGroup("grp");
+        assertEquals(ReplicationGroupStatus.AVAILABLE, restored.getStatus());
+        assertEquals(16379, restored.getConfigurationEndpoint().port());
+        assertEquals("cid-grp", restored.getContainerId(),
+                "A restored group must track the container it actually has");
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16380, next.getProxyPort(),
+                "A restored group's port must be reserved again so new groups cannot take it");
+    }
+
+    @Test
+    void singleNodeRestoreFailureReportsCreateFailedAndReleasesThePort() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        // Only the restore fails: the create that checks the port was freed must still get through.
+        when(restartedContainers.tryStart(eq("grp"), anyString()))
+                .thenThrow(new RuntimeException("container failed"));
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        ReplicationGroup failed = restarted.getReplicationGroup("grp");
+        assertEquals(ReplicationGroupStatus.CREATE_FAILED, failed.getStatus());
+        assertNull(failed.getConfigurationEndpoint(),
+                "A group whose data plane is gone must not advertise an endpoint");
+        verify(restartedProxies, never()).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16379, next.getProxyPort(),
+                "The failed restore's port must be released for the next group");
+    }
+
+    @Test
+    void singleNodeRestoreWithoutADockerDaemonKeepsTheGroupAvailable() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        when(restartedContainers.tryStart(anyString(), anyString())).thenReturn(null);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        ReplicationGroup restored = restarted.getReplicationGroup("grp");
+        assertEquals(ReplicationGroupStatus.AVAILABLE, restored.getStatus(),
+                "No reachable daemon is the create path's documented degraded mode, not a failure");
+        assertNull(restored.getContainerId());
+        verify(restartedProxies, never()).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+    }
+
+    @Test
+    void restoreDoesNotResurrectAGroupDeletedWhileItWasRestoring() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+        ElastiCacheContainerHandle restoredHandle =
+                new ElastiCacheContainerHandle("cid-grp-restored", "grp", "localhost", 6379);
+        // The delete lands in the window the group's monitor closes: the container is up, the
+        // record has not been written back yet.
+        when(restartedContainers.tryStart(eq("grp"), anyString())).thenAnswer(inv -> {
+            restarted.deleteReplicationGroup("grp");
+            // Takes the port that delete just freed, so a restore that released it a second
+            // time would hand the same port out twice.
+            restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+            return restoredHandle;
+        });
+
+        restarted.restorePersistedRuntime().join();
+
+        assertThrows(AwsException.class, () -> restarted.getReplicationGroup("grp"),
+                "A group deleted while it was restoring must stay deleted");
+        verify(restartedProxies, never()).startProxy(eq("grp"), any(), anyInt(), anyString(), anyInt(), any());
+        verify(restartedContainers).stop(restoredHandle);
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp3", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16380, next.getProxyPort(),
+                "The abandoned restore must leave grp2 holding the port the delete released");
+    }
+
+    @Test
+    void restorePersistedRuntimeSkipsGroupsBeingDeleted() {
+        StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+        // The in-memory backend hands back the stored instance, so this is the persisted record.
+        before.getReplicationGroup("grp").setStatus(ReplicationGroupStatus.DELETING);
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(restartedContainers, never()).tryStart(anyString(), anyString());
+        assertEquals(ReplicationGroupStatus.DELETING, restarted.getReplicationGroup("grp").getStatus());
+    }
+
     @Test
     void restorePersistedRuntimeReprovisionsClusterModeGroups() {
         StorageFactory storageFactory = sharedStorageFactory();
@@ -1213,6 +1355,144 @@ class ElastiCacheServiceTest {
                 .getConfigurationEndpoint().port());
         assertEquals(16379, restarted.findCacheClusters("persisted").getFirst()
                 .getConfigurationEndpoint().port());
+    }
+
+    private static StorageFactory storageWithStandaloneCluster(String clusterId) {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        serviceWith(storageFactory, beforeRestart, mock(ElastiCacheProxyManager.class),
+                mock(ValkeyClusterFormation.class))
+                .createCacheCluster(cacheClusterRequest(clusterId, "redis", 1, AuthMode.PASSWORD,
+                        "a-long-enough-auth-token", null));
+        return storageFactory;
+    }
+
+    @Test
+    void restorePersistedRuntimeReprovisionsStandaloneCacheClusters() {
+        // The shape aws_elasticache_cluster actually creates. Left unrestored it is the exact
+        // state #4094 fixed for every other shape: available with nothing behind the endpoint.
+        StorageFactory storageFactory = storageWithStandaloneCluster("tf-redis");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(restartedContainers).tryStart(eq("tf-redis"), anyString());
+        verify(restartedProxies).startProxy(eq("tf-redis"), eq(AuthMode.PASSWORD), eq(16379),
+                eq("localhost"), eq(6379), any());
+        CacheCluster restored = restarted.findCacheClusters("tf-redis").getFirst();
+        assertEquals(CacheClusterStatus.AVAILABLE, restored.getCacheClusterStatus());
+        assertEquals(16379, restored.getConfigurationEndpoint().port());
+        assertEquals("cid-tf-redis", restored.getContainerId(),
+                "A restored cluster must track the container it actually has");
+    }
+
+    @Test
+    void standaloneClusterRestoreFailureReportsRestoreFailedAndReleasesThePort() {
+        StorageFactory storageFactory = storageWithStandaloneCluster("tf-redis");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        // Only the restore fails: the create that checks the port was freed must still get through.
+        when(restartedContainers.tryStart(eq("tf-redis"), anyString()))
+                .thenThrow(new RuntimeException("container failed"));
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        CacheCluster failed = restarted.findCacheClusters("tf-redis").getFirst();
+        assertEquals(CacheClusterStatus.RESTORE_FAILED, failed.getCacheClusterStatus(),
+                "restore-failed is the value CacheClusterStatus models; create-failed is not");
+        assertNull(failed.getConfigurationEndpoint(),
+                "A cluster whose data plane is gone must not advertise an endpoint");
+        verify(restartedProxies, never()).startProxy(anyString(), any(), anyInt(), anyString(),
+                anyInt(), any());
+
+        CacheCluster next = restarted.createCacheCluster(cacheClusterRequest("next", "redis", 1));
+        assertEquals(16379, next.getConfigurationEndpoint().port(),
+                "The failed restore's port must be released for the next cluster");
+    }
+
+    @Test
+    void standaloneClusterRestoreWithoutADockerDaemonKeepsTheClusterAvailable() {
+        StorageFactory storageFactory = storageWithStandaloneCluster("tf-redis");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        when(restartedContainers.tryStart(anyString(), anyString())).thenReturn(null);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        CacheCluster restored = restarted.findCacheClusters("tf-redis").getFirst();
+        assertEquals(CacheClusterStatus.AVAILABLE, restored.getCacheClusterStatus(),
+                "No reachable daemon is the create path's documented degraded mode, not a failure");
+        assertNull(restored.getContainerId());
+        verify(restartedProxies, never()).startProxy(anyString(), any(), anyInt(), anyString(),
+                anyInt(), any());
+    }
+
+    @Test
+    void restorePersistedRuntimeSkipsStandaloneClustersBeingDeleted() {
+        StorageFactory storageFactory = storageWithStandaloneCluster("tf-redis");
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+        // The in-memory backend hands back the stored instance, so this is the persisted record.
+        before.findCacheClusters("tf-redis").getFirst()
+                .setCacheClusterStatus(CacheClusterStatus.DELETING);
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(restartedContainers, never()).tryStart(anyString(), anyString());
+        assertEquals(CacheClusterStatus.DELETING,
+                restarted.findCacheClusters("tf-redis").getFirst().getCacheClusterStatus());
+    }
+
+    @Test
+    void restoreDoesNotResurrectAStandaloneClusterDeletedWhileItWasRestoring() {
+        StorageFactory storageFactory = storageWithStandaloneCluster("tf-redis");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        ElastiCacheProxyManager restartedProxies = mock(ElastiCacheProxyManager.class);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+        ElastiCacheContainerHandle restoredHandle =
+                new ElastiCacheContainerHandle("cid-restored", "tf-redis", "localhost", 6379);
+        // The delete lands in the window the cluster's monitor closes: the container is up, the
+        // record has not been written back yet.
+        when(restartedContainers.tryStart(eq("tf-redis"), anyString())).thenAnswer(inv -> {
+            restarted.deleteCacheCluster("tf-redis");
+            // Takes the port that delete just freed, so a restore that released it a second
+            // time would hand the same port out twice.
+            restarted.createCacheCluster(cacheClusterRequest("after", "redis", 1));
+            return restoredHandle;
+        });
+
+        restarted.restorePersistedRuntime().join();
+
+        assertTrue(restarted.findCacheClusters("tf-redis").isEmpty(),
+                "A cluster deleted while it was restoring must stay deleted");
+        verify(restartedProxies, never()).startProxy(eq("tf-redis"), any(), anyInt(), anyString(),
+                anyInt(), any());
+        verify(restartedContainers).stop(restoredHandle);
+
+        CacheCluster next = restarted.createCacheCluster(cacheClusterRequest("third", "redis", 1));
+        assertEquals(16380, next.getConfigurationEndpoint().port(),
+                "The abandoned restore must leave 'after' holding the port the delete released");
     }
 
     @Test

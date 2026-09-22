@@ -819,7 +819,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         XmlBuilder xml = new XmlBuilder()
                 .start("CacheCluster")
                   .elem("CacheClusterId", c.getCacheClusterId())
-                  .elem("CacheClusterStatus", c.getCacheClusterStatus().name().toLowerCase())
+                  .elem("CacheClusterStatus", c.getCacheClusterStatus().wireName())
                   .elem("Engine", c.getEngine())
                   .elem("EngineVersion", c.getEngineVersion());
         if ("memcached".equals(c.getEngine())) {

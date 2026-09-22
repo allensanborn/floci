@@ -102,6 +102,7 @@ public class AwsQueryController {
             "TagUser", "UntagUser", "ListUserTags",
             "TagRole", "UntagRole", "ListRoleTags",
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
+            "TagInstanceProfile", "UntagInstanceProfile", "ListInstanceProfileTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
             "GetAccountSummary", "GetAccountAuthorizationDetails",
@@ -608,6 +609,7 @@ public class AwsQueryController {
             "CreateClusterParameterGroup", "DescribeClusterParameterGroups", "DescribeClusterParameters", "DeleteClusterParameterGroup",
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
+            "CreateSnapshotCopyGrant", "DescribeSnapshotCopyGrants", "DeleteSnapshotCopyGrant",
             "CreateTags", "DeleteTags", "DescribeTags",
             "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
