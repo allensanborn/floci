@@ -2296,40 +2296,9 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private String fetchTemplateFromS3(String url) {
-        // Parse S3 URL — three forms:
-        //   Virtual-hosted AWS:   https://bucket.s3[.region].amazonaws.com/key
-        //   Virtual-hosted local: http://bucket.localhost:4566/key  (or configured/default hostname)
-        //   Path-style (both):    https://s3[.region].amazonaws.com/bucket/key
-        //                         http://host:port/bucket/key
-        //
-        // The old condition matched host.endsWith(".amazonaws.com") for virtual-hosted, which
-        // incorrectly caught path-style AWS URLs like s3.us-east-1.amazonaws.com and extracted
-        // "s3" as the bucket name. Virtual-hosted URLs always have a bucket label before ".s3.".
-        String bucket;
-        String key;
-
-        URI uri = URI.create(url);
-        String host = uri.getHost();
-        String path = uri.getRawPath();
-
-        boolean isVirtualHosted = host != null && (
-                host.contains(".s3.")
-                || isConfiguredVirtualHostedS3Host(host)
-                || host.endsWith(".localhost"));
-
-        if (isVirtualHosted) {
-            bucket = host.split("\\.")[0];
-            key = path.startsWith("/") ? path.substring(1) : path;
-        } else {
-            // Path-style: /bucket/key
-            String rawPath = path.startsWith("/") ? path.substring(1) : path;
-            int slash = rawPath.indexOf('/');
-            bucket = slash > 0 ? rawPath.substring(0, slash) : rawPath;
-            key = slash > 0 ? rawPath.substring(slash + 1) : "";
-        }
-
+        S3TemplateRef ref = parseTemplateUrl(url, config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX));
         try {
-            var obj = s3Service.getObject(bucket, key);
+            var obj = s3Service.getObject(ref.bucket(), ref.key());
             return new String(obj.getData());
         } catch (Exception e) {
             LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
@@ -2337,9 +2306,62 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private boolean isConfiguredVirtualHostedS3Host(String host) {
-        String suffix = config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
-        return hasBucketPrefixForSuffix(host, suffix);
+    /** The bucket and key a {@code TemplateURL} addresses. */
+    record S3TemplateRef(String bucket, String key) {}
+
+    /**
+     * Splits a {@code TemplateURL} into the bucket and key it addresses. Three forms:
+     * <pre>
+     *   Virtual-hosted AWS:   https://bucket.s3[.region].amazonaws.com/key
+     *   Virtual-hosted local: http://bucket.localhost:4566/key  (or configured/default hostname)
+     *   Path-style (both):    https://s3[.region].amazonaws.com/bucket/key
+     *                         http://host:port/bucket/key
+     * </pre>
+     *
+     * <p>The oldest condition matched host.endsWith(".amazonaws.com") for virtual-hosted, which
+     * incorrectly caught path-style AWS URLs like s3.us-east-1.amazonaws.com and extracted
+     * "s3" as the bucket name. Virtual-hosted URLs always have a bucket label before ".s3.".
+     * The local hostnames kept that same misreading for longer, because ending with the
+     * configured suffix was on its own enough to call a host virtual-hosted: see
+     * {@link #isS3ServiceEndpointHost}, which now rules the service endpoint out first.
+     *
+     * @param hostnameSuffix the configured {@code floci.hostname}, or the default DNS suffix
+     */
+    static S3TemplateRef parseTemplateUrl(String url, String hostnameSuffix) {
+        URI uri = URI.create(url);
+        String host = uri.getHost();
+        String path = uri.getRawPath();
+
+        boolean isVirtualHosted = host != null
+                && !isS3ServiceEndpointHost(host)
+                && (host.contains(".s3.")
+                    || hasBucketPrefixForSuffix(host, hostnameSuffix)
+                    || host.endsWith(".localhost"));
+
+        if (isVirtualHosted) {
+            return new S3TemplateRef(host.split("\\.")[0],
+                    path.startsWith("/") ? path.substring(1) : path);
+        }
+        // Path-style: /bucket/key
+        String rawPath = path.startsWith("/") ? path.substring(1) : path;
+        int slash = rawPath.indexOf('/');
+        return new S3TemplateRef(slash > 0 ? rawPath.substring(0, slash) : rawPath,
+                slash > 0 ? rawPath.substring(slash + 1) : "");
+    }
+
+    /**
+     * Whether the host is the S3 service endpoint rather than a bucket: {@code s3.<suffix>} and
+     * the regional {@code s3.<region>.<suffix>}, for a local hostname as much as for
+     * {@code amazonaws.com}. A URL against the service endpoint is path-style, so its bucket is
+     * the first path segment and never the literal label "s3". This costs the ability to address
+     * a bucket actually named "s3" virtual-hosted style, which is the trade AWS itself makes.
+     *
+     * <p>{@code S3VirtualHostFilter.extractBucket} draws the same line for the request path, in
+     * more detail than a TemplateURL needs.
+     */
+    private static boolean isS3ServiceEndpointHost(String host) {
+        String normalizedHost = host.toLowerCase(Locale.ROOT);
+        return normalizedHost.equals("s3") || normalizedHost.startsWith("s3.");
     }
 
     private static boolean hasBucketPrefixForSuffix(String host, String suffix) {
