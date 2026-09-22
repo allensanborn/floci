@@ -13,7 +13,7 @@ import java.util.List;
  *
  * <p>Held in its own store rather than as a field on {@link BackupVault} because
  * {@code DescribeBackupVault} serialises the vault POJO directly, and AWS does not
- * return the notification configuration there — it is reachable only through
+ * return the notification configuration there -- it is reachable only through
  * {@code GetBackupVaultNotifications}. Keeping it separate is what stops the vault
  * description growing members real AWS does not send.
  */

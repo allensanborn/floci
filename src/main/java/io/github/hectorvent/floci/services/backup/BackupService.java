@@ -102,7 +102,7 @@ public class BackupService {
         // vault shell: AWS's guide says the vault "can be deleted if it is empty and does
         // not contain any recovery points", even under a compliance lock. The non-empty
         // check above is already the case AWS refuses, so an added lock check would only
-        // ever fire where AWS succeeds — and it would break CloudFormation stack teardown,
+        // ever fire where AWS succeeds -- and it would break CloudFormation stack teardown,
         // which deletes vaults through BackupVaultCfnProvisioner and tolerates only
         // not-found.
         String key = vaultKey(region, vaultName);
@@ -129,7 +129,7 @@ public class BackupService {
 
     /**
      * Every BackupVaultEvent value the PutBackupVaultNotifications reference lists,
-     * including the ones AWS marks deprecated — they are still accepted values, and
+     * including the ones AWS marks deprecated -- they are still accepted values, and
      * rejecting one would fail an apply AWS allows.
      *
      * <p>All 30 of them. An earlier revision carried 17, which is the failure mode this
@@ -296,7 +296,7 @@ public class BackupService {
      *
      * <p>A governance lock carries no LockDate and is always changeable. A compliance
      * lock is changeable only before its LockDate. Absent means governance, so a null
-     * LockDate must answer TRUE here — the inverse of this is the defect that made a
+     * LockDate must answer TRUE here -- the inverse of this is the defect that made a
      * governance lock permanent.
      */
     private static boolean lockIsStillChangeable(BackupVault vault) {

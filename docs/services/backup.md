@@ -122,7 +122,7 @@ Actual backup is simulated — no data is read from or written to the referenced
 - **DeleteBackupVault** returns `InvalidRequestException` (400) if the vault contains recovery points.
 - **DeleteBackupPlan** returns `InvalidRequestException` (400) if the plan has active selections.
 - **CreateBackupVault** returns `AlreadyExistsException` (400) on duplicate vault names within the same region.
-- **Vault Lock has two modes, and `ChangeableForDays` selects them — in the direction
+- **Vault Lock has two modes, and `ChangeableForDays` selects them -- in the direction
   that reads backwards.** *Present* means **compliance** mode: `LockDate` is set that many
   days ahead, the lock can still be changed or deleted before it, and on and after it both
   `PutBackupVaultLockConfiguration` and `DeleteBackupVaultLockConfiguration` return
