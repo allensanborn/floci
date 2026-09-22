@@ -20,6 +20,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * A stack being deleted moves from the live map to the retained-deleted one. Handing it over in
@@ -52,6 +53,8 @@ class CloudFormationDeletedStackListingRaceTest {
      */
     private static final int ATTEMPTS = 60;
     private static final int POLLERS = 4;
+    /** Generous: a poller checks the stop flag every pass, so overrunning this means it is stuck. */
+    private static final long POLLER_SHUTDOWN_MILLIS = 10_000;
 
     @Inject
     CloudFormationService cloudFormationService;
@@ -72,7 +75,7 @@ class CloudFormationDeletedStackListingRaceTest {
             List<Thread> pollers = new ArrayList<>();
             for (int p = 0; p < POLLERS; p++) {
                 Thread poller = new Thread(() -> {
-                    while (!stop.get()) {
+                    while (!stop.get() && !Thread.currentThread().isInterrupted()) {
                         Stack listed = RequestScopes.callAs(ACCOUNT, () ->
                                 cloudFormationService.listStacks(REGION).stream()
                                         .filter(s -> stackId.equals(s.getStackId()))
@@ -84,17 +87,33 @@ class CloudFormationDeletedStackListingRaceTest {
                         }
                     }
                 }, "list-race-poller-" + p);
+                // Daemon as a backstop: a poller left running by some future edit that throws
+                // where nothing throws today must not be able to hold the test JVM open.
+                poller.setDaemon(true);
                 pollers.add(poller);
                 poller.start();
             }
 
-            deleteStack(stackName);
-            awaitDeleted(stackId);
-            stop.set(true);
-            for (Thread poller : pollers) {
-                poller.join(10_000);
+            List<String> stillRunning = new ArrayList<>();
+            try {
+                deleteStack(stackName);
+                awaitDeleted(stackId);
+            } finally {
+                // In a finally so a failing delete stops the pollers on its way out rather than
+                // leaving them spinning, which would bury the failure that caused it.
+                stop.set(true);
+                for (Thread poller : pollers) {
+                    poller.join(POLLER_SHUTDOWN_MILLIS);
+                    if (poller.isAlive()) {
+                        poller.interrupt();
+                        stillRunning.add(poller.getName());
+                    }
+                }
             }
 
+            // After the try, never inside the finally: an assertion there would replace whatever
+            // the delete threw with its own failure.
+            assertTrue(stillRunning.isEmpty(), "pollers did not stop: " + stillRunning);
             assertNull(lost.get(), lost.get());
         }
     }
@@ -153,6 +172,6 @@ class CloudFormationDeletedStackListingRaceTest {
             }
             Thread.sleep(2);
         }
-        assertTrue(false, "stack " + stackId + " never reached DELETE_COMPLETE");
+        fail("stack " + stackId + " never reached DELETE_COMPLETE");
     }
 }
