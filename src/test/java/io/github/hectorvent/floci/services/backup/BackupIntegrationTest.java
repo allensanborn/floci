@@ -827,6 +827,23 @@ class BackupIntegrationTest {
     }
 
     @Test
+    @Order(136)
+    void lockRejectsANonIntegralRetention() {
+        // asLong() would have coerced each of these instead of refusing: 1.5 truncates
+        // to 1, true becomes 1, "7" parses to 7. AWS rejects a non-integral value for a
+        // long-typed member, so a coercing emulator lets a request AWS refuses succeed
+        // against a number the caller never sent.
+        for (String bad : new String[] {"1.5", "true", "\"7\""}) {
+            given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"MinRetentionDays\":" + bad + "}")
+            .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", containsString("MinRetentionDays"));
+        }
+    }
+
+    @Test
     @Order(137)
     void anEmptyVaultCanBeDeletedWhileLocked() {
         // A lock protects the recovery points, not the vault shell: AWS deletes an empty

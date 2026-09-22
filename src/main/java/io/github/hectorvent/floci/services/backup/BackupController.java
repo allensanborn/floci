@@ -458,9 +458,25 @@ public class BackupController {
 
     // Absent and null both mean "not supplied", which for these members is meaningful:
     // omitting ChangeableForDays is what selects compliance mode.
+    //
+    // A present value must be an INTEGRAL NUMBER, and is rejected rather than coerced.
+    // asLong() would silently accept anything: 1.5 truncates to 1, true becomes 1, and
+    // the string "7" becomes 7 -- so a request AWS rejects with a serialization error
+    // would instead succeed here against a value the caller never asked for, and a
+    // retention floor could be set from a number that was never sent. Matches the
+    // existing shape in KinesisJsonHandler#optionalMaxRecordSize and
+    // TimestreamInfluxDbValidation, which reject on !isIntegralNumber() for the same
+    // reason. Found by Greptile on fork PR #16.
     private static Long longOrNull(JsonNode node, String field) {
         JsonNode n = node.path(field);
-        return n.isMissingNode() || n.isNull() ? null : n.asLong();
+        if (n.isMissingNode() || n.isNull()) {
+            return null;
+        }
+        if (!n.isIntegralNumber()) {
+            throw new AwsException("InvalidParameterValueException",
+                    field + " must be an integer", 400);
+        }
+        return n.longValue();
     }
 
     private static String textOrNull(JsonNode node, String field) {
