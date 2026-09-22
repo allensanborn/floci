@@ -382,6 +382,25 @@ Lambda. floci supports two shapes:
   ResponseURL callback fires. The wait is bounded by an async custom-resource timeout (3 minutes by
   default); a resource that never completes fails the stack rather than hanging.
 
+## Deleted Stacks
+
+A deleted stack is kept for a short window afterwards rather than being forgotten at
+`DELETE_COMPLETE`, because the client that asked for the delete goes on polling for it. Within that
+window AWS's asymmetry is reproduced:
+
+- `DescribeStacks` **by stack id** (the ARN) answers with the stack, its `DELETE_COMPLETE` status
+  and its `DeletionTime`. `DescribeStackEvents` by stack id answers likewise.
+- `DescribeStacks` **by name** returns `ValidationError`, as it does on AWS. The CDK CLI depends on
+  the pair: it monitors a delete by stack id, and a stack id that stops resolving ends the rest of
+  a `cdk destroy --all` run.
+- `ListStacks` includes the stack as `DELETE_COMPLETE` with its `DeletionTime`, and a
+  `StackStatusFilter` of `DELETE_COMPLETE` selects it. A name reused after a delete is listed
+  twice, once per stack id.
+
+Once the window passes, all of those behave as though the stack had never existed. AWS keeps a
+deleted stack for 90 days; locally it only has to outlive the delete polling of the client that
+asked for it, so the window defaults to 30 seconds (see [Configuration](#configuration)).
+
 ## Deletion Policies
 
 A resource's [`DeletionPolicy`](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-attribute-deletionpolicy.html)
@@ -456,6 +475,7 @@ provisioning outcomes rather than always returning `SUCCEEDED`.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDFORMATION_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_CLOUDFORMATION_DELETED_STACK_RETENTION_SECONDS` | `30` | How long a deleted stack stays describable by its stack id and listed as `DELETE_COMPLETE` (see [Deleted Stacks](#deleted-stacks)) |
 
 ## Examples
 

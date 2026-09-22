@@ -470,6 +470,10 @@ floci:
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # How long a deleted stack stays describable by its stack id (ARN) and listed as
+      # DELETE_COMPLETE. AWS keeps one for 90 days; locally it only has to outlive the delete
+      # polling of the client that asked for it.
+      deleted-stack-retention-seconds: 30
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false

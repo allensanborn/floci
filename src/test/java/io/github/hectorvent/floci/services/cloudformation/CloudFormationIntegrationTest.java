@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -2201,6 +2202,179 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("does not exist"));
+    }
+
+    @Test
+    void describeDeletedStack_byArn_reportsItsDeletionTime() throws Exception {
+        String stackArn = createAndDeleteStack("deleted-deletion-time-stack",
+                "deleted-deletion-time-test-bucket");
+
+        String xml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(xml, containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+        // The service clock, not the wall clock: the test clock starts the run at 2026-01-01.
+        assertThat(xml, containsString("<DeletionTime>2026-01-01T"));
+    }
+
+    @Test
+    void describeLiveStack_reportsNoDeletionTime() {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "live-no-deletion-time-test-bucket" }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "live-no-deletion-time-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "live-no-deletion-time-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<DeletionTime>")));
+    }
+
+    @Test
+    void listStacks_includesADeletedStackAsDeleteComplete() throws Exception {
+        String stackArn = createAndDeleteStack("listed-deleted-stack",
+                "listed-deleted-test-bucket");
+
+        String member = listStacksMemberFor(listStacksXml(null), stackArn);
+
+        assertThat(member, containsString("<StackName>listed-deleted-stack</StackName>"));
+        assertThat(member, containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+        assertThat(member, containsString("<DeletionTime>2026-01-01T"));
+    }
+
+    @Test
+    void listStacks_filteredToDeleteComplete_returnsTheDeletedStackAndNoLiveOne() throws Exception {
+        String stackArn = createAndDeleteStack("listed-filtered-deleted-stack",
+                "listed-filtered-deleted-test-bucket");
+
+        String xml = listStacksXml("DELETE_COMPLETE");
+
+        assertThat(xml, containsString("<StackId>" + stackArn + "</StackId>"));
+        assertThat(xml, not(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>")));
+    }
+
+    @Test
+    void listStacks_afterTheRetentionWindow_dropsTheDeletedStack() throws Exception {
+        String stackArn = createAndDeleteStack("listed-expiring-deleted-stack",
+                "listed-expiring-deleted-test-bucket");
+
+        assertThat(listStacksXml(null), containsString("<StackId>" + stackArn + "</StackId>"));
+
+        clock.advance(Duration.ofSeconds(31));
+
+        assertThat(listStacksXml(null), not(containsString("<StackId>" + stackArn + "</StackId>")));
+    }
+
+    /**
+     * Creates a single-bucket stack, deletes it, and answers its stack ARN once the delete has
+     * reached DELETE_COMPLETE. DeleteStack hands the work to a background executor, so the
+     * DELETE_COMPLETE event is what says the retained record is in place.
+     */
+    private String createAndDeleteStack(String stackName, String bucketName) throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "%s" }
+                }
+              }
+            }
+            """.formatted(bucketName);
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String events = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (events.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                return stackArn;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("stack " + stackName + " never reached DELETE_COMPLETE");
+    }
+
+    private String listStacksXml(String statusFilter) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStacks");
+        if (statusFilter != null) {
+            request = request.formParam("StackStatusFilter.member.1", statusFilter);
+        }
+        return request
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    /** The one ListStacks summary carrying this stack id, so an assertion cannot match another. */
+    private static String listStacksMemberFor(String xml, String stackArn) {
+        int idAt = xml.indexOf("<StackId>" + stackArn + "</StackId>");
+        assertTrue(idAt >= 0, "stack " + stackArn + " is not listed:\n" + xml);
+        return xml.substring(xml.lastIndexOf("<member>", idAt), xml.indexOf("</member>", idAt));
     }
 
     @Test

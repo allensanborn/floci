@@ -35,6 +35,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -1085,9 +1086,20 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── ListStacks ────────────────────────────────────────────────────────────
 
+    /**
+     * Summaries for the region's stacks, the ones still within the deleted-stack retention window
+     * included. AWS keeps a deleted stack in ListStacks as {@code DELETE_COMPLETE} long after
+     * DescribeStacks has stopped answering for it by name, which is how a client reconciles what
+     * it deployed against what is left. A name reused after a delete lists twice, once per stack
+     * id, as it does on AWS.
+     */
     public List<Stack> listStacks(String region) {
         String accountId = currentAccount();
-        return stacks.values().stream()
+        Instant current = now();
+        Stream<Stack> retained = deletedStacks.values().stream()
+                .filter(entry -> !entry.isExpired(current))
+                .map(DeletedStackEntry::stack);
+        return Stream.concat(stacks.values().stream(), retained)
                 .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
                 .sorted(Comparator.comparing(Stack::getCreationTime))
                 .toList();
@@ -2072,6 +2084,7 @@ public class CloudFormationService implements ResourceProvider {
             }
 
             stack.setStatus("DELETE_COMPLETE");
+            stack.setDeletionTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);

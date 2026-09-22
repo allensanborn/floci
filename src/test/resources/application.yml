@@ -256,6 +256,9 @@ floci:
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Pinned to the shipped default: the retention tests advance the test clock past this
+      # window by name, so the value they assume is spelled out rather than inherited.
+      deleted-stack-retention-seconds: 30
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false

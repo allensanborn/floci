@@ -26,6 +26,8 @@ public class Stack {
     private String statusReason;
     private Instant creationTime = Instant.now();
     private Instant lastUpdatedTime;
+    /** Set once the stack reaches DELETE_COMPLETE; null for every stack that is still there. */
+    private Instant deletionTime;
     private String templateBody;
     private String originalTemplateBody;
     private List<String> capabilities = new ArrayList<>();
@@ -60,6 +62,8 @@ public class Stack {
     public void setCreationTime(Instant creationTime) { this.creationTime = creationTime; }
     public Instant getLastUpdatedTime() { return lastUpdatedTime; }
     public void setLastUpdatedTime(Instant lastUpdatedTime) { this.lastUpdatedTime = lastUpdatedTime; }
+    public Instant getDeletionTime() { return deletionTime; }
+    public void setDeletionTime(Instant deletionTime) { this.deletionTime = deletionTime; }
     public String getTemplateBody() { return templateBody; }
     public void setTemplateBody(String templateBody) { this.templateBody = templateBody; }
     public String getOriginalTemplateBody() { return originalTemplateBody; }

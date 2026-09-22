@@ -559,8 +559,11 @@ public class CloudFormationQueryHandler {
                .elem("StackId", s.getStackId())
                .elem("StackName", s.getStackName())
                .elem("StackStatus", s.getStatus())
-               .elem("CreationTime", ISO.format(s.getCreationTime()))
-               .end("member");
+               .elem("CreationTime", ISO.format(s.getCreationTime()));
+            if (s.getDeletionTime() != null) {
+                xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
+            }
+            xml.end("member");
         }
         xml.end("StackSummaries").end("ListStacksResult")
            .raw(AwsQueryResponse.responseMetadata())
@@ -600,6 +603,9 @@ public class CloudFormationQueryHandler {
                 .elem("CreationTime", ISO.format(s.getCreationTime()));
         if (s.getLastUpdatedTime() != null) {
             xml.elem("LastUpdatedTime", ISO.format(s.getLastUpdatedTime()));
+        }
+        if (s.getDeletionTime() != null) {
+            xml.elem("DeletionTime", ISO.format(s.getDeletionTime()));
         }
         if (s.getStatusReason() != null) {
             xml.elem("StackStatusReason", s.getStatusReason());
