@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -198,14 +199,14 @@ class LambdaExecutorServiceTest {
         doAnswer(inv -> {
             routed.countDown();
             return null;
-        }).when(router).route(any(), any(), any());
+        }).when(router).route(any(), any(), any(), anyInt());
 
         byte[] payload = "{}".getBytes();
         InvokeResult result = routingExecutor.invoke(fn, payload, InvocationType.Event);
 
         assertEquals(202, result.getStatusCode());
         assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
-        verify(router).route(fn, payload, expected);
+        verify(router).route(fn, payload, expected, 0);
     }
 
     @Test

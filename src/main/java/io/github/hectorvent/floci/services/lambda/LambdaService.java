@@ -1047,11 +1047,23 @@ public class LambdaService implements ResourceProvider {
 
     /** Invokes a Lambda target ARN using the account encoded in that ARN. */
     public InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type) {
+        return invokeArn(functionArn, payload, type, 0);
+    }
+
+    /**
+     * Invokes a Lambda destination, carrying the number of destination deliveries that reached it
+     * so {@link AsyncInvokeDestinationRouter} can bound a chain that leads back into itself.
+     */
+    InvokeResult invokeArnFromDestination(String functionArn, byte[] payload, int chainDepth) {
+        return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult result = executorService.invoke(fn, payload, type);
+        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }

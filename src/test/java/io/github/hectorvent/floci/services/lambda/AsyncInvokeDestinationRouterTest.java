@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -28,9 +27,11 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -76,7 +77,7 @@ class AsyncInvokeDestinationRouterTest {
     void onSuccessEventBridgeDestination_putsTheRecordOnTheBusAsTheEventDetail() {
         configure(BUS_ARN, null);
 
-        router.route(fn, request(), success("{\"bankId\":\"PawnShop\",\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"bankId\":\"PawnShop\",\"rate\":3.5}"), 0);
 
         JsonNode entry = capturedEventEntry();
         assertEquals("lambda", entry.get("Source").asText());
@@ -104,7 +105,7 @@ class AsyncInvokeDestinationRouterTest {
     void onSuccessSqsDestination_sendsTheRecordToTheQueue() {
         configure(QUEUE_ARN, null);
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/quotes-queue"),
@@ -120,7 +121,7 @@ class AsyncInvokeDestinationRouterTest {
     void onSuccessSnsDestination_publishesTheRecordToTheTopic() {
         configure(TOPIC_ARN, null);
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         ArgumentCaptor<String> message = ArgumentCaptor.forClass(String.class);
         verify(snsService).publish(eq(TOPIC_ARN), eq(null), message.capture(), anyString(), eq("us-east-1"));
@@ -131,11 +132,40 @@ class AsyncInvokeDestinationRouterTest {
     void onSuccessLambdaDestination_invokesTheFunctionAsynchronously() {
         configure(COLLECTOR_ARN, null);
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(lambdaService).invokeArn(eq(COLLECTOR_ARN), payload.capture(), eq(InvocationType.Event));
+        verify(lambdaService).invokeArnFromDestination(eq(COLLECTOR_ARN), payload.capture(), eq(1));
         assertEquals(3.5, read(new String(payload.getValue())).path("responsePayload").path("rate").asDouble());
+    }
+
+    @Test
+    void lambdaDestinationPartWayAlongAChain_invokesWithTheNextHopCount() {
+        configure(COLLECTOR_ARN, null);
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 3);
+
+        verify(lambdaService).invokeArnFromDestination(eq(COLLECTOR_ARN), any(), eq(4));
+    }
+
+    @Test
+    void lambdaDestinationAtTheChainLimit_stopsRatherThanInvokingAgain() {
+        configure(COLLECTOR_ARN, null);
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 16);
+
+        verify(lambdaService, never()).invokeArnFromDestination(anyString(), any(), anyInt());
+    }
+
+    @Test
+    void nonLambdaDestinationAtTheChainLimit_isStillDelivered() {
+        // The bound exists to stop a chain re-entering Lambda; a queue is the end of one.
+        configure(QUEUE_ARN, null);
+
+        router.route(fn, request(), success("{\"rate\":3.5}"), 16);
+
+        verify(sqsService).sendMessage(eq("http://localhost:4566/000000000000/quotes-queue"),
+                anyString(), eq(0), eq("us-east-1"));
     }
 
     @Test
@@ -144,7 +174,7 @@ class AsyncInvokeDestinationRouterTest {
         InvokeResult failure = new InvokeResult(200, "Unhandled",
                 "{\"errorMessage\":\"boom\",\"errorType\":\"Error\"}".getBytes(), null, "req-1");
 
-        router.route(fn, request(), failure);
+        router.route(fn, request(), failure, 0);
 
         JsonNode entry = capturedEventEntry();
         assertEquals("Lambda Function Invocation Result - Failure", entry.get("DetailType").asText());
@@ -162,14 +192,14 @@ class AsyncInvokeDestinationRouterTest {
         InvokeResult failure = new InvokeResult(200, "Unhandled",
                 "{\"errorMessage\":\"boom\"}".getBytes(), null, "req-1");
 
-        router.route(fn, request(), failure);
+        router.route(fn, request(), failure, 0);
 
         verifyNoInteractions(eventBridgeService, sqsService, snsService);
     }
 
     @Test
     void noEventInvokeConfig_deliversNothing() {
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         verifyNoInteractions(eventBridgeService, sqsService, snsService);
         verify(lambdaService).findEventInvokeConfig(fn);
@@ -181,7 +211,7 @@ class AsyncInvokeDestinationRouterTest {
         config.setMaximumRetryAttempts(0);
         when(lambdaService.findEventInvokeConfig(fn)).thenReturn(Optional.of(config));
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         verifyNoInteractions(eventBridgeService, sqsService, snsService);
     }
@@ -190,7 +220,7 @@ class AsyncInvokeDestinationRouterTest {
     void unsupportedDestinationArn_deliversNothing() {
         configure("arn:aws:states:us-east-1:000000000000:stateMachine:quotes", null);
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         verifyNoInteractions(eventBridgeService, sqsService, snsService);
     }
@@ -201,7 +231,7 @@ class AsyncInvokeDestinationRouterTest {
         when(sqsService.sendMessage(anyString(), anyString(), any(), anyString()))
                 .thenThrow(new IllegalStateException("The specified queue does not exist."));
 
-        assertDoesNotThrow(() -> router.route(fn, request(), success("{\"rate\":3.5}")));
+        assertDoesNotThrow(() -> router.route(fn, request(), success("{\"rate\":3.5}"), 0));
     }
 
     @Test
@@ -210,7 +240,7 @@ class AsyncInvokeDestinationRouterTest {
         fn.setVersion("3");
         configure(BUS_ARN, null);
 
-        router.route(fn, request(), success("{\"rate\":3.5}"));
+        router.route(fn, request(), success("{\"rate\":3.5}"), 0);
 
         JsonNode detail = detailOf(capturedEventEntry());
         assertEquals(FUNCTION_ARN + ":3", detail.path("requestContext").path("functionArn").asText());

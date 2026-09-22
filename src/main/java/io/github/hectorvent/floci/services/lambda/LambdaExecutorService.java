@@ -66,6 +66,15 @@ public class LambdaExecutorService {
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
+        return invoke(fn, payload, type, 0);
+    }
+
+    /**
+     * Invokes {@code fn}, carrying the number of Lambda destination deliveries that led here.
+     * A direct invoke starts at zero; each delivery to a Lambda destination adds one, which is
+     * what bounds a destination chain that points back at a function already in it.
+     */
+    InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth) {
         String requestId = UUID.randomUUID().toString();
 
         if (type == InvocationType.DryRun) {
@@ -84,7 +93,7 @@ public class LambdaExecutorService {
                         permit.close();
                     }
                     if (destinationRouter != null) {
-                        destinationRouter.route(fn, payload, asyncResult);
+                        destinationRouter.route(fn, payload, asyncResult, chainDepth);
                     }
                 });
             } catch (RuntimeException e) {

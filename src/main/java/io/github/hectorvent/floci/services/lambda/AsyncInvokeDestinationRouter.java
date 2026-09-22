@@ -57,6 +57,13 @@ public class AsyncInvokeDestinationRouter {
     private static final String DEFAULT_VERSION = "$LATEST";
     /** Floci does not retry a failed asynchronous invocation, so every record is the first attempt. */
     private static final int APPROXIMATE_INVOKE_COUNT = 1;
+    /**
+     * How many Lambda destination hops a single originating invocation may take. A function whose
+     * destination leads back into itself would otherwise invoke forever, which on a laptop is a
+     * worse failure than on AWS, where recursive loop detection halts the chain. The bound matches
+     * the depth AWS stops at.
+     */
+    private static final int MAX_DESTINATION_CHAIN_DEPTH = 16;
 
     private final Instance<LambdaService> lambdaService;
     private final Instance<EventBridgeService> eventBridgeService;
@@ -88,8 +95,11 @@ public class AsyncInvokeDestinationRouter {
      * <p>Never throws. The caller answered the invoke with 202 long before the function
      * finished, so a destination that rejects the record has nowhere left to be reported and is
      * logged instead.
+     *
+     * @param chainDepth how many Lambda destination deliveries led to this invocation, which
+     *                   bounds a chain of them that leads back into itself
      */
-    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result) {
+    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result, int chainDepth) {
         // A runtime that never started, timed out, or crashed is reported as a function error by
         // the executor, so this one test covers a handler error and a failed runtime alike.
         boolean failed = result.getFunctionError() != null;
@@ -108,7 +118,7 @@ public class AsyncInvokeDestinationRouter {
 
         String arn = destination.getDestination();
         try {
-            deliver(arn, fn, buildRecord(fn, requestPayload, result, failed), failed);
+            deliver(arn, fn, buildRecord(fn, requestPayload, result, failed), failed, chainDepth);
         } catch (Exception e) {
             LOG.warnv("Failed to deliver the Lambda {0} destination record for {1} to {2}: {3}",
                     side(failed), fn.getFunctionArn(), arn, e.getMessage());
@@ -157,7 +167,7 @@ public class AsyncInvokeDestinationRouter {
         return record;
     }
 
-    private void deliver(String arn, LambdaFunction fn, ObjectNode record, boolean failed) {
+    private void deliver(String arn, LambdaFunction fn, ObjectNode record, boolean failed, int chainDepth) {
         String region = AwsArnUtils.regionOrDefault(arn,
                 AwsArnUtils.regionOrDefault(fn.getFunctionArn(), null));
         String accountId = AwsArnUtils.accountOrDefault(arn, fn.getAccountId());
@@ -171,9 +181,18 @@ public class AsyncInvokeDestinationRouter {
                     sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
             case "sns" -> RequestScopes.runAs(accountId, () ->
                     snsService.get().publish(arn, null, body, "Lambda", region));
-            case "lambda" -> RequestScopes.runAs(accountId, () ->
-                    lambdaService.get().invokeArn(arn, body.getBytes(StandardCharsets.UTF_8),
-                            InvocationType.Event));
+            case "lambda" -> {
+                if (chainDepth >= MAX_DESTINATION_CHAIN_DEPTH) {
+                    LOG.warnv("Lambda {0} destination chain from {1} reached {2} hops at {3}; "
+                            + "dropping the record rather than continuing a chain that leads back "
+                            + "into itself", side(failed), fn.getFunctionArn(),
+                            MAX_DESTINATION_CHAIN_DEPTH, arn);
+                    return;
+                }
+                RequestScopes.runAs(accountId, () ->
+                        lambdaService.get().invokeArnFromDestination(
+                                arn, body.getBytes(StandardCharsets.UTF_8), chainDepth + 1));
+            }
             default -> {
                 LOG.warnv("Unsupported Lambda {0} destination, dropping the record: {1}", side(failed), arn);
                 return;

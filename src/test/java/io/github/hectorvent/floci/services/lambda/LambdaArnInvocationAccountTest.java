@@ -48,7 +48,7 @@ class LambdaArnInvocationAccountTest {
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
         InvokeResult executorResult = new InvokeResult();
-        when(executor.invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event)))
+        when(executor.invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
                 .thenReturn(executorResult);
         LambdaService service = new LambdaService(
                 store,
@@ -75,7 +75,7 @@ class LambdaArnInvocationAccountTest {
         InvokeResult result = service.invokeArn(functionArn, "{}".getBytes(), InvocationType.Event);
 
         assertEquals("$LATEST", result.getExecutedVersion());
-        verify(executor).invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event));
+        verify(executor).invoke(eq(function), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0));
     }
 
     @Test
@@ -110,7 +110,7 @@ class LambdaArnInvocationAccountTest {
                 "alias::" + region + "::" + functionName + "::live", alias);
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
-        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event)))
+        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
                 .thenAnswer(ignored -> new InvokeResult());
         LambdaService service = new LambdaService(
                 functionStore,
@@ -142,7 +142,7 @@ class LambdaArnInvocationAccountTest {
         assertEquals("7", versionResult.getExecutedVersion());
         assertEquals("7", aliasResult.getExecutedVersion());
         verify(executor, org.mockito.Mockito.times(2))
-                .invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event));
+                .invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0));
     }
 
     @Test
@@ -176,9 +176,9 @@ class LambdaArnInvocationAccountTest {
                 new AccountAwareStorageBackend<>(rawAliases, null, defaultAccount));
 
         LambdaExecutorService executor = mock(LambdaExecutorService.class);
-        when(executor.invoke(eq(latest), aryEq("{}".getBytes()), eq(InvocationType.Event)))
+        when(executor.invoke(eq(latest), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
                 .thenAnswer(ignored -> new InvokeResult());
-        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event)))
+        when(executor.invoke(eq(version), aryEq("{}".getBytes()), eq(InvocationType.Event), eq(0)))
                 .thenAnswer(ignored -> new InvokeResult());
         LambdaService service = service(functionStore, aliasStore, executor, region, defaultAccount);
 
