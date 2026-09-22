@@ -460,9 +460,9 @@ public class Route53ResolverService {
      * distinction matters because it is not cosmetic: every AWS SDK, the CLI and the
      * Terraform provider serialise {@code IpAddresses}, and the CLI refuses to send
      * {@code IpAddressRequests} at all because no such member exists in its model. So
-     * reading only the old name meant {@code CreateResolverEndpoint} dispatched — it
+     * reading only the old name meant {@code CreateResolverEndpoint} dispatched -- it
      * appears in the service directory, a health check lists the service, and a
-     * does-it-route probe passes — while no real client could ever call it.</p>
+     * does-it-route probe passes -- while no real client could ever call it.</p>
      *
      * <p>The previous spelling is still accepted, so anything written against the
      * emulator's earlier behaviour keeps working. It is not documented, and the error
