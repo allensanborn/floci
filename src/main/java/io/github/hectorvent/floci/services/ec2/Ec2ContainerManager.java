@@ -1260,10 +1260,7 @@ public class Ec2ContainerManager {
             instance.setState(InstanceState.shuttingDown());
         }
         executor.submit(() -> {
-            // Whether the container is actually gone, which is the only precondition the
-            // post-teardown hook needs. Anything after removal can fail without making a
-            // reclaim wrong, but running the hook when removal itself failed would attempt a
-            // reclaim Docker is bound to refuse, with no later retry behind it.
+            // The post-teardown hook's only precondition; see the Javadoc above for why.
             boolean containerGone = false;
             try {
                 portForwardManager.unpublishAll(instance);
@@ -1314,9 +1311,9 @@ public class Ec2ContainerManager {
                                 instance.getInstanceId(), e.getMessage());
                     }
                 } else if (afterTeardown != null) {
-                    LOG.warnv("Skipping post-teardown hook for instance {0}: its container could "
-                            + "not be removed, so anything waiting on the container being gone "
-                            + "would fail", instance.getInstanceId());
+                    LOG.warnv("Skipping post-teardown hook for instance {0}: its container is "
+                            + "not established to be gone, so anything waiting on the container "
+                            + "being gone would fail", instance.getInstanceId());
                 }
             }
         });
