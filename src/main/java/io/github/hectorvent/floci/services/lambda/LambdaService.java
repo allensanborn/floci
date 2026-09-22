@@ -3292,6 +3292,28 @@ public class LambdaService implements ResourceProvider {
         return result;
     }
 
+    /**
+     * The event invoke configuration that applies to an invocation of {@code fn}, or empty when
+     * the function has none. Unlike {@link #getEventInvokeConfig} this answers a background
+     * worker rather than an API caller, so an absent configuration is a result and not a fault.
+     *
+     * <p>The lookup key is the unqualified function ARN plus the version the invocation actually
+     * ran, which is where a function-level {@code PutFunctionEventInvokeConfig} stores its
+     * settings: that call names {@code $LATEST}, and so does a resolved unpublished function.
+     */
+    public Optional<FunctionEventInvokeConfig> findEventInvokeConfig(LambdaFunction fn) {
+        if (fn == null || fn.getFunctionArn() == null) {
+            return Optional.empty();
+        }
+        String qualifier = fn.getVersion() != null ? fn.getVersion() : "$LATEST";
+        String functionArn = fn.getFunctionArn();
+        if (functionArn.endsWith(":" + qualifier)) {
+            functionArn = functionArn.substring(0, functionArn.length() - qualifier.length() - 1);
+        }
+        String region = AwsArnUtils.regionOrDefault(functionArn, null);
+        return Optional.ofNullable(eventInvokeConfigs.get(eventInvokeKey(region, functionArn, qualifier)));
+    }
+
     private String eventInvokeKey(String region, String functionArn, String qualifier) {
         return region + ":" + functionArn + ":" + (qualifier != null ? qualifier : "$LATEST");
     }

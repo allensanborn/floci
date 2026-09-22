@@ -179,6 +179,36 @@ class LambdaExecutorServiceTest {
     }
 
     @Test
+    void eventInvocation_answers202AndRoutesTheResultToDestinations() throws Exception {
+        AsyncInvokeDestinationRouter router = mock(AsyncInvokeDestinationRouter.class);
+        LambdaExecutorService routingExecutor =
+                new LambdaExecutorService(warmPool, new ObjectMapper(), concurrencyLimiter, router);
+
+        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
+        ContainerHandle handle = new ContainerHandle("cid-async", "test-fn", rtas, ContainerState.WARM);
+        when(warmPool.acquire(any())).thenReturn(handle);
+        InvokeResult expected = new InvokeResult(200, null, "{\"ok\":true}".getBytes(), null, "req-async");
+        doAnswer(inv -> {
+            PendingInvocation pi = inv.getArgument(0);
+            pi.getResultFuture().complete(expected);
+            return pi.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
+
+        CountDownLatch routed = new CountDownLatch(1);
+        doAnswer(inv -> {
+            routed.countDown();
+            return null;
+        }).when(router).route(any(), any(), any());
+
+        byte[] payload = "{}".getBytes();
+        InvokeResult result = routingExecutor.invoke(fn, payload, InvocationType.Event);
+
+        assertEquals(202, result.getStatusCode());
+        assertTrue(routed.await(5, TimeUnit.SECONDS), "destination routing never ran");
+        verify(router).route(fn, payload, expected);
+    }
+
+    @Test
     void exceptionDuringInvocation_destroysHandle_doesNotRelease() {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-exc", "test-fn", rtas, ContainerState.WARM);

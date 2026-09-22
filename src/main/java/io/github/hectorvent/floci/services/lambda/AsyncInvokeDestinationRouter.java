@@ -1,0 +1,235 @@
+package io.github.hectorvent.floci.services.lambda;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.lambda.model.FunctionEventInvokeConfig;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Delivers the result of an asynchronous Lambda invocation to the {@code OnSuccess} or
+ * {@code OnFailure} destination of the function's event invoke configuration.
+ *
+ * <p>Every destination carries the same asynchronous invocation record AWS sends, the envelope
+ * around the event and the response that real CDK applications write EventBridge rules against
+ * ({@code detail.responsePayload.<field>}). An EventBridge destination puts that record on the
+ * bus as the event {@code detail}; SQS, SNS and Lambda destinations receive it as the message or
+ * the event payload.
+ *
+ * <p>This lives outside {@link LambdaExecutorService} and reaches its collaborators through
+ * {@link Instance} because the dependency graph runs the other way: {@code SnsService} invokes
+ * its Lambda subscribers and {@code EventBridgeInvoker} its Lambda targets, so injecting those
+ * services into the executor eagerly would close a CDI cycle. The lookup happens per delivery,
+ * which is also when a destination is first known to exist.
+ *
+ * <p>Retries and event age are not applied, so a failed invocation reaches {@code OnFailure}
+ * once and its record's {@code approximateInvokeCount} is always 1.
+ */
+@ApplicationScoped
+public class AsyncInvokeDestinationRouter {
+
+    private static final Logger LOG = Logger.getLogger(AsyncInvokeDestinationRouter.class);
+
+    private static final String RECORD_VERSION = "1.0";
+    private static final String EVENT_SOURCE = "lambda";
+    private static final String SUCCESS_DETAIL_TYPE = "Lambda Function Invocation Result - Success";
+    private static final String FAILURE_DETAIL_TYPE = "Lambda Function Invocation Result - Failure";
+    private static final String SUCCESS_CONDITION = "Success";
+    private static final String FAILURE_CONDITION = "RetriesExhausted";
+    private static final String DEFAULT_VERSION = "$LATEST";
+    /** Floci does not retry a failed asynchronous invocation, so every record is the first attempt. */
+    private static final int APPROXIMATE_INVOKE_COUNT = 1;
+
+    private final Instance<LambdaService> lambdaService;
+    private final Instance<EventBridgeService> eventBridgeService;
+    private final Instance<SqsService> sqsService;
+    private final Instance<SnsService> snsService;
+    private final ObjectMapper objectMapper;
+    private final String baseUrl;
+
+    @Inject
+    public AsyncInvokeDestinationRouter(Instance<LambdaService> lambdaService,
+                                        Instance<EventBridgeService> eventBridgeService,
+                                        Instance<SqsService> sqsService,
+                                        Instance<SnsService> snsService,
+                                        ObjectMapper objectMapper,
+                                        EmulatorConfig config) {
+        this.lambdaService = lambdaService;
+        this.eventBridgeService = eventBridgeService;
+        this.sqsService = sqsService;
+        this.snsService = snsService;
+        this.objectMapper = objectMapper;
+        this.baseUrl = config.baseUrl();
+    }
+
+    /**
+     * Delivers the result of one asynchronous invocation to the destination configured for its
+     * outcome, and does nothing at all when the function has no event invoke configuration or
+     * that configuration names no destination for this side.
+     *
+     * <p>Never throws. The caller answered the invoke with 202 long before the function
+     * finished, so a destination that rejects the record has nowhere left to be reported and is
+     * logged instead.
+     */
+    public void route(LambdaFunction fn, byte[] requestPayload, InvokeResult result) {
+        // A runtime that never started, timed out, or crashed is reported as a function error by
+        // the executor, so this one test covers a handler error and a failed runtime alike.
+        boolean failed = result.getFunctionError() != null;
+        FunctionEventInvokeConfig.Destination destination;
+        try {
+            destination = destinationFor(fn, failed);
+        } catch (Exception e) {
+            LOG.warnv("Could not read the event invoke configuration of {0}: {1}",
+                    fn.getFunctionArn(), e.getMessage());
+            return;
+        }
+        if (destination == null || destination.getDestination() == null
+                || destination.getDestination().isBlank()) {
+            return;
+        }
+
+        String arn = destination.getDestination();
+        try {
+            deliver(arn, fn, buildRecord(fn, requestPayload, result, failed), failed);
+        } catch (Exception e) {
+            LOG.warnv("Failed to deliver the Lambda {0} destination record for {1} to {2}: {3}",
+                    side(failed), fn.getFunctionArn(), arn, e.getMessage());
+        }
+    }
+
+    private FunctionEventInvokeConfig.Destination destinationFor(LambdaFunction fn, boolean failed) {
+        FunctionEventInvokeConfig config = lambdaService.get().findEventInvokeConfig(fn).orElse(null);
+        if (config == null || config.getDestinationConfig() == null) {
+            return null;
+        }
+        return failed
+                ? config.getDestinationConfig().getOnFailure()
+                : config.getDestinationConfig().getOnSuccess();
+    }
+
+    /**
+     * The asynchronous invocation record, the shape AWS delivers to every destination kind. The
+     * function ARN carries the executed version, as it does in a real record.
+     */
+    private ObjectNode buildRecord(LambdaFunction fn, byte[] requestPayload,
+                                   InvokeResult result, boolean failed) {
+        String version = executedVersion(fn);
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("version", RECORD_VERSION);
+        record.put("timestamp", Instant.now().toString());
+
+        ObjectNode requestContext = record.putObject("requestContext");
+        requestContext.put("requestId", result.getRequestId());
+        requestContext.put("functionArn", qualifiedFunctionArn(fn, version));
+        requestContext.put("condition", failed ? FAILURE_CONDITION : SUCCESS_CONDITION);
+        requestContext.put("approximateInvokeCount", APPROXIMATE_INVOKE_COUNT);
+
+        record.set("requestPayload", payloadNode(requestPayload));
+
+        ObjectNode responseContext = record.putObject("responseContext");
+        responseContext.put("statusCode", result.getStatusCode());
+        responseContext.put("executedVersion", version);
+        // Present only on a failure record, carrying the same Handled/Unhandled value the
+        // synchronous invoke reports in its X-Amz-Function-Error header.
+        if (result.getFunctionError() != null) {
+            responseContext.put("functionError", result.getFunctionError());
+        }
+
+        record.set("responsePayload", payloadNode(result.getPayload()));
+        return record;
+    }
+
+    private void deliver(String arn, LambdaFunction fn, ObjectNode record, boolean failed) {
+        String region = AwsArnUtils.regionOrDefault(arn,
+                AwsArnUtils.regionOrDefault(fn.getFunctionArn(), null));
+        String accountId = AwsArnUtils.accountOrDefault(arn, fn.getAccountId());
+        String body = record.toString();
+
+        // The invocation ran on a pool thread that carries no request context, so the account the
+        // destination lives in has to be re-established before any account-aware store is read.
+        switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
+            case "events" -> RequestScopes.runAs(accountId, () -> putOnEventBus(arn, body, region, failed));
+            case "sqs" -> RequestScopes.runAs(accountId, () ->
+                    sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
+            case "sns" -> RequestScopes.runAs(accountId, () ->
+                    snsService.get().publish(arn, null, body, "Lambda", region));
+            case "lambda" -> RequestScopes.runAs(accountId, () ->
+                    lambdaService.get().invokeArn(arn, body.getBytes(StandardCharsets.UTF_8),
+                            InvocationType.Event));
+            default -> {
+                LOG.warnv("Unsupported Lambda {0} destination, dropping the record: {1}", side(failed), arn);
+                return;
+            }
+        }
+        LOG.debugv("Lambda {0} destination delivered to {1}", side(failed), arn);
+    }
+
+    /**
+     * Puts the record on the bus as the event {@code detail}. The source and detail type are the
+     * fixed ones AWS uses, which is what a rule on a Lambda destination matches against.
+     */
+    private void putOnEventBus(String busArn, String detail, String region, boolean failed) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        // PutEvents takes a full event-bus ARN as EventBusName and validates it.
+        entry.put("EventBusName", busArn);
+        entry.put("Source", EVENT_SOURCE);
+        entry.put("DetailType", failed ? FAILURE_DETAIL_TYPE : SUCCESS_DETAIL_TYPE);
+        entry.put("Detail", detail);
+        // A null account routes the bus lookup through the request context just established,
+        // the only path that carries the un-prefixed legacy-key fallback.
+        EventBridgeService.PutEventsResult result =
+                eventBridgeService.get().putEvents(List.of(entry), region, null);
+        if (result.failedCount() > 0) {
+            LOG.warnv("EventBridge rejected the Lambda {0} destination record for {1}: {2}",
+                    side(failed), busArn, result.entries());
+        }
+    }
+
+    /**
+     * The payload as JSON when it parses as JSON, and as a JSON string otherwise. AWS records the
+     * event and the response verbatim and both are JSON for every runtime, so the string arm only
+     * catches a runtime that wrote something else, which is still worth reporting.
+     */
+    private JsonNode payloadNode(byte[] payload) {
+        if (payload == null || payload.length == 0) {
+            return objectMapper.nullNode();
+        }
+        try {
+            return objectMapper.readTree(payload);
+        } catch (Exception e) {
+            return objectMapper.getNodeFactory().textNode(new String(payload, StandardCharsets.UTF_8));
+        }
+    }
+
+    private static String qualifiedFunctionArn(LambdaFunction fn, String version) {
+        String arn = fn.getFunctionArn();
+        return arn.endsWith(":" + version) ? arn : arn + ":" + version;
+    }
+
+    private static String executedVersion(LambdaFunction fn) {
+        String version = fn.getVersion();
+        return version == null || version.isBlank() ? DEFAULT_VERSION : version;
+    }
+
+    private static String side(boolean failed) {
+        return failed ? "OnFailure" : "OnSuccess";
+    }
+}

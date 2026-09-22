@@ -23,6 +23,10 @@ import java.util.concurrent.TimeoutException;
 /**
  * Orchestrates Lambda function invocations.
  * Handles RequestResponse (sync), Event (async fire-and-forget), and DryRun modes.
+ *
+ * <p>An Event invocation answers 202 straight away and, once the function has finished on the
+ * pool, hands its result to {@link AsyncInvokeDestinationRouter}, which delivers it to the
+ * function's configured destination when it has one.
  */
 @ApplicationScoped
 public class LambdaExecutorService {
@@ -34,6 +38,8 @@ public class LambdaExecutorService {
     private final WarmPool warmPool;
     private final ObjectMapper objectMapper;
     private final LambdaConcurrencyLimiter concurrencyLimiter;
+    /** Null in the constructor tests use, which exercise execution rather than delivery. */
+    private final AsyncInvokeDestinationRouter destinationRouter;
     private final ExecutorService asyncExecutor = new ThreadPoolExecutor(
             Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
             Math.max(8, Runtime.getRuntime().availableProcessors() * 4),
@@ -44,10 +50,19 @@ public class LambdaExecutorService {
     @Inject
     public LambdaExecutorService(WarmPool warmPool,
                                  ObjectMapper objectMapper,
-                                 LambdaConcurrencyLimiter concurrencyLimiter) {
+                                 LambdaConcurrencyLimiter concurrencyLimiter,
+                                 AsyncInvokeDestinationRouter destinationRouter) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
         this.concurrencyLimiter = concurrencyLimiter;
+        this.destinationRouter = destinationRouter;
+    }
+
+    /** Package-private constructor for testing without CDI, leaving destinations unrouted. */
+    LambdaExecutorService(WarmPool warmPool,
+                          ObjectMapper objectMapper,
+                          LambdaConcurrencyLimiter concurrencyLimiter) {
+        this(warmPool, objectMapper, concurrencyLimiter, null);
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
@@ -62,10 +77,14 @@ public class LambdaExecutorService {
         if (type == InvocationType.Event) {
             try {
                 asyncExecutor.submit(() -> {
+                    InvokeResult asyncResult;
                     try {
-                        executeSync(fn, payload, requestId);
+                        asyncResult = executeSync(fn, payload, requestId);
                     } finally {
                         permit.close();
+                    }
+                    if (destinationRouter != null) {
+                        destinationRouter.route(fn, payload, asyncResult);
                     }
                 });
             } catch (RuntimeException e) {
