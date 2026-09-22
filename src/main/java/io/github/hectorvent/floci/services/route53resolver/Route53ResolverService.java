@@ -176,9 +176,9 @@ public class Route53ResolverService {
         requireText(request, "Name", INVALID_PARAMETER);
         String direction = requireText(request, "Direction", INVALID_PARAMETER);
         String idPrefix = endpointIdPrefix(direction);
-        JsonNode ipAddresses = request.path("IpAddressRequests");
+        JsonNode ipAddresses = ipAddressesOf(request);
         if (!ipAddresses.isArray() || ipAddresses.isEmpty()) {
-            throw new AwsException(INVALID_PARAMETER, "IpAddressRequests is required", 400);
+            throw new AwsException(INVALID_PARAMETER, "IpAddresses is required", 400);
         }
         java.util.Optional<ObjectNode> replay = replayOf(endpointStore, request, region);
         if (replay.isPresent()) {
@@ -438,6 +438,9 @@ public class Route53ResolverService {
      * of this branch.</p>
      */
     private void requireSameIpRequests(ObjectNode existing, JsonNode request, JsonNode ipAddresses) {
+        // The store's member name is deliberately left as IpAddressRequests: it is internal
+        // state, and renaming it would make every record written by an earlier build read as
+        // absent, which this method reports as a replay conflict.
         JsonNode recorded = endpointIpRequestStore.get(text(existing, "Id"))
                 .map(node -> node.get("IpAddressRequests"))
                 .orElse(null);
@@ -445,8 +448,29 @@ public class Route53ResolverService {
         // written before the ordering was corrected still compares as equal.
         if (recorded == null
                 || !normalizedIpRequests(recorded).equals(normalizedIpRequests(ipAddresses))) {
-            throw replayConflict(request, existing, "IpAddressRequests");
+            throw replayConflict(request, existing, "IpAddresses");
         }
+    }
+
+    /**
+     * The IP addresses a {@code CreateResolverEndpoint} request carries.
+     *
+     * <p>AWS names this member {@code IpAddresses}. Its list SHAPE is named
+     * {@code IpAddressRequest}, which is where the wrong wire name came from. The
+     * distinction matters because it is not cosmetic: every AWS SDK, the CLI and the
+     * Terraform provider serialise {@code IpAddresses}, and the CLI refuses to send
+     * {@code IpAddressRequests} at all because no such member exists in its model. So
+     * reading only the old name meant {@code CreateResolverEndpoint} dispatched — it
+     * appears in the service directory, a health check lists the service, and a
+     * does-it-route probe passes — while no real client could ever call it.</p>
+     *
+     * <p>The previous spelling is still accepted, so anything written against the
+     * emulator's earlier behaviour keeps working. It is not documented, and the error
+     * message names only the AWS member.</p>
+     */
+    private static JsonNode ipAddressesOf(JsonNode request) {
+        JsonNode aws = request.path("IpAddresses");
+        return aws.isMissingNode() || aws.isNull() ? request.path("IpAddressRequests") : aws;
     }
 
     /**
