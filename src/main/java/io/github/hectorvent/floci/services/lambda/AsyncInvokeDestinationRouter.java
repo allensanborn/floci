@@ -175,30 +175,48 @@ public class AsyncInvokeDestinationRouter {
 
         // The invocation ran on a pool thread that carries no request context, so the account the
         // destination lives in has to be re-established before any account-aware store is read.
-        switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
-            case "events" -> RequestScopes.runAs(accountId, () -> putOnEventBus(arn, body, region, failed));
-            case "sqs" -> RequestScopes.runAs(accountId, () ->
-                    sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
-            case "sns" -> RequestScopes.runAs(accountId, () ->
-                    snsService.get().publish(arn, null, body, "Lambda", region));
-            case "lambda" -> {
-                if (chainDepth >= MAX_DESTINATION_CHAIN_DEPTH) {
-                    LOG.warnv("Lambda {0} destination chain from {1} reached {2} hops at {3}; "
-                            + "dropping the record rather than continuing a chain that leads back "
-                            + "into itself", side(failed), fn.getFunctionArn(),
-                            MAX_DESTINATION_CHAIN_DEPTH, arn);
-                    return;
-                }
-                RequestScopes.runAs(accountId, () ->
-                        lambdaService.get().invokeArnFromDestination(
-                                arn, body.getBytes(StandardCharsets.UTF_8), chainDepth + 1));
+        boolean delivered = switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
+            case "events" -> {
+                RequestScopes.runAs(accountId, () -> putOnEventBus(arn, body, region, failed));
+                yield true;
             }
+            case "sqs" -> {
+                RequestScopes.runAs(accountId, () ->
+                        sqsService.get().sendMessage(AwsArnUtils.arnToQueueUrl(arn, baseUrl), body, 0, region));
+                yield true;
+            }
+            case "sns" -> {
+                RequestScopes.runAs(accountId, () ->
+                        snsService.get().publish(arn, null, body, "Lambda", region));
+                yield true;
+            }
+            case "lambda" -> invokeDestinationFunction(arn, fn, body, accountId, failed, chainDepth);
             default -> {
                 LOG.warnv("Unsupported Lambda {0} destination, dropping the record: {1}", side(failed), arn);
-                return;
+                yield false;
             }
+        };
+        if (delivered) {
+            LOG.debugv("Lambda {0} destination delivered to {1}", side(failed), arn);
         }
-        LOG.debugv("Lambda {0} destination delivered to {1}", side(failed), arn);
+    }
+
+    /**
+     * Invokes a Lambda destination unless the chain that reached it is already at its bound, and
+     * answers whether it did.
+     */
+    private boolean invokeDestinationFunction(String arn, LambdaFunction fn, String body,
+                                              String accountId, boolean failed, int chainDepth) {
+        if (chainDepth >= MAX_DESTINATION_CHAIN_DEPTH) {
+            LOG.warnv("Lambda {0} destination chain from {1} reached {2} hops at {3}; dropping the "
+                    + "record rather than continuing a chain that leads back into itself",
+                    side(failed), fn.getFunctionArn(), MAX_DESTINATION_CHAIN_DEPTH, arn);
+            return false;
+        }
+        RequestScopes.runAs(accountId, () ->
+                lambdaService.get().invokeArnFromDestination(
+                        arn, body.getBytes(StandardCharsets.UTF_8), chainDepth + 1));
+        return true;
     }
 
     /**
