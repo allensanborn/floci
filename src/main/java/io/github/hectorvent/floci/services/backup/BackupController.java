@@ -88,27 +88,118 @@ public class BackupController {
         return Response.ok(out).build();
     }
 
-    // Notification configuration is an optional, never-configured aspect of a vault in the
-    // emulator. Per the AWS Backup API, GetBackupVaultNotifications returns
-    // ResourceNotFoundException (HTTP 400) when no notification configuration exists for the
-    // vault. We mirror that exact error contract so SDK clients see the documented
-    // "not configured" signal rather than an empty 200 or a generic 400 they can't interpret.
-    @GET
-    @Path("/backup-vaults/{backupVaultName}/notification-configuration")
-    public Response getBackupVaultNotifications(@PathParam("backupVaultName") String vaultName) {
-        throw new AwsException("ResourceNotFoundException",
-                "No notification configuration found for backup vault: " + vaultName, 400);
+    // ── Vault access policy ────────────────────────────────────────────────────
+    //
+    // These three used to be one unconditional GET that always answered
+    // ResourceNotFoundException, on the reasoning that a policy is "an optional,
+    // never-configured aspect of a vault in the emulator". That error contract was
+    // right and is kept below for the genuinely-unconfigured case; what was missing is
+    // any way to configure one. A vault could be created and never given a policy, a
+    // lock or a notification target, so every Gruntwork example that configures a vault
+    // failed at apply.
+
+    @PUT
+    @Path("/backup-vaults/{backupVaultName}/access-policy")
+    public Response putBackupVaultAccessPolicy(@Context HttpHeaders headers,
+                                                @PathParam("backupVaultName") String vaultName,
+                                                String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode req = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        // AWS accepts Policy as a JSON string. Terraform sends a string; the console
+        // sends a string. An object is accepted too and re-serialised, because refusing
+        // it would be stricter than AWS for no benefit to the caller.
+        JsonNode policyNode = req.path("Policy");
+        String policy = policyNode.isMissingNode() || policyNode.isNull() ? null
+                : (policyNode.isTextual() ? policyNode.asText() : policyNode.toString());
+        service.putBackupVaultAccessPolicy(vaultName, region, policy);
+        return Response.noContent().build();
     }
 
-    // Access policy is an optional, never-configured aspect of a vault in the emulator. Per the
-    // AWS Backup API, GetBackupVaultAccessPolicy returns ResourceNotFoundException (HTTP 400)
-    // when no policy exists for the vault. We mirror that exact error contract so SDK clients
-    // see the documented "not configured" signal rather than an empty 200 or a generic 400.
     @GET
     @Path("/backup-vaults/{backupVaultName}/access-policy")
-    public Response getBackupVaultAccessPolicy(@PathParam("backupVaultName") String vaultName) {
-        throw new AwsException("ResourceNotFoundException",
-                "No access policy found for backup vault: " + vaultName, 400);
+    public Response getBackupVaultAccessPolicy(@Context HttpHeaders headers,
+                                                @PathParam("backupVaultName") String vaultName) {
+        String region = regionResolver.resolveRegion(headers);
+        String policy = service.getBackupVaultAccessPolicy(vaultName, region);
+        BackupVault vault = service.describeBackupVault(vaultName, region);
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("BackupVaultName", vault.getBackupVaultName());
+        out.put("BackupVaultArn", vault.getBackupVaultArn());
+        out.put("Policy", policy);
+        return Response.ok(out).build();
+    }
+
+    @DELETE
+    @Path("/backup-vaults/{backupVaultName}/access-policy")
+    public Response deleteBackupVaultAccessPolicy(@Context HttpHeaders headers,
+                                                   @PathParam("backupVaultName") String vaultName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteBackupVaultAccessPolicy(vaultName, region);
+        return Response.noContent().build();
+    }
+
+    // ── Vault notifications ────────────────────────────────────────────────────
+
+    @PUT
+    @Path("/backup-vaults/{backupVaultName}/notification-configuration")
+    public Response putBackupVaultNotifications(@Context HttpHeaders headers,
+                                                 @PathParam("backupVaultName") String vaultName,
+                                                 String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode req = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        service.putBackupVaultNotifications(vaultName, region,
+                textOrNull(req, "SNSTopicArn"), readStringList(req.path("BackupVaultEvents")));
+        return Response.noContent().build();
+    }
+
+    @GET
+    @Path("/backup-vaults/{backupVaultName}/notification-configuration")
+    public Response getBackupVaultNotifications(@Context HttpHeaders headers,
+                                                 @PathParam("backupVaultName") String vaultName) {
+        String region = regionResolver.resolveRegion(headers);
+        BackupVaultNotifications notifications = service.getBackupVaultNotifications(vaultName, region);
+        BackupVault vault = service.describeBackupVault(vaultName, region);
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("BackupVaultName", vault.getBackupVaultName());
+        out.put("BackupVaultArn", vault.getBackupVaultArn());
+        out.put("SNSTopicArn", notifications.getSnsTopicArn());
+        ArrayNode events = out.putArray("BackupVaultEvents");
+        notifications.getBackupVaultEvents().forEach(events::add);
+        return Response.ok(out).build();
+    }
+
+    @DELETE
+    @Path("/backup-vaults/{backupVaultName}/notification-configuration")
+    public Response deleteBackupVaultNotifications(@Context HttpHeaders headers,
+                                                    @PathParam("backupVaultName") String vaultName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteBackupVaultNotifications(vaultName, region);
+        return Response.noContent().build();
+    }
+
+    // ── Vault lock ─────────────────────────────────────────────────────────────
+
+    @PUT
+    @Path("/backup-vaults/{backupVaultName}/vault-lock")
+    public Response putBackupVaultLockConfiguration(@Context HttpHeaders headers,
+                                                     @PathParam("backupVaultName") String vaultName,
+                                                     String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode req = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        service.putBackupVaultLockConfiguration(vaultName, region,
+                longOrNull(req, "MinRetentionDays"),
+                longOrNull(req, "MaxRetentionDays"),
+                longOrNull(req, "ChangeableForDays"));
+        return Response.noContent().build();
+    }
+
+    @DELETE
+    @Path("/backup-vaults/{backupVaultName}/vault-lock")
+    public Response deleteBackupVaultLockConfiguration(@Context HttpHeaders headers,
+                                                        @PathParam("backupVaultName") String vaultName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteBackupVaultLockConfiguration(vaultName, region);
+        return Response.noContent().build();
     }
 
     // ── Plan ───────────────────────────────────────────────────────────────────
@@ -364,6 +455,13 @@ public class BackupController {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    // Absent and null both mean "not supplied", which for these members is meaningful:
+    // omitting ChangeableForDays is what selects compliance mode.
+    private static Long longOrNull(JsonNode node, String field) {
+        JsonNode n = node.path(field);
+        return n.isMissingNode() || n.isNull() ? null : n.asLong();
+    }
 
     private static String textOrNull(JsonNode node, String field) {
         JsonNode n = node.path(field);

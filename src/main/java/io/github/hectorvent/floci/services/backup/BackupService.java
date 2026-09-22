@@ -35,6 +35,8 @@ public class BackupService {
     private final StorageBackend<String, BackupSelection> selectionStore;
     private final StorageBackend<String, BackupJob>       jobStore;
     private final StorageBackend<String, RecoveryPoint>   recoveryStore;
+    private final StorageBackend<String, String>          accessPolicyStore;
+    private final StorageBackend<String, BackupVaultNotifications> notificationStore;
 
     private final RegionResolver regionResolver;
     private final int jobCompletionDelaySeconds;
@@ -52,6 +54,8 @@ public class BackupService {
         this.selectionStore = storageFactory.create("backup", "backup-selections.json", new TypeReference<>() {});
         this.jobStore       = storageFactory.create("backup", "backup-jobs.json",       new TypeReference<>() {});
         this.recoveryStore  = storageFactory.create("backup", "backup-recovery-points.json", new TypeReference<>() {});
+        this.accessPolicyStore  = storageFactory.create("backup", "backup-vault-access-policies.json", new TypeReference<>() {});
+        this.notificationStore  = storageFactory.create("backup", "backup-vault-notifications.json",   new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.jobCompletionDelaySeconds = config.services().backup().jobCompletionDelaySeconds();
     }
@@ -94,12 +98,178 @@ public class BackupService {
             throw new AwsException("InvalidRequestException",
                     "Non-empty backup vault cannot be deleted: " + vaultName, 400);
         }
-        vaultStore.delete(vaultKey(region, vaultName));
+        // A locked vault cannot be deleted while the lock stands. Without this a
+        // compliance lock, whose entire purpose is that the vault cannot be removed,
+        // would be a field that changes an API response and nothing else.
+        if (vault.isLocked()) {
+            throw new AwsException("InvalidRequestException",
+                    "Backup vault is locked and cannot be deleted: " + vaultName, 400);
+        }
+        String key = vaultKey(region, vaultName);
+        vaultStore.delete(key);
+        // Drop the sub-resources with the vault. They are keyed by vault name, so
+        // leaving them behind would silently graft an old policy or notification
+        // configuration onto the next vault created with the same name.
+        accessPolicyStore.delete(key);
+        notificationStore.delete(key);
     }
 
     public List<BackupVault> listBackupVaults(String region) {
         String prefix = region + ":";
         return vaultStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // ── Vault sub-resources: access policy, notifications, lock ────────────────
+    //
+    // Each of these first resolves the vault through describeBackupVault, so a call
+    // naming a vault that does not exist reports that, rather than reporting the
+    // sub-resource as merely unconfigured. The two are different answers to different
+    // questions and AWS distinguishes them; collapsing them would tell a caller its
+    // typo'd vault name was fine.
+
+    /** The documented BackupVaultEvent values. */
+    private static final Set<String> BACKUP_VAULT_EVENTS = Set.of(
+            "BACKUP_JOB_STARTED", "BACKUP_JOB_COMPLETED", "BACKUP_JOB_SUCCESSFUL",
+            "BACKUP_JOB_FAILED", "BACKUP_JOB_EXPIRED",
+            "RESTORE_JOB_STARTED", "RESTORE_JOB_COMPLETED", "RESTORE_JOB_SUCCESSFUL",
+            "RESTORE_JOB_FAILED",
+            "COPY_JOB_STARTED", "COPY_JOB_SUCCESSFUL", "COPY_JOB_FAILED",
+            "RECOVERY_POINT_MODIFIED",
+            "BACKUP_PLAN_CREATED", "BACKUP_PLAN_MODIFIED",
+            "S3_BACKUP_OBJECT_FAILED", "S3_RESTORE_OBJECT_FAILED");
+
+    public void putBackupVaultAccessPolicy(String vaultName, String region, String policy) {
+        describeBackupVault(vaultName, region);
+        if (policy == null || policy.isBlank()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Policy must be a non-empty resource policy document", 400);
+        }
+        accessPolicyStore.put(vaultKey(region, vaultName), policy);
+    }
+
+    public String getBackupVaultAccessPolicy(String vaultName, String region) {
+        describeBackupVault(vaultName, region);
+        return accessPolicyStore.get(vaultKey(region, vaultName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No access policy found for backup vault: " + vaultName, 400));
+    }
+
+    /**
+     * Deleting an access policy that is not set is a no-op, matching AWS: the
+     * operation is idempotent, so Terraform destroying a configuration twice does not
+     * fail the second time.
+     */
+    public void deleteBackupVaultAccessPolicy(String vaultName, String region) {
+        describeBackupVault(vaultName, region);
+        accessPolicyStore.delete(vaultKey(region, vaultName));
+    }
+
+    public void putBackupVaultNotifications(String vaultName, String region,
+                                            String snsTopicArn, List<String> events) {
+        describeBackupVault(vaultName, region);
+        if (snsTopicArn == null || snsTopicArn.isBlank()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "SNSTopicArn is required", 400);
+        }
+        if (events == null || events.isEmpty()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "BackupVaultEvents must name at least one event", 400);
+        }
+        // Reject unknown events rather than storing them. An emulator that accepts a
+        // misspelt event and reports it back unchanged lets a configuration that real
+        // AWS refuses pass a local test, which is the failure mode this corpus exists
+        // to catch.
+        List<String> unknown = events.stream().filter(e -> !BACKUP_VAULT_EVENTS.contains(e)).toList();
+        if (!unknown.isEmpty()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Invalid backup vault event(s): " + String.join(", ", unknown), 400);
+        }
+        notificationStore.put(vaultKey(region, vaultName),
+                new BackupVaultNotifications(snsTopicArn, events));
+    }
+
+    public BackupVaultNotifications getBackupVaultNotifications(String vaultName, String region) {
+        describeBackupVault(vaultName, region);
+        return notificationStore.get(vaultKey(region, vaultName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No notification configuration found for backup vault: " + vaultName, 400));
+    }
+
+    /** Idempotent, for the same reason as {@link #deleteBackupVaultAccessPolicy}. */
+    public void deleteBackupVaultNotifications(String vaultName, String region) {
+        describeBackupVault(vaultName, region);
+        notificationStore.delete(vaultKey(region, vaultName));
+    }
+
+    /**
+     * Apply a Vault Lock.
+     *
+     * <p>AWS has two modes and the difference is the whole point of the feature.
+     * With {@code ChangeableForDays} the lock is in governance mode: it becomes
+     * immutable at {@code LockDate}, and until then it can be changed or removed.
+     * Without it the lock is in compliance mode and is immutable immediately — it can
+     * never be removed, and the vault can never be deleted. Modelling only the first
+     * would make a compliance lock look reversible, which is precisely the property a
+     * caller sets one to obtain.
+     */
+    public BackupVault putBackupVaultLockConfiguration(String vaultName, String region,
+                                                       Long minRetentionDays,
+                                                       Long maxRetentionDays,
+                                                       Long changeableForDays) {
+        BackupVault vault = describeBackupVault(vaultName, region);
+        if (vault.isLocked() && !lockIsStillChangeable(vault)) {
+            throw new AwsException("InvalidRequestException",
+                    "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
+        }
+        if (minRetentionDays != null && minRetentionDays < 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MinRetentionDays must be at least 1", 400);
+        }
+        if (maxRetentionDays != null && maxRetentionDays < 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaxRetentionDays must be at least 1", 400);
+        }
+        if (minRetentionDays != null && maxRetentionDays != null && maxRetentionDays < minRetentionDays) {
+            throw new AwsException("InvalidParameterValueException",
+                    "MaxRetentionDays must be greater than or equal to MinRetentionDays", 400);
+        }
+        if (changeableForDays != null && changeableForDays < 3) {
+            // AWS's documented floor. Below it a governance lock would be effectively
+            // immutable on creation, which is what compliance mode is for.
+            throw new AwsException("InvalidParameterValueException",
+                    "ChangeableForDays must be at least 3", 400);
+        }
+        vault.setLocked(true);
+        vault.setMinRetentionDays(minRetentionDays);
+        vault.setMaxRetentionDays(maxRetentionDays);
+        vault.setLockDate(changeableForDays == null ? null
+                : Instant.now().plus(changeableForDays, java.time.temporal.ChronoUnit.DAYS).getEpochSecond());
+        vaultStore.put(vaultKey(region, vaultName), vault);
+        LOG.infov("Locked backup vault {0} in {1} (changeable for {2} day(s))",
+                vaultName, region, changeableForDays);
+        return vault;
+    }
+
+    public void deleteBackupVaultLockConfiguration(String vaultName, String region) {
+        BackupVault vault = describeBackupVault(vaultName, region);
+        if (vault.isLocked() && !lockIsStillChangeable(vault)) {
+            throw new AwsException("InvalidRequestException",
+                    "Backup vault lock is immutable and cannot be deleted: " + vaultName, 400);
+        }
+        vault.setLocked(false);
+        vault.setLockDate(null);
+        vault.setMinRetentionDays(null);
+        vault.setMaxRetentionDays(null);
+        vaultStore.put(vaultKey(region, vaultName), vault);
+    }
+
+    /**
+     * True while a lock can still be changed: a governance lock before its LockDate.
+     * A compliance lock carries no LockDate and is never changeable.
+     */
+    private static boolean lockIsStillChangeable(BackupVault vault) {
+        Long lockDate = vault.getLockDate();
+        return lockDate != null && Instant.now().getEpochSecond() < lockDate;
     }
 
     // ── Plan ───────────────────────────────────────────────────────────────────

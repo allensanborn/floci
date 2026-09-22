@@ -552,4 +552,249 @@ class BackupIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    // ── Vault sub-resources: access policy, notifications, lock ────────────────
+    //
+    // These run on their own vault, at orders above every existing test, so that
+    // configuring a policy here cannot change what the Order(14)/Order(15) tests above
+    // observe. Those two assert the unconfigured case, which is still the right answer
+    // for a vault nobody has configured -- the gap this section covers was that there
+    // was no way to configure one.
+
+    private static final String SUB_VAULT = "sub-resource-vault";
+    private static final String POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"AllowDescribe\","
+            + "\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"*\"},"
+            + "\"Action\":\"backup:DescribeBackupVault\",\"Resource\":\"*\"}]}";
+    private static final String TOPIC = "arn:aws:sns:us-east-1:000000000000:backup-events";
+
+    @Test
+    @Order(100)
+    void createSubResourceVault() {
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200).body("BackupVaultName", equalTo(SUB_VAULT));
+    }
+
+    @Test
+    @Order(101)
+    void anUnlockedVaultReportsLockedFalse() {
+        // Locked is always present on a vault in AWS. A client cannot tell "not locked"
+        // from "this emulator does not model locking" unless the member is there.
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200)
+            .body("Locked", equalTo(false))
+            .body("$", not(hasKey("LockDate")));
+    }
+
+    @Test
+    @Order(110)
+    void putAccessPolicyThenReadItBack() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":\"" + POLICY.replace("\"", "\\\"") + "\"}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(200)
+            .body("BackupVaultName", equalTo(SUB_VAULT))
+            .body("BackupVaultArn", containsString("backup-vault:" + SUB_VAULT))
+            .body("Policy", containsString("AllowDescribe"));
+    }
+
+    @Test
+    @Order(111)
+    void putAccessPolicyRejectsAnEmptyDocument() {
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(112)
+    void accessPolicyOnAVaultThatDoesNotExistSaysSo() {
+        // The distinction that matters: "no such vault" is a different answer from
+        // "that vault has no policy", and a caller with a typo needs the first.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":\"{}\"}")
+        .when().put("/backup-vaults/no-such-vault/access-policy")
+        .then().statusCode(404).body("message", containsString("no-such-vault"));
+    }
+
+    @Test
+    @Order(113)
+    void deleteAccessPolicyLeavesItUnconfigured() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(114)
+    void deleteAccessPolicyIsIdempotent() {
+        // Terraform destroys a configuration it has already destroyed on a re-run.
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(204);
+    }
+
+    @Test
+    @Order(120)
+    void putNotificationsThenReadThemBack() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\","
+                + "\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\",\"RESTORE_JOB_FAILED\"]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(200)
+            .body("BackupVaultName", equalTo(SUB_VAULT))
+            .body("SNSTopicArn", equalTo(TOPIC))
+            .body("BackupVaultEvents", hasItems("BACKUP_JOB_COMPLETED", "RESTORE_JOB_FAILED"));
+    }
+
+    @Test
+    @Order(121)
+    void notificationsRejectAnEventAwsDoesNotDefine() {
+        // Accepting a misspelt event and echoing it back would let a configuration real
+        // AWS refuses pass against the emulator.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\","
+                + "\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\",\"NOT_AN_EVENT\"]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("NOT_AN_EVENT"));
+    }
+
+    @Test
+    @Order(122)
+    void notificationsRequireATopicAndAtLeastOneEvent() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(123)
+    void deleteNotificationsLeavesThemUnconfigured() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(130)
+    void aGovernanceLockIsVisibleOnTheVault() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30,\"ChangeableForDays\":3}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200)
+            .body("Locked", equalTo(true))
+            .body("MinRetentionDays", equalTo(7))
+            .body("MaxRetentionDays", equalTo(30))
+            .body("LockDate", notNullValue());
+    }
+
+    @Test
+    @Order(131)
+    void aLockedVaultCannotBeDeleted() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("locked"));
+    }
+
+    @Test
+    @Order(132)
+    void aGovernanceLockCanBeRemovedInsideItsGracePeriod() {
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200)
+            .body("Locked", equalTo(false))
+            .body("$", not(hasKey("MinRetentionDays")));
+    }
+
+    @Test
+    @Order(133)
+    void lockRejectsAMaximumBelowTheMinimum() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":30,\"MaxRetentionDays\":7,\"ChangeableForDays\":3}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(134)
+    void aComplianceLockCannotBeRemoved() {
+        // No ChangeableForDays means compliance mode: immutable immediately. If this
+        // could be deleted, the mode would be a field that changes a response and
+        // nothing else.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200).body("Locked", equalTo(true))
+            .body("$", not(hasKey("LockDate")));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("immutable"));
+    }
+
+    @Test
+    @Order(140)
+    void subResourcesDoNotOutliveTheirVault() {
+        // A fresh vault, configured, deleted and recreated under the same name must not
+        // inherit the old policy: the sub-resource stores are keyed by vault name.
+        String vault = "recycled-vault";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":\"{}\"}")
+        .when().put("/backup-vaults/" + vault + "/access-policy").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/access-policy")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
 }

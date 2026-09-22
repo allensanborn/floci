@@ -12,8 +12,31 @@
 |---|---|---|---|
 | `CreateBackupVault` | `PUT` | `/backup-vaults/{backupVaultName}` | Create a backup vault |
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
-| `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault |
+| `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty, unlocked backup vault |
 | `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults |
+
+### Backup Vault Access Policy
+
+| Action | Method | Path | Description |
+|---|---|---|---|
+| `PutBackupVaultAccessPolicy` | `PUT` | `/backup-vaults/{backupVaultName}/access-policy` | Attach a resource policy to a vault |
+| `GetBackupVaultAccessPolicy` | `GET` | `/backup-vaults/{backupVaultName}/access-policy` | Read a vault's resource policy |
+| `DeleteBackupVaultAccessPolicy` | `DELETE` | `/backup-vaults/{backupVaultName}/access-policy` | Remove a vault's resource policy |
+
+### Backup Vault Notifications
+
+| Action | Method | Path | Description |
+|---|---|---|---|
+| `PutBackupVaultNotifications` | `PUT` | `/backup-vaults/{backupVaultName}/notification-configuration` | Send vault events to an SNS topic |
+| `GetBackupVaultNotifications` | `GET` | `/backup-vaults/{backupVaultName}/notification-configuration` | Read a vault's notification configuration |
+| `DeleteBackupVaultNotifications` | `DELETE` | `/backup-vaults/{backupVaultName}/notification-configuration` | Remove a vault's notification configuration |
+
+### Backup Vault Lock
+
+| Action | Method | Path | Description |
+|---|---|---|---|
+| `PutBackupVaultLockConfiguration` | `PUT` | `/backup-vaults/{backupVaultName}/vault-lock` | Apply a governance or compliance lock |
+| `DeleteBackupVaultLockConfiguration` | `DELETE` | `/backup-vaults/{backupVaultName}/vault-lock` | Remove a lock that is still changeable |
 
 ### Backup Plans
 
@@ -99,6 +122,21 @@ Actual backup is simulated — no data is read from or written to the referenced
 - **DeleteBackupVault** returns `InvalidRequestException` (400) if the vault contains recovery points.
 - **DeleteBackupPlan** returns `InvalidRequestException` (400) if the plan has active selections.
 - **CreateBackupVault** returns `AlreadyExistsException` (400) on duplicate vault names within the same region.
+- **Vault Lock has two modes, and they behave differently.** With `ChangeableForDays` the
+  lock is in governance mode: `LockDate` is set that many days ahead, and until then the
+  lock can be changed or deleted. Without it the lock is in compliance mode — immutable
+  immediately, so `PutBackupVaultLockConfiguration` and
+  `DeleteBackupVaultLockConfiguration` both return `InvalidRequestException` (400)
+  afterwards. `ChangeableForDays` below 3 is rejected.
+- **DeleteBackupVault** returns `InvalidRequestException` (400) while the vault is locked.
+- **PutBackupVaultNotifications** rejects any `BackupVaultEvents` value outside the
+  documented set with `InvalidParameterValueException` (400), rather than storing it.
+- Deleting an access policy or notification configuration that was never set is a no-op,
+  so a destroy re-run does not fail.
+- The access policy and notification configuration are **not** returned by
+  `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
+  operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
+  `MaxRetentionDays`) are on the vault, also matching AWS.
 
 ## Configuration
 
@@ -110,8 +148,6 @@ Actual backup is simulated — no data is read from or written to the referenced
 ## Not Yet Supported
 
 - Restore jobs (`StartRestoreJob`, `DescribeRestoreJob`, `ListRestoreJobs`)
-- Backup vaults with notifications (`PutBackupVaultNotifications`, `GetBackupVaultNotifications`)
-- Backup vaults with access policy (`PutBackupVaultAccessPolicy`, `GetBackupVaultAccessPolicy`)
 - Copy jobs (`StartCopyJob`, `DescribeCopyJob`, `ListCopyJobs`)
 - Report plans (`CreateReportPlan`, `DescribeReportPlan`, etc.)
 - Framework operations (`CreateFramework`, etc.)
