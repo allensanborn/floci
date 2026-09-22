@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
@@ -1949,6 +1950,55 @@ class RdsQueryHandlerTest {
         assertEquals(400, handler.handle("StartDBCluster", params()).getStatus());
         assertEquals(400, handler.handle("RebootDBCluster", params()).getStatus());
         verify(service, never()).startDbCluster(any(), any());
+    }
+
+    @Test
+    void clusterSnapshotActions_dispatchAndRenderTheClusterSnapshot() {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotIdentifier("csnap");
+        snapshot.setDbClusterIdentifier("aurora");
+        snapshot.setEngineIdentifier("aurora-postgresql");
+        snapshot.setStatus("available");
+        snapshot.setPercentProgress(100);
+        snapshot.setDbClusterSnapshotArn("arn:aws:rds:us-east-1:000000000000:cluster-snapshot:csnap");
+        snapshot.setAvailabilityZones(List.of("us-east-1a"));
+        snapshot.setRestoreAccountIds(List.of("all"));
+        when(service.createDbClusterSnapshot(eq("csnap"), eq("aurora"), eq(Map.of()), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> create = params();
+        create.add("DBClusterSnapshotIdentifier", "csnap");
+        create.add("DBClusterIdentifier", "aurora");
+        Response created = handler.handle("CreateDBClusterSnapshot", create);
+        assertEquals(200, created.getStatus());
+        String body = (String) created.getEntity();
+        assertTrue(body.contains("<CreateDBClusterSnapshotResult>"));
+        assertTrue(body.contains("<DBClusterSnapshot>"));
+        assertTrue(body.contains("<AvailabilityZone>us-east-1a</AvailabilityZone>"));
+        assertTrue(body.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(body.contains("<PercentProgress>100</PercentProgress>"));
+        assertTrue(body.contains("<DBClusterSnapshotArn>arn:aws:rds:us-east-1:000000000000:cluster-snapshot:csnap</DBClusterSnapshotArn>"));
+
+        when(service.describeDbClusterSnapshots(isNull(), eq("aurora"), isNull(), isNull())).thenReturn(List.of(snapshot));
+        MultivaluedMap<String, String> describe = params();
+        describe.add("DBClusterIdentifier", "aurora");
+        String listBody = (String) handler.handle("DescribeDBClusterSnapshots", describe).getEntity();
+        assertTrue(listBody.contains("<DBClusterSnapshots><DBClusterSnapshot>"));
+
+        when(service.describeDbClusterSnapshotAttributes(eq("csnap"), isNull())).thenReturn(snapshot);
+        MultivaluedMap<String, String> attrs = params();
+        attrs.add("DBClusterSnapshotIdentifier", "csnap");
+        String attrBody = (String) handler.handle("DescribeDBClusterSnapshotAttributes", attrs).getEntity();
+        assertTrue(attrBody.contains("<DBClusterSnapshotAttributesResult>"));
+        assertTrue(attrBody.contains("<AttributeName>restore</AttributeName>"));
+        assertTrue(attrBody.contains("<AttributeValue>all</AttributeValue>"));
+
+        assertEquals(400, handler.handle("CreateDBClusterSnapshot", params()).getStatus());
+        assertEquals(400, handler.handle("DeleteDBClusterSnapshot", params()).getStatus());
+        MultivaluedMap<String, String> restore = params();
+        restore.add("DBClusterIdentifier", "restored");
+        restore.add("SnapshotIdentifier", "csnap");
+        Response missingEngine = handler.handle("RestoreDBClusterFromSnapshot", restore);
+        assertEquals(400, missingEngine.getStatus());
+        assertTrue(((String) missingEngine.getEntity()).contains("Engine is required."));
     }
 
     @Test
