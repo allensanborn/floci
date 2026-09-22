@@ -472,7 +472,13 @@ public class BackupController {
         if (n.isMissingNode() || n.isNull()) {
             return null;
         }
-        if (!n.isIntegralNumber()) {
+        // canConvertToLong as well as isIntegralNumber, because the first alone leaves
+        // one coercion open: 99999999999999999999 IS an integral number, and
+        // longValue() truncates it to 7766279631452241919, which then passes the
+        // retention checks as if the caller had sent it. Kinesis guards the same way
+        // with canConvertToInt (KinesisJsonHandler#optionalMaxRecordSize). Rejecting
+        // a value we cannot represent is the whole point of not coercing.
+        if (!n.isIntegralNumber() || !n.canConvertToLong()) {
             throw new AwsException("InvalidParameterValueException",
                     field + " must be an integer", 400);
         }
