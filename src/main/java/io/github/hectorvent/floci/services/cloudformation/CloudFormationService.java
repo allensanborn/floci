@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynami
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -2298,7 +2299,7 @@ public class CloudFormationService implements ResourceProvider {
     private String fetchTemplateFromS3(String url) {
         S3TemplateRef ref = parseTemplateUrl(url, config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX));
         try {
-            var obj = s3Service.getObject(ref.bucket(), ref.key());
+            S3Object obj = s3Service.getObject(ref.bucket(), ref.key());
             return new String(obj.getData());
         } catch (Exception e) {
             LOG.errorv("Failed to fetch CloudFormation template from {0}: {1}", url, e.getMessage());
@@ -2350,23 +2351,19 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Whether the host is the S3 service endpoint rather than a bucket: {@code s3.<suffix>} and
-     * the regional {@code s3.<region>.<suffix>}, for a local hostname as much as for
-     * {@code amazonaws.com}. A URL against the service endpoint is path-style, so its bucket is
-     * the first path segment and never the literal label "s3". This costs the ability to address
-     * a bucket actually named "s3" virtual-hosted style, which is the trade AWS itself makes.
+     * Whether the host is the S3 <em>service</em> endpoint rather than a bucket-qualified one:
+     * {@code s3.<suffix>} and the regional {@code s3.<region>.<suffix>}, for a local hostname as
+     * much as for {@code amazonaws.com}. A URL against the service endpoint is path-style, so its
+     * bucket is the first path segment.
+     *
+     * <p>The first label alone does not decide it, because a bucket may legally be named
+     * {@code s3}: that makes {@code s3.s3.us-east-1.amazonaws.com} and {@code s3.s3.<suffix>}
+     * virtual-hosted URLs for that bucket. What separates the two is what follows the first
+     * label, so this strips an optional region label and requires the remainder to be an
+     * endpoint suffix.
      *
      * <p>{@code S3VirtualHostFilter.extractBucket} draws the same line for the request path, in
      * more detail than a TemplateURL needs.
-     */
-    /**
-     * Whether a host is the S3 <em>service</em> endpoint rather than a bucket-qualified one.
-     *
-     * <p>Testing only for a leading {@code s3.} is not enough: a bucket may legally be named
-     * {@code s3}, which makes {@code s3.s3.us-east-1.amazonaws.com} and
-     * {@code s3.s3.<suffix>} virtual-hosted URLs for that bucket. What separates the two is
-     * what follows the first label: the service endpoint is {@code s3.} plus an endpoint
-     * suffix, optionally with a region label in between.
      */
     private static boolean isS3ServiceEndpointHost(String host, String hostnameSuffix) {
         String normalizedHost = host.toLowerCase(Locale.ROOT);

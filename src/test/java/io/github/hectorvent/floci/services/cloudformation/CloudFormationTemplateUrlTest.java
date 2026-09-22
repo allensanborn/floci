@@ -4,7 +4,8 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationService.S3TemplateRef;
 import org.junit.jupiter.api.Test;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Bucket/key extraction from a {@code TemplateURL}, which decides whether the URL is
@@ -19,8 +20,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.localhost.floci.io:4566/bucket/key", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
     }
 
     @Test
@@ -29,8 +30,8 @@ class CloudFormationTemplateUrlTest {
                 "http://s3.us-east-1.localhost.floci.io:4566/cdk-hnb659fds-assets-000000000000-us-east-1/d05ac.json",
                 SUFFIX);
 
-        assertEquals("cdk-hnb659fds-assets-000000000000-us-east-1", ref.bucket());
-        assertEquals("d05ac.json", ref.key());
+        assertThat(ref.bucket(), equalTo("cdk-hnb659fds-assets-000000000000-us-east-1"));
+        assertThat(ref.key(), equalTo("d05ac.json"));
     }
 
     @Test
@@ -38,8 +39,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.localhost:4566/bucket/nested/key.json", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("nested/key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("nested/key.json"));
     }
 
     @Test
@@ -47,8 +48,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://bucket.localhost.floci.io:4566/key", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
     }
 
     @Test
@@ -56,8 +57,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://bucket.s3.localhost.floci.io:4566/nested/key.json", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("nested/key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("nested/key.json"));
     }
 
     @Test
@@ -65,8 +66,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://bucket.localhost:4566/key", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
     }
 
     @Test
@@ -74,8 +75,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "https://s3.us-east-1.amazonaws.com/bucket/key", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
     }
 
     @Test
@@ -83,8 +84,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "https://bucket.s3.us-east-1.amazonaws.com/nested/key.json", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("nested/key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("nested/key.json"));
     }
 
     @Test
@@ -92,8 +93,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://127.0.0.1:4566/bucket/key", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key"));
     }
 
     @Test
@@ -101,8 +102,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.localhost.floci.io:4566/bucket", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo(""));
     }
 
     @Test
@@ -110,8 +111,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.s3.localhost.floci.io:4566/key.json", SUFFIX);
 
-        assertEquals("s3", ref.bucket());
-        assertEquals("key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("s3"));
+        assertThat(ref.key(), equalTo("key.json"));
     }
 
     @Test
@@ -119,8 +120,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "https://s3.s3.us-east-1.amazonaws.com/nested/key.json", SUFFIX);
 
-        assertEquals("s3", ref.bucket());
-        assertEquals("nested/key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("s3"));
+        assertThat(ref.key(), equalTo("nested/key.json"));
     }
 
     @Test
@@ -128,8 +129,8 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.s3.localhost:4566/key.json", SUFFIX);
 
-        assertEquals("s3", ref.bucket());
-        assertEquals("key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("s3"));
+        assertThat(ref.key(), equalTo("key.json"));
     }
 
     @Test
@@ -137,7 +138,7 @@ class CloudFormationTemplateUrlTest {
         S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
                 "http://s3.us-east-1.localhost.floci.io:4566/bucket/key.json", SUFFIX);
 
-        assertEquals("bucket", ref.bucket());
-        assertEquals("key.json", ref.key());
+        assertThat(ref.bucket(), equalTo("bucket"));
+        assertThat(ref.key(), equalTo("key.json"));
     }
 }
