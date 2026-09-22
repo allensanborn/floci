@@ -2333,7 +2333,7 @@ public class CloudFormationService implements ResourceProvider {
         String path = uri.getRawPath();
 
         boolean isVirtualHosted = host != null
-                && !isS3ServiceEndpointHost(host)
+                && !isS3ServiceEndpointHost(host, hostnameSuffix)
                 && (host.contains(".s3.")
                     || hasBucketPrefixForSuffix(host, hostnameSuffix)
                     || host.endsWith(".localhost"));
@@ -2359,9 +2359,44 @@ public class CloudFormationService implements ResourceProvider {
      * <p>{@code S3VirtualHostFilter.extractBucket} draws the same line for the request path, in
      * more detail than a TemplateURL needs.
      */
-    private static boolean isS3ServiceEndpointHost(String host) {
+    /**
+     * Whether a host is the S3 <em>service</em> endpoint rather than a bucket-qualified one.
+     *
+     * <p>Testing only for a leading {@code s3.} is not enough: a bucket may legally be named
+     * {@code s3}, which makes {@code s3.s3.us-east-1.amazonaws.com} and
+     * {@code s3.s3.<suffix>} virtual-hosted URLs for that bucket. What separates the two is
+     * what follows the first label: the service endpoint is {@code s3.} plus an endpoint
+     * suffix, optionally with a region label in between.
+     */
+    private static boolean isS3ServiceEndpointHost(String host, String hostnameSuffix) {
         String normalizedHost = host.toLowerCase(Locale.ROOT);
-        return normalizedHost.equals("s3") || normalizedHost.startsWith("s3.");
+        if (normalizedHost.equals("s3")) {
+            return true;
+        }
+        if (!normalizedHost.startsWith("s3.")) {
+            return false;
+        }
+        String remainder = normalizedHost.substring("s3.".length());
+        String withoutRegion = remainder;
+        int dot = remainder.indexOf('.');
+        if (dot > 0 && isRegionLabel(remainder.substring(0, dot))) {
+            withoutRegion = remainder.substring(dot + 1);
+        }
+        return isEndpointSuffix(remainder, hostnameSuffix)
+                || isEndpointSuffix(withoutRegion, hostnameSuffix);
+    }
+
+    private static boolean isEndpointSuffix(String candidate, String hostnameSuffix) {
+        if (candidate.equals("amazonaws.com") || candidate.equals("localhost")) {
+            return true;
+        }
+        return hostnameSuffix != null && !hostnameSuffix.isBlank()
+                && candidate.equals(hostnameSuffix.toLowerCase(Locale.ROOT));
+    }
+
+    /** An AWS region label, such as {@code us-east-1} or {@code ap-southeast-2}. */
+    private static boolean isRegionLabel(String label) {
+        return label.matches("[a-z]{2}(-[a-z]+)+-\\d+");
     }
 
     private static boolean hasBucketPrefixForSuffix(String host, String suffix) {

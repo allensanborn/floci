@@ -104,4 +104,40 @@ class CloudFormationTemplateUrlTest {
         assertEquals("bucket", ref.bucket());
         assertEquals("", ref.key());
     }
+
+    @Test
+    void virtualHostedForABucketNamedS3_onTheConfiguredSuffix_keepsTheBucket() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3.s3.localhost.floci.io:4566/key.json", SUFFIX);
+
+        assertEquals("s3", ref.bucket());
+        assertEquals("key.json", ref.key());
+    }
+
+    @Test
+    void virtualHostedForABucketNamedS3_onAws_keepsTheBucket() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "https://s3.s3.us-east-1.amazonaws.com/nested/key.json", SUFFIX);
+
+        assertEquals("s3", ref.bucket());
+        assertEquals("nested/key.json", ref.key());
+    }
+
+    @Test
+    void virtualHostedForABucketNamedS3_onBareLocalhost_keepsTheBucket() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3.s3.localhost:4566/key.json", SUFFIX);
+
+        assertEquals("s3", ref.bucket());
+        assertEquals("key.json", ref.key());
+    }
+
+    @Test
+    void theRegionalServiceHost_readsBucketFromThePath() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3.us-east-1.localhost.floci.io:4566/bucket/key.json", SUFFIX);
+
+        assertEquals("bucket", ref.bucket());
+        assertEquals("key.json", ref.key());
+    }
 }
