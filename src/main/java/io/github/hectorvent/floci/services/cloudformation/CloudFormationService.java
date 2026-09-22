@@ -43,7 +43,6 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -1095,15 +1094,26 @@ public class CloudFormationService implements ResourceProvider {
      *
      * <p>Reduced by stack id, because a stack being deleted is briefly in both maps: it is
      * retained before it is removed from the live one, so that it is never in neither.
+     *
+     * <p>The maps are read one after the other, the live one first and in full, rather than as one
+     * concatenated pipeline. A delete retains before it removes, so reading in that order leaves a
+     * stack mid-handover in at least one of the two views. Building both views up front breaks
+     * that: a {@link ConcurrentHashMap} view reflects the table at some point at or since its own
+     * creation and is not guaranteed to reflect a modification made after it, so a retained view
+     * created before the retain need never show the stack, while a live view created after it can
+     * already miss it. Traversing the retained view second does not rescue this, because it is
+     * creation and not traversal that bounds the guarantee.
      */
     public List<Stack> listStacks(String region) {
         String accountId = currentAccount();
         Instant current = now();
-        Stream<Stack> retained = deletedStacks.values().stream()
-                .filter(entry -> !entry.isExpired(current))
-                .map(DeletedStackEntry::stack);
         Map<String, Stack> byStackId = new LinkedHashMap<>();
-        Stream.concat(stacks.values().stream(), retained)
+        stacks.values().stream()
+                .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
+                .forEach(s -> byStackId.putIfAbsent(s.getStackId(), s));
+        deletedStacks.values().stream()
+                .filter(entry -> !entry.isExpired(current))
+                .map(DeletedStackEntry::stack)
                 .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
                 .forEach(s -> byStackId.putIfAbsent(s.getStackId(), s));
         return byStackId.values().stream()
