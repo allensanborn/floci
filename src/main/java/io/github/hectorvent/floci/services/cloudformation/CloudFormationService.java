@@ -2083,8 +2083,12 @@ public class CloudFormationService implements ResourceProvider {
                 throw new IllegalStateException(reason);
             }
 
-            stack.setStatus("DELETE_COMPLETE");
+            // Before the status, never after. Status is the volatile publishing write, so a reader
+            // that observes DELETE_COMPLETE is guaranteed to observe every write that preceded it.
+            // Assigned afterwards, a concurrent DescribeStacks can report the terminal status with
+            // no DeletionTime at all.
             stack.setDeletionTime(now());
+            stack.setStatus("DELETE_COMPLETE");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
