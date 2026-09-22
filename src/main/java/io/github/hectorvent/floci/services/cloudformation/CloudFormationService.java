@@ -1092,6 +1092,9 @@ public class CloudFormationService implements ResourceProvider {
      * DescribeStacks has stopped answering for it by name, which is how a client reconciles what
      * it deployed against what is left. A name reused after a delete lists twice, once per stack
      * id, as it does on AWS.
+     *
+     * <p>Reduced by stack id, because a stack being deleted is briefly in both maps: it is
+     * retained before it is removed from the live one, so that it is never in neither.
      */
     public List<Stack> listStacks(String region) {
         String accountId = currentAccount();
@@ -1099,8 +1102,11 @@ public class CloudFormationService implements ResourceProvider {
         Stream<Stack> retained = deletedStacks.values().stream()
                 .filter(entry -> !entry.isExpired(current))
                 .map(DeletedStackEntry::stack);
-        return Stream.concat(stacks.values().stream(), retained)
+        Map<String, Stack> byStackId = new LinkedHashMap<>();
+        Stream.concat(stacks.values().stream(), retained)
                 .filter(s -> accountId.equals(ownerAccount(s)) && region.equals(s.getRegion()))
+                .forEach(s -> byStackId.putIfAbsent(s.getStackId(), s));
+        return byStackId.values().stream()
                 .sorted(Comparator.comparing(Stack::getCreationTime))
                 .toList();
     }
@@ -2092,11 +2098,15 @@ public class CloudFormationService implements ResourceProvider {
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
-            stacks.remove(stackKey(ownerAccount(stack), stack.getStackName(), region));
-            unpersistStack(ownerAccount(stack), stack.getStackName(), region);
+            // Retained before it leaves the live map, never after: the other order leaves a window
+            // in which the stack is in neither, and a ListStacks landing there loses it entirely.
+            // Overlapping instead is harmless, since both maps hold this same Stack and listStacks
+            // reduces by stack id.
             deletedStacks.put(stack.getStackId(), new DeletedStackEntry(
                     stack,
                     now().plusSeconds(config.services().cloudformation().deletedStackRetentionSeconds())));
+            stacks.remove(stackKey(ownerAccount(stack), stack.getStackName(), region));
+            unpersistStack(ownerAccount(stack), stack.getStackName(), region);
             LOG.infov("Stack {0} deleted", stack.getStackName());
 
         } catch (Exception e) {
