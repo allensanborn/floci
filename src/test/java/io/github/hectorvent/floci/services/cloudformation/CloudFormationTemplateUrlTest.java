@@ -186,4 +186,22 @@ class CloudFormationTemplateUrlTest {
         assertThat(ref.bucket(), equalTo("s3-logs"));
         assertThat(ref.key(), equalTo("key.json"));
     }
+
+    @Test
+    void aBucketWithARegionShapedS3Name_staysVirtualHosted() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3-eu-team-2.localhost.floci.io:4566/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("s3-eu-team-2"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
+
+    @Test
+    void aBucketWithARegionShapedLabelBeforeTheSuffix_staysVirtualHosted() {
+        S3TemplateRef ref = CloudFormationService.parseTemplateUrl(
+                "http://s3.eu-team-2.localhost.floci.io:4566/key.json", SUFFIX);
+
+        assertThat(ref.bucket(), equalTo("s3"));
+        assertThat(ref.key(), equalTo("key.json"));
+    }
 }

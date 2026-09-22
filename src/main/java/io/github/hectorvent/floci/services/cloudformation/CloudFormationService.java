@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -2376,7 +2377,7 @@ public class CloudFormationService implements ResourceProvider {
         }
         String remainder = stripLeadingLabel(normalizedHost.substring(firstDot + 1), "dualstack");
         int dot = remainder.indexOf('.');
-        if (dot > 0 && isRegionLabel(remainder.substring(0, dot))) {
+        if (dot > 0 && AwsRegions.isRegionId(remainder.substring(0, dot))) {
             remainder = remainder.substring(dot + 1);
         }
         return isEndpointSuffix(remainder, hostnameSuffix);
@@ -2394,9 +2395,9 @@ public class CloudFormationService implements ResourceProvider {
             return true;
         }
         if (label.startsWith("s3-website-")) {
-            return isRegionLabel(label.substring("s3-website-".length()));
+            return AwsRegions.isRegionId(label.substring("s3-website-".length()));
         }
-        return label.startsWith("s3-") && isRegionLabel(label.substring("s3-".length()));
+        return label.startsWith("s3-") && AwsRegions.isRegionId(label.substring("s3-".length()));
     }
 
     private static String stripLeadingLabel(String host, String label) {
@@ -2409,11 +2410,6 @@ public class CloudFormationService implements ResourceProvider {
         }
         return hostnameSuffix != null && !hostnameSuffix.isBlank()
                 && candidate.equals(hostnameSuffix.toLowerCase(Locale.ROOT));
-    }
-
-    /** An AWS region label, such as {@code us-east-1} or {@code ap-southeast-2}. */
-    private static boolean isRegionLabel(String label) {
-        return label.matches("[a-z]{2}(-[a-z]+)+-\\d+");
     }
 
     private static boolean hasBucketPrefixForSuffix(String host, String suffix) {
