@@ -75,6 +75,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.Set;
 import java.util.Comparator;
@@ -1657,12 +1658,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deregisterTaskFromLoadBalancers(task, region);
 
         Map<String, Integer> exitCodes = Map.of();
+        Map<String, Instant> finishedAt = Map.of();
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
             try {
                 exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
             } finally {
                 retainUnresolvedLogHandle(task.getTaskArn(), handle);
+            }
+            if (handle != null) {
+                finishedAt = handle.getFinishedAt();
             }
         }
 
@@ -1673,11 +1678,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         containerManager.releaseTaskNetwork(task, region);
         if (task.getContainers() != null) {
             final Map<String, Integer> codes = exitCodes;
+            final Map<String, Instant> finishTimes = finishedAt;
             task.getContainers().forEach(c -> {
                 c.setLastStatus("STOPPED");
                 Integer code = codes.get(c.getName());
                 if (code != null) {
                     c.setExitCode(code);
+                }
+                Instant finished = finishTimes.get(c.getName());
+                if (finished != null) {
+                    c.setFinishedAt(finished);
                 }
             });
         }
@@ -1733,6 +1743,42 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
             lbRegistrar.deregisterTask(task, svc, region);
+        }
+    }
+
+    /** A container reached through the task metadata endpoint, with the task it belongs to. */
+    public record MetadataTarget(EcsTask task, Container container, TaskDefinition taskDefinition) {}
+
+    /**
+     * Resolves the {@code ECS_CONTAINER_METADATA_URI_V4} id a container was given at launch. The id
+     * is minted per container and never reused, so it identifies both the container and its task.
+     */
+    public Optional<MetadataTarget> findByMetadataId(String metadataId) {
+        if (metadataId == null || metadataId.isBlank()) {
+            return Optional.empty();
+        }
+        for (EcsTask task : tasks.values()) {
+            if (task.getContainers() == null) {
+                continue;
+            }
+            for (Container container : task.getContainers()) {
+                if (metadataId.equals(container.getMetadataId())) {
+                    return Optional.of(new MetadataTarget(task, container,
+                            taskDefinitionOf(task)));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** The task's definition, or null when it has since been deleted. */
+    private TaskDefinition taskDefinitionOf(EcsTask task) {
+        try {
+            return resolveTaskDefinitionOrThrow(task.getTaskDefinitionArn(), taskRegion(task));
+        } catch (AwsException e) {
+            LOG.debugv("Task {0} references a task definition that is gone: {1}",
+                    task.getTaskArn(), e.getMessage());
+            return null;
         }
     }
 
@@ -3772,14 +3818,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         updateHealth(task, handle);
 
-        // Inspect every container; abort if any are still running.
+        // Inspect every container; abort if any are still running. A container that exited on its
+        // own has a finish time of its own, read here while the daemon still remembers it.
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
+        Map<String, Instant> finishedAt = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
             if (code == null) {
                 return;
             }
             exitCodes.put(entry.getKey(), code);
+            Instant finished = containerManager.getFinishedAtIfStopped(entry.getValue());
+            if (finished != null) {
+                finishedAt.put(entry.getKey(), finished);
+            }
         }
 
         // All containers have exited. Atomically claim the handle to avoid
@@ -3798,6 +3850,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 Integer code = exitCodes.get(c.getName());
                 if (code != null) {
                     c.setExitCode(code);
+                }
+                Instant finished = finishedAt.get(c.getName());
+                if (finished != null) {
+                    c.setFinishedAt(finished);
                 }
             });
         }
