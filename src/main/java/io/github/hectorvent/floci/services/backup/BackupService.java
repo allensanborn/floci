@@ -98,13 +98,13 @@ public class BackupService {
             throw new AwsException("InvalidRequestException",
                     "Non-empty backup vault cannot be deleted: " + vaultName, 400);
         }
-        // A locked vault cannot be deleted while the lock stands. Without this a
-        // compliance lock, whose entire purpose is that the vault cannot be removed,
-        // would be a field that changes an API response and nothing else.
-        if (vault.isLocked()) {
-            throw new AwsException("InvalidRequestException",
-                    "Backup vault is locked and cannot be deleted: " + vaultName, 400);
-        }
+        // No lock check here, deliberately. A lock protects the RECOVERY POINTS, not the
+        // vault shell: AWS's guide says the vault "can be deleted if it is empty and does
+        // not contain any recovery points", even under a compliance lock. The non-empty
+        // check above is already the case AWS refuses, so an added lock check would only
+        // ever fire where AWS succeeds — and it would break CloudFormation stack teardown,
+        // which deletes vaults through BackupVaultCfnProvisioner and tolerates only
+        // not-found.
         String key = vaultKey(region, vaultName);
         vaultStore.delete(key);
         // Drop the sub-resources with the vault. They are keyed by vault name, so
@@ -127,7 +127,15 @@ public class BackupService {
     // questions and AWS distinguishes them; collapsing them would tell a caller its
     // typo'd vault name was fine.
 
-    /** The documented BackupVaultEvent values. */
+    /**
+     * Every BackupVaultEvent value the PutBackupVaultNotifications reference lists,
+     * including the ones AWS marks deprecated — they are still accepted values, and
+     * rejecting one would fail an apply AWS allows.
+     *
+     * <p>All 30 of them. An earlier revision carried 17, which is the failure mode this
+     * whole validation has to avoid: a list that rejects is only as good as it is
+     * complete, and a stale one turns a valid configuration into a 400.
+     */
     private static final Set<String> BACKUP_VAULT_EVENTS = Set.of(
             "BACKUP_JOB_STARTED", "BACKUP_JOB_COMPLETED", "BACKUP_JOB_SUCCESSFUL",
             "BACKUP_JOB_FAILED", "BACKUP_JOB_EXPIRED",
@@ -136,7 +144,15 @@ public class BackupService {
             "COPY_JOB_STARTED", "COPY_JOB_SUCCESSFUL", "COPY_JOB_FAILED",
             "RECOVERY_POINT_MODIFIED",
             "BACKUP_PLAN_CREATED", "BACKUP_PLAN_MODIFIED",
-            "S3_BACKUP_OBJECT_FAILED", "S3_RESTORE_OBJECT_FAILED");
+            "S3_BACKUP_OBJECT_FAILED", "S3_RESTORE_OBJECT_FAILED",
+            "CONTINUOUS_BACKUP_INTERRUPTED",
+            "RECOVERY_POINT_INDEX_COMPLETED", "RECOVERY_POINT_INDEX_DELETED",
+            "RECOVERY_POINT_INDEXING_FAILED",
+            "EKS_RESTORE_OBJECT_FAILED", "EKS_RESTORE_OBJECT_SKIPPED",
+            "EKS_BACKUP_OBJECT_FAILED",
+            "ACCESS_POINT_AVAILABLE", "ACCESS_POINT_CREATION_FAILED",
+            "ACCESS_POINT_DELETED", "ACCESS_POINT_DELETION_FAILED",
+            "ACCESS_POINT_EXPIRED", "ACCESS_POINT_DISASSOCIATED");
 
     public void putBackupVaultAccessPolicy(String vaultName, String region, String policy) {
         describeBackupVault(vaultName, region);
@@ -204,13 +220,25 @@ public class BackupService {
     /**
      * Apply a Vault Lock.
      *
-     * <p>AWS has two modes and the difference is the whole point of the feature.
-     * With {@code ChangeableForDays} the lock is in governance mode: it becomes
-     * immutable at {@code LockDate}, and until then it can be changed or removed.
-     * Without it the lock is in compliance mode and is immutable immediately — it can
-     * never be removed, and the vault can never be deleted. Modelling only the first
-     * would make a compliance lock look reversible, which is precisely the property a
-     * caller sets one to obtain.
+     * <p>AWS has two modes and {@code ChangeableForDays} is what selects them, in the
+     * direction that reads backwards at first glance:
+     *
+     * <ul>
+     *   <li><b>Absent → governance mode.</b> "If this parameter is not specified, you
+     *       can delete Vault Lock from the vault using DeleteBackupVaultLockConfiguration
+     *       or change the Vault Lock configuration using PutBackupVaultLockConfiguration
+     *       at any time." No lock date is set and the lock never becomes immutable.</li>
+     *   <li><b>Present → compliance mode.</b> The lock date is that many days out, and
+     *       "before the lock date, you can delete Vault Lock ... On and after the lock
+     *       date, the Vault Lock becomes immutable and cannot be changed or deleted."
+     *       AWS enforces a 72-hour cooling-off period, hence the floor of 3.</li>
+     * </ul>
+     *
+     * <p>An earlier revision of this method had the two the wrong way round, which made
+     * AWS's freely removable governance lock permanent. Both quotations above are from
+     * the PutBackupVaultLockConfiguration reference; the Vault Lock guide states the
+     * mapping the same way ("If you wish to create a vault lock in governance mode, do
+     * not include ChangeableForDays").
      */
     public BackupVault putBackupVaultLockConfiguration(String vaultName, String region,
                                                        Long minRetentionDays,
@@ -264,12 +292,16 @@ public class BackupService {
     }
 
     /**
-     * True while a lock can still be changed: a governance lock before its LockDate.
-     * A compliance lock carries no LockDate and is never changeable.
+     * True while a lock can still be changed or removed.
+     *
+     * <p>A governance lock carries no LockDate and is always changeable. A compliance
+     * lock is changeable only before its LockDate. Absent means governance, so a null
+     * LockDate must answer TRUE here — the inverse of this is the defect that made a
+     * governance lock permanent.
      */
     private static boolean lockIsStillChangeable(BackupVault vault) {
         Long lockDate = vault.getLockDate();
-        return lockDate != null && Instant.now().getEpochSecond() < lockDate;
+        return lockDate == null || Instant.now().getEpochSecond() < lockDate;
     }
 
     // ── Plan ───────────────────────────────────────────────────────────────────

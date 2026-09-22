@@ -122,15 +122,19 @@ Actual backup is simulated — no data is read from or written to the referenced
 - **DeleteBackupVault** returns `InvalidRequestException` (400) if the vault contains recovery points.
 - **DeleteBackupPlan** returns `InvalidRequestException` (400) if the plan has active selections.
 - **CreateBackupVault** returns `AlreadyExistsException` (400) on duplicate vault names within the same region.
-- **Vault Lock has two modes, and they behave differently.** With `ChangeableForDays` the
-  lock is in governance mode: `LockDate` is set that many days ahead, and until then the
-  lock can be changed or deleted. Without it the lock is in compliance mode — immutable
-  immediately, so `PutBackupVaultLockConfiguration` and
-  `DeleteBackupVaultLockConfiguration` both return `InvalidRequestException` (400)
-  afterwards. `ChangeableForDays` below 3 is rejected.
-- **DeleteBackupVault** returns `InvalidRequestException` (400) while the vault is locked.
+- **Vault Lock has two modes, and `ChangeableForDays` selects them — in the direction
+  that reads backwards.** *Present* means **compliance** mode: `LockDate` is set that many
+  days ahead, the lock can still be changed or deleted before it, and on and after it both
+  `PutBackupVaultLockConfiguration` and `DeleteBackupVaultLockConfiguration` return
+  `InvalidRequestException` (400). *Absent* means **governance** mode: no `LockDate` is
+  set and the lock can be changed or removed at any time. `ChangeableForDays` below 3 is
+  rejected, matching AWS's 72-hour cooling-off period; retention days below 1 are rejected.
+- **A lock does not stop the vault being deleted.** It protects the recovery points, so an
+  empty vault can be deleted even under a compliance lock. The non-empty rule above is the
+  one that refuses.
 - **PutBackupVaultNotifications** rejects any `BackupVaultEvents` value outside the
-  documented set with `InvalidParameterValueException` (400), rather than storing it.
+  documented set with `InvalidParameterValueException` (400), rather than storing it. All
+  30 documented values are accepted, including the ones AWS marks deprecated.
 - Deleting an access policy or notification configuration that was never set is a no-op,
   so a destroy re-run does not fail.
 - The access policy and notification configuration are **not** returned by

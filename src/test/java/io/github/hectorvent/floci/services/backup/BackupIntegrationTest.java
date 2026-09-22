@@ -701,9 +701,17 @@ class BackupIntegrationTest {
         .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    // ── Vault Lock ─────────────────────────────────────────────────────────────
+    //
+    // ChangeableForDays selects the mode, in the direction that reads backwards:
+    // PRESENT means compliance (immutable on and after LockDate), ABSENT means
+    // governance (no LockDate, removable at any time). An earlier revision of this
+    // branch had them the wrong way round and these tests asserted the inversion, so
+    // the suite could not catch it. Both directions are now pinned separately.
+
     @Test
     @Order(130)
-    void aGovernanceLockIsVisibleOnTheVault() {
+    void aComplianceLockCarriesALockDateAndIsVisibleOnTheVault() {
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30,\"ChangeableForDays\":3}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
@@ -720,17 +728,10 @@ class BackupIntegrationTest {
 
     @Test
     @Order(131)
-    void aLockedVaultCannotBeDeleted() {
-        given().header("Authorization", AUTH)
-        .when().delete("/backup-vaults/" + SUB_VAULT)
-        .then().statusCode(400)
-            .body("__type", equalTo("InvalidRequestException"))
-            .body("message", containsString("locked"));
-    }
-
-    @Test
-    @Order(132)
-    void aGovernanceLockCanBeRemovedInsideItsGracePeriod() {
+    void aComplianceLockCanBeRemovedBeforeItsLockDate() {
+        // "Before the lock date, you can delete Vault Lock from the vault using
+        // DeleteBackupVaultLockConfiguration." The vault above was locked seconds ago
+        // with a three-day cooling-off period, so it is inside that window.
         given().header("Authorization", AUTH)
         .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock")
         .then().statusCode(204);
@@ -739,11 +740,58 @@ class BackupIntegrationTest {
         .when().get("/backup-vaults/" + SUB_VAULT)
         .then().statusCode(200)
             .body("Locked", equalTo(false))
+            .body("$", not(hasKey("LockDate")))
             .body("$", not(hasKey("MinRetentionDays")));
     }
 
     @Test
+    @Order(132)
+    void aGovernanceLockHasNoLockDateAndIsAlwaysRemovable() {
+        // No ChangeableForDays: "If this parameter is not specified, you can delete
+        // Vault Lock from the vault ... at any time."
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200)
+            .body("Locked", equalTo(true))
+            .body("$", not(hasKey("LockDate")));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200).body("Locked", equalTo(false));
+    }
+
+    @Test
     @Order(133)
+    void aGovernanceLockCanBeReconfiguredInPlace() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":14,\"MaxRetentionDays\":100}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200)
+            .body("MinRetentionDays", equalTo(14))
+            .body("MaxRetentionDays", equalTo(100));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
+    }
+
+    @Test
+    @Order(134)
     void lockRejectsAMaximumBelowTheMinimum() {
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"MinRetentionDays\":30,\"MaxRetentionDays\":7,\"ChangeableForDays\":3}")
@@ -752,30 +800,97 @@ class BackupIntegrationTest {
     }
 
     @Test
-    @Order(134)
-    void aComplianceLockCannotBeRemoved() {
-        // No ChangeableForDays means compliance mode: immutable immediately. If this
-        // could be deleted, the mode would be a field that changes a response and
-        // nothing else.
+    @Order(135)
+    void lockRejectsACoolingOffPeriodBelowThreeDays() {
+        // "AWS Backup enforces a 72-hour cooling-off period ... you must set
+        // ChangeableForDays to 3 or greater."
         given().header("Authorization", AUTH).contentType("application/json")
-            .body("{\"MinRetentionDays\":7,\"MaxRetentionDays\":30}")
+            .body("{\"MinRetentionDays\":7,\"ChangeableForDays\":2}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
-        .then().statusCode(204);
-
-        given().header("Authorization", AUTH)
-        .when().get("/backup-vaults/" + SUB_VAULT)
-        .then().statusCode(200).body("Locked", equalTo(true))
-            .body("$", not(hasKey("LockDate")));
-
-        given().header("Authorization", AUTH)
-        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock")
         .then().statusCode(400)
-            .body("__type", equalTo("InvalidRequestException"))
-            .body("message", containsString("immutable"));
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("ChangeableForDays"));
     }
 
     @Test
-    @Order(140)
+    @Order(136)
+    void lockRejectsRetentionPeriodsBelowOneDay() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":0}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MaxRetentionDays\":0}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @Test
+    @Order(137)
+    void anEmptyVaultCanBeDeletedWhileLocked() {
+        // A lock protects the recovery points, not the vault shell: AWS deletes an empty
+        // vault even under a lock. An earlier revision refused this, which would also
+        // have broken CloudFormation stack teardown.
+        String vault = "locked-but-empty";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":7,\"ChangeableForDays\":3}")
+        .when().put("/backup-vaults/" + vault + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+    }
+
+    @Test
+    @Order(138)
+    void accessPolicyAcceptsAnObjectBodyAsWellAsAString() {
+        // Terraform and the console send Policy as a JSON string; an object is accepted
+        // and re-serialised rather than refused, since refusing would be stricter than
+        // AWS for no benefit.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":{\"Version\":\"2012-10-17\",\"Statement\":[]}}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(200).body("Policy", containsString("2012-10-17"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/access-policy").then().statusCode(204);
+    }
+
+    @Test
+    @Order(139)
+    void notificationsAreDroppedWithTheVaultToo() {
+        // The policy case is covered at Order(141); this is the other sub-resource
+        // store, which has its own delete call and could be forgotten independently.
+        String vault = "recycled-notify";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\","
+                + "\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + vault + "/notification-configuration")
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(141)
     void subResourcesDoNotOutliveTheirVault() {
         // A fresh vault, configured, deleted and recreated under the same name must not
         // inherit the old policy: the sub-resource stores are keyed by vault name.
