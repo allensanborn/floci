@@ -21,6 +21,8 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,6 +50,16 @@ import java.util.Map;
 public class AsyncInvokeDestinationRouter {
 
     private static final Logger LOG = Logger.getLogger(AsyncInvokeDestinationRouter.class);
+
+    /**
+     * Milliseconds, always three digits. {@code Instant.toString()} emits micro or nanosecond
+     * precision on JDK 9+, and emits NO fractional part at all when the nanos happen to be zero,
+     * so a consumer parsing the record with a fixed {@code .SSS} pattern breaks roughly once in a
+     * billion records. AWS always emits milliseconds. Same formatter shape as
+     * {@code ElasticBeanstalkQueryHandler}.
+     */
+    private static final DateTimeFormatter RECORD_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     private static final String RECORD_VERSION = "1.0";
     private static final String EVENT_SOURCE = "lambda";
@@ -137,6 +149,18 @@ public class AsyncInvokeDestinationRouter {
     }
 
     /**
+     * The record timestamp, always with exactly three fractional digits.
+     *
+     * <p>Package-private so a test can pin it at a ZERO-NANOSECOND instant. That input is the
+     * only one that separates this from {@code truncatedTo(MILLIS).toString()}, which looks
+     * equivalent and drops the fraction entirely on an exact second. A test that only formats
+     * {@code now()} passes against both roughly 999 times in 1000.
+     */
+    static String formatRecordTimestamp(Instant instant) {
+        return RECORD_TIMESTAMP.format(instant);
+    }
+
+    /**
      * The asynchronous invocation record, the shape AWS delivers to every destination kind. The
      * function ARN carries the executed version, as it does in a real record.
      */
@@ -145,7 +169,7 @@ public class AsyncInvokeDestinationRouter {
         String version = executedVersion(fn);
         ObjectNode record = objectMapper.createObjectNode();
         record.put("version", RECORD_VERSION);
-        record.put("timestamp", Instant.now().toString());
+        record.put("timestamp", formatRecordTimestamp(Instant.now()));
 
         ObjectNode requestContext = record.putObject("requestContext");
         requestContext.put("requestId", result.getRequestId());

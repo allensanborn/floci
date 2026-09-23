@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * other account is delivered no destination at all.
  */
 @QuarkusTest
-class LambdaEventInvokeConfigAccountScopeTest {
+class LambdaEventInvokeConfigAccountScopeIntegrationTest {
 
     private static final String REGION = "us-east-1";
     private static final String OTHER_ACCOUNT = "100000000012";

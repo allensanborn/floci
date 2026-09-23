@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import java.time.Instant;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
@@ -71,6 +72,28 @@ class AsyncInvokeDestinationRouterTest {
         fn.setFunctionName("bank-pawnshop");
         fn.setFunctionArn(FUNCTION_ARN);
         fn.setAccountId("000000000000");
+    }
+
+    @Test
+    void record_timestampAlwaysCarriesExactlyThreeFractionalDigits() {
+        // AWS always emits milliseconds (2019-11-14T18:16:05.568Z). Instant.toString() emits
+        // micro/nanosecond precision on JDK 9+ and NO fractional part at all when the nanos are
+        // zero, so a consumer parsing with a fixed .SSS pattern breaks about once in a billion
+        // records -- the kind of defect that never shows up in a test run that happens to be lucky.
+        configure(BUS_ARN, null);
+
+        router.route(fn, request(), success("{}"), 0);
+
+        String timestamp = detailOf(capturedEventEntry()).get("timestamp").asText();
+        assertTrue(timestamp.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z"),
+                "timestamp must be ISO-8601 with exactly three fractional digits, was: " + timestamp);
+
+        // The deciding case, pinned rather than left to chance. An exact second is the only input
+        // that separates the formatter from truncatedTo(MILLIS).toString(), which drops the
+        // fraction there; asserting only on now() passes against both ~999 runs in 1000.
+        assertEquals("2019-11-14T18:16:05.000Z",
+                AsyncInvokeDestinationRouter.formatRecordTimestamp(Instant.ofEpochSecond(1573755365L)),
+                "an exact second must still carry .000");
     }
 
     @Test
