@@ -65,8 +65,9 @@ code. See `issues/route53resolver-firewall-domain-list-retry-conflict.md`.
 
 For `CreateResolverEndpoint` the comparison covers the actual `IpAddresses` entries,
 not just how many there are, so a retry that keeps the count but changes a subnet or
-address is a conflict. The member is `IpAddresses`, as AWS names it; the list's shape is
-named `IpAddressRequest`, which earlier builds of this service mistook for the wire name.
+address is a conflict. The member is `IpAddresses`, as AWS names it; its list shape is
+`IpAddressesRequest` and each element is an `IpAddressRequest`, which is the name earlier
+builds of this service mistook for the wire name.
 That spelling is still accepted so existing callers keep working, but it is not the
 documented one, and a retry that switches between the two is not a conflict because the
 comparison is on contents. Order is not significant. The modelled `ResolverEndpoint` shape has
