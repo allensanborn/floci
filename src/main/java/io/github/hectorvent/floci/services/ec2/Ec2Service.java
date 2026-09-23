@@ -33,6 +33,7 @@ import org.jboss.logging.Logger;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
@@ -3123,6 +3124,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // a capture -- not the ones already processed, which linger as shutting-down while their
         // containers are torn down asynchronously, and not the ones still waiting their turn.
         Set<String> terminating = new LinkedHashSet<>(instanceIds);
+        // Captured HERE, on the request thread, because the post-teardown hook below runs on the
+        // teardown executor where no request context is active and every account-aware store
+        // would silently fall back to the default account.
+        String owner = callerAccountId();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
 
@@ -3138,7 +3143,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // attempt below runs while teardown is still scheduled, so for a batch whose
                 // containers all tear down slowly every in-loop attempt can be refused by the
                 // daemon and, without this, nothing would try again.
-                containerManager.terminate(inst, () -> reclaimCapturesPinnedBy(region, inst, terminating));
+                containerManager.terminate(inst, () ->
+                        RequestScopes.runAs(owner, () -> reclaimCapturesPinnedBy(region, inst, terminating)));
             }
             // Delete root volume if deleteOnTermination (matches real AWS behavior)
             if (inst.getRootVolumeId() != null) {

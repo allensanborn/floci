@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -413,6 +414,57 @@ class Ec2CapturedImageReclaimIntegrationTest {
         when(containerManager.removeCommittedImage(tag)).thenReturn(true);
         pendingTeardowns.forEach(Runnable::run);
 
+        verify(containerManager, times(3)).removeCommittedImage(tag);
+    }
+
+    @Test
+    void aBatchInANonDefaultAccountStillReclaimsAfterTeardown() throws Exception {
+        // The hook runs on the teardown executor, which carries no request context, so every
+        // account-aware store it touches falls back to the default account. For a function of
+        // this shape that is silent: capturedImageFor finds no registered image under
+        // 000000000000, returns null, and the reclaim returns at its first guard with nothing
+        // logged -- which is indistinguishable from "this AMI was never captured".
+        //
+        // The other batch tests cannot catch it. They drain pendingTeardowns on the test thread,
+        // where the request context IS active, so the fallback never happens. This one drains on
+        // a bare thread, which is what the executor actually gives the hook.
+        String tag = "floci-ami/ami-other-account:latest";
+        String otherAccount = "210987654321";
+
+        Image image = RequestScopes.callAs(otherAccount, () -> {
+            when(containerManager.commitInstance(any(Instance.class), anyString())).thenReturn(tag);
+            Instance source = launch(BASE_AMI);
+            Image captured = service.createImage(REGION, source.getInstanceId(),
+                    "other-account", "captured", true);
+            service.terminateInstances(REGION, List.of(source.getInstanceId()));
+            return captured;
+        });
+
+        RequestScopes.runAs(otherAccount, () -> {
+            terminationLeavesInstancesShuttingDown();
+            Instance first = launch(image.getImageId());
+            Instance second = launch(image.getImageId());
+            service.deregisterImage(REGION, image.getImageId(), false);
+            when(containerManager.removeCommittedImage(tag)).thenReturn(false);
+            service.terminateInstances(REGION,
+                    List.of(first.getInstanceId(), second.getInstanceId()));
+        });
+
+        // The two synchronous attempts ran on the request thread, where the account IS active, so
+        // they found the AMI and were refused by the daemon rather than by a wrong-account lookup.
+        // That is exactly why this bug is invisible to the other batch tests.
+        verify(containerManager, times(2)).removeCommittedImage(tag);
+
+        // Teardown finishes on a thread with no request scope at all, as it does in production.
+        when(containerManager.removeCommittedImage(tag)).thenReturn(true);
+        List<Runnable> draining = List.copyOf(pendingTeardowns);
+        Thread bare = new Thread(() -> draining.forEach(Runnable::run), "teardown-no-request-scope");
+        bare.start();
+        bare.join(30_000);
+
+        // The third attempt is the hook's. Without the account captured on the request thread it
+        // never happens: the lookup resolves under the default account, finds nothing, and the
+        // reclaim returns at its first guard, leaving the layer on disk for good.
         verify(containerManager, times(3)).removeCommittedImage(tag);
     }
 
