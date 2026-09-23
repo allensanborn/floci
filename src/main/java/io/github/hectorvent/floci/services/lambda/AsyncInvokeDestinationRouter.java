@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
@@ -177,7 +178,8 @@ public class AsyncInvokeDestinationRouter {
         // destination lives in has to be re-established before any account-aware store is read.
         boolean delivered = switch (AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).service() : "") {
             case "events" -> {
-                RequestScopes.runAs(accountId, () -> putOnEventBus(arn, body, region, failed));
+                RequestScopes.runAs(accountId, () ->
+                        putOnEventBus(arn, body, region, failed, fn.getFunctionArn()));
                 yield true;
             }
             case "sqs" -> {
@@ -222,14 +224,27 @@ public class AsyncInvokeDestinationRouter {
     /**
      * Puts the record on the bus as the event {@code detail}. The source and detail type are the
      * fixed ones AWS uses, which is what a rule on a Lambda destination matches against.
+     *
+     * <p>{@code Resources} carries the invoked function and the destination, as AWS fills it.
+     * Without it a rule whose pattern matches on {@code resources} never fires: the field arrives
+     * empty rather than absent, so the pattern simply does not match and the record is dropped
+     * silently at the bus instead of at the destination. Rules matching on {@code detail} are
+     * unaffected either way, which is why this stayed invisible.
      */
-    private void putOnEventBus(String busArn, String detail, String region, boolean failed) {
+    private void putOnEventBus(String busArn, String detail, String region, boolean failed,
+                               String functionArn) {
         Map<String, Object> entry = new LinkedHashMap<>();
         // PutEvents takes a full event-bus ARN as EventBusName and validates it.
         entry.put("EventBusName", busArn);
         entry.put("Source", EVENT_SOURCE);
         entry.put("DetailType", failed ? FAILURE_DETAIL_TYPE : SUCCESS_DETAIL_TYPE);
         entry.put("Detail", detail);
+        ArrayNode resources = objectMapper.createArrayNode();
+        if (functionArn != null && !functionArn.isBlank()) {
+            resources.add(functionArn);
+        }
+        resources.add(busArn);
+        entry.put("Resources", resources);
         // A null account routes the bus lookup through the request context just established,
         // the only path that carries the un-prefixed legacy-key fallback.
         EventBridgeService.PutEventsResult result =

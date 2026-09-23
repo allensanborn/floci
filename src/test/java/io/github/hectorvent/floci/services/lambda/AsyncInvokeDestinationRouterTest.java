@@ -74,6 +74,23 @@ class AsyncInvokeDestinationRouterTest {
     }
 
     @Test
+    void eventBridgeDestination_carriesTheFunctionAndDestinationAsEventResources() {
+        // AWS fills the event's resources with the invoked function and the destination. Without
+        // them a rule whose pattern matches on `resources` never fires: the field arrives empty
+        // rather than absent, so the pattern does not match and the record is dropped at the bus.
+        // Rules matching on `detail` are unaffected, which is why this stayed invisible.
+        configure(BUS_ARN, null);
+
+        router.route(fn, request(), success("{\"bankId\":\"PawnShop\"}"), 0);
+
+        JsonNode resources = capturedEventEntry().get("Resources");
+        assertTrue(resources != null && resources.isArray() && resources.size() == 2,
+                "the entry must carry both ARNs as Resources, was: " + resources);
+        assertEquals(FUNCTION_ARN, resources.get(0).asText());
+        assertEquals(BUS_ARN, resources.get(1).asText());
+    }
+
+    @Test
     void onSuccessEventBridgeDestination_putsTheRecordOnTheBusAsTheEventDetail() {
         configure(BUS_ARN, null);
 

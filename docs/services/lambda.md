@@ -58,9 +58,9 @@ settings.
 ### Asynchronous Invocation Destinations
 
 An asynchronous invocation (`InvocationType: Event`) delivers its result to the `OnSuccess` or
-`OnFailure` destination the configuration names. All four destination kinds are supported, routed
-by the service in the destination ARN: an EventBridge event bus, an SQS queue, an SNS topic, and
-another Lambda function. A function with no destination configured is unaffected, and delivery
+`OnFailure` destination the configuration names. Four of AWS's five destination kinds are
+supported, routed by the service in the destination ARN: an EventBridge event bus, an SQS queue,
+an SNS topic, and another Lambda function. A function with no destination configured is unaffected, and delivery
 never changes what the caller sees: the invoke still answers `202` immediately, and a destination
 that rejects the record is logged rather than reported back.
 
@@ -90,13 +90,18 @@ type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExh
 `functionError` member is present only on a failure record. Since retries are not applied, a
 failure reaches its destination once and `approximateInvokeCount` is always 1.
 
-Two limits are worth knowing:
+Three limits are worth knowing:
 
 - **A destination configured on an alias does not fire.** The configuration is matched against the
   version the invocation actually ran, so one stored for `$LATEST` or for an explicit version is
   found, while one stored for an alias (`Qualifier: prod`) is not, and nothing is delivered. The
   CDK `onSuccess` and `onFailure` properties store theirs under `$LATEST`, so a destination
   declared that way is unaffected.
+- **An S3 `OnFailure` destination is not delivered.** AWS added an S3 bucket as a fifth
+  destination kind, on failure only. Floci routes on the service in the destination ARN and has
+  no `s3` arm, so such a record is dropped with a warning rather than written to the bucket. The
+  configuration is still stored and read back, so Terraform and CloudFormation converge; only the
+  delivery is missing.
 - **A chain of Lambda destinations stops at 16 hops.** A function whose destination leads back into
   itself would otherwise invoke forever. AWS halts such a chain at about the same depth through
   recursive loop detection; here the record at the sixteenth hop is dropped with a warning.
