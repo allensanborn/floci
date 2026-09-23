@@ -137,6 +137,9 @@ public class BackupService {
      * whole validation has to avoid: a list that rejects is only as good as it is
      * complete, and a stale one turns a valid configuration into a 400.
      */
+    /** AWS's documented ceiling for every Vault Lock day value. */
+    private static final long MAX_RETENTION_DAYS = 36500;
+
     private static final Set<String> BACKUP_VAULT_EVENTS = Set.of(
             "BACKUP_JOB_STARTED", "BACKUP_JOB_COMPLETED", "BACKUP_JOB_SUCCESSFUL",
             "BACKUP_JOB_FAILED", "BACKUP_JOB_EXPIRED",
@@ -250,24 +253,15 @@ public class BackupService {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
         }
-        if (minRetentionDays != null && minRetentionDays < 1) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MinRetentionDays must be at least 1", 400);
-        }
-        if (maxRetentionDays != null && maxRetentionDays < 1) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaxRetentionDays must be at least 1", 400);
-        }
+        requireDayRange("MinRetentionDays", minRetentionDays, 1);
+        requireDayRange("MaxRetentionDays", maxRetentionDays, 1);
         if (minRetentionDays != null && maxRetentionDays != null && maxRetentionDays < minRetentionDays) {
             throw new AwsException("InvalidParameterValueException",
                     "MaxRetentionDays must be greater than or equal to MinRetentionDays", 400);
         }
-        if (changeableForDays != null && changeableForDays < 3) {
-            // AWS's documented floor. Below it a governance lock would be effectively
-            // immutable on creation, which is what compliance mode is for.
-            throw new AwsException("InvalidParameterValueException",
-                    "ChangeableForDays must be at least 3", 400);
-        }
+        // The floor is 3 because below it a governance lock would be effectively immutable on
+        // creation, which is what compliance mode is for.
+        requireDayRange("ChangeableForDays", changeableForDays, 3);
         vault.setLocked(true);
         vault.setMinRetentionDays(minRetentionDays);
         vault.setMaxRetentionDays(maxRetentionDays);
@@ -277,6 +271,29 @@ public class BackupService {
         LOG.infov("Locked backup vault {0} in {1} (changeable for {2} day(s))",
                 vaultName, region, changeableForDays);
         return vault;
+    }
+
+    /**
+     * AWS's documented ceiling on every Vault Lock day value: "no less than 3 and no greater than
+     * 36,500". Without the upper bound two things go wrong, and the second is the worse one.
+     *
+     * <p>A value like 40,000 is accepted here and refused by AWS, which is the shape this whole
+     * corpus exists to catch: a Terraform configuration that applies locally and fails for real.
+     *
+     * <p>And {@code Long.MAX_VALUE} is a perfectly good long, so it survives the integral check in
+     * the controller and reaches {@code Instant.plus}, which throws {@code ArithmeticException:
+     * long overflow}. The only exception mapper in the tree handles {@link AwsException}, so that
+     * escapes as an HTTP 500 rather than the documented 400. Bounding the value is what stops the
+     * overflow being reachable at all, rather than catching it after the fact.
+     */
+    private static void requireDayRange(String field, Long value, long floor) {
+        if (value == null) {
+            return;
+        }
+        if (value < floor || value > MAX_RETENTION_DAYS) {
+            throw new AwsException("InvalidParameterValueException",
+                    field + " must be between " + floor + " and " + MAX_RETENTION_DAYS, 400);
+        }
     }
 
     public void deleteBackupVaultLockConfiguration(String vaultName, String region) {
