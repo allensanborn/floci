@@ -76,9 +76,10 @@ class AsyncInvokeDestinationRouterTest {
     @Test
     void eventBridgeDestination_carriesTheFunctionAndDestinationAsEventResources() {
         // AWS fills the event's resources with the invoked function and the destination. Without
-        // them a rule whose pattern matches on `resources` never fires: the field arrives empty
-        // rather than absent, so the pattern does not match and the record is dropped at the bus.
-        // Rules matching on `detail` are unaffected, which is why this stayed invisible.
+        // them a rule matching on `resources` never fires: matchesPattern casts the ABSENT member
+        // to an ArrayNode, the NPE is swallowed and logged as a pattern-parse failure, and the
+        // record is dropped at the bus while the log blames the caller's pattern. Rules matching
+        // on `detail` are unaffected, which is why this stayed invisible.
         configure(BUS_ARN, null);
 
         router.route(fn, request(), success("{\"bankId\":\"PawnShop\"}"), 0);

@@ -102,9 +102,13 @@ Three limits are worth knowing:
   no `s3` arm, so such a record is dropped with a warning rather than written to the bucket. The
   configuration is still stored and read back, so Terraform and CloudFormation converge; only the
   delivery is missing.
-- **A chain of Lambda destinations stops at 16 hops.** A function whose destination leads back into
-  itself would otherwise invoke forever. AWS halts such a chain at about the same depth through
-  recursive loop detection; here the record at the sixteenth hop is dropped with a warning.
+- **A chain of Lambda destinations stops at 16 hops, but only a chain of Lambda destinations.** A
+  function whose `OnSuccess` names another function would otherwise invoke forever; AWS halts such
+  a chain at about the same depth through recursive loop detection, and here the record at the
+  sixteenth hop is dropped with a warning. The bound is keyed on the destination being a Lambda
+  ARN, so a cycle that leaves and re-enters Lambda by another route is **not** bounded: a topic
+  that fans back to the function, or a bus rule targeting it, each start a fresh chain at zero.
+  Avoid configuring one until this is closed.
 
 ## Hot-Reloading via Reactive S3 Sync
 
