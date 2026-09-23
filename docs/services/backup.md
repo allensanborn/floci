@@ -12,7 +12,7 @@
 |---|---|---|---|
 | `CreateBackupVault` | `PUT` | `/backup-vaults/{backupVaultName}` | Create a backup vault |
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
-| `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty, unlocked backup vault |
+| `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault, locked or not |
 | `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults |
 
 ### Backup Vault Access Policy

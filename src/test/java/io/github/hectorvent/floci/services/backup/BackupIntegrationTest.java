@@ -827,38 +827,6 @@ class BackupIntegrationTest {
     }
 
     @Test
-    @Order(141)
-    void lockRejectsADayValueAboveTheDocumentedCeiling() {
-        // AWS: "no less than 3 and no greater than 36,500". Without the ceiling a Terraform
-        // configuration with changeable_for_days = 40000 applies here and fails on real AWS,
-        // which is the exact divergence this corpus exists to find.
-        for (String field : new String[] {"MinRetentionDays", "MaxRetentionDays", "ChangeableForDays"}) {
-            given().header("Authorization", AUTH).contentType("application/json")
-                .body("{\"" + field + "\":40000}")
-            .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
-            .then().statusCode(400)
-                .body("__type", equalTo("InvalidParameterValueException"))
-                .body("message", containsString(field));
-        }
-    }
-
-    @Test
-    @Order(142)
-    void lockRejectsLongMaxDaysWithA400RatherThanOverflowingTo500() {
-        // Long.MAX_VALUE is a perfectly good long, so it survives the integral check and used to
-        // reach Instant.plus, which throws ArithmeticException: long overflow. The only exception
-        // mapper handles AwsException, so that escaped as a 500. The ceiling makes the overflow
-        // unreachable rather than catching it afterwards; this pins the status code, because a
-        // 500 here would be indistinguishable from the emulator simply falling over.
-        given().header("Authorization", AUTH).contentType("application/json")
-            .body("{\"ChangeableForDays\":9223372036854775807}")
-        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
-        .then().statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"))
-            .body("message", containsString("ChangeableForDays"));
-    }
-
-    @Test
     @Order(140)
     void lockRejectsANonIntegralRetention() {
         // asLong() would have coerced each of these instead of refusing: 1.5 truncates
@@ -964,4 +932,36 @@ class BackupIntegrationTest {
         .when().get("/backup-vaults/" + vault + "/access-policy")
         .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
+    @Test
+    @Order(142)
+    void lockRejectsADayValueAboveTheDocumentedCeiling() {
+        // AWS: "no less than 3 and no greater than 36,500". Without the ceiling a Terraform
+        // configuration with changeable_for_days = 40000 applies here and fails on real AWS,
+        // which is the exact divergence this corpus exists to find.
+        for (String field : new String[] {"MinRetentionDays", "MaxRetentionDays", "ChangeableForDays"}) {
+            given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"" + field + "\":40000}")
+            .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", containsString(field));
+        }
+    }
+
+    @Test
+    @Order(143)
+    void lockRejectsLongMaxDaysWithA400RatherThanOverflowingTo500() {
+        // Long.MAX_VALUE is a perfectly good long, so it survives the integral check and used to
+        // reach Instant.plus, which throws ArithmeticException: long overflow. The only exception
+        // mapper handles AwsException, so that escaped as a 500. The ceiling makes the overflow
+        // unreachable rather than catching it afterwards; this pins the status code, because a
+        // 500 here would be indistinguishable from the emulator simply falling over.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"ChangeableForDays\":9223372036854775807}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("ChangeableForDays"));
+    }
+
 }

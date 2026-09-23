@@ -268,8 +268,10 @@ public class BackupService {
         vault.setLockDate(changeableForDays == null ? null
                 : Instant.now().plus(changeableForDays, ChronoUnit.DAYS).getEpochSecond());
         vaultStore.put(vaultKey(region, vaultName), vault);
-        LOG.infov("Locked backup vault {0} in {1} (changeable for {2} day(s))",
-                vaultName, region, changeableForDays);
+        LOG.infov("Locked backup vault {0} in {1} ({2})", vaultName, region,
+                changeableForDays == null
+                        ? "governance mode, changeable at any time"
+                        : "compliance mode, changeable for " + changeableForDays + " day(s)");
         return vault;
     }
 
