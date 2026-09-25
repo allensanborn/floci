@@ -4548,6 +4548,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * endpoint. One class AWS also serves is not modelled, needing per-service metadata floci
      * does not hold: the several private names a service such as S3 answers to.
      */
+    /**
+     * The network interfaces an interface endpoint owns, by id, in subnet order.
+     *
+     * <p>DescribeVpcEndpoints reports these in {@code networkInterfaceIdSet}, and the
+     * Terraform AWS provider surfaces them as {@code aws_vpc_endpoint.network_interface_ids}.
+     * Gruntwork modules feed that output downstream, so an empty list does not merely
+     * diff -- it propagates into whatever consumes it.
+     *
+     * <p>Derived from {@link #endpointNetworkInterfaces(String)} rather than stored, and
+     * deliberately so: those interfaces are already synthesized deterministically from the
+     * endpoint's subnets, and a second, stored copy could disagree with the one flow-log
+     * attribution reads. A Gateway endpoint has no interfaces and gets an empty list, which
+     * is what AWS reports for one.
+     */
+    public List<String> endpointNetworkInterfaceIds(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        List<String> ids = new ArrayList<>();
+        for (String subnetId : endpoint.getSubnetIds()) {
+            ids.add(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+        }
+        return ids;
+    }
+
     public List<VpcEndpointDnsEntry> endpointDnsEntries(VpcEndpoint endpoint) {
         if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
             return List.of();
