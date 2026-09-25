@@ -80,14 +80,13 @@ public class BackupService {
         if (vaultStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
         }
-        // Sweep any sub-resource record left over for this key before the vault exists to own
-        // it. The stores are keyed by vault name, so a stale policy or notification
-        // configuration would otherwise graft itself onto this brand-new vault, which reports
-        // a configuration its creator never sent. Paired with the delete order below: together
-        // they close the window that neither closes alone.
-        accessPolicyStore.delete(key);
-        notificationStore.delete(key);
-
+        // No sub-resource sweep here. An earlier revision of this fix swept the two stores at
+        // this point, which traded one race for a worse one: two creates of the same name can
+        // both pass the existence check above, and if a policy is applied against the first
+        // vault before the second reaches its sweep, the sweep deletes a LIVE configuration
+        // while both creates report success. Sub-resources are keyed per vault incarnation
+        // instead -- see subResourceKey -- so a new vault simply cannot see an old vault's
+        // records and there is nothing to sweep.
         BackupVault vault = new BackupVault();
         vault.setBackupVaultName(vaultName);
         vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
@@ -123,18 +122,15 @@ public class BackupService {
         // leaving them behind would silently graft an old policy or notification
         // configuration onto the next vault created with the same name.
         //
-        // DEPENDENTS FIRST, the vault record LAST, and the order is the whole point. There is
-        // no transaction across three stores, so whatever sits between the first delete and
-        // the last is observable. With the vault removed first, a concurrent request could
-        // recreate it under the same name and configure it in that gap, and the two deletes
-        // still to come would erase the NEW vault's configuration -- data loss on a live
-        // vault. Removing the vault last inverts the exposure into a merely stale record,
-        // and createBackupVault sweeps the key before taking ownership, so that record
-        // cannot reach the next vault either. Neither half closes the window alone.
-        String key = vaultKey(region, vaultName);
-        accessPolicyStore.delete(key);
-        notificationStore.delete(key);
-        vaultStore.delete(key);
+        // Dependents first, the vault record last. There is no transaction across three
+        // stores, so whatever sits between the first delete and the last is observable, and
+        // this order keeps the observable state a vault with no configuration rather than a
+        // configuration with no vault. The sub-resource keys carry this vault's creation date,
+        // so these two deletes cannot reach a configuration belonging to a later vault that
+        // has taken the same name -- which is what made the previous order lose data.
+        accessPolicyStore.delete(subResourceKey(region, vault));
+        notificationStore.delete(subResourceKey(region, vault));
+        vaultStore.delete(vaultKey(region, vaultName));
     }
 
     public List<BackupVault> listBackupVaults(String region) {
@@ -194,9 +190,9 @@ public class BackupService {
      * a different case: it is present and invalid, so it is still rejected.
      */
     public void putBackupVaultAccessPolicy(String vaultName, String region, String policy) {
-        describeBackupVault(vaultName, region);
+        BackupVault vault = describeBackupVault(vaultName, region);
         if (policy == null) {
-            accessPolicyStore.delete(vaultKey(region, vaultName));
+            accessPolicyStore.delete(subResourceKey(region, vault));
             return;
         }
         if (policy.isBlank()) {
@@ -204,7 +200,7 @@ public class BackupService {
                     "Policy must be a non-empty resource policy document", 400);
         }
         requireJsonObject(policy);
-        accessPolicyStore.put(vaultKey(region, vaultName), policy);
+        accessPolicyStore.put(subResourceKey(region, vault), policy);
     }
 
     /**
@@ -232,8 +228,8 @@ public class BackupService {
     }
 
     public String getBackupVaultAccessPolicy(String vaultName, String region) {
-        describeBackupVault(vaultName, region);
-        return accessPolicyStore.get(vaultKey(region, vaultName))
+        BackupVault vault = describeBackupVault(vaultName, region);
+        return accessPolicyStore.get(subResourceKey(region, vault))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No access policy found for backup vault: " + vaultName, 400));
     }
@@ -245,13 +241,13 @@ public class BackupService {
      * operation's errors and does not say whether an unset policy raises it.
      */
     public void deleteBackupVaultAccessPolicy(String vaultName, String region) {
-        describeBackupVault(vaultName, region);
-        accessPolicyStore.delete(vaultKey(region, vaultName));
+        BackupVault vault = describeBackupVault(vaultName, region);
+        accessPolicyStore.delete(subResourceKey(region, vault));
     }
 
     public void putBackupVaultNotifications(String vaultName, String region,
                                             String snsTopicArn, List<String> events) {
-        describeBackupVault(vaultName, region);
+        BackupVault vault = describeBackupVault(vaultName, region);
         // Absent and present-but-empty are different faults. PutBackupVaultNotifications lists
         // MissingParameterValueException, "Indicates that a required parameter is missing", in
         // its Errors section, which names the absent case. The reference does not name the
@@ -281,21 +277,21 @@ public class BackupService {
             throw new AwsException("InvalidParameterValueException",
                     "Invalid backup vault event(s): " + String.join(", ", unknown), 400);
         }
-        notificationStore.put(vaultKey(region, vaultName),
+        notificationStore.put(subResourceKey(region, vault),
                 new BackupVaultNotifications(snsTopicArn, events));
     }
 
     public BackupVaultNotifications getBackupVaultNotifications(String vaultName, String region) {
-        describeBackupVault(vaultName, region);
-        return notificationStore.get(vaultKey(region, vaultName))
+        BackupVault vault = describeBackupVault(vaultName, region);
+        return notificationStore.get(subResourceKey(region, vault))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No notification configuration found for backup vault: " + vaultName, 400));
     }
 
     /** Idempotent, for the same reason as {@link #deleteBackupVaultAccessPolicy}. */
     public void deleteBackupVaultNotifications(String vaultName, String region) {
-        describeBackupVault(vaultName, region);
-        notificationStore.delete(vaultKey(region, vaultName));
+        BackupVault vault = describeBackupVault(vaultName, region);
+        notificationStore.delete(subResourceKey(region, vault));
     }
 
     /**
@@ -410,16 +406,36 @@ public class BackupService {
      * cleanly here and failed its first backup on real AWS, which is precisely the divergence this
      * emulator exists to remove rather than introduce.
      *
-     * <p>A job carrying no lifecycle at all is not refused. AWS's default retention is indefinite,
-     * which no maximum can be exceeded by and no minimum violated.
+     * <p><b>An absent lifecycle is checked against the MAXIMUM, not waved through.</b> The first
+     * version of this returned early whenever DeleteAfterDays was missing, on the reasoning that
+     * indefinite retention cannot exceed a maximum. That is backwards, and it left the ceiling
+     * bypassable by simply omitting the member: retaining forever is the LARGEST retention there
+     * is, so it exceeds every finite maximum, and the recovery point outlives the limit the lock
+     * was created to impose. A minimum is the other way round -- indefinite satisfies any floor --
+     * so an absent lifecycle is refused only when a maximum is set.
+     *
+     * <p>That last point is Floci's reading rather than a quotation. The reference states the
+     * rule for a lifecycle that falls outside the window and does not spell out the absent case;
+     * the reading is forced by what a maximum retention period means, and it errs toward refusing
+     * a request rather than storing a recovery point the lock forbids.
      */
     private static void requireLifecycleWithinLock(BackupVault vault, Lifecycle lifecycle) {
-        if (!vault.isLocked() || lifecycle == null || lifecycle.getDeleteAfterDays() == null) {
+        if (!vault.isLocked()) {
             return;
         }
-        long deleteAfter = lifecycle.getDeleteAfterDays();
         Long min = vault.getMinRetentionDays();
         Long max = vault.getMaxRetentionDays();
+        Long deleteAfterDays = lifecycle == null ? null : lifecycle.getDeleteAfterDays();
+        if (deleteAfterDays == null) {
+            if (max != null) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Lifecycle DeleteAfterDays is required for a vault locked with a maximum "
+                                + "retention of " + max + " day(s): retaining indefinitely would "
+                                + "exceed it", 400);
+            }
+            return;
+        }
+        long deleteAfter = deleteAfterDays;
         if (min != null && deleteAfter < min) {
             throw new AwsException("InvalidParameterValueException",
                     "Lifecycle DeleteAfterDays of " + deleteAfter + " is below the vault lock's "
@@ -815,6 +831,30 @@ public class BackupService {
 
     private static String vaultKey(String region, String vaultName) {
         return region + ":" + vaultName;
+    }
+
+    /**
+     * The key a vault's sub-resources are stored under: the vault key plus the vault's creation
+     * date, so it identifies THIS vault rather than merely this NAME.
+     *
+     * <p>Keying by name alone is what made delete-and-recreate hazardous in both directions. A
+     * record surviving a delete grafted an old policy onto the next vault to take the name, and
+     * cleaning up by name could erase a live configuration belonging to a vault that had already
+     * replaced the one being deleted. Sweeping stale records on create fixed the first and made
+     * the second worse, because two creates racing the existence check would both sweep, and the
+     * later sweep would delete a configuration applied against the earlier vault.
+     *
+     * <p>Including the creation date removes the shared key instead of policing it. A new vault
+     * cannot read, and cleanup for an old vault cannot touch, a record belonging to a different
+     * incarnation of the name -- no sweep, and no dependence on the order two stores are written
+     * in. Deleting a vault still removes its own records, now because they are its own rather
+     * than because nothing else has claimed them yet.
+     *
+     * <p>Two vaults of one name in the same SECOND would collide, which is why the delete path
+     * below still removes the sub-resources rather than relying on this alone.
+     */
+    private static String subResourceKey(String region, BackupVault vault) {
+        return vaultKey(region, vault.getBackupVaultName()) + ":" + vault.getCreationDate();
     }
 
     private static String vaultKey(BackupVault vault) {

@@ -1156,8 +1156,26 @@ class BackupIntegrationTest {
             .body("__type", equalTo("InvalidParameterValueException"))
             .body("message", containsString("maximum retention"));
 
-        // Inside the window, and with no lifecycle at all: both accepted. AWS's default
-        // retention is indefinite, which no maximum is exceeded by and no minimum violates.
+        // Omitting the lifecycle entirely is refused too, and this one is worth spelling out
+        // because the first version of the fix got it backwards and waved it through, on the
+        // reasoning that indefinite retention cannot exceed a maximum. Retaining forever is the
+        // LARGEST retention there is, so it exceeds every finite maximum: omitting the member
+        // was a one-line bypass of the ceiling the lock exists to impose.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("DeleteAfterDays is required"));
+
+        // Inside the window: accepted. The guard has to let a valid job through, or a locked
+        // vault could never be backed up at all.
         given().header("Authorization", AUTH).contentType("application/json")
             .body("""
                 {
@@ -1168,6 +1186,22 @@ class BackupIntegrationTest {
                 }
                 """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
         .when().put("/backup-jobs").then().statusCode(200);
+    }
+
+    @Test
+    @Order(156)
+    void aLockWithOnlyAMinimumStillAcceptsAJobWithNoLifecycle() {
+        // The other side of the rule above, and the reason it is scoped to a MAXIMUM. A floor is
+        // satisfied by indefinite retention, so refusing an absent lifecycle here would refuse a
+        // request AWS accepts -- the divergence this emulator exists to remove. lock-no-minimum
+        // carries MaxRetentionDays only, so this needs its own vault with the inverse.
+        String vault = "lock-only-minimum";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":30}")
+        .when().put("/backup-vaults/" + vault + "/vault-lock").then().statusCode(204);
 
         given().header("Authorization", AUTH).contentType("application/json")
             .body("""
@@ -1176,8 +1210,44 @@ class BackupIntegrationTest {
                   "ResourceArn": "%s",
                   "IamRoleArn": "%s"
                 }
-                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
         .when().put("/backup-jobs").then().statusCode(200);
+    }
+
+    @Test
+    @Order(157)
+    void subResourcesAreKeyedPerVaultIncarnationRatherThanPerName() {
+        // Why the keying matters rather than what it does: the stores used to be keyed by vault
+        // name, which made one key shared between every vault that ever held the name. A record
+        // surviving a delete grafted an old policy onto the next vault, and cleanup for a deleted
+        // vault could erase a live configuration belonging to the vault that had replaced it.
+        //
+        // Honest about what this test can and cannot show: it pins the sequential behaviour, and
+        // the sequential behaviour was already correct once deleteBackupVault removed the
+        // sub-resources. The races the keying removes need two requests interleaved and are not
+        // reachable from a single-threaded HTTP test. What is reachable, and is asserted here, is
+        // that a vault carries only the configuration applied to IT.
+        String vault = "incarnation-keyed-vault";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + vault + "/notification-configuration").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/notification-configuration")
+        .then().statusCode(200).body("SNSTopicArn", equalTo(TOPIC));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test

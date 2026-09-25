@@ -136,7 +136,13 @@ Actual backup is simulated — no data is read from or written to the referenced
   `DeleteRecoveryPoint` returns `InvalidRequestException` (400) for a recovery point younger
   than `MinRetentionDays` while the vault is locked, and `StartBackupJob` returns
   `InvalidParameterValueException` (400) when the lifecycle's `DeleteAfterDays` falls outside
-  `[MinRetentionDays, MaxRetentionDays]`. Both are the documented purpose of the lock: it
+  `[MinRetentionDays, MaxRetentionDays]`, **including when the lifecycle is omitted and the
+  lock sets a maximum** -- retaining indefinitely is the largest retention there is, so it
+  exceeds every finite ceiling, and waving it through would leave the ceiling bypassable by
+  dropping one member. An absent lifecycle under a minimum-only lock is accepted, because a
+  floor is satisfied by indefinite retention. That scoping is Floci's reading rather than a
+  quotation: the reference states the rule for a lifecycle outside the window and does not
+  spell out the absent case. Both are the documented purpose of the lock: it
   "prevents the deletion of recovery points before their retention periods expire", and
   "backup jobs will fail if the lifecycle policy of the backup plan is outside the vault
   lock's retention period". **Governance mode enforces here exactly as compliance mode
@@ -175,11 +181,13 @@ Actual backup is simulated — no data is read from or written to the referenced
   `"SNSTopicArn": 123` fails instead of storing the topic `"123"`.
 - Deleting an access policy or notification configuration that was never set is a no-op,
   so a destroy re-run does not fail.
-- **Deleting a vault removes its policy and notification configuration, dependents first.**
-  The three stores have no transaction between them, so the order is load-bearing: the vault
-  record goes last, and `CreateBackupVault` sweeps both sub-resource keys before taking
-  ownership of a name. Together those stop a concurrent delete-and-recreate either losing the
-  new vault's configuration or inheriting the old one.
+- **A vault's policy and notification configuration are keyed per vault, not per vault
+  name**, so a vault carries only the configuration applied to it. Reusing a deleted vault's
+  name therefore starts clean, and cleaning up a deleted vault cannot reach a configuration
+  belonging to a later vault of the same name. Deleting a vault removes both, dependents
+  first: the three stores have no transaction between them, and that order keeps any
+  observable intermediate state a vault without configuration rather than a configuration
+  without a vault.
 - The access policy and notification configuration are **not** returned by
   `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
   operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
