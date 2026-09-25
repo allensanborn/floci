@@ -4511,25 +4511,51 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     public List<NetworkInterface> endpointNetworkInterfaces(String region) {
         List<NetworkInterface> result = new ArrayList<>();
         for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
-            if (!region.equals(endpoint.getRegion())
-                    || !"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            if (region.equals(endpoint.getRegion())) {
+                result.addAll(endpointNetworkInterfacesOf(endpoint));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The interfaces ONE endpoint owns. The region-wide method above is this, looped.
+     *
+     * <p>A distinct NAME rather than an overload of {@code endpointNetworkInterfaces},
+     * deliberately: an overload taking VpcEndpoint beside one taking String makes a
+     * Mockito {@code any()} ambiguous, and FlowLogServiceTest:31 already uses one. A new
+     * method should not make an existing test stop compiling.
+     *
+     * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
+     * the wire, the objects flow-log attribution reads -- comes from one place and
+     * cannot disagree. The alternative, deriving ids independently from the same
+     * {@link #endpointEniId}, looks equivalent and is not: this method skips a subnet
+     * whose record has gone, and a second derivation that forgot to would report an
+     * interface the first one denies exists. Congruence by construction beats congruence
+     * by inspection, and the two had in fact already diverged.
+     *
+     * <p>A Gateway endpoint owns no interfaces and gets an empty list.
+     */
+    public List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint) {
+        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+            return List.of();
+        }
+        String region = endpoint.getRegion();
+        List<NetworkInterface> result = new ArrayList<>();
+        for (String subnetId : endpoint.getSubnetIds()) {
+            Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
+            if (subnet == null) {
                 continue;
             }
-            for (String subnetId : endpoint.getSubnetIds()) {
-                Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
-                if (subnet == null) {
-                    continue;
-                }
-                NetworkInterface ni = new NetworkInterface();
-                ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
-                ni.setSubnetId(subnetId);
-                ni.setVpcId(endpoint.getVpcId());
-                ni.setAvailabilityZone(subnet.getAvailabilityZone());
-                ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
-                ni.setInterfaceType("vpc_endpoint");
-                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
-                result.add(ni);
-            }
+            NetworkInterface ni = new NetworkInterface();
+            ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+            ni.setSubnetId(subnetId);
+            ni.setVpcId(endpoint.getVpcId());
+            ni.setAvailabilityZone(subnet.getAvailabilityZone());
+            ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
+            ni.setInterfaceType("vpc_endpoint");
+            ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
+            result.add(ni);
         }
         return result;
     }
@@ -4549,19 +4575,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * Gruntwork modules feed that output downstream, so an empty list does not merely
      * diff -- it propagates into whatever consumes it.
      *
-     * <p>Derived from {@link #endpointNetworkInterfaces(String)} rather than stored, and
-     * deliberately so: those interfaces are already synthesized deterministically from the
-     * endpoint's subnets, and a second, stored copy could disagree with the one flow-log
-     * attribution reads. A Gateway endpoint has no interfaces and gets an empty list, which
-     * is what AWS reports for one.
+     * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
+     * separately, so the ids on the wire are BY CONSTRUCTION the interfaces flow-log
+     * attribution reads. An earlier version of this method called {@link #endpointEniId}
+     * itself and looked equivalent; it was not, because it lacked that method\'s skip of a
+     * subnet whose record has gone, and the two were measured reporting different sets
+     * after a subnet was deleted out from under a live endpoint. A Gateway endpoint has no
+     * interfaces and gets an empty list, which is what AWS reports for one.
      */
     public List<String> endpointNetworkInterfaceIds(VpcEndpoint endpoint) {
-        if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
-            return List.of();
-        }
         List<String> ids = new ArrayList<>();
-        for (String subnetId : endpoint.getSubnetIds()) {
-            ids.add(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+        for (NetworkInterface ni : endpointNetworkInterfacesOf(endpoint)) {
+            ids.add(ni.getNetworkInterfaceId());
         }
         return ids;
     }
