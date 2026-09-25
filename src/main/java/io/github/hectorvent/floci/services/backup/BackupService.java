@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -43,9 +44,16 @@ public class BackupService {
 
     private final RegionResolver regionResolver;
     private final int jobCompletionDelaySeconds;
-    // Syntax-checking a resource policy needs a parser. Its own, not a shared injected one:
-    // this reads a document and never configures anything, so there is nothing to share.
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper;
+
+    // One monitor per vault key, so the check-then-write in createBackupVault and the
+    // multi-store cleanup in deleteBackupVault are atomic for a given name. Same shape as
+    // SecretsManagerService#lockFor and KinesisService's append locks.
+    private final ConcurrentHashMap<String, Object> vaultLocks = new ConcurrentHashMap<>();
+
+    private Object lockFor(String vaultKey) {
+        return vaultLocks.computeIfAbsent(vaultKey, k -> new Object());
+    }
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "backup-job-scheduler");
@@ -54,7 +62,8 @@ public class BackupService {
     });
 
     @Inject
-    public BackupService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public BackupService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                         ObjectMapper objectMapper) {
         this.vaultStore     = storageFactory.create("backup", "backup-vaults.json",     new TypeReference<>() {});
         this.planStore      = storageFactory.create("backup", "backup-plans.json",      new TypeReference<>() {});
         this.selectionStore = storageFactory.create("backup", "backup-selections.json", new TypeReference<>() {});
@@ -63,6 +72,7 @@ public class BackupService {
         this.accessPolicyStore  = storageFactory.create("backup", "backup-vault-access-policies.json", new TypeReference<>() {});
         this.notificationStore  = storageFactory.create("backup", "backup-vault-notifications.json",   new TypeReference<>() {});
         this.regionResolver = regionResolver;
+        this.objectMapper = objectMapper;
         this.jobCompletionDelaySeconds = config.services().backup().jobCompletionDelaySeconds();
     }
 
@@ -77,27 +87,34 @@ public class BackupService {
                                          String creatorRequestId, Map<String, String> tags,
                                          String region) {
         String key = vaultKey(region, vaultName);
-        if (vaultStore.get(key).isPresent()) {
-            throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
+        // Check and write under one monitor. Unsynchronised, two creates of the same name can
+        // both find the name free and both write, so AlreadyExistsException never fires and the
+        // two vaults share a sub-resource key -- the second could then read configuration
+        // applied to the first. AWS's CreateBackupVault is atomic for a name; this is what
+        // makes it atomic here. Same per-key monitor pattern as SecretsManagerService#lockFor.
+        //
+        // No sub-resource sweep in here, deliberately. An earlier revision swept the two stores
+        // at this point and that traded one race for a worse one: with two creates in flight the
+        // later sweep could delete a configuration already applied against the earlier vault,
+        // while both creates reported success. Deleting a configuration a caller had just
+        // successfully applied is worse than the stale record the sweep was there to prevent.
+        // Sub-resources are keyed per vault incarnation instead, so there is nothing to sweep.
+        synchronized (lockFor(key)) {
+            if (vaultStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
+            }
+            BackupVault vault = new BackupVault();
+            vault.setBackupVaultName(vaultName);
+            vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
+            vault.setEncryptionKeyArn(encryptionKeyArn);
+            vault.setCreationDate(Instant.now().getEpochSecond());
+            vault.setCreatorRequestId(creatorRequestId);
+            vault.setNumberOfRecoveryPoints(0);
+            vault.setTags(tags);
+            vaultStore.put(key, vault);
+            LOG.infov("Created backup vault {0} in {1}", vaultName, region);
+            return vault;
         }
-        // No sub-resource sweep here. An earlier revision of this fix swept the two stores at
-        // this point, which traded one race for a worse one: two creates of the same name can
-        // both pass the existence check above, and if a policy is applied against the first
-        // vault before the second reaches its sweep, the sweep deletes a LIVE configuration
-        // while both creates report success. Sub-resources are keyed per vault incarnation
-        // instead -- see subResourceKey -- so a new vault simply cannot see an old vault's
-        // records and there is nothing to sweep.
-        BackupVault vault = new BackupVault();
-        vault.setBackupVaultName(vaultName);
-        vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
-        vault.setEncryptionKeyArn(encryptionKeyArn);
-        vault.setCreationDate(Instant.now().getEpochSecond());
-        vault.setCreatorRequestId(creatorRequestId);
-        vault.setNumberOfRecoveryPoints(0);
-        vault.setTags(tags);
-        vaultStore.put(key, vault);
-        LOG.infov("Created backup vault {0} in {1}", vaultName, region);
-        return vault;
     }
 
     public BackupVault describeBackupVault(String vaultName, String region) {
@@ -106,6 +123,14 @@ public class BackupService {
     }
 
     public void deleteBackupVault(String vaultName, String region) {
+        // Under the same monitor as createBackupVault: the three deletes below must not
+        // interleave with a create of this name, or the name could be recreated mid-cleanup.
+        synchronized (lockFor(vaultKey(region, vaultName))) {
+            deleteBackupVaultLocked(vaultName, region);
+        }
+    }
+
+    private void deleteBackupVaultLocked(String vaultName, String region) {
         BackupVault vault = describeBackupVault(vaultName, region);
         if (vault.getNumberOfRecoveryPoints() > 0) {
             throw new AwsException("InvalidRequestException",
@@ -850,8 +875,11 @@ public class BackupService {
      * in. Deleting a vault still removes its own records, now because they are its own rather
      * than because nothing else has claimed them yet.
      *
-     * <p>Two vaults of one name in the same SECOND would collide, which is why the delete path
-     * below still removes the sub-resources rather than relying on this alone.
+     * <p>The creation date is only unique per name because {@code createBackupVault} holds a
+     * per-name monitor across its check and its write, so two vaults of one name cannot exist
+     * and cannot be created in the same second. Without that lock this key would still collide
+     * and the two vaults could read each other's configuration. The delete path also removes its
+     * own sub-resources, which covers a record surviving for any other reason.
      */
     private static String subResourceKey(String region, BackupVault vault) {
         return vaultKey(region, vault.getBackupVaultName()) + ":" + vault.getCreationDate();

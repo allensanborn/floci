@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -1259,15 +1261,14 @@ class BackupIntegrationTest {
         // user real time: the configuration passes locally and the deploy is where they learn.
         for (String bad : new String[] {"not a policy", "{\"Version\":", "[]", "42", "\"a string\""}) {
             given().header("Authorization", AUTH).contentType("application/json")
-                .body(java.util.Map.of("Policy", bad))
+                .body(Map.of("Policy", bad))
             .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
             .then().statusCode(400)
                 .body("__type", equalTo("InvalidParameterValueException"));
         }
         // A real document still works, so the check refuses only what it should.
         given().header("Authorization", AUTH).contentType("application/json")
-            .body("{\"Policy\":" + new com.fasterxml.jackson.databind.ObjectMapper()
-                    .valueToTree(POLICY).toString() + "}")
+            .body(Map.of("Policy", POLICY))
         .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy").then().statusCode(204);
     }
 
