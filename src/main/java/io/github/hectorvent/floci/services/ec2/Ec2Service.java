@@ -4542,13 +4542,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * The {@code DnsEntries} an interface endpoint reports. The names and zones are synthesized
-     * deterministically rather than persisted, so a restart keeps answering with what the caller
-     * first saw, and the private-DNS entry carries its own zone because AWS creates one per
-     * endpoint. One class AWS also serves is not modelled, needing per-service metadata floci
-     * does not hold: the several private names a service such as S3 answers to.
-     */
-    /**
      * The network interfaces an interface endpoint owns, by id, in subnet order.
      *
      * <p>DescribeVpcEndpoints reports these in {@code networkInterfaceIdSet}, and the
@@ -4573,6 +4566,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return ids;
     }
 
+    /**
+     * The {@code DnsEntries} an interface endpoint reports. The names and zones are synthesized
+     * deterministically rather than persisted, so a restart keeps answering with what the caller
+     * first saw, and the private-DNS entry carries its own zone because AWS creates one per
+     * endpoint. One class AWS also serves is not modelled, needing per-service metadata floci
+     * does not hold: the several private names a service such as S3 answers to.
+     */
     public List<VpcEndpointDnsEntry> endpointDnsEntries(VpcEndpoint endpoint) {
         if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
             return List.of();
