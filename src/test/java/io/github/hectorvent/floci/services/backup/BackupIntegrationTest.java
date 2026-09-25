@@ -1023,4 +1023,234 @@ class BackupIntegrationTest {
             .body("message", containsString("ChangeableForDays"));
     }
 
+    // ── What the lock enforces, and the validation that stops a bad value looking good ──
+    //
+    // Every test below covers a finding Greptile raised on the fork PR that our own review
+    // had not: four of its six findings were one shape, state written that nothing consumed.
+    // A round-trip test cannot see that shape -- the write works and the read works -- so
+    // these assert on the BEHAVIOUR the stored value is supposed to change, which is the only
+    // place the difference shows.
+
+    private static final String LOCK_VAULT = "lock-enforcement-vault";
+
+    @Test
+    @Order(150)
+    void aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention() throws InterruptedException {
+        // The finding: PutBackupVaultLockConfiguration succeeded, DescribeBackupVault
+        // reported Locked, and every recovery point the lock was supposed to protect deleted
+        // exactly as before, because deleteRecoveryPoint read no lock field. The lock was
+        // decorative. Note the shape of the old test suite: it could lock a vault and read the
+        // lock back, and both passed, while this was true.
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + LOCK_VAULT).then().statusCode(200);
+
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        Thread.sleep(2000); // job-completion-delay-seconds=1 in test config
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .body("State", equalTo("COMPLETED"))
+            .extract().path("RecoveryPointArn");
+
+        // Governance mode: no ChangeableForDays. It still enforces retention here, because
+        // Floci does not model backup:DisableGovernanceRetention and so cannot grant the
+        // override that would let a privileged caller through on real AWS.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":30,\"MaxRetentionDays\":365}")
+        .when().put("/backup-vaults/" + LOCK_VAULT + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + LOCK_VAULT + "/recovery-points/" + rpArn)
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", containsString("30"));
+
+        // And the vault is still non-empty, so the refusal really did refuse rather than
+        // reporting an error after deleting. A 400 with the row gone would be worse than
+        // no check at all.
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + LOCK_VAULT)
+        .then().statusCode(200).body("NumberOfRecoveryPoints", equalTo(1));
+    }
+
+    @Test
+    @Order(151)
+    void aLockWithNoMinimumRetentionDoesNotBlockDeletion() {
+        // The other direction, and the one that makes the test above worth trusting. A guard
+        // measured only where it fires is indistinguishable from one that refuses everything,
+        // and a lock that blocked every deletion would fail a Terraform destroy outright.
+        // MinRetentionDays is optional, so a lock carrying none protects nothing by retention.
+        String vault = "lock-no-minimum";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        String jid = given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().extract().path("RecoveryPointArn");
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MaxRetentionDays\":365}")
+        .when().put("/backup-vaults/" + vault + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault + "/recovery-points/" + rpArn)
+        .then().statusCode(204);
+    }
+
+    @Test
+    @Order(152)
+    void aBackupJobIsRefusedWhenItsLifecycleFallsOutsideTheLock() {
+        // "Backup jobs will fail if the lifecycle policy of the backup plan is outside the
+        // vault lock's retention period." Until this existed, getMaxRetentionDays had ZERO
+        // readers anywhere in the tree: the ceiling was accepted, stored, and reported by
+        // DescribeBackupVault while bounding nothing. A Terraform configuration pairing a lock
+        // with a shorter plan lifecycle applied cleanly here and failed its first real backup.
+        // LOCK_VAULT is locked at [30, 365] by the test above.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 7}
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("minimum retention"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 4000}
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("maximum retention"));
+
+        // Inside the window, and with no lifecycle at all: both accepted. AWS's default
+        // retention is indefinite, which no maximum is exceeded by and no minimum violates.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s",
+                  "Lifecycle": {"DeleteAfterDays": 90}
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200);
+    }
+
+    @Test
+    @Order(153)
+    void anUnparseablePolicyIsRefusedRatherThanStored() {
+        // The finding: the blank check accepted any other string, so `not a policy` was stored,
+        // PUT reported success and GET returned it unchanged. An invalid policy looked applied.
+        // That is the emulator being MORE permissive than AWS, the one direction that costs a
+        // user real time: the configuration passes locally and the deploy is where they learn.
+        for (String bad : new String[] {"not a policy", "{\"Version\":", "[]", "42", "\"a string\""}) {
+            given().header("Authorization", AUTH).contentType("application/json")
+                .body(java.util.Map.of("Policy", bad))
+            .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        }
+        // A real document still works, so the check refuses only what it should.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":" + new com.fasterxml.jackson.databind.ObjectMapper()
+                    .valueToTree(POLICY).toString() + "}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy").then().statusCode(204);
+    }
+
+    @Test
+    @Order(154)
+    void aNonStringTopicArnIsRefusedRatherThanCoerced() {
+        // asText() turns the JSON number 123 into the nonblank string "123", which passed every
+        // present-and-nonblank check and was stored as the topic: an unusable configuration
+        // that reads back as valid. Same coercion Greptile found in longOrNull, other direction.
+        for (String bad : new String[] {"123", "true", "{}", "[]"}) {
+            given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"SNSTopicArn\":" + bad + ",\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+            .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+            .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", containsString("SNSTopicArn"));
+        }
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(204);
+    }
+
+    @Test
+    @Order(155)
+    void aRecreatedVaultDoesNotInheritTheDeletedVaultsConfiguration() {
+        // The stores are keyed by vault name and there is no transaction across the three, so
+        // a leftover record grafts an old policy onto a new vault of the same name.
+        //
+        // Measured, and stated because the measurement is unflattering: this test still PASSES
+        // with the create-side sweep removed, because the sequential path is already covered by
+        // the deletes in deleteBackupVault. What it pins is the sequential guarantee, not the
+        // fix. The concurrent interleaving the fix exists for -- a Put landing between the
+        // sub-resource deletes and the vault delete -- is not reachable from a single-threaded
+        // HTTP test, so no test here pins the sweep. Keeping it is a judgement that the race is
+        // real rather than a claim that it is covered.
+        String vault = "recycled-vault-name";
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + vault + "/notification-configuration").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + vault).then().statusCode(204);
+
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + vault + "/notification-configuration")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
 }

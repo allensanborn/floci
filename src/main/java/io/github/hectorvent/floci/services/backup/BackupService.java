@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.backup;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -41,6 +43,9 @@ public class BackupService {
 
     private final RegionResolver regionResolver;
     private final int jobCompletionDelaySeconds;
+    // Syntax-checking a resource policy needs a parser. Its own, not a shared injected one:
+    // this reads a document and never configures anything, so there is nothing to share.
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "backup-job-scheduler");
@@ -75,6 +80,14 @@ public class BackupService {
         if (vaultStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
         }
+        // Sweep any sub-resource record left over for this key before the vault exists to own
+        // it. The stores are keyed by vault name, so a stale policy or notification
+        // configuration would otherwise graft itself onto this brand-new vault, which reports
+        // a configuration its creator never sent. Paired with the delete order below: together
+        // they close the window that neither closes alone.
+        accessPolicyStore.delete(key);
+        notificationStore.delete(key);
+
         BackupVault vault = new BackupVault();
         vault.setBackupVaultName(vaultName);
         vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
@@ -106,13 +119,22 @@ public class BackupService {
         // ever fire where AWS succeeds -- and it would break CloudFormation stack teardown,
         // which deletes vaults through BackupVaultCfnProvisioner and tolerates only
         // not-found.
-        String key = vaultKey(region, vaultName);
-        vaultStore.delete(key);
         // Drop the sub-resources with the vault. They are keyed by vault name, so
         // leaving them behind would silently graft an old policy or notification
         // configuration onto the next vault created with the same name.
+        //
+        // DEPENDENTS FIRST, the vault record LAST, and the order is the whole point. There is
+        // no transaction across three stores, so whatever sits between the first delete and
+        // the last is observable. With the vault removed first, a concurrent request could
+        // recreate it under the same name and configure it in that gap, and the two deletes
+        // still to come would erase the NEW vault's configuration -- data loss on a live
+        // vault. Removing the vault last inverts the exposure into a merely stale record,
+        // and createBackupVault sweeps the key before taking ownership, so that record
+        // cannot reach the next vault either. Neither half closes the window alone.
+        String key = vaultKey(region, vaultName);
         accessPolicyStore.delete(key);
         notificationStore.delete(key);
+        vaultStore.delete(key);
     }
 
     public List<BackupVault> listBackupVaults(String region) {
@@ -181,7 +203,32 @@ public class BackupService {
             throw new AwsException("InvalidParameterValueException",
                     "Policy must be a non-empty resource policy document", 400);
         }
+        requireJsonObject(policy);
         accessPolicyStore.put(vaultKey(region, vaultName), policy);
+    }
+
+    /**
+     * A resource policy has to be a JSON object before anything else can be true of it.
+     *
+     * <p>Checking only for blankness accepted {@code not a policy}: PUT reported success and GET
+     * returned the string back unchanged, so an unparseable policy looked applied. That is the
+     * emulator being more permissive than AWS, which is the one direction that costs a user real
+     * time -- the configuration passes locally and the deploy is where they find out.
+     *
+     * <p>Syntax only. Floci does not evaluate whether the document grants or denies anything, and
+     * PutBackupVaultAccessPolicy does not list MalformedPolicyDocumentException among its errors,
+     * so a bad document is reported as the invalid parameter value it is.
+     */
+    private void requireJsonObject(String policy) {
+        try {
+            if (!objectMapper.readTree(policy).isObject()) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Policy must be a JSON object", 400);
+            }
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Policy is not a valid JSON document: " + e.getOriginalMessage(), 400);
+        }
     }
 
     public String getBackupVaultAccessPolicy(String vaultName, String region) {
@@ -350,6 +397,42 @@ public class BackupService {
     }
 
     /**
+     * Refuse a backup whose retention the vault's lock does not permit.
+     *
+     * <p>This is the other half of what a Vault Lock does, and the half that acts at write time:
+     * "Backup jobs will fail if the lifecycle policy of the backup plan is outside the vault lock's
+     * retention period." MinRetentionDays and MaxRetentionDays bound {@code DeleteAfterDays}, so a
+     * plan retaining for 7 days cannot write into a vault whose lock demands 30.
+     *
+     * <p>Until this existed, {@code getMaxRetentionDays} had no reader anywhere in the tree: the
+     * ceiling was accepted, stored, and reported by DescribeBackupVault while bounding nothing. A
+     * Terraform configuration pairing a lock with a shorter plan lifecycle therefore applied
+     * cleanly here and failed its first backup on real AWS, which is precisely the divergence this
+     * emulator exists to remove rather than introduce.
+     *
+     * <p>A job carrying no lifecycle at all is not refused. AWS's default retention is indefinite,
+     * which no maximum can be exceeded by and no minimum violated.
+     */
+    private static void requireLifecycleWithinLock(BackupVault vault, Lifecycle lifecycle) {
+        if (!vault.isLocked() || lifecycle == null || lifecycle.getDeleteAfterDays() == null) {
+            return;
+        }
+        long deleteAfter = lifecycle.getDeleteAfterDays();
+        Long min = vault.getMinRetentionDays();
+        Long max = vault.getMaxRetentionDays();
+        if (min != null && deleteAfter < min) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Lifecycle DeleteAfterDays of " + deleteAfter + " is below the vault lock's "
+                            + "minimum retention of " + min + " day(s)", 400);
+        }
+        if (max != null && deleteAfter > max) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Lifecycle DeleteAfterDays of " + deleteAfter + " exceeds the vault lock's "
+                            + "maximum retention of " + max + " day(s)", 400);
+        }
+    }
+
+    /**
      * True while a lock can still be changed or removed.
      *
      * <p>A governance lock carries no LockDate and is always changeable. A compliance
@@ -457,6 +540,7 @@ public class BackupService {
     public BackupJob startBackupJob(String vaultName, String resourceArn, String iamRoleArn,
                                      Lifecycle lifecycle, String region) {
         BackupVault vault = describeBackupVault(vaultName, region);
+        requireLifecycleWithinLock(vault, lifecycle);
 
         String jobId = UUID.randomUUID().toString();
         long now = Instant.now().getEpochSecond();
@@ -527,8 +611,37 @@ public class BackupService {
                 .toList();
     }
 
+    /**
+     * Delete a recovery point, unless a Vault Lock still protects it.
+     *
+     * <p>This is what the lock is FOR. "Vault Lock ... prevents the deletion of recovery points
+     * before their retention periods expire", and the minimum retention period is the floor: a
+     * recovery point younger than MinRetentionDays cannot be deleted while the vault is locked.
+     * Without this check the lock was decorative -- it governed only its own mutation, so
+     * PutBackupVaultLockConfiguration succeeded, DescribeBackupVault reported Locked, and every
+     * recovery point the lock was supposed to protect deleted exactly as before. An empty vault
+     * then deletes too, so the whole protection came apart from the one operation it names.
+     *
+     * <p>Both lock modes enforce retention. Governance mode differs on real AWS in that a
+     * principal holding {@code backup:DisableGovernanceRetention} can override it; Floci does not
+     * model that permission, so governance mode enforces here as compliance mode does. That is
+     * stricter than AWS for an unusually-privileged caller and identical for every other one,
+     * which is the safer direction: a local test that deletes a protected recovery point and
+     * passes would be describing AWS behaviour that needs a specific permission to reproduce.
+     */
     public void deleteRecoveryPoint(String vaultName, String recoveryPointArn, String region) {
+        BackupVault vault = describeBackupVault(vaultName, region);
         RecoveryPoint rp = describeRecoveryPoint(vaultName, recoveryPointArn, region);
+        if (vault.isLocked() && vault.getMinRetentionDays() != null) {
+            long ageDays = ChronoUnit.DAYS.between(
+                    Instant.ofEpochSecond(rp.getCreationDate()), Instant.now());
+            if (ageDays < vault.getMinRetentionDays()) {
+                throw new AwsException("InvalidRequestException",
+                        "Recovery point is protected by a vault lock until its minimum retention of "
+                                + vault.getMinRetentionDays() + " day(s) has elapsed: " + recoveryPointArn,
+                        400);
+            }
+        }
         recoveryStore.delete(recoveryPointArn);
         decrementVaultCount(vaultName, region);
     }

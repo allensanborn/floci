@@ -132,6 +132,17 @@ Actual backup is simulated — no data is read from or written to the referenced
 - **A lock does not stop the vault being deleted.** It protects the recovery points, so an
   empty vault can be deleted even under a compliance lock. The non-empty rule above is the
   one that refuses.
+- **What the lock actually enforces, in both directions.**
+  `DeleteRecoveryPoint` returns `InvalidRequestException` (400) for a recovery point younger
+  than `MinRetentionDays` while the vault is locked, and `StartBackupJob` returns
+  `InvalidParameterValueException` (400) when the lifecycle's `DeleteAfterDays` falls outside
+  `[MinRetentionDays, MaxRetentionDays]`. Both are the documented purpose of the lock: it
+  "prevents the deletion of recovery points before their retention periods expire", and
+  "backup jobs will fail if the lifecycle policy of the backup plan is outside the vault
+  lock's retention period". **Governance mode enforces here exactly as compliance mode
+  does.** On real AWS a principal holding `backup:DisableGovernanceRetention` can override a
+  governance lock; Floci does not model that permission, so it does not grant the override.
+  That is stricter than AWS for that one privileged caller and identical for every other.
 - **The Vault Lock day limits are per field, because AWS documents them per field.**
   `ChangeableForDays` must be 3 or greater and at most 36,500. `MaxRetentionDays` is at
   most 36,500. `MinRetentionDays` has a documented minimum of 1 day and **no documented
@@ -156,8 +167,19 @@ Actual backup is simulated — no data is read from or written to the referenced
   AWS behaviour: it leaves the vault carrying exactly the policy the request carried,
   instead of retaining one the caller did not send. A `Policy` that is present but empty
   is a different case and is rejected with `InvalidParameterValueException` (400).
+- **`Policy` must be a JSON object.** A document that does not parse, or parses to
+  something other than an object, is rejected with `InvalidParameterValueException` (400)
+  rather than stored. Syntax only: Floci does not evaluate what the document grants.
+- **`SNSTopicArn` must be a JSON string.** A number or boolean is rejected with
+  `InvalidParameterValueException` (400) rather than coerced, so a request carrying
+  `"SNSTopicArn": 123` fails instead of storing the topic `"123"`.
 - Deleting an access policy or notification configuration that was never set is a no-op,
   so a destroy re-run does not fail.
+- **Deleting a vault removes its policy and notification configuration, dependents first.**
+  The three stores have no transaction between them, so the order is load-bearing: the vault
+  record goes last, and `CreateBackupVault` sweeps both sub-resource keys before taking
+  ownership of a name. Together those stop a concurrent delete-and-recreate either losing the
+  new vault's configuration or inheriting the old one.
 - The access policy and notification configuration are **not** returned by
   `DescribeBackupVault`, matching AWS: each is reachable only through its own `Get`
   operation. The lock fields (`Locked`, `LockDate`, `MinRetentionDays`,
@@ -172,6 +194,17 @@ Actual backup is simulated — no data is read from or written to the referenced
 
 ## Not Yet Supported
 
+- **Notification delivery.** `PutBackupVaultNotifications` stores the configuration and
+  `GetBackupVaultNotifications` reports it, but no vault event is ever published to the SNS
+  topic: a subscriber receives nothing when a backup job completes. The configuration is
+  modelled, the delivery is not, so a Terraform configuration that attaches notifications
+  applies and reads back correctly while a test asserting on a received message will fail.
+- **Access policy enforcement.** `PutBackupVaultAccessPolicy` stores a resource policy and
+  `GetBackupVaultAccessPolicy` reports it, but no authorization path consults it: a policy
+  denying a vault operation does not prevent that operation, even with IAM enforcement
+  enabled. This matches the rest of Floci rather than being specific to Backup -- S3 bucket
+  policies are the only resource policies any service enforces today. Stated here because a
+  stored-and-ignored policy is otherwise indistinguishable from an enforced one.
 - Restore jobs (`StartRestoreJob`, `DescribeRestoreJob`, `ListRestoreJobs`)
 - Copy jobs (`StartCopyJob`, `DescribeCopyJob`, `ListCopyJobs`)
 - Report plans (`CreateReportPlan`, `DescribeReportPlan`, etc.)

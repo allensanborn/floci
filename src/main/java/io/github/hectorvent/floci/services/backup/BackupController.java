@@ -153,7 +153,7 @@ public class BackupController {
         JsonNode eventsNode = req.path("BackupVaultEvents");
         List<String> events = eventsNode.isMissingNode() || eventsNode.isNull() ? null
                 : readStringList(eventsNode);
-        service.putBackupVaultNotifications(vaultName, region, textOrNull(req, "SNSTopicArn"), events);
+        service.putBackupVaultNotifications(vaultName, region, stringOrNull(req, "SNSTopicArn"), events);
         return Response.noContent().build();
     }
 
@@ -493,6 +493,32 @@ public class BackupController {
     private static String textOrNull(JsonNode node, String field) {
         JsonNode n = node.path(field);
         return n.isMissingNode() || n.isNull() ? null : n.asText();
+    }
+
+    /**
+     * Like {@link #textOrNull} but refuses to invent a string out of something that is not one.
+     *
+     * <p>{@code asText()} coerces: a request carrying {@code "SNSTopicArn": 123} yields the
+     * nonblank string {@code "123"}, which passes every present-and-nonblank check the service
+     * makes and is stored as the topic. The configuration then reads back as valid while naming a
+     * topic that cannot exist. This is the same coercion Greptile found in {@link #longOrNull}
+     * above, in the other direction, and it gets the same answer: reject a value we would have to
+     * fabricate rather than read.
+     *
+     * <p>Used for the fields where the fabricated value would survive validation. The advisory
+     * ones -- CreatorRequestId and the like -- stay on textOrNull, because a coerced value there
+     * is stored and echoed and misleads nobody.
+     */
+    private static String stringOrNull(JsonNode node, String field) {
+        JsonNode n = node.path(field);
+        if (n.isMissingNode() || n.isNull()) {
+            return null;
+        }
+        if (!n.isTextual()) {
+            throw new AwsException("InvalidParameterValueException",
+                    field + " must be a string", 400);
+        }
+        return n.asText();
     }
 
     @SuppressWarnings("unchecked")
