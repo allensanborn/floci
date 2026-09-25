@@ -696,15 +696,30 @@ class BackupIntegrationTest {
     @Test
     @Order(122)
     void notificationsRequireATopicAndAtLeastOneEvent() {
+        // A missing required parameter is MissingParameterValueException, which the operation
+        // lists in its Errors section; present-but-empty is InvalidParameterValueException. An
+        // SDK maps __type to a typed exception, so collapsing the two hands the caller the wrong
+        // one for a request real AWS names precisely.
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
-        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+        .then().statusCode(400)
+            .body("__type", equalTo("MissingParameterValueException"))
+            .body("message", containsString("SNSTopicArn"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"" + TOPIC + "\"}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400)
+            .body("__type", equalTo("MissingParameterValueException"))
+            .body("message", containsString("BackupVaultEvents"));
 
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[]}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
-        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("BackupVaultEvents"));
     }
 
     @Test

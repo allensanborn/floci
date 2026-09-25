@@ -147,8 +147,13 @@ public class BackupController {
                                                  String body) throws IOException {
         String region = regionResolver.resolveRegion(headers);
         JsonNode req = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
-        service.putBackupVaultNotifications(vaultName, region,
-                textOrNull(req, "SNSTopicArn"), readStringList(req.path("BackupVaultEvents")));
+        // null, not an empty list, when the member is absent: the service answers a missing
+        // parameter with MissingParameterValueException and an empty one with
+        // InvalidParameterValueException, and readStringList cannot tell them apart.
+        JsonNode eventsNode = req.path("BackupVaultEvents");
+        List<String> events = eventsNode.isMissingNode() || eventsNode.isNull() ? null
+                : readStringList(eventsNode);
+        service.putBackupVaultNotifications(vaultName, region, textOrNull(req, "SNSTopicArn"), events);
         return Response.noContent().build();
     }
 

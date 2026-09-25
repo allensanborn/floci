@@ -199,11 +199,23 @@ public class BackupService {
     public void putBackupVaultNotifications(String vaultName, String region,
                                             String snsTopicArn, List<String> events) {
         describeBackupVault(vaultName, region);
-        if (snsTopicArn == null || snsTopicArn.isBlank()) {
-            throw new AwsException("InvalidParameterValueException",
+        // Absent and present-but-empty are different faults and AWS answers them differently.
+        // PutBackupVaultNotifications lists MissingParameterValueException, "Indicates that a
+        // required parameter is missing", in its Errors section; a parameter that is present and
+        // unusable stays InvalidParameterValueException.
+        if (snsTopicArn == null) {
+            throw new AwsException("MissingParameterValueException",
                     "SNSTopicArn is required", 400);
         }
-        if (events == null || events.isEmpty()) {
+        if (snsTopicArn.isBlank()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "SNSTopicArn must not be empty", 400);
+        }
+        if (events == null) {
+            throw new AwsException("MissingParameterValueException",
+                    "BackupVaultEvents is required", 400);
+        }
+        if (events.isEmpty()) {
             throw new AwsException("InvalidParameterValueException",
                     "BackupVaultEvents must name at least one event", 400);
         }
