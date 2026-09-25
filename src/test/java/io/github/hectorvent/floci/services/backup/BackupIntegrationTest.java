@@ -866,10 +866,12 @@ class BackupIntegrationTest {
         // to 1, true becomes 1, "7" parses to 7. AWS rejects a non-integral value for a
         // long-typed member, so a coercing emulator lets a request AWS refuses succeed
         // against a number the caller never sent.
-        // 99999999999999999999 is the one isIntegralNumber() alone lets through:
-        // longValue() truncates it to 7766279631452241919 and the retention checks
-        // then accept a number the caller never sent.
-        for (String bad : new String[] {"1.5", "true", "\"7\"", "99999999999999999999"}) {
+        // 18446744073709551623 is 2^64 + 7, the case isIntegralNumber() alone lets through:
+        // longValue() keeps the low 64 bits, so it wraps to 7, a value the retention checks
+        // are happy with. Only canConvertToLong() refuses it, and only a value that lands
+        // INSIDE the valid range tests that guard: an out-of-range truncation is caught by
+        // the range check instead, leaving the guard free to be deleted unnoticed.
+        for (String bad : new String[] {"1.5", "true", "\"7\"", "18446744073709551623"}) {
             given().header("Authorization", AUTH).contentType("application/json")
                 .body("{\"MinRetentionDays\":" + bad + "}")
             .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")

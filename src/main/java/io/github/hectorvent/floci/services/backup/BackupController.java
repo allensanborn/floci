@@ -471,15 +471,15 @@ public class BackupController {
     // retention floor could be set from a number that was never sent. Matches the
     // existing shape in KinesisJsonHandler#optionalMaxRecordSize and
     // TimestreamInfluxDbValidation, which reject on !isIntegralNumber() for the same
-    // reason. Found by Greptile on fork PR #16.
+    // reason. Found by Greptile on the fork PR.
     private static Long longOrNull(JsonNode node, String field) {
         JsonNode n = node.path(field);
         if (n.isMissingNode() || n.isNull()) {
             return null;
         }
         // canConvertToLong as well as isIntegralNumber, because the first alone leaves
-        // one coercion open: 99999999999999999999 IS an integral number, and
-        // longValue() truncates it to 7766279631452241919, which then passes the
+        // one coercion open: 18446744073709551623 IS an integral number, and
+        // longValue() keeps its low 64 bits, wrapping it to 7, which then passes the
         // retention checks as if the caller had sent it. Kinesis guards the same way
         // with canConvertToInt (KinesisJsonHandler#optionalMaxRecordSize). Rejecting
         // a value we cannot represent is the whole point of not coercing.
