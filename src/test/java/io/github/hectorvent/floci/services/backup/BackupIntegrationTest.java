@@ -715,6 +715,13 @@ class BackupIntegrationTest {
             .body("message", containsString("BackupVaultEvents"));
 
         given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"\",\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidParameterValueException"))
+            .body("message", containsString("SNSTopicArn"));
+
+        given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"SNSTopicArn\":\"" + TOPIC + "\",\"BackupVaultEvents\":[]}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
         .then().statusCode(400)
