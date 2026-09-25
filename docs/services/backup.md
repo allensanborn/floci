@@ -135,8 +135,9 @@ Actual backup is simulated — no data is read from or written to the referenced
 - **The Vault Lock day limits are per field, because AWS documents them per field.**
   `ChangeableForDays` must be 3 or greater and at most 36,500. `MaxRetentionDays` is at
   most 36,500. `MinRetentionDays` has a documented minimum of 1 day and **no documented
-  maximum**, so Floci applies none: bounding it would refuse a value real AWS accepts.
-  `MaxRetentionDays` below `MinRetentionDays` is rejected when both are supplied.
+  maximum**, so Floci applies none: bounding it would risk refusing a value real AWS
+  accepts. `MaxRetentionDays` below `MinRetentionDays` is rejected when both are
+  supplied.
 - **PutBackupVaultNotifications** rejects any `BackupVaultEvents` value outside the
   documented set with `InvalidParameterValueException` (400), rather than storing it. All
   30 documented values are accepted, including the ones AWS marks deprecated.
@@ -145,8 +146,8 @@ Actual backup is simulated — no data is read from or written to the referenced
   `SNSTopicArn` or `BackupVaultEvents` is absent, which is the error AWS lists in that
   operation's Errors section, and `InvalidParameterValueException` (400) when one is
   present but unusable (`"SNSTopicArn": ""`, or `"BackupVaultEvents": []`). An SDK maps
-  the two onto different typed exceptions, so collapsing them hands the caller an error
-  real AWS would not have returned.
+  the two onto different typed exceptions. The reference names the absent case; the
+  present-but-unusable one is Floci's reading, not a quotation.
 - **`PutBackupVaultAccessPolicy` accepts a request that omits `Policy`.** AWS documents
   `Policy` as `Required: No`, so refusing one would fail a call real AWS accepts. What
   AWS then stores is **not documented, and we have not measured it**; Floci **clears**

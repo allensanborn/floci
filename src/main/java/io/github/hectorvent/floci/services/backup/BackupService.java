@@ -192,9 +192,10 @@ public class BackupService {
     }
 
     /**
-     * Deleting an access policy that is not set is a no-op, matching AWS: the
-     * operation is idempotent, so Terraform destroying a configuration twice does not
-     * fail the second time.
+     * Deleting an access policy that is not set is a no-op, so Terraform destroying a
+     * configuration twice does not fail the second time. That is Floci's choice and not a
+     * measured AWS behaviour: the reference lists ResourceNotFoundException among this
+     * operation's errors and does not say whether an unset policy raises it.
      */
     public void deleteBackupVaultAccessPolicy(String vaultName, String region) {
         describeBackupVault(vaultName, region);
@@ -204,10 +205,10 @@ public class BackupService {
     public void putBackupVaultNotifications(String vaultName, String region,
                                             String snsTopicArn, List<String> events) {
         describeBackupVault(vaultName, region);
-        // Absent and present-but-empty are different faults and AWS answers them differently.
-        // PutBackupVaultNotifications lists MissingParameterValueException, "Indicates that a
-        // required parameter is missing", in its Errors section; a parameter that is present and
-        // unusable stays InvalidParameterValueException.
+        // Absent and present-but-empty are different faults. PutBackupVaultNotifications lists
+        // MissingParameterValueException, "Indicates that a required parameter is missing", in
+        // its Errors section, which names the absent case. The reference does not name the
+        // present-but-unusable case, so it keeps InvalidParameterValueException.
         if (snsTopicArn == null) {
             throw new AwsException("MissingParameterValueException",
                     "SNSTopicArn is required", 400);
@@ -283,8 +284,8 @@ public class BackupService {
                     "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
         }
         // "The shortest minimum retention period you can specify is 1 day." The reference states
-        // no maximum for this field, so it gets none here: inventing one would refuse a value
-        // real AWS accepts, which is the divergence this work exists to remove, not create.
+        // no maximum for this field, so it gets none here: inventing a bound risks refusing a
+        // value real AWS accepts, which is the divergence this work exists to remove, not create.
         requireDayRange("MinRetentionDays", minRetentionDays, 1, null);
         requireDayRange("MaxRetentionDays", maxRetentionDays, 1, MAX_RETENTION_DAYS);
         if (minRetentionDays != null && maxRetentionDays != null && maxRetentionDays < minRetentionDays) {

@@ -698,8 +698,8 @@ class BackupIntegrationTest {
     void notificationsRequireATopicAndAtLeastOneEvent() {
         // A missing required parameter is MissingParameterValueException, which the operation
         // lists in its Errors section; present-but-empty is InvalidParameterValueException. An
-        // SDK maps __type to a typed exception, so collapsing the two hands the caller the wrong
-        // one for a request real AWS names precisely.
+        // SDK maps __type to a typed exception, so collapsing the two hands the caller an error
+        // other than the one the reference names for a missing parameter.
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"BackupVaultEvents\":[\"BACKUP_JOB_COMPLETED\"]}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/notification-configuration")
@@ -993,8 +993,8 @@ class BackupIntegrationTest {
 
         // MinRetentionDays is the exception: the reference gives it a floor, "The shortest
         // minimum retention period you can specify is 1 day", and no maximum at all. Refusing
-        // 40000 here would be stricter than AWS, which is the same divergence pointing the
-        // other way.
+        // 40000 here would be stricter than the reference, which risks the same divergence
+        // pointing the other way.
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"MinRetentionDays\":40000}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
