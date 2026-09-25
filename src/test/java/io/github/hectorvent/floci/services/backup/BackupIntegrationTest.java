@@ -968,10 +968,12 @@ class BackupIntegrationTest {
     @Test
     @Order(142)
     void lockRejectsADayValueAboveTheDocumentedCeiling() {
-        // AWS: "no less than 3 and no greater than 36,500". Without the ceiling a Terraform
+        // The ceiling is documented per field, not once for all three: MaxRetentionDays, "The
+        // longest maximum retention period you can specify is 36500 days", and ChangeableForDays,
+        // "The maximum value you can specify is 36,500 days". Without it a Terraform
         // configuration with changeable_for_days = 40000 applies here and fails on real AWS,
         // which is the exact divergence this corpus exists to find.
-        for (String field : new String[] {"MinRetentionDays", "MaxRetentionDays", "ChangeableForDays"}) {
+        for (String field : new String[] {"MaxRetentionDays", "ChangeableForDays"}) {
             given().header("Authorization", AUTH).contentType("application/json")
                 .body("{\"" + field + "\":40000}")
             .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock")
@@ -979,6 +981,21 @@ class BackupIntegrationTest {
                 .body("__type", equalTo("InvalidParameterValueException"))
                 .body("message", containsString(field));
         }
+
+        // MinRetentionDays is the exception: the reference gives it a floor, "The shortest
+        // minimum retention period you can specify is 1 day", and no maximum at all. Refusing
+        // 40000 here would be stricter than AWS, which is the same divergence pointing the
+        // other way.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":40000}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT)
+        .then().statusCode(200).body("MinRetentionDays", equalTo(40000));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + SUB_VAULT + "/vault-lock").then().statusCode(204);
     }
 
     @Test

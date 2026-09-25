@@ -137,7 +137,12 @@ public class BackupService {
      * whole validation has to avoid: a list that rejects is only as good as it is
      * complete, and a stale one turns a valid configuration into a 400.
      */
-    /** AWS's documented ceiling for every Vault Lock day value. */
+    /**
+     * The ceiling the PutBackupVaultLockConfiguration reference documents for two of the three
+     * day values: MaxRetentionDays, "The longest maximum retention period you can specify is
+     * 36500 days", and ChangeableForDays, "The maximum value you can specify is 36,500 days".
+     * MinRetentionDays has no documented maximum and is deliberately not bounded by it.
+     */
     private static final long MAX_RETENTION_DAYS = 36500;
 
     private static final Set<String> BACKUP_VAULT_EVENTS = Set.of(
@@ -277,15 +282,18 @@ public class BackupService {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
         }
-        requireDayRange("MinRetentionDays", minRetentionDays, 1);
-        requireDayRange("MaxRetentionDays", maxRetentionDays, 1);
+        // "The shortest minimum retention period you can specify is 1 day." The reference states
+        // no maximum for this field, so it gets none here: inventing one would refuse a value
+        // real AWS accepts, which is the divergence this work exists to remove, not create.
+        requireDayRange("MinRetentionDays", minRetentionDays, 1, null);
+        requireDayRange("MaxRetentionDays", maxRetentionDays, 1, MAX_RETENTION_DAYS);
         if (minRetentionDays != null && maxRetentionDays != null && maxRetentionDays < minRetentionDays) {
             throw new AwsException("InvalidParameterValueException",
                     "MaxRetentionDays must be greater than or equal to MinRetentionDays", 400);
         }
-        // The floor is 3 because below it a governance lock would be effectively immutable on
-        // creation, which is what compliance mode is for.
-        requireDayRange("ChangeableForDays", changeableForDays, 3);
+        // "You must set ChangeableForDays to 3 or greater": below it a governance lock would be
+        // effectively immutable on creation, which is what compliance mode is for.
+        requireDayRange("ChangeableForDays", changeableForDays, 3, MAX_RETENTION_DAYS);
         vault.setLocked(true);
         vault.setMinRetentionDays(minRetentionDays);
         vault.setMaxRetentionDays(maxRetentionDays);
@@ -300,25 +308,30 @@ public class BackupService {
     }
 
     /**
-     * AWS's documented ceiling on every Vault Lock day value: "no less than 3 and no greater than
-     * 36,500". Without the upper bound two things go wrong, and the second is the worse one.
+     * Bound one Vault Lock day value. A null {@code ceiling} means the reference documents no
+     * maximum for that field, and the value is only floored.
      *
-     * <p>A value like 40,000 is accepted here and refused by AWS, which is the shape this whole
-     * corpus exists to catch: a Terraform configuration that applies locally and fails for real.
+     * <p>Where a ceiling is documented, two things go wrong without it, and the second is the
+     * worse one. A value like 40,000 is accepted here and refused by AWS, which is the shape this
+     * whole corpus exists to catch: a Terraform configuration that applies locally and fails for
+     * real.
      *
      * <p>And {@code Long.MAX_VALUE} is a perfectly good long, so it survives the integral check in
      * the controller and reaches {@code Instant.plus}, which throws {@code ArithmeticException:
      * long overflow}. The only exception mapper in the tree handles {@link AwsException}, so that
-     * escapes as an HTTP 500 rather than the documented 400. Bounding the value is what stops the
-     * overflow being reachable at all, rather than catching it after the fact.
+     * escapes as an HTTP 500 rather than the documented 400. Bounding ChangeableForDays, the one
+     * value that reaches {@code Instant.plus}, is what stops the overflow being reachable at all,
+     * rather than catching it after the fact.
      */
-    private static void requireDayRange(String field, Long value, long floor) {
+    private static void requireDayRange(String field, Long value, long floor, Long ceiling) {
         if (value == null) {
             return;
         }
-        if (value < floor || value > MAX_RETENTION_DAYS) {
+        if (value < floor || (ceiling != null && value > ceiling)) {
             throw new AwsException("InvalidParameterValueException",
-                    field + " must be between " + floor + " and " + MAX_RETENTION_DAYS, 400);
+                    ceiling == null
+                            ? field + " must be " + floor + " or greater"
+                            : field + " must be between " + floor + " and " + ceiling, 400);
         }
     }
 
