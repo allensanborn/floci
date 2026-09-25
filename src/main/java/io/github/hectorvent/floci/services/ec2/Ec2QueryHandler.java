@@ -5565,6 +5565,19 @@ public class Ec2QueryHandler {
             xml.start("item").elem("groupId", securityGroupId).end("item");
         }
         xml.end("groupSet");
+        // AWS reports an interface endpoint's ENIs here, and the Terraform provider
+        // surfaces them as aws_vpc_endpoint.network_interface_ids. Floci already
+        // synthesizes those interfaces deterministically for flow-log attribution; until
+        // now nothing said so on the wire, so the attribute came back empty and
+        // propagated into every module that feeds it downstream (floci-5vs).
+        List<String> endpointEniIds = service.endpointNetworkInterfaceIds(endpoint);
+        if (!endpointEniIds.isEmpty()) {
+            xml.start("networkInterfaceIdSet");
+            for (String eniId : endpointEniIds) {
+                xml.elem("item", eniId);
+            }
+            xml.end("networkInterfaceIdSet");
+        }
         List<VpcEndpointDnsEntry> dnsEntries = service.endpointDnsEntries(endpoint);
         if (!dnsEntries.isEmpty()) {
             xml.start("dnsEntrySet");
