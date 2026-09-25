@@ -6,9 +6,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.*;
 
 /**
@@ -27,6 +29,30 @@ class BackupIntegrationTest {
     private static String selectionId;
     private static String jobId;
     private static String recoveryPointArn;
+
+    /**
+     * Blocks until a backup job reports {@code COMPLETED}.
+     *
+     * <p>A job finishes asynchronously, so the recovery point it produces is not readable the
+     * instant PutBackupJob returns. Polling the state rather than sleeping a fixed span is what
+     * keeps this honest on a slow runner: a sleep sized for this machine only means the job is
+     * still RUNNING on a slower one, and the assertion that follows fails for a reason that has
+     * nothing to do with the behaviour under test.
+     */
+    private static void awaitJobCompleted(String backupJobId) {
+        await().atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(25))
+                .until(() -> {
+                    String state = given()
+                        .header("Authorization", AUTH)
+                    .when()
+                        .get("/backup-jobs/" + backupJobId)
+                    .then()
+                        .statusCode(200)
+                        .extract().path("State");
+                    return "COMPLETED".equals(state);
+                });
+    }
 
     // ── Vault ──────────────────────────────────────────────────────────────────
 
@@ -302,8 +328,8 @@ class BackupIntegrationTest {
 
     @Test
     @Order(42)
-    void describeBackupJobCompleted() throws InterruptedException {
-        Thread.sleep(2000); // job-completion-delay-seconds=1 in test config
+    void describeBackupJobCompleted() {
+        awaitJobCompleted(jobId);
         given()
             .header("Authorization", AUTH)
         .when()
@@ -1037,7 +1063,7 @@ class BackupIntegrationTest {
 
     @Test
     @Order(150)
-    void aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention() throws InterruptedException {
+    void aLockedVaultRefusesToDeleteARecoveryPointInsideMinRetention() {
         // The finding: PutBackupVaultLockConfiguration succeeded, DescribeBackupVault
         // reported Locked, and every recovery point the lock was supposed to protect deleted
         // exactly as before, because deleteRecoveryPoint read no lock field. The lock was
@@ -1056,7 +1082,7 @@ class BackupIntegrationTest {
                 """.formatted(LOCK_VAULT, RESOURCE_ARN, IAM_ROLE))
         .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
 
-        Thread.sleep(2000); // job-completion-delay-seconds=1 in test config
+        awaitJobCompleted(jid);
         String rpArn = given().header("Authorization", AUTH)
         .when().get("/backup-jobs/" + jid).then().statusCode(200)
             .body("State", equalTo("COMPLETED"))
@@ -1104,11 +1130,7 @@ class BackupIntegrationTest {
                 """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
         .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
 
-        try {
-            Thread.sleep(2000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        awaitJobCompleted(jid);
         String rpArn = given().header("Authorization", AUTH)
         .when().get("/backup-jobs/" + jid).then().extract().path("RecoveryPointArn");
 
