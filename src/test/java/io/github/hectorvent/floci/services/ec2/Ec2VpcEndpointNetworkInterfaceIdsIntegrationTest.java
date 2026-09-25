@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import jakarta.inject.Inject;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -36,6 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
+
+    @Inject
+    Ec2Service service;
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
@@ -95,6 +101,53 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
         // Stable across calls. The ids are derived, not stored, so a caller that reads them
         // twice -- as Terraform does between plan and apply -- must see the same list.
         assertEquals(eniIds, eniIdsOf(endpointId));
+    }
+
+    @Test
+    void theWireIdsAreTheInterfacesFlowLogAttributionReads() {
+        // THE PROPERTY THE DESIGN RESTS ON, and the one the other tests do not reach.
+        // They pin count, shape, distinctness and stability -- all of which an
+        // implementation deriving ids from the subnet id alone would satisfy while
+        // reporting interfaces that endpointNetworkInterfaces() denies exist. That is
+        // not hypothetical: an earlier version of endpointNetworkInterfaceIds called
+        // endpointEniId itself, lacked this method's skip of a vanished subnet, and the
+        // two were measured reporting different sets after a subnet was deleted out from
+        // under a live endpoint. Flow-log attribution reads the service side; Terraform
+        // reads the wire side; they have to be the same list.
+        String vpcId = createVpc("10.77.0.0/16");
+        String subnetA = createSubnet(vpcId, "10.77.1.0/24", "us-east-1a");
+        String subnetB = createSubnet(vpcId, "10.77.2.0/24", "us-east-1b");
+
+        String endpointId = ec2Value("CreateVpcEndpoint",
+                "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.ec2",
+                "VpcEndpointType", "Interface", "SubnetId.1", subnetA, "SubnetId.2", subnetB);
+
+        // DELETE A SUBNET OUT FROM UNDER THE LIVE ENDPOINT. Without this the test is
+        // decorative: both derivations agree whenever every subnet still exists, so a
+        // version that skipped the vanished-subnet filter passed this assertion happily.
+        // Measured -- the first draft of this test did exactly that. Real AWS answers
+        // DependencyViolation here and Terraform's graph destroys the endpoint first, so
+        // the state is reachable only in an emulator; that is precisely why the emulator
+        // has to stay self-consistent in it rather than report two different answers.
+        ec2Value("DeleteSubnet", "DeleteSubnetResponse.return", "SubnetId", subnetB);
+
+        List<String> onTheWire = eniIdsOf(endpointId);
+
+        // Scoped to THIS endpoint: the region-wide overload returns every endpoint's
+        // interfaces, and other tests in this class leave their own behind.
+        List<String> fromTheService = new ArrayList<>();
+        for (NetworkInterface ni : service.endpointNetworkInterfaces("us-east-1")) {
+            if (("VPC Endpoint Interface " + endpointId).equals(ni.getDescription())) {
+                fromTheService.add(ni.getNetworkInterfaceId());
+            }
+        }
+
+        assertEquals(fromTheService, onTheWire,
+                "the ids DescribeVpcEndpoints publishes must be the interfaces the "
+                + "service reports, in the same order");
+        assertEquals(1, onTheWire.size(),
+                "the endpoint has one surviving subnet, so it reports one interface");
     }
 
     @Test
