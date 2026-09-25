@@ -606,10 +606,17 @@ class BackupIntegrationTest {
 
     @Test
     @Order(111)
-    void putAccessPolicyRejectsAnEmptyDocument() {
+    void putAccessPolicyWithoutADocumentClearsTheStoredOne() {
+        // Policy is documented "Required: No", so refusing a request that omits it fails a call
+        // real AWS accepts. Order(110) put a policy on this vault, so the read-back below is
+        // what proves the omission cleared it rather than simply finding nothing there.
         given().header("Authorization", AUTH).contentType("application/json").body("{}")
         .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
-        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+        .then().statusCode(204);
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -642,6 +649,17 @@ class BackupIntegrationTest {
         given().header("Authorization", AUTH)
         .when().delete("/backup-vaults/" + SUB_VAULT + "/access-policy")
         .then().statusCode(204);
+    }
+
+    @Test
+    @Order(115)
+    void putAccessPolicyStillRejectsAnEmptyDocument() {
+        // Present and empty is not the same as absent: an empty string is not a policy document,
+        // so it stays an InvalidParameterValueException.
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"Policy\":\"\"}")
+        .when().put("/backup-vaults/" + SUB_VAULT + "/access-policy")
+        .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
     }
 
     @Test

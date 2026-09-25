@@ -158,9 +158,21 @@ public class BackupService {
             "ACCESS_POINT_DELETED", "ACCESS_POINT_DELETION_FAILED",
             "ACCESS_POINT_EXPIRED", "ACCESS_POINT_DISASSOCIATED");
 
+    /**
+     * The reference documents {@code Policy} as "Required: No", so a request that omits it is
+     * not an error and must not be refused here. What AWS stores in that case is not documented
+     * and we have not measured it; clearing is the choice taken, because it leaves the vault
+     * carrying exactly the policy the request carried rather than one the caller did not send,
+     * and it keeps the end state readable through GetBackupVaultAccessPolicy. An empty string is
+     * a different case: it is present and invalid, so it is still rejected.
+     */
     public void putBackupVaultAccessPolicy(String vaultName, String region, String policy) {
         describeBackupVault(vaultName, region);
-        if (policy == null || policy.isBlank()) {
+        if (policy == null) {
+            accessPolicyStore.delete(vaultKey(region, vaultName));
+            return;
+        }
+        if (policy.isBlank()) {
             throw new AwsException("InvalidParameterValueException",
                     "Policy must be a non-empty resource policy document", 400);
         }
