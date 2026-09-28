@@ -259,11 +259,13 @@ public class ElastiCacheService implements ResourceProvider {
                                                       ReplicationGroupSettings resolvedSettings) {
         String groupId = request.replicationGroupId();
         AuthMode authMode = request.authMode();
-        int proxyPort = allocateProxyPort(request.port());
+        Integer requestedPort = validateRequestedPort(request.port());
+        int proxyPort = bindProxyPort(requestedPort);
+        int advertisedPort = advertisedPort(requestedPort, proxyPort);
         String image = config.services().elasticache().defaultImage();
 
-        LOG.infov("Creating replication group {0} with authMode={1} on proxy port {2}",
-                groupId, authMode, String.valueOf(proxyPort));
+        LOG.infov("Creating replication group {0} with authMode={1} advertising port {2} on proxy port {3}",
+                groupId, authMode, String.valueOf(advertisedPort), String.valueOf(proxyPort));
 
         ElastiCacheContainerHandle handle = null;
         try {
@@ -274,7 +276,8 @@ public class ElastiCacheService implements ResourceProvider {
             handle = containerManager.tryStart(groupId, image);
 
             String endpointHost = resolveEndpointHost();
-            Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
+            logPortRebind("Replication group", groupId, endpointHost, advertisedPort, proxyPort);
+            Endpoint endpoint = new Endpoint(endpointHost, advertisedPort);
             ReplicationGroup group = new ReplicationGroup(
                     groupId, request.description(), ReplicationGroupStatus.AVAILABLE,
                     authMode, endpoint, Instant.now(), proxyPort);
@@ -308,7 +311,7 @@ public class ElastiCacheService implements ResourceProvider {
                 recordsHoldingTheirPort.add(groupId);
             }
 
-            LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
+            LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(advertisedPort));
             return group;
         } catch (RuntimeException e) {
             LOG.warnv("Replication group {0} provisioning failed, rolling back: {1}", groupId, e.getMessage());
@@ -327,6 +330,7 @@ public class ElastiCacheService implements ResourceProvider {
         int replicasPerNodeGroup = request.replicasPerNodeGroup() != null
                 ? validateRange("ReplicasPerNodeGroup", request.replicasPerNodeGroup(), 0, 5)
                 : 0;
+        Integer requestedPort = validateRequestedPort(request.port());
         String image = config.services().elasticache().defaultImage();
         String endpointHost = resolveClusterAnnounceHost();
         String announceIp = resolveAnnounceIp(endpointHost);
@@ -344,11 +348,14 @@ public class ElastiCacheService implements ResourceProvider {
                 int[] slots = ValkeyClusterFormation.slotRange(shard, numNodeGroups);
                 for (int member = 0; member <= replicasPerNodeGroup; member++) {
                     String memberId = groupId + "-" + nodeGroupId + "-" + String.format("%03d", member + 1);
-                    // The group's Port is reported from the first node's proxy port, so only that
-                    // node can honor a requested port; the rest take whatever is free.
-                    Integer requestedPort = nodes.isEmpty() ? request.port() : null;
+                    // Node ports are host ports: each node's proxy needs its own listener, and
+                    // the cluster-announce flags below hand these out in MOVED/ASK redirects, so
+                    // they have to be the ports that actually answer. The first node prefers the
+                    // requested one only so the group's endpoint usually answers where it says;
+                    // the group advertises the requested port either way.
+                    Integer preferred = nodes.isEmpty() ? requestedPort : null;
                     nodes.add(new ClusterNode(memberId, nodeGroupId, member == 0,
-                            allocateProxyPort(requestedPort), slots[0] + "-" + slots[1]));
+                            bindProxyPort(preferred), slots[0] + "-" + slots[1]));
                 }
             }
 
@@ -380,10 +387,14 @@ public class ElastiCacheService implements ResourceProvider {
                 startedProxyKeys.add(node.getMemberClusterId());
             }
 
-            Endpoint configurationEndpoint = new Endpoint(endpointHost, nodes.getFirst().getProxyPort());
+            int primaryProxyPort = nodes.getFirst().getProxyPort();
+            int advertisedPort = advertisedPort(requestedPort, primaryProxyPort);
+            logPortRebind("Cluster-mode replication group", groupId, endpointHost,
+                    advertisedPort, primaryProxyPort);
+            Endpoint configurationEndpoint = new Endpoint(endpointHost, advertisedPort);
             ReplicationGroup group = new ReplicationGroup(
                     groupId, request.description(), ReplicationGroupStatus.AVAILABLE,
-                    authMode, configurationEndpoint, Instant.now(), nodes.getFirst().getProxyPort());
+                    authMode, configurationEndpoint, Instant.now(), primaryProxyPort);
             group.setAuthToken(request.authToken());
             group.setArn(regionResolver.buildArn("elasticache", request.region(),
                     "replicationgroup:" + groupId));
@@ -629,15 +640,22 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Reserves the port a cluster-mode-disabled group comes back advertising and marks it
+     * Reserves the host port a cluster-mode-disabled group listens on and marks it
      * {@code creating} for {@link #restoreSingleNodeGroup}. The endpoint host is re-derived from
      * configuration rather than replayed from the record, so a group restored under a changed
      * {@code FLOCI_HOSTNAME} advertises the name this process actually answers to.
+     *
+     * <p>The advertised port, unlike the host it is paired with, is replayed exactly: it is the
+     * port the caller pinned, and a restart that moved it would show up as terraform drift on a
+     * group nobody touched.
      */
     private void reserveSingleNodeGroup(ReplicationGroup group, List<ReplicationGroup> toRestore) {
         try {
+            Endpoint persisted = group.getConfigurationEndpoint();
+            int advertised = persisted != null && persisted.port() > 0
+                    ? persisted.port() : group.getProxyPort();
             group.setProxyPort(reserveOrAllocateProxyPort(group.getProxyPort()));
-            group.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), group.getProxyPort()));
+            group.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), advertised));
             group.setStatus(ReplicationGroupStatus.CREATING);
             // The reservation above succeeded, so this process owns the port whether or not it is
             // the one the record came back with. Without this the delete path would decline to
@@ -652,11 +670,15 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Reserves the proxy port a standalone cache cluster comes back advertising and marks it
+     * Reserves the host port a standalone cache cluster listens on and marks it
      * {@code creating} for {@link #restoreCacheCluster}, the same pair of steps
      * {@link #reserveSingleNodeGroup} performs for a cluster-mode-disabled group. As there, the
      * endpoint host is re-derived from configuration rather than replayed, so a cluster restored
-     * under a changed {@code FLOCI_HOSTNAME} advertises the name this process answers to.
+     * under a changed {@code FLOCI_HOSTNAME} advertises the name this process answers to, while
+     * the advertised port is replayed exactly because it is the caller's.
+     *
+     * <p>A record written before the two ports were separate carries no {@code proxyPort}, so its
+     * endpoint port stands in as the port it was listening on — which is what it was.
      *
      * <p>A cluster whose port cannot be reserved is reported {@code restore-failed}, the status
      * AWS models on {@code CacheCluster}; a replication group reports {@code create-failed},
@@ -666,8 +688,12 @@ public class ElastiCacheService implements ResourceProvider {
         String clusterId = cluster.getCacheClusterId();
         try {
             Endpoint persisted = cluster.getConfigurationEndpoint();
-            int proxyPort = reserveOrAllocateProxyPort(persisted != null ? persisted.port() : 0);
-            cluster.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
+            int persistedBound = cluster.getProxyPort() > 0 ? cluster.getProxyPort()
+                    : (persisted != null ? persisted.port() : 0);
+            int proxyPort = reserveOrAllocateProxyPort(persistedBound);
+            cluster.setProxyPort(proxyPort);
+            int advertised = persisted != null && persisted.port() > 0 ? persisted.port() : proxyPort;
+            cluster.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), advertised));
             cluster.setCacheClusterStatus(CacheClusterStatus.CREATING);
             recordsHoldingTheirPort.add(clusterId);
             toRestore.add(cluster);
@@ -788,9 +814,9 @@ public class ElastiCacheService implements ResourceProvider {
                         + "was being restored", clusterId);
                 return;
             }
-            Endpoint endpoint = cluster.getConfigurationEndpoint();
-            if (endpoint != null && recordsHoldingTheirPort.remove(clusterId)) {
-                releaseProxyPort(endpoint.port());
+            // The bound port, not the advertised one: only the listener's port was ever reserved.
+            if (cluster.getProxyPort() > 0 && recordsHoldingTheirPort.remove(clusterId)) {
+                releaseProxyPort(cluster.getProxyPort());
             }
             cluster.setContainerId(null);
             cluster.setContainerHost(null);
@@ -1236,11 +1262,16 @@ public class ElastiCacheService implements ResourceProvider {
     private CacheCluster provisionCacheCluster(CreateCacheClusterRequest request, String engine) {
         String clusterId = request.cacheClusterId();
         AuthMode authMode = request.authMode() != null ? request.authMode() : AuthMode.NO_AUTH;
-        int proxyPort = allocateProxyPort(request.port());
+        Integer requestedPort = validateRequestedPort(request.port());
+        int proxyPort = bindProxyPort(requestedPort);
+        int advertisedPort = advertisedPort(requestedPort, proxyPort);
+        String endpointHost = resolveEndpointHost();
+        logPortRebind("Cache cluster", clusterId, endpointHost, advertisedPort, proxyPort);
         String image = config.services().elasticache().defaultImage();
 
-        LOG.infov("Creating single-node {0} cache cluster {1} with authMode={2} on proxy port {3}",
-                engine, clusterId, authMode, String.valueOf(proxyPort));
+        LOG.infov("Creating single-node {0} cache cluster {1} with authMode={2} advertising port {3} "
+                        + "on proxy port {4}",
+                engine, clusterId, authMode, String.valueOf(advertisedPort), String.valueOf(proxyPort));
 
         ElastiCacheContainerHandle handle = null;
         try {
@@ -1253,7 +1284,8 @@ public class ElastiCacheService implements ResourceProvider {
                     request.engineVersion() != null && !request.engineVersion().isBlank()
                             ? request.engineVersion()
                             : defaultEngineVersion(engine),
-                    new Endpoint(resolveEndpointHost(), proxyPort), Instant.now());
+                    new Endpoint(endpointHost, advertisedPort), Instant.now());
+            cluster.setProxyPort(proxyPort);
             cluster.setNumCacheNodes(1);
             cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
                     ? request.cacheNodeType()
@@ -1290,7 +1322,7 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
-                    cluster.getConfigurationEndpoint().address(), String.valueOf(proxyPort));
+                    cluster.getConfigurationEndpoint().address(), String.valueOf(advertisedPort));
             return cluster;
         } catch (RuntimeException e) {
             LOG.warnv("Cache cluster {0} provisioning failed, rolling back: {1}", clusterId, e.getMessage());
@@ -1381,11 +1413,11 @@ public class ElastiCacheService implements ResourceProvider {
                 // container name still finds the cluster's container.
                 containerManager.stopByGroupId(clusterId);
             }
-            // Only a port this process reserved for this record: a restored cluster whose port
-            // was already taken advertises one it does not own, and freeing it would hand the
-            // holder's port to the next create.
-            if (cluster.getConfigurationEndpoint() != null && recordsHoldingTheirPort.remove(clusterId)) {
-                releaseProxyPort(cluster.getConfigurationEndpoint().port());
+            // Only a port this process reserved for this record, and the bound one rather than
+            // the advertised one: the advertised port may be shared with another record, which
+            // holds its own reservation and would lose it here.
+            if (cluster.getProxyPort() > 0 && recordsHoldingTheirPort.remove(clusterId)) {
+                releaseProxyPort(cluster.getProxyPort());
             }
 
             cacheClusters.delete(clusterId);
@@ -1437,10 +1469,14 @@ public class ElastiCacheService implements ResourceProvider {
             }
             return members;
         }
+        // The advertised port, not the bound one: DescribeCacheClusters is where the terraform
+        // provider reads a member's port back, and AWS reports the group's own port there.
+        Endpoint endpoint = group.getConfigurationEndpoint();
+        int port = endpoint != null ? endpoint.port() : group.getProxyPort();
         for (int i = 1; i <= group.getNumCacheClusters(); i++) {
             members.add(new MemberCacheCluster(group,
                     group.getReplicationGroupId() + "-" + String.format("%03d", i),
-                    group.getProxyPort(), i == 1));
+                    port, i == 1));
         }
         return members;
     }
@@ -1632,45 +1668,77 @@ public class ElastiCacheService implements ResourceProvider {
                 .orElseGet(this::resolveEndpointHost);
     }
 
-    private int allocateProxyPort() {
-        return allocateProxyPort(null);
+    /**
+     * The port the caller reads back: the one it asked for, or the bound port when it asked for
+     * none. AWS models Port as an optional input on CreateReplicationGroup and CreateCacheCluster
+     * ("the port number on which each member of the replication group accepts connections"), and
+     * terraform treats it as replacement-forcing, so a pinned port read back changed is a diff no
+     * plan can ever settle. A pinned port is therefore always echoed.
+     */
+    private static int advertisedPort(Integer requested, int boundPort) {
+        return requested != null ? requested : boundPort;
     }
 
     /**
-     * Honors the request's {@code Port} when it is free and inside the proxy range. AWS models
-     * Port as an optional input on CreateReplicationGroup ("the port number on which each member
-     * of the replication group accepts connections"), so a caller that pins one and reads back a
-     * different value sees permanent drift: Terraform treats the port as replacement-forcing.
-     *
-     * <p>An explicit port is therefore either honored or refused, never quietly changed.
-     * Substituting one reproduces the very drift honoring it was meant to remove, and the
-     * substitution could only ever hit a caller who did ask for a port: one who does not care
-     * passes null and never reaches that branch. Floci multiplexes every group's proxy onto one
-     * host, so two groups genuinely cannot share a port, and a caller who pinned an unavailable
-     * one needs to know rather than discover it as drift later.
-     *
-     * <p>Only an unpinned create falls back through the range below.
-     * {@code NeptuneService.allocateProxyPort} still substitutes on this path and carries the
-     * same flaw.
+     * AWS accepts any cache port from 1150 to 65535 and rejects the rest with
+     * InvalidParameterValue; {@code RdsService.reserveProxyPort} applies that same range to the
+     * same argument. Floci used to reject anything outside its own proxy range instead, which is
+     * an emulator-shaped limit no AWS caller can anticipate — and, now that the advertised port
+     * is no longer the bound one, a limit that constrains nothing.
      */
-    private int allocateProxyPort(Integer requested) {
+    private static Integer validateRequestedPort(Integer requested) {
+        if (requested != null && (requested < 1150 || requested > 65535)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Port must be between 1150 and 65535.", 400);
+        }
+        return requested;
+    }
+
+    /**
+     * Says where a record can actually be reached when Floci could not listen on the port it
+     * advertises, and why — the two reasons are different problems and only one of them is
+     * fixed by stopping something. Silent on the common case, where the two are one number.
+     */
+    private void logPortRebind(String kind, String recordId, String endpointHost,
+                               int advertised, int bound) {
+        if (advertised == bound) {
+            return;
+        }
         int base = config.services().elasticache().proxyBasePort();
         int max = config.services().elasticache().proxyMaxPort();
-        if (requested != null) {
-            if (requested < base || requested > max) {
-                LOG.infov("Rejecting ElastiCache port {0}: outside the proxy range {1}-{2}",
-                        String.valueOf(requested), String.valueOf(base), String.valueOf(max));
-                throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is outside the port range this emulator serves ("
-                                + base + "-" + max + ").", 400);
-            }
-            if (!usedPorts.add(requested)) {
-                LOG.infov("Rejecting ElastiCache port {0}: already used by another replication group",
-                        String.valueOf(requested));
-                throw new AwsException("InvalidParameterValue",
-                        "Port " + requested + " is already in use by another replication group.", 400);
-            }
-            return requested;
+        String reason = advertised < base || advertised > max
+                ? "that port is outside the proxy range " + base + "-" + max + " this emulator serves"
+                : "another cache here is already listening on that port";
+        LOG.warnv("{0} {1} advertises port {2}, as AWS does, but {3}; its proxy is bound to {4} "
+                        + "instead. Reach this cache at {5}:{4}.",
+                kind, recordId, String.valueOf(advertised), reason, String.valueOf(bound), endpointHost);
+    }
+
+    /**
+     * Reserves the host port this process listens on for one record, preferring {@code preferred}
+     * when it is inside the proxy range and free.
+     *
+     * <p>This port is Floci's, not AWS's. On AWS the port a caller pins belongs to that cluster's
+     * own endpoint: 6379 is the Redis default, so nearly every ElastiCache cluster in the world
+     * uses it and they coexist. Floci multiplexes every group's proxy onto one host, where a TCP
+     * port really is exclusive, and it used to advertise the listener's port as the AWS one. That
+     * conflation made the AWS port globally scarce — a second group asking for 6379 was refused
+     * with {@code InvalidParameterValue}, which AWS never does — so any module standing up two
+     * Redis clusters, or any suite standing up one per test, failed at the second create.
+     *
+     * <p>The two are separate now. {@link #advertisedPort} answers the caller with the port it
+     * pinned, and this method answers the proxy with a port nothing here is listening on. When
+     * they differ, {@link #logPortRebind} says where the cache actually answers; the alternative,
+     * refusing the create, diverges from AWS on an entirely ordinary request.
+     *
+     * <p>{@code NeptuneService.allocateProxyPort} still substitutes the advertised port on its
+     * own path, which is the drift this split removes here.
+     */
+    private int bindProxyPort(Integer preferred) {
+        int base = config.services().elasticache().proxyBasePort();
+        int max = config.services().elasticache().proxyMaxPort();
+        if (preferred != null && preferred >= base && preferred <= max && usedPorts.add(preferred)) {
+            return preferred;
         }
         for (int port = base; port <= max; port++) {
             if (usedPorts.add(port)) {
@@ -1691,11 +1759,14 @@ public class ElastiCacheService implements ResourceProvider {
         usedPorts.remove(port);
     }
 
+    /**
+     * The bound port a restored record gets back: the one it was listening on before, when that
+     * is still free, and any other port in the range when it is not. Unlike the advertised port,
+     * which a restore replays unchanged because it is the caller's, this one is this process's
+     * own and may move across a restart without anyone noticing.
+     */
     private int reserveOrAllocateProxyPort(int persistedPort) {
-        if (persistedPort > 0 && usedPorts.add(persistedPort)) {
-            return persistedPort;
-        }
-        return allocateProxyPort();
+        return bindProxyPort(persistedPort > 0 ? persistedPort : null);
     }
 
     // ── Cache Subnet Groups ───────────────────────────────────────────────────

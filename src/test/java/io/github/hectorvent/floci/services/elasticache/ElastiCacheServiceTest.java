@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -266,8 +267,10 @@ class ElastiCacheServiceTest {
     void requestedPortIsHonoredWhenFreeAndInRange() {
         ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", 16390));
 
+        assertEquals(16390, group.getConfigurationEndpoint().port(),
+                "A requested Port must be the port the group reports");
         assertEquals(16390, group.getProxyPort(),
-                "A free, in-range requested Port must be the port the group reports");
+                "...and when it is free and in range, the port the proxy binds as well");
     }
 
     @Test
@@ -279,26 +282,40 @@ class ElastiCacheServiceTest {
     }
 
     @Test
-    void requestedPortAlreadyInUseIsRejected() {
-        // floci multiplexes every group's proxy onto one host, so two groups cannot share a port.
-        // Substituting a different one would hand back the drift honoring Port exists to remove,
-        // and it could only ever hit a caller who did pin a port.
+    void aPortAnotherGroupHoldsIsStillAdvertisedToTheCaller() {
+        // AWS scopes Port to a cluster's own endpoint: 6379 is the Redis default, so groups share
+        // it routinely and two replication groups on it coexist. Refusing the second create
+        // diverged from AWS on an entirely ordinary request, and failed every module standing up
+        // two Redis clusters. Floci's listener still needs a port nothing else is on, so the
+        // advertised port and the bound one are separate rather than one being refused.
         service.createReplicationGroup(singleNodeRequest("grp1", 16390));
 
-        AwsException thrown = assertThrows(AwsException.class,
-                () -> service.createReplicationGroup(singleNodeRequest("grp2", 16390)));
+        ReplicationGroup second = service.createReplicationGroup(singleNodeRequest("grp2", 16390));
 
-        assertEquals("InvalidParameterValue", thrown.getErrorCode());
-        assertTrue(thrown.getMessage().contains("16390"));
+        assertEquals(16390, second.getConfigurationEndpoint().port(),
+                "The second group advertises the port it pinned, as AWS would report it");
+        assertNotEquals(16390, second.getProxyPort(),
+                "...while its proxy binds a port of its own, a host TCP port being exclusive");
     }
 
     @Test
-    void requestedPortOutsideTheProxyRangeIsRejected() {
+    void aPortOutsideTheProxyRangeIsAdvertisedRatherThanRefused() {
+        // The proxy range bounds what Floci may listen on. It never bounded what AWS accepts, and
+        // rejecting on it was an emulator-shaped limit no caller could anticipate.
+        ReplicationGroup group = service.createReplicationGroup(singleNodeRequest("grp", 9999));
+
+        assertEquals(9999, group.getConfigurationEndpoint().port());
+        assertEquals(16379, group.getProxyPort(),
+                "The listener falls back to the base port, the advertised one being unservable");
+    }
+
+    @Test
+    void aPortOutsideTheRangeAwsAcceptsIsStillRejected() {
         AwsException thrown = assertThrows(AwsException.class,
-                () -> service.createReplicationGroup(singleNodeRequest("grp", 9999)));
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 80)));
 
         assertEquals("InvalidParameterValue", thrown.getErrorCode());
-        assertTrue(thrown.getMessage().contains("9999"));
+        assertTrue(thrown.getMessage().contains("1150"));
     }
 
     @Test
