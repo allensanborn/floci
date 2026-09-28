@@ -67,6 +67,27 @@ class EcsServiceDeploymentStatusTest {
         assertNotNull(done.getFinishedAt(), "a finished deployment reports when it finished");
     }
 
+    /**
+     * A guard, not a repro: this one passes on the build the bug was found on, because there
+     * every deployment was born SUCCESSFUL and so a zero-desired service trivially was too. It
+     * exists to pin a direction the fix must not break -- a service already at its requested
+     * count has converged, so its deployment is finished immediately and a steady-state wait
+     * returns at once rather than stalling for something that is never going to happen.
+     *
+     * <p>What it catches, measured rather than asserted: make {@code settleStatus} refuse to call
+     * a zero-desired service converged (add {@code && svc.getDesiredCount() > 0}, the shape a
+     * defensive "nothing was asked for, so nothing succeeded" slip takes) and this goes red with
+     * {@code expected: <SUCCESSFUL> but was: <IN_PROGRESS>} while the two desiredCount-1 tests in
+     * this class stay green. The same mutation is what deriving the status on a reconciler tick,
+     * instead of at read time, would amount to for a service that never needs a tick.
+     *
+     * <p>Two other tests catch that mutation too -- this class's integration twin
+     * {@code theJoinedDeploymentIsDescribableAndReportsTheServicesProgress} and the pre-existing
+     * {@code EcsFargateEdgeCaseIntegrationTest.aServiceDeploymentPointsAtTheRevisionItDeployed},
+     * both of which also use desiredCount 0. So this is not independent coverage. It is kept
+     * because it is the only one of the three that fails with the condition named in the message;
+     * the other two report "1 expectation failed" from a wire assertion.
+     */
     @Test
     void aServiceAlreadyAtItsRequestedCountHasNothingToWaitFor() {
         EcsService service = newMockModeService();
