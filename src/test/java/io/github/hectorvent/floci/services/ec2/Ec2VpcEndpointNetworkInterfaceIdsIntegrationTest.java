@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import io.quarkus.test.junit.QuarkusTest;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
@@ -33,7 +33,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * DescribeVpcEndpoints answered with the element absent.
  *
  * <p>A Gateway endpoint has no interfaces, and AWS reports none for one; that direction is
- * asserted too, because a change that simply always emitted the set would otherwise pass.
+ * asserted too. Note what that assertion can and cannot catch: it pins that no interface
+ * ids are REPORTED, not that the element is absent. Dropping the emission guard would
+ * yield an empty {@code <networkInterfaceIdSet/>}, whose {@code item} list is also empty,
+ * and this test would still pass. That is deliberate rather than an oversight -- AWS emits
+ * the empty element where this omits it, a difference no ec2query SDK can observe, so
+ * pinning absence would pin the side of that choice further from AWS.
  *
  * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcEndpoints.html">DescribeVpcEndpoints</a>
  */
@@ -161,8 +166,9 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
                 "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.s3",
                 "VpcEndpointType", "Gateway", "RouteTableId.1", routeTableId);
 
-        // A gateway endpoint is a route-table entry, not an ENI. Asserted so that emitting
-        // the set unconditionally would not pass this suite.
+        // A gateway endpoint is a route-table entry, not an ENI. This is a regression guard
+        // on that, not a discriminator for the emission change: see the class javadoc for
+        // why an empty element and an absent one are indistinguishable here.
         assertTrue(eniIdsOf(endpointId).isEmpty(),
                 "a gateway endpoint owns no interfaces");
     }
