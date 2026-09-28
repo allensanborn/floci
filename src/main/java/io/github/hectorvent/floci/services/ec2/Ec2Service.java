@@ -4583,8 +4583,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      *
      * <p>A distinct NAME rather than an overload of {@code endpointNetworkInterfaces},
      * deliberately: an overload taking VpcEndpoint beside one taking String makes a
-     * Mockito {@code any()} ambiguous, and FlowLogServiceTest:31 already uses one. A new
-     * method should not make an existing test stop compiling.
+     * Mockito {@code any()} ambiguous, and {@code FlowLogServiceTest} already stubs
+     * {@code endpointNetworkInterfaces(any())}. A new method should not make an existing
+     * test stop compiling.
      *
      * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
      * the wire, the objects flow-log attribution reads -- comes from one place and
@@ -4596,7 +4597,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      *
      * <p>A Gateway endpoint owns no interfaces and gets an empty list.
      */
-    public List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint) {
+    private List<NetworkInterface> endpointNetworkInterfacesOf(VpcEndpoint endpoint) {
         if (!"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
             return List.of();
         }
@@ -4636,11 +4637,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * diff -- it propagates into whatever consumes it.
      *
      * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
-     * separately, so the ids on the wire are BY CONSTRUCTION the interfaces flow-log
-     * attribution reads. An earlier version of this method called {@link #endpointEniId}
-     * itself and looked equivalent; it was not, because it lacked that method\'s skip of a
-     * subnet whose record has gone, and the two were measured reporting different sets
-     * after a subnet was deleted out from under a live endpoint. A Gateway endpoint has no
+     * separately, so the ids on the wire come BY CONSTRUCTION from the same derivation
+     * flow-log attribution uses, and no endpoint can be described two ways. An earlier
+     * version of this method called {@link #endpointEniId} itself and looked equivalent;
+     * it was not, because it lacked that method's skip of a subnet whose record has gone,
+     * and the two were measured reporting different sets after a subnet was deleted out
+     * from under a live endpoint.
+     *
+     * <p>Shared derivation, not a shared view: {@link FlowLogService} runs on a scheduler
+     * with no request context and so reads the default account, while this path reads the
+     * caller's. For a non-default account the flow-log side sees no endpoints at all.
+     * Each side stays internally consistent, which is the property being claimed here --
+     * it is not a claim that both see the same endpoints. A Gateway endpoint has no
      * interfaces and gets an empty list, which is what AWS reports for one.
      */
     public List<String> endpointNetworkInterfaceIds(VpcEndpoint endpoint) {
