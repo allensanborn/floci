@@ -154,6 +154,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String PROPAGATE_TAGS_SERVICE = "SERVICE";
     public static final String PROPAGATE_TAGS_TASK_DEFINITION = "TASK_DEFINITION";
     public static final String PROPAGATE_TAGS_NONE = "NONE";
+    /** A service deployment whose target revision's tasks are not all up yet. */
+    public static final String DEPLOYMENT_STATUS_IN_PROGRESS = "IN_PROGRESS";
+    /** A service deployment whose target revision is running at its requested task count. */
+    public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
     /** A listing returns at most a hundred ARNs per page. */
@@ -3678,6 +3682,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return deploymentArns.stream()
                 .map(arn -> serviceDeployments.get(arn))
                 .filter(d -> d != null)
+                .map(this::settleStatus)
                 .toList();
     }
 
@@ -3694,6 +3699,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         return serviceDeployments.values().stream()
                 .filter(d -> d.getServiceArn().equals(svc.getServiceArn()))
+                .map(this::settleStatus)
                 .filter(d -> statusFilter == null || statusFilter.isEmpty()
                         || statusFilter.contains(d.getStatus()))
                 .sorted((a, b) -> b.getCreatedAt().compareTo(a.getCreatedAt()))
@@ -3809,21 +3815,39 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * The bare identifier inside the service's {@code ecs-svc/<id>} deployment id — what AWS
+     * calls the task set id, and what names the service revision that deployment targets.
+     */
+    private String taskSetId(EcsServiceModel svc) {
+        String id = deploymentId(svc);
+        int slash = id.indexOf('/');
+        return slash < 0 ? id : id.substring(slash + 1);
+    }
+
+    /**
      * Records the deployment and the revision it targets. The revision is the snapshot of the
      * service's configuration, so it is copied out of the service rather than read back from it
      * later; the deployment links to it, which is how a caller gets from
      * {@code DescribeServiceDeployments} to what was actually deployed.
      *
-     * <p>Floci applies a change in place instead of rolling it, so a deployment is finished the
-     * moment it is recorded: {@code startedAt} and {@code finishedAt} are both its creation time.
+     * <p>The revision is named by the deployment's <em>task set id</em> rather than by an id of
+     * its own, because AWS mints the two together: a service reports {@code deployments[].id} as
+     * {@code ecs-svc/<id>} and the revision that deployment targets as
+     * {@code .../service-revision/<cluster>/<service>/<id>}, the same {@code <id>}. Clients join
+     * the two on it. The Terraform AWS provider's {@code wait_for_steady_state} does exactly
+     * that — it reads the PRIMARY deployment's id out of {@code DescribeServices}, then looks for
+     * that id inside each {@code ListServiceDeployments} brief's
+     * {@code targetServiceRevisionArn} to find the deployment to poll. Minting the revision id
+     * independently left that join with nothing to match, so the provider never resolved a
+     * deployment and reported {@code tfPENDING} until its twenty-minute timeout, on a service
+     * that was running and reporting itself stable everywhere else (floci-rddp).
      */
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
         String deploymentArn = regionResolver.buildArn("ecs", region,
                 "service-deployment/" + deploymentId);
-        String revisionId = UUID.randomUUID().toString().replace("-", "");
         String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + revisionId);
+                "service-revision/" + taskSetId(svc));
         Instant now = Instant.now();
 
         List<String> priorRevisions = serviceRevisions.values().stream()
@@ -3839,10 +3863,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deployment.setServiceArn(svc.getServiceArn());
         deployment.setClusterArn(svc.getClusterArn());
         deployment.setTaskDefinition(taskDefinition);
-        deployment.setStatus("SUCCESSFUL");
+        // Born in progress; settleStatus finishes it once the service's tasks are up.
+        deployment.setStatus(DEPLOYMENT_STATUS_IN_PROGRESS);
         deployment.setCreatedAt(now);
         deployment.setStartedAt(now);
-        deployment.setFinishedAt(now);
         deployment.setUpdatedAt(now);
         deployment.setTargetServiceRevisionArn(revisionArn);
         deployment.setSourceServiceRevisionArns(priorRevisions);
@@ -3864,6 +3888,37 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setContainerImages(containerImagesOf(taskDefinition, region));
         revision.setCreatedAt(now);
         serviceRevisions.put(revisionArn, revision);
+    }
+
+    /**
+     * Brings the deployment a service is <em>currently</em> on up to date with that service, the
+     * same way {@link #deploymentsFor} derives {@code rolloutState}: IN_PROGRESS until
+     * {@code runningCount} has reached {@code desiredCount}, SUCCESSFUL once it has. A deployment
+     * the service has already moved off keeps what it was last recorded with — it is history.
+     *
+     * <p>Deriving it matters rather than being cosmetic, because this status is what a
+     * steady-state wait reads: the Terraform AWS provider polls
+     * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL from
+     * the moment it was recorded would make {@code wait_for_steady_state} return before a single
+     * task had started — a wait that always passes says nothing about the service.
+     */
+    private ServiceDeployment settleStatus(ServiceDeployment deployment) {
+        EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
+        if (svc == null || deployment.getTargetServiceRevisionArn() == null
+                || !deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))) {
+            return deployment;
+        }
+        boolean converged = STATUS_ACTIVE.equals(svc.getStatus())
+                && svc.getRunningCount() >= svc.getDesiredCount();
+        deployment.setStatus(converged ? DEPLOYMENT_STATUS_SUCCESSFUL : DEPLOYMENT_STATUS_IN_PROGRESS);
+        if (!converged) {
+            deployment.setFinishedAt(null);
+        } else if (deployment.getFinishedAt() == null) {
+            Instant now = Instant.now();
+            deployment.setFinishedAt(now);
+            deployment.setUpdatedAt(now);
+        }
+        return deployment;
     }
 
     /** The images the revision's task definition pins, one entry per container definition. */
