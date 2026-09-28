@@ -16,6 +16,14 @@ public class CacheCluster {
     private String engine;
     private String engineVersion;
     private Endpoint configurationEndpoint;
+    /**
+     * The host port this emulator's auth proxy listens on for this cluster, which is not the port
+     * the endpoint advertises. AWS scopes a cache's port to its own endpoint — 6379 is the Redis
+     * default, so clusters share it routinely — while a host TCP port is exclusive, so Floci
+     * hands out a port of its own and keeps the caller's on the endpoint. Zero on a record
+     * written before the two were separate, when the endpoint's port was both.
+     */
+    private int proxyPort;
     private Instant cacheClusterCreateTime;
     private String cacheNodeType;
     private int numCacheNodes;
@@ -66,6 +74,9 @@ public class CacheCluster {
 
     public Endpoint getConfigurationEndpoint() { return configurationEndpoint; }
     public void setConfigurationEndpoint(Endpoint configurationEndpoint) { this.configurationEndpoint = configurationEndpoint; }
+
+    public int getProxyPort() { return proxyPort; }
+    public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
 
     public Instant getCacheClusterCreateTime() { return cacheClusterCreateTime; }
     public void setCacheClusterCreateTime(Instant cacheClusterCreateTime) { this.cacheClusterCreateTime = cacheClusterCreateTime; }
