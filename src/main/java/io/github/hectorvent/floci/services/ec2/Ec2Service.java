@@ -4752,6 +4752,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         String cidr = subnet.getCidrBlock();
         String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
         String[] parts = baseIp.split("\\.");
+        // A subnet's CidrBlock is not guaranteed to be dotted IPv4. CreateSubnet stores
+        // whatever it is given without validating the family, and an IPv6-only subnet has
+        // no IPv4 CIDR at all, so this can be "2001:db8::" or anything else -- one element,
+        // and parts[1] then throws. That used to surface only on the flow-log scheduler;
+        // DescribeVpcEndpoints now derives interfaces on the request path, which would turn
+        // an odd subnet into a failed EC2 response rather than a degraded address.
+        // Falls back to the same default the null case already uses, so "no usable IPv4"
+        // has one behaviour rather than two.
+        if (parts.length < 4) {
+            parts = "172.31.0.0".split("\\.");
+        }
         int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }

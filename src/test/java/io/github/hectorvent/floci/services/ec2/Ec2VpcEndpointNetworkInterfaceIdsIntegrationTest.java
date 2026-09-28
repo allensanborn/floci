@@ -2,9 +2,9 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.quarkus.test.junit.QuarkusTest;
-import jakarta.inject.Inject;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -153,6 +153,34 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
                 + "service reports, in the same order");
         assertEquals(1, onTheWire.size(),
                 "the endpoint has one surviving subnet, so it reports one interface");
+    }
+
+    @Test
+    void anEndpointOnASubnetWithoutIpv4StillAnswers() {
+        // REGRESSION GUARD for the request path this change created. Deriving the
+        // interfaces now happens while rendering CreateVpcEndpoint and
+        // DescribeVpcEndpoints, and that derivation computes a private IP by splitting
+        // the subnet's CidrBlock on dots. CreateSubnet stores whatever CidrBlock it is
+        // given without validating the family, so the value is not guaranteed to be
+        // dotted IPv4 -- and before the guard, parts[1] threw, turning an odd subnet into
+        // a FAILED EC2 response instead of a degraded address. Previously the same
+        // calculation ran only on the flow-log scheduler, where a throw was contained.
+        String vpcId = createVpc("10.78.0.0/16");
+        String subnetId = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
+                "VpcId", vpcId, "CidrBlock", "2001:db8::/56",
+                "AvailabilityZone", "us-east-1a");
+
+        String endpointId = ec2Value("CreateVpcEndpoint",
+                "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.ec2",
+                "VpcEndpointType", "Interface", "SubnetId.1", subnetId);
+
+        // The assertion is that we get an ANSWER at all: every ec2Value above already
+        // requires statusCode 200, so a throw in the rendering path fails this test at
+        // CreateVpcEndpoint. Describe is exercised too, because it renders by the same
+        // path and is the call Terraform makes between plan and apply.
+        assertEquals(1, eniIdsOf(endpointId).size(),
+                "one subnet, so one interface, whatever family its CIDR is");
     }
 
     @Test
