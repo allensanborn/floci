@@ -104,7 +104,15 @@ class ElastiCachePortSharingIntegrationTest {
             .extract().xmlPath().getInt(CREATED_PORT);
     }
 
-    /** The bug: AWS creates this group, and Floci answered InvalidParameterValue. */
+    /**
+     * The bug: AWS creates this group, and Floci answered InvalidParameterValue.
+     *
+     * <p>Not redundant against {@code Order(6)}, which is the reading this assertion invites.
+     * Comparing the two REPORTED ports is what rejects a build that reports one port for both
+     * caches, and it does so before anything connects, so it survives on a runner where
+     * {@code Order(6)} is skipped for want of Docker. {@code Order(6)} catches what this cannot,
+     * namely two distinct reported ports that do not reach the caches they name.
+     */
     @Test
     @Order(2)
     void secondGroupOnTheSamePortIsCreatedRatherThanRefused() {
@@ -131,10 +139,14 @@ class ElastiCachePortSharingIntegrationTest {
                 describeMember(SECOND_GROUP + "-001").extract().xmlPath().getInt(MEMBER_NODE_PORT));
     }
 
-    /** AWS's own rule, and the only rejection left. */
+    /**
+     * The one range check left. The bound is the one {@code RdsService.reserveProxyPort} applies
+     * to the same argument; nothing here establishes ElastiCache's real limit on AWS, so the name
+     * says "accepted" rather than claiming the range is AWS's.
+     */
     @Test
     @Order(5)
-    void aPortOutsideTheRangeAwsAcceptsIsStillRefused() {
+    void aPortOutsideTheAcceptedRangeIsStillRefused() {
         given()
             .formParam("Action", "CreateReplicationGroup")
             .formParam("ReplicationGroupId", "it-ec-share-bad-port")
