@@ -179,21 +179,31 @@ public class CloudWatchDashboardsService {
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        return findByArn(resourceArn, region).map(Dashboard::getTags).orElse(Map.of());
+        return requireDashboard(resourceArn, region).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        findByArn(resourceArn, region).ifPresent(dashboard -> {
-            dashboard.getTags().putAll(tags);
-            dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
-        });
+        Dashboard dashboard = requireDashboard(resourceArn, region);
+        dashboard.getTags().putAll(tags);
+        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        findByArn(resourceArn, region).ifPresent(dashboard -> {
-            tagKeys.forEach(dashboard.getTags()::remove);
-            dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
-        });
+        Dashboard dashboard = requireDashboard(resourceArn, region);
+        tagKeys.forEach(dashboard.getTags()::remove);
+        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
+    }
+
+    /**
+     * Resolves the dashboard an ARN names, or reports that nothing does. The tag operations
+     * declare {@code ResourceNotFoundException}, which is a different shape from the
+     * {@code ResourceNotFound} that {@code GetDashboard} and {@code DeleteDashboards} declare,
+     * so this is not the {@link #notFound(String)} used by the rest of this service.
+     */
+    private Dashboard requireDashboard(String resourceArn, String region) {
+        return findByArn(resourceArn, region).orElseThrow(() ->
+                new AwsException("ResourceNotFoundException",
+                        "Dashboard does not exist: " + resourceArn, 404));
     }
 
     private java.util.Optional<Dashboard> findByArn(String resourceArn, String region) {

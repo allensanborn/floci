@@ -149,6 +149,32 @@ class CloudWatchDashboardsServiceTest {
         assertEquals(java.util.Map.of(), service.listTagsForResource(arn, REGION));
     }
 
+    /**
+     * An ARN naming no dashboard is an error on all three operations, not a silent no-op. The
+     * ARN used here differs from a working one only in the dashboard name, so the outcome
+     * cannot be explained by the ARN failing to parse as a dashboard ARN.
+     */
+    @Test
+    void tagOperationsRejectAnArnThatNamesNoDashboard() {
+        service.putDashboard("ops", BODY, REGION);
+        String arn = service.getDashboard("ops", REGION).getDashboardArn();
+        String ghost = arn.replace("dashboard/ops", "dashboard/nosuch");
+        assertTrue(CloudWatchDashboardsService.isDashboardArn(ghost));
+
+        for (Runnable call : List.<Runnable>of(
+                () -> service.tagResource(ghost, java.util.Map.of("env", "prod"), REGION),
+                () -> service.untagResource(ghost, List.of("env"), REGION),
+                () -> service.listTagsForResource(ghost, REGION))) {
+            AwsException e = assertThrows(AwsException.class, call::run);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals(404, e.getHttpStatus());
+        }
+
+        // The failures wrote nothing: the real dashboard still carries only what it was given.
+        service.tagResource(arn, java.util.Map.of("env", "dev"), REGION);
+        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
+    }
+
     @Test
     void deleteDashboardsIsBestEffortWhenOneNameIsMissing() {
         service.putDashboard("a", BODY, REGION);
