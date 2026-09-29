@@ -976,14 +976,30 @@ class Ec2Tests {
         // it into networkInterfaceIds(). A response can be well-formed XML and still not
         // populate the SDK model -- a wrong element name or nesting fails silently, leaving
         // an empty list rather than an error, which is exactly the symptom being fixed.
+        // OWNS ITS FIXTURES. The shared subnetId and security group this test originally
+        // used are destroyed before it runs -- @Order(44) deletes the subnet and sets
+        // subnetId to null, @Order(45) deletes the group -- so it was passing null as a
+        // subnet id and asserting on groups that no longer existed. Caught in review.
+        // An ordered suite sharing mutable fixtures makes "what exists here" a function of
+        // position, so a test placed late has to create what it needs.
+        String ownSubnetId = null;
+        String ownGroupId = null;
         String endpointId = null;
         try {
+            ownSubnetId = ec2.createSubnet(CreateSubnetRequest.builder()
+                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone("us-east-1a")
+                    .build()).subnet().subnetId();
+            ownGroupId = ec2.createSecurityGroup(CreateSecurityGroupRequest.builder()
+                    .groupName("vpce-eni-sdk-test").description("endpoint interface ids")
+                    .vpcId(vpcId).build()).groupId();
+
             CreateVpcEndpointResponse created = ec2.createVpcEndpoint(
                     CreateVpcEndpointRequest.builder()
                             .vpcId(vpcId)
                             .serviceName("com.amazonaws.us-east-1.ec2")
                             .vpcEndpointType(VpcEndpointType.INTERFACE)
-                            .subnetIds(subnetId)
+                            .subnetIds(ownSubnetId)
+                            .securityGroupIds(ownGroupId)
                             .build());
             endpointId = created.vpcEndpoint().vpcEndpointId();
 
@@ -1008,6 +1024,14 @@ class Ec2Tests {
             if (endpointId != null) {
                 ec2.deleteVpcEndpoints(DeleteVpcEndpointsRequest.builder()
                         .vpcEndpointIds(endpointId).build());
+            }
+            if (ownGroupId != null) {
+                ec2.deleteSecurityGroup(DeleteSecurityGroupRequest.builder()
+                        .groupId(ownGroupId).build());
+            }
+            if (ownSubnetId != null) {
+                ec2.deleteSubnet(DeleteSubnetRequest.builder()
+                        .subnetId(ownSubnetId).build());
             }
         }
     }
