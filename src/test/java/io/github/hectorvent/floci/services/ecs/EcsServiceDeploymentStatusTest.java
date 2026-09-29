@@ -349,8 +349,12 @@ class EcsServiceDeploymentStatusTest {
      * itself and not an incidental difference.
      *
      * <p>The assertions below deliberately pin the limitation as well as the fix: the task still
-     * running is the OLD revision's. That is what makes the count honest about what it is
-     * counting, and it is the thing that changes when DAEMON rolling is implemented.
+     * running is the OLD revision's. That coupling is load-bearing, not documentation. The day
+     * DAEMON rolling is implemented, counting stale tasks would reproduce on DAEMON the exact
+     * REPLICA bug this branch exists to remove, so the DAEMON branch of the count has to come
+     * out at the same moment. This assertion is what forces that: it fails as soon as the
+     * reconciler starts replacing the task, instead of letting the mitigation quietly outlive
+     * the reason for it.
      */
     @Test
     void aDaemonServiceStillFinishesItsDeploymentAfterATaskDefinitionChange() {

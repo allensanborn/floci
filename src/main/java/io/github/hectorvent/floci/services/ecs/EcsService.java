@@ -3859,12 +3859,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // sit at zero for ever, and a steady-state wait on a DAEMON service would hang rather
         // than return.
         //
-        // Counting them keeps DAEMON exactly as it behaves on main, which reports the deployment
-        // finished while the old revision is still what is running. That is wrong, and this is a
-        // mitigation rather than a claim it is right: the fault is that DAEMON services do not
-        // roll on a task-definition change, which is floci-n5kb's sibling bead, not something to
-        // fix from inside a counting helper. Do not "tidy" this branch away to match the one
-        // below without fixing the reconciler first.
+        // Counting them makes a DAEMON deployment converge on the same tick as main. The one
+        // difference is the birth state: a deployment with no tasks running yet reads
+        // IN_PROGRESS here and SUCCESSFUL on main, which is this branch's subject applied
+        // uniformly rather than a DAEMON-specific behaviour change.
+        //
+        // It is still a mitigation and not a claim DAEMON is right: what it preserves is main
+        // reporting a deployment finished while the previous revision is what is actually
+        // running. The fault is that DAEMON services do not roll on a task-definition change,
+        // which is a reconciler defect with its own bead, not something to fix from inside a
+        // counting helper. Do not "tidy" this branch away to match the one below without fixing
+        // the reconciler first: once DAEMON rolls, counting stale tasks reproduces the exact
+        // REPLICA bug this branch exists to remove, on DAEMON.
         if (SCHEDULING_DAEMON.equals(svc.getSchedulingStrategy())) {
             return running.count();
         }
