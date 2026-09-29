@@ -3924,7 +3924,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code targetServiceRevisionArn} to find the deployment to poll. Minting the revision id
      * independently left that join with nothing to match, so the provider never resolved a
      * deployment and reported {@code tfPENDING} until its twenty-minute timeout, on a service
-     * that was running and reporting itself stable everywhere else (floci-rddp).
+     * that was running and reporting itself stable everywhere else.
      */
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
@@ -4059,8 +4059,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * let tasks dying afterwards flip a finished record back to IN_PROGRESS and blank a
      * {@code finishedAt} it had already published, then stamp a new one on recovery, so a
      * terminal record mutated under its readers. A service that never converges still has no
-     * terminal failure state and stays IN_PROGRESS; that is the loud direction, and
-     * {@code floci-n5kb} tracks it.
+     * terminal failure state and stays IN_PROGRESS; that is the loud direction, and is
+     * tracked separately.
      *
      * <p>The task scan sits last in the condition, so listing a service's deployments costs at
      * most one scan however many it returns, and none once the current one has latched.

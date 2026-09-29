@@ -30,7 +30,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * What a service deployment reports, driven off the reconciler tick by tick (floci-rddp).
+ * What a service deployment reports, driven off the reconciler tick by tick.
  *
  * <p>The deployment a service is currently on is the resource a steady-state wait polls, so its
  * status has to mean something, and three things have to be true of it at once:

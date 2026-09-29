@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The join a steady-state wait walks, end to end (floci-rddp).
+ * The join a steady-state wait walks, end to end.
  *
  * <p>Since provider 6.x the Terraform AWS provider no longer decides {@code wait_for_steady_state}
  * from {@code DescribeServices} alone. For a service under the ECS deployment controller whose
