@@ -181,6 +181,12 @@ account's behalf, published under the reserved `alias/aws/<service>` alias: `ali
 but a module that leaves a service's encryption at its default resolves one through a data
 source. Floci ships the same catalog.
 
+The catalog holds only **AWS managed** keys, which live in your account and do have that alias.
+It deliberately excludes services that encrypt with an **AWS owned** key, which lives in an
+AWS-owned account and has no alias in yours: EKS API-data envelope encryption is the clearest
+case. Resolving an alias AWS does not publish would be worse than not having it, since the call
+would succeed here and fail against a real account.
+
 ```bash
 aws kms list-aliases --query 'Aliases[?starts_with(AliasName, `alias/aws/`)].AliasName' \
   --endpoint-url $AWS_ENDPOINT_URL
@@ -189,9 +195,11 @@ aws kms describe-key --key-id alias/aws/s3 \
   --query KeyMetadata.KeyManager --endpoint-url $AWS_ENDPOINT_URL   # -> "AWS"
 ```
 
-A region's AWS managed keys are minted the first time anything reads that region's alias
-namespace, which is either `ListAliases` or a lookup naming one of the reserved aliases. They
-behave as AWS's keys, not the account's:
+A region's AWS managed keys are minted the first time anything reads that region's key or alias
+namespace: `ListKeys`, `ListAliases`, or a lookup naming one of the reserved aliases. An entry is
+skipped only when its alias is present *and* the key that alias targets is present, so a lost or
+quarantined `kms-keys.json` rebuilds from the catalog rather than leaving every alias dangling.
+They behave as AWS's keys, not the account's:
 
 - `DescribeKey` reports `KeyManager: AWS`, and `GetKeyRotationStatus` reports `true`, since AWS
   rotates them and the customer cannot turn that off.
@@ -203,6 +211,8 @@ behave as AWS's keys, not the account's:
 - The `alias/aws/` namespace is reserved. `CreateAlias` under it is rejected with
   `InvalidAliasNameException`, and `UpdateAlias` or `DeleteAlias` against one of these aliases is
   rejected with `AccessDeniedException`.
+- They cannot be given a second alias. `CreateAlias` or `UpdateAlias` naming an AWS managed key as
+  the target is rejected with `AccessDeniedException`.
 
 Two deliberate simplifications: the key policy is the standard account-root policy rather than
 the service-principal policy with a `kms:ViaService` condition that AWS attaches, and AWS

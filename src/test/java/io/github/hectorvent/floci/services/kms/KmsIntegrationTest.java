@@ -29,6 +29,7 @@ import java.util.List;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -3325,6 +3326,30 @@ class KmsIntegrationTest {
 
         assertEquals("default key payload",
                 new String(Base64.getDecoder().decode(plaintext), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * CreateAlias must not hand an AWS managed key a second alias. AWS excludes them as a target,
+     * so accepting one here would make a template succeed against Floci and fail against AWS,
+     * which is the one failure mode nothing downstream reports.
+     */
+    @Test
+    void refusesToPointACustomerAliasAtAnAwsManagedKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateAlias")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"AliasName\": \"alias/borrowed-from-aws\", \"TargetKeyId\": \"alias/aws/s3\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+
+        given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Aliases.AliasName", not(hasItem("alias/borrowed-from-aws")));
     }
 
     /**

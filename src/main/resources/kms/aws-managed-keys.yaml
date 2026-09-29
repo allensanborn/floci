@@ -6,19 +6,39 @@
 # encryption at its default resolves one: a data source reading alias/aws/s3 succeeds against
 # any real account and must succeed here too.
 #
-# One entry mints one key and one alias the first time a region's alias namespace is read.
-# Adding a service is a line here, not a code change.
+# One entry mints one key and one alias the first time a region's key or alias namespace is read.
 #
-# The alias names are AWS's own, taken from the "AWS managed key" rows of
-# https://docs.aws.amazon.com/kms/latest/developerguide/concepts.html and each service's
-# encryption-at-rest documentation. Note that the alias follows the service's API namespace
-# rather than its brand name: EFS is alias/aws/elasticfilesystem, OpenSearch is alias/aws/es
-# and MSK is alias/aws/kafka.
+# ---------------------------------------------------------------------------------------------
+# BEFORE ADDING A LINE: an AWS managed key is not the same thing as an AWS owned key, and only
+# the first belongs here.
+#
+#   AWS MANAGED key  lives in the customer's account. It appears in ListKeys and ListAliases,
+#                    reports KeyManager: AWS, and has an alias/aws/<service> alias. Seed it.
+#
+#   AWS OWNED key    lives in an AWS-owned account, not the customer's. It appears in neither
+#                    ListKeys nor ListAliases, and DescribeKey on alias/aws/<service> fails
+#                    against a real account. Do NOT seed it.
+#
+# Seeding an owned-key service would make DescribeKey succeed here and fail against AWS, which
+# is the worst failure this emulator can produce: a module looks compatible when it is not, and
+# nothing reports the error. A service we failed to seed is a visible gap someone files a bug
+# about; a service we wrongly seeded is a lie nobody notices. So the bar is asymmetric on
+# purpose: add a line only when AWS itself shows or documents the alias aws/<service> as a key
+# selectable or defaulted in *your* account, and prefer dropping an entry to guessing.
+#
+# Many services encrypt at rest with an AWS owned key and offer no alias at all, and several
+# offer only a customer managed key. Both are absent from this list deliberately. EKS is the
+# clearest example: its API-data envelope encryption uses an AWS owned key by default and a
+# customer managed key otherwise, so there is no alias/aws/eks to resolve.
+#
+# The alias follows the service's API namespace rather than its brand name: EFS is
+# alias/aws/elasticfilesystem, OpenSearch Service is alias/aws/es and MSK is alias/aws/kafka.
 #
 # The descriptions follow the template AWS uses for these keys, "Default master key that
 # protects my <resources> when no other key is defined". AWS has reworded individual entries
 # over the years and a given account may show slightly different phrasing, so treat the exact
 # string as illustrative rather than authoritative. Nothing resolves a key by its description.
+# ---------------------------------------------------------------------------------------------
 keys:
   - alias: "alias/aws/s3"
     description: "Default master key that protects my S3 objects when no other key is defined"
@@ -46,57 +66,23 @@ keys:
     description: "Default master key that protects my OpenSearch domains when no other key is defined"
   - alias: "alias/aws/kinesis"
     description: "Default master key that protects my Kinesis data when no other key is defined"
-  - alias: "alias/aws/kinesisvideo"
-    description: "Default master key that protects my Kinesis Video streams when no other key is defined"
   - alias: "alias/aws/kafka"
     description: "Default master key that protects my MSK clusters when no other key is defined"
   - alias: "alias/aws/redshift"
     description: "Default master key that protects my Redshift clusters when no other key is defined"
-  - alias: "alias/aws/glue"
-    description: "Default master key that protects my Glue data when no other key is defined"
   - alias: "alias/aws/backup"
     description: "Default master key that protects my AWS Backup data when no other key is defined"
   - alias: "alias/aws/ecr"
     description: "Default master key that protects my ECR images when no other key is defined"
-  - alias: "alias/aws/eks"
-    description: "Default master key that protects my EKS cluster secrets when no other key is defined"
   - alias: "alias/aws/fsx"
     description: "Default master key that protects my FSx file systems when no other key is defined"
-  - alias: "alias/aws/xray"
-    description: "Default master key that protects my X-Ray traces when no other key is defined"
+  - alias: "alias/aws/dms"
+    description: "Default master key that protects my DMS replication instance storage when no other key is defined"
   - alias: "alias/aws/codeartifact"
     description: "Default master key that protects my CodeArtifact packages when no other key is defined"
   - alias: "alias/aws/codecommit"
     description: "Default master key that protects my CodeCommit repositories when no other key is defined"
-  - alias: "alias/aws/connect"
-    description: "Default master key that protects my Connect data when no other key is defined"
-  - alias: "alias/aws/dms"
-    description: "Default master key that protects my DMS endpoints when no other key is defined"
-  - alias: "alias/aws/directoryservice"
-    description: "Default master key that protects my Directory Service directories when no other key is defined"
-  - alias: "alias/aws/sagemaker"
-    description: "Default master key that protects my SageMaker data when no other key is defined"
   - alias: "alias/aws/ses"
     description: "Default master key that protects my SES messages when no other key is defined"
-  - alias: "alias/aws/storagegateway"
-    description: "Default master key that protects my Storage Gateway volumes when no other key is defined"
-  - alias: "alias/aws/timestream"
-    description: "Default master key that protects my Timestream data when no other key is defined"
   - alias: "alias/aws/workspaces"
     description: "Default master key that protects my WorkSpaces volumes when no other key is defined"
-  - alias: "alias/aws/transfer"
-    description: "Default master key that protects my Transfer Family data when no other key is defined"
-  - alias: "alias/aws/mq"
-    description: "Default master key that protects my Amazon MQ brokers when no other key is defined"
-  - alias: "alias/aws/imagebuilder"
-    description: "Default master key that protects my Image Builder components when no other key is defined"
-  - alias: "alias/aws/comprehend"
-    description: "Default master key that protects my Comprehend jobs when no other key is defined"
-  - alias: "alias/aws/lex"
-    description: "Default master key that protects my Lex bots when no other key is defined"
-  - alias: "alias/aws/qldb"
-    description: "Default master key that protects my QLDB ledgers when no other key is defined"
-  - alias: "alias/aws/appflow"
-    description: "Default master key that protects my AppFlow data when no other key is defined"
-  - alias: "alias/aws/lightsail"
-    description: "Default master key that protects my Lightsail disks when no other key is defined"

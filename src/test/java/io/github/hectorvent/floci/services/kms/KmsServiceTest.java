@@ -332,8 +332,10 @@ class KmsServiceTest {
         kmsService.createKey("key2", REGION);
         kmsService.createKey("key3", "eu-west-1");
 
-        List<KmsKey> keys = kmsService.listKeys(REGION);
-        assertEquals(2, keys.size());
+        // ListKeys also returns the region's AWS managed keys, as it does on real AWS, so the
+        // count this test is about is the customer-managed one.
+        assertEquals(2, customerKeys(REGION).size());
+        assertEquals(1, customerKeys("eu-west-1").size());
     }
 
     @Test
@@ -855,6 +857,13 @@ class KmsServiceTest {
         KmsKey updated = kmsService.describeKey(key.getKeyId(), REGION);
         assertEquals("Enabled", updated.getKeyState());
         assertEquals(0, updated.getDeletionDate());
+    }
+
+    /** The keys a test created. ListKeys also returns the region's AWS managed keys. */
+    private List<KmsKey> customerKeys(String region) {
+        return kmsService.listKeys(region).stream()
+                .filter(key -> !"AWS".equals(key.getKeyManager()))
+                .toList();
     }
 
     /**
@@ -3854,6 +3863,84 @@ class KmsServiceTest {
                     () -> kmsService.describeKey("alias/aws/not-a-real-service", REGION));
 
             assertEquals("NotFoundException", exception.getErrorCode());
+        }
+
+        /**
+         * The aliases and the keys live in different files, and PersistentStorage quarantines an
+         * unreadable one and starts that store empty on its own. Gating minting on the alias alone
+         * left every alias dangling for the life of the instance: ListAliases advertised
+         * alias/aws/s3 while DescribeKey on it reported NotFoundException. The catalog is in the
+         * repository, so this is the one part of a damaged store that can rebuild itself.
+         */
+        @Test
+        void remintsTheKeyWhenTheKeyStoreLostItAndTheAliasSurvived() {
+            String original = kmsService.describeKey("alias/aws/s3", REGION).getKeyId();
+            keyStore.delete(REGION + "::" + original);
+
+            // Not a shape check: the alias has to resolve to a key that can still do the work.
+            byte[] plaintext = "after the key store was lost".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt("alias/aws/s3", plaintext, REGION);
+
+            assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, REGION));
+            String reminted = kmsService.describeKey("alias/aws/s3", REGION).getKeyId();
+            assertNotEquals(original, reminted, "the alias still points at the key that was lost");
+            assertEquals("AWS", kmsService.describeKey("alias/aws/s3", REGION).getKeyManager());
+            // The repair must not duplicate the alias.
+            assertEquals(1, kmsService.listAliases(REGION).stream()
+                    .filter(alias -> "alias/aws/s3".equals(alias.getAliasName())).count());
+        }
+
+        @Test
+        void listAliasesRepairsEveryDanglingReservedAlias() {
+            kmsService.listAliases(REGION).stream()
+                    .filter(alias -> alias.getAliasName().startsWith("alias/aws/"))
+                    .forEach(alias -> keyStore.delete(REGION + "::" + alias.getTargetKeyId()));
+
+            for (KmsAlias alias : kmsService.listAliases(REGION)) {
+                assertEquals(alias.getTargetKeyId(),
+                        kmsService.describeKey(alias.getAliasName(), REGION).getKeyId(),
+                        alias.getAliasName() + " did not resolve after the key store was emptied");
+            }
+        }
+
+        /**
+         * Real AWS returns the AWS managed keys from ListKeys unconditionally. Reading ListKeys
+         * first on a cold service used to return nothing, so a caller that filters on KeyManager
+         * saw them or not depending on call order.
+         */
+        @Test
+        void listKeysMintsTheAwsManagedKeysWithoutAPriorAliasRead() {
+            List<KmsKey> keys = kmsService.listKeys(REGION);
+
+            assertEquals(AwsManagedKeys.KEYS.size(), keys.size());
+            assertTrue(keys.stream().allMatch(key -> "AWS".equals(key.getKeyManager())));
+            // And it did not mint a second set once the alias namespace is read as well.
+            kmsService.listAliases(REGION);
+            assertEquals(keys.size(), kmsService.listKeys(REGION).size());
+        }
+
+        @Test
+        void refusesToPointACustomerAliasAtAnAwsManagedKey() {
+            String awsKeyId = kmsService.describeKey("alias/aws/s3", REGION).getKeyId();
+            KmsKey mine = kmsService.createKey("mine", REGION);
+            kmsService.createAlias("alias/mine", mine.getKeyId(), REGION);
+
+            for (String target : List.of("alias/aws/s3", awsKeyId)) {
+                AwsException created = assertThrows(AwsException.class,
+                        () -> kmsService.createAlias("alias/borrowed", target, REGION),
+                        "CreateAlias accepted an AWS managed key as the target: " + target);
+                assertEquals("AccessDeniedException", created.getErrorCode());
+
+                AwsException updated = assertThrows(AwsException.class,
+                        () -> kmsService.updateAlias("alias/mine", target, REGION),
+                        "UpdateAlias accepted an AWS managed key as the target: " + target);
+                assertEquals("AccessDeniedException", updated.getErrorCode());
+            }
+
+            assertTrue(customerAliases(REGION).stream()
+                    .noneMatch(alias -> "alias/borrowed".equals(alias.getAliasName())));
+            assertEquals(mine.getKeyId(),
+                    kmsService.describeKey("alias/mine", REGION).getKeyId());
         }
 
         @Test
