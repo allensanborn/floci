@@ -36,6 +36,8 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class KmsIntegrationTest {
@@ -3239,6 +3241,121 @@ class KmsIntegrationTest {
                         .formatted(keyId, parameters.getString("ImportToken"), wrapped))
                 .when().post("/")
                 .then().statusCode(200);
+    }
+
+    /**
+     * The alias/aws/* keys, over the wire. DescribeKey's KeyManager was a constant "CUSTOMER"
+     * before these keys existed, so an AWS managed key has to be asked for through the handler
+     * to prove the field now tracks the key rather than the code path.
+     */
+    @Test
+    void listAliasesExposesTheAwsManagedAliasesWithTargetKeys() {
+        JsonPath aliases = given()
+                .header("X-Amz-Target", "TrentService.ListAliases")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath();
+
+        List<String> names = aliases.getList("Aliases.AliasName");
+        assertTrue(names.contains("alias/aws/s3"), "alias/aws/s3 missing from " + names);
+        assertTrue(names.contains("alias/aws/ebs"), "alias/aws/ebs missing from " + names);
+
+        int index = names.indexOf("alias/aws/s3");
+        String targetKeyId = aliases.getList("Aliases.TargetKeyId", String.class).get(index);
+        assertNotNull(targetKeyId, "alias/aws/s3 resolves to nothing");
+        assertFalse(targetKeyId.isBlank(), "alias/aws/s3 resolves to nothing");
+        assertTrue(aliases.getList("Aliases.AliasArn", String.class).get(index).endsWith(":alias/aws/s3"));
+    }
+
+    @Test
+    void describeKeyReportsKeyManagerPerKey() {
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/s3\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyManager", equalTo("AWS"))
+                .body("KeyMetadata.Enabled", equalTo(true))
+                .body("KeyMetadata.KeyState", equalTo("Enabled"));
+
+        String customerKeyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\": \"customer managed\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + customerKeyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyManager", equalTo("CUSTOMER"));
+    }
+
+    /**
+     * The lookup a module actually performs: encrypt under the service default key and read it
+     * back. A resolvable alias whose key could not encrypt would satisfy DescribeKey and still
+     * fail the caller.
+     */
+    @Test
+    void encryptsAndDecryptsUnderAnAwsManagedAlias() {
+        String ciphertext = given()
+                .header("X-Amz-Target", "TrentService.Encrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/secretsmanager\", \"Plaintext\": \""
+                        + Base64.getEncoder().encodeToString("default key payload".getBytes(StandardCharsets.UTF_8))
+                        + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("CiphertextBlob");
+
+        String plaintext = given()
+                .header("X-Amz-Target", "TrentService.Decrypt")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"CiphertextBlob\": \"" + ciphertext + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Plaintext");
+
+        assertEquals("default key payload",
+                new String(Base64.getDecoder().decode(plaintext), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * An AWS managed key is AWS's, not the account's. ScheduleKeyDeletion takes a key id rather
+     * than an alias, so the refusal has to be reached through the id the alias resolves to.
+     */
+    @Test
+    void refusesToScheduleDeletionOfAnAwsManagedKey() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"alias/aws/ebs\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ScheduleKeyDeletion")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + keyId + "\", \"PendingWindowInDays\": 7}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("AccessDeniedException"));
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\": \"" + keyId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyState", equalTo("Enabled"));
     }
 
     /**

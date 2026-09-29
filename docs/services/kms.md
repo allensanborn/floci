@@ -173,6 +173,43 @@ own the material and cannot rotate it.
   already has key material is rejected with `UnsupportedOperationException`, and
   `ListKeyRotations` is not implemented.
 
+## AWS Managed Keys
+
+Every AWS account has a per-region AWS managed key for each service that encrypts data on the
+account's behalf, published under the reserved `alias/aws/<service>` alias: `alias/aws/s3`,
+`alias/aws/ebs`, `alias/aws/rds` and so on. Nothing creates them, so no template declares them,
+but a module that leaves a service's encryption at its default resolves one through a data
+source. Floci ships the same catalog.
+
+```bash
+aws kms list-aliases --query 'Aliases[?starts_with(AliasName, `alias/aws/`)].AliasName' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws kms describe-key --key-id alias/aws/s3 \
+  --query KeyMetadata.KeyManager --endpoint-url $AWS_ENDPOINT_URL   # -> "AWS"
+```
+
+A region's AWS managed keys are minted the first time anything reads that region's alias
+namespace, which is either `ListAliases` or a lookup naming one of the reserved aliases. They
+behave as AWS's keys, not the account's:
+
+- `DescribeKey` reports `KeyManager: AWS`, and `GetKeyRotationStatus` reports `true`, since AWS
+  rotates them and the customer cannot turn that off.
+- They encrypt and decrypt like any other symmetric key.
+- Every administrative operation is refused with `AccessDeniedException`: `ScheduleKeyDeletion`,
+  `CancelKeyDeletion`, `PutKeyPolicy`, `UpdateKeyDescription`, `EnableKey`, `DisableKey`,
+  `EnableKeyRotation`, `DisableKeyRotation`, `RotateKeyOnDemand`, `TagResource` and
+  `UntagResource`.
+- The `alias/aws/` namespace is reserved. `CreateAlias` under it is rejected with
+  `InvalidAliasNameException`, and `UpdateAlias` or `DeleteAlias` against one of these aliases is
+  rejected with `AccessDeniedException`.
+
+Two deliberate simplifications: the key policy is the standard account-root policy rather than
+the service-principal policy with a `kms:ViaService` condition that AWS attaches, and AWS
+distinguishes some of the refusals above as unsupported operations rather than access denials.
+The catalog itself is `src/main/resources/kms/aws-managed-keys.yaml`; adding a service is a line
+there.
+
 ## Grant Support Scope
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
