@@ -18,13 +18,18 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Two caches may both ask for 6379, and each is reachable at the endpoint it reports.
+ *
+ * <p>Nothing here requires either cache to land on 6379 itself. Another class in this shared
+ * Quarkus instance may already hold it, in which case the substitution is the feature working,
+ * and a test demanding 6379 would fail on correct behaviour before reaching what it exists to
+ * check. What is asserted is the relationship: two caches asking for one port are served on
+ * two ports, and each reports the one it is on.
  *
  * <p>6379 is the Redis default, so nearly every ElastiCache cluster uses it and on AWS they
  * coexist: each cache has a DNS name of its own and the port never distinguishes them. Floci has
@@ -97,11 +102,12 @@ class ElastiCachePortSharingIntegrationTest {
 
     @Test
     @Order(1)
-    void firstGroupIsServedOnThePortItAskedFor() {
+    void firstGroupIsServedAndReportsWhereItIs() {
         firstPort = createGroup(FIRST_GROUP, SHARED_PORT, FIRST_TOKEN)
             .statusCode(200)
-            .body(CREATED_PORT, equalTo(String.valueOf(SHARED_PORT)))
             .extract().xmlPath().getInt(CREATED_PORT);
+
+        assertTrue(firstPort > 0, "The first group must report a port it can be dialled on");
     }
 
     /**
@@ -273,10 +279,45 @@ class ElastiCachePortSharingIntegrationTest {
         }
     }
 
+    /**
+     * Reads exactly one RESP reply. A single {@code read()} returns whatever happened to arrive,
+     * which is usually the whole reply over loopback and is not guaranteed to be: TCP may split it
+     * anywhere. That turns a working proxy into an intermittently failing test, which is worse
+     * than no test because it teaches people to re-run.
+     *
+     * <p>Handles the two shapes these commands produce: a single line for {@code +OK}, {@code -ERR}
+     * and the like, and a bulk string whose first line declares how many bytes follow.
+     */
     private static String readReply(InputStream in) throws IOException {
-        byte[] buffer = new byte[256];
-        int read = in.read(buffer);
-        return read < 0 ? "" : new String(buffer, 0, read, StandardCharsets.UTF_8);
+        String header = readLine(in);
+        if (header.isEmpty() || header.charAt(0) != '$') {
+            return header;
+        }
+        int length = Integer.parseInt(header.substring(1).trim());
+        if (length < 0) {
+            return header;
+        }
+        byte[] body = in.readNBytes(length);
+        if (body.length < length) {
+            throw new IOException("Short bulk string: wanted " + length + ", read " + body.length);
+        }
+        readLine(in);
+        return header + new String(body, StandardCharsets.UTF_8) + "\r\n";
+    }
+
+    /** One CRLF-terminated line, byte at a time so nothing of the next reply is consumed. */
+    private static String readLine(InputStream in) throws IOException {
+        StringBuilder line = new StringBuilder();
+        int b;
+        while ((b = in.read()) != -1) {
+            line.append((char) b);
+            if (line.length() >= 2
+                    && line.charAt(line.length() - 2) == '\r'
+                    && line.charAt(line.length() - 1) == '\n') {
+                return line.toString();
+            }
+        }
+        return line.toString();
     }
 
     private static String bulkString(String reply) {
