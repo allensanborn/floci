@@ -4760,10 +4760,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // an odd subnet into a failed EC2 response rather than a degraded address.
         // Falls back to the same default the null case already uses, so "no usable IPv4"
         // has one behaviour rather than two.
-        if (parts.length < 4) {
-            parts = "172.31.0.0".split("\\.");
-        }
         int host = 200 + Math.floorMod(endpoint.getVpcEndpointId().hashCode(), 50);
+        if (parts.length < 4) {
+            // The third octet comes from the SUBNET, not a constant. On the IPv4 path each
+            // subnet supplies its own distinct network, and that is the only thing making
+            // one endpoint's interfaces distinct -- the host octet is derived from the
+            // endpoint and is therefore the same for all of them. A constant fallback threw
+            // that away and gave every non-IPv4 subnet on an endpoint the same address,
+            // trading a crash for a silent collision.
+            return "172.31." + Math.floorMod(subnetId.hashCode(), 256) + "." + host;
+        }
         return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 

@@ -184,6 +184,44 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
     }
 
     @Test
+    void twoSubnetsWithoutIpv4GetDistinctAddresses() {
+        // The first fix for the non-IPv4 crash used a CONSTANT fallback network, which
+        // turned a crash into a silent collision: the host octet is derived from the
+        // ENDPOINT, so it is identical across that endpoint's interfaces, and on the IPv4
+        // path the only thing making them distinct is each subnet's own network. Collapse
+        // the network to a constant and every non-IPv4 subnet gets the same address.
+        // Caught in review, not by the test above, which uses a single subnet and so
+        // cannot see a collision at all.
+        String vpcId = createVpc("10.79.0.0/16");
+        String subnetA = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
+                "VpcId", vpcId, "CidrBlock", "2001:db8:1::/64",
+                "AvailabilityZone", "us-east-1a");
+        String subnetB = ec2Value("CreateSubnet", "CreateSubnetResponse.subnet.subnetId",
+                "VpcId", vpcId, "CidrBlock", "2001:db8:2::/64",
+                "AvailabilityZone", "us-east-1b");
+
+        String endpointId = ec2Value("CreateVpcEndpoint",
+                "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.ec2",
+                "VpcEndpointType", "Interface",
+                "SubnetId.1", subnetA, "SubnetId.2", subnetB);
+
+        List<String> addresses = new ArrayList<>();
+        for (NetworkInterface ni : service.endpointNetworkInterfaces("us-east-1")) {
+            if (("VPC Endpoint Interface " + endpointId).equals(ni.getDescription())) {
+                addresses.add(ni.getPrivateIpAddress());
+            }
+        }
+
+        assertEquals(2, addresses.size(), "one interface per subnet");
+        assertNotEquals(addresses.get(0), addresses.get(1),
+                "each subnet's interface needs its own address, got " + addresses);
+        // And the ids stay distinct too, which they already were -- endpointEniId mixes the
+        // subnet in. Asserted so a future change cannot fix one and break the other.
+        assertEquals(2, eniIdsOf(endpointId).size());
+    }
+
+    @Test
     void aGatewayEndpointReportsNoNetworkInterfaces() {
         String vpcId = createVpc("10.75.0.0/16");
         String routeTableId = ec2Value("CreateRouteTable",
