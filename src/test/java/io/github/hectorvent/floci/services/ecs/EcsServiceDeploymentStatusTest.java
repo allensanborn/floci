@@ -36,12 +36,12 @@ import static org.mockito.Mockito.when;
  * status has to mean something, and three things have to be true of it at once:
  *
  * <ul>
- *   <li>it is IN_PROGRESS until the deployment's tasks are up — one that is SUCCESSFUL the
+ *   <li>it is IN_PROGRESS until the deployment's tasks are up. One that is SUCCESSFUL the
  *       instant it is recorded makes {@code wait_for_steady_state} a wait that can never fail;</li>
- *   <li>the tasks it counts are its <em>own</em>, not the service's — counting the ones still
+ *   <li>the tasks it counts are its <em>own</em>, not the service's. Counting the ones still
  *       draining from the deployment it replaced reports a task-definition change finished
  *       before the new revision has started;</li>
- *   <li>SUCCESSFUL is terminal — tasks dying afterwards do not un-finish a finished
+ *   <li>SUCCESSFUL is terminal. Tasks dying afterwards do not un-finish a finished
  *       deployment.</li>
  * </ul>
  *

@@ -3828,13 +3828,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * for it. The reconciler sets that field from <em>every</em> RUNNING task the service owns,
      * which during a rolling change includes the ones still draining from the deployment this one
      * replaced. Judging a deployment by it reports a task-definition change finished the instant
-     * {@code UpdateService} returns — on the strength of the old revision's task — so a new image
+     * {@code UpdateService} returns, on the strength of the old revision's task, so a new image
      * that cannot start reads as stable and a steady-state wait returns at once. The reconciler
      * derives the right quantity one line before it sets that field, as
      * {@code running - staleTasks.size()}.
      *
      * <p>Recomputed here rather than carried over from the reconciler, for two reasons. A cached
-     * count is a fact about the last tick, and this is read on demand between ticks — right after
+     * count is a fact about the last tick, and this is read on demand between ticks, right after
      * {@code UpdateService}, which is exactly the moment that matters. And caching it would add
      * per-deployment state to the service model for a value that is cheap to derive from the
      * tasks already in hand, which is the same trade {@link #deploymentsFor} already makes.
@@ -3856,7 +3856,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The bare identifier inside the service's {@code ecs-svc/<id>} deployment id — what AWS
+     * The bare identifier inside the service's {@code ecs-svc/<id>} deployment id: what AWS
      * calls the task set id, and what names the service revision that deployment targets.
      */
     private String taskSetId(EcsServiceModel svc) {
@@ -3876,7 +3876,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code ecs-svc/<id>} and the revision that deployment targets as
      * {@code .../service-revision/<cluster>/<service>/<id>}, the same {@code <id>}. Clients join
      * the two on it. The Terraform AWS provider's {@code wait_for_steady_state} does exactly
-     * that — it reads the PRIMARY deployment's id out of {@code DescribeServices}, then looks for
+     * that: it reads the PRIMARY deployment's id out of {@code DescribeServices}, then looks for
      * that id inside each {@code ListServiceDeployments} brief's
      * {@code targetServiceRevisionArn} to find the deployment to poll. Minting the revision id
      * independently left that join with nothing to match, so the provider never resolved a
@@ -3936,15 +3936,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * tasks are running. A deployment the service has already moved off is history and is left
      * as it is.
      *
-     * <p>This status is what a steady-state wait reads — the Terraform AWS provider polls
-     * {@code DescribeServiceDeployments} for SUCCESSFUL — so a deployment that was SUCCESSFUL
+     * <p>This status is what a steady-state wait reads. The Terraform AWS provider polls
+     * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL
      * from the moment it was recorded would make {@code wait_for_steady_state} return before a
      * single task had started, a wait that always passes and therefore says nothing.
      *
      * <p><strong>SUCCESSFUL is terminal.</strong> The transition runs once and never reverses:
      * in AWS a completed deployment does not un-complete because the service later became
      * unhealthy, and {@code finishedAt} records when the deployment finished, not the last time
-     * someone looked. Deriving the status afresh on every read — the shape this started as —
+     * someone looked. Deriving the status afresh on every read, the shape this started as,
      * let tasks dying afterwards flip a finished record back to IN_PROGRESS and blank a
      * {@code finishedAt} it had already published, then stamp a new one on recovery, so a
      * terminal record mutated under its readers. A service that never converges still has no
@@ -3966,11 +3966,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      *
      * <p>The first row is not a one-off: a deployment stays unlatched for as long as it takes to
      * converge, so a rollout that is slow, or one that never converges at all, pays 3 on every
-     * poll for its whole duration — which is exactly when a waiter is polling hardest.</p>
+     * poll for its whole duration, which is exactly when a waiter is polling hardest.</p>
      *
      * where the three are {@link #deploymentsFor}, {@link #eventsFor} and
      * {@link #currentServiceDeployment}. {@code deploymentsFor} scans unconditionally.
-     * {@code eventsFor} scans only for a service that exists and is ACTIVE — its call is the last
+     * {@code eventsFor} scans only for a service that exists and is ACTIVE: its call is the last
      * disjunct of an {@code ||} chain, so it short-circuits, and widening that chain would change
      * this. {@code currentServiceDeployment} settles, so it scans until the current deployment
      * latches and never again: the poll that reads 1 is the poll that latches it.
@@ -4296,7 +4296,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 LOG.debugv("Could not parse region from service ARN {0}", svc.getServiceArn());
             }
         }
-        return regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
+        // Straight to the resolver, with no hardcoded fallback behind a null check. The sibling
+        // below guards, but the guard is unreachable here: nothing constructs an EcsService
+        // without a resolver, and the class dereferences it unguarded in the create paths, so a
+        // null one would fail long before this line. A fallback region literal that cannot be
+        // reached is still a wrong answer waiting in a non-default partition.
+        return regionResolver.getDefaultRegion();
     }
 
     /** The region a task lives in, read off its ARN, falling back to the default region. */

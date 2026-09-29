@@ -123,7 +123,7 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
         }
         assertNotNull(deploymentArn, "the listing must contain the PRIMARY deployment");
 
-        // A service at its requested task count — desiredCount 0 — is a finished deployment.
+        // A service at its requested task count, desiredCount 0, is a finished deployment.
         call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
                 .then()
                 .body("serviceDeployments", hasSize(1))
