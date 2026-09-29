@@ -6,6 +6,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -115,7 +117,7 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
         String deploymentArn = null;
         for (Object brief : listed.jsonPath().getList("serviceDeployments")) {
             @SuppressWarnings("unchecked")
-            java.util.Map<String, Object> map = (java.util.Map<String, Object>) brief;
+            Map<String, Object> map = (Map<String, Object>) brief;
             Object revision = map.get("targetServiceRevisionArn");
             if (revision != null && revision.toString().contains(taskSetId)) {
                 deploymentArn = String.valueOf(map.get("serviceDeploymentArn"));
