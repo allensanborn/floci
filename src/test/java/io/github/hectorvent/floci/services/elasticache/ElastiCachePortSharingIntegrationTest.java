@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.elasticache;
 
+import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.MethodOrderer;
@@ -84,6 +86,10 @@ class ElastiCachePortSharingIntegrationTest {
 
     private static int firstPort;
     private static int secondPort;
+
+    /** The manager that starts these caches' containers, so the guard is the service's own. */
+    @Inject
+    ElastiCacheContainerManager containerManager;
 
     @AfterAll
     static void cleanup() {
@@ -325,11 +331,21 @@ class ElastiCachePortSharingIntegrationTest {
         return lines.length > 1 ? lines[1] : reply;
     }
 
-    private static boolean isDockerAvailable() {
-        try {
-            return new ProcessBuilder("docker", "info").start().waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+    /**
+     * The service's own check, not a second one that happens to agree.
+     *
+     * <p>{@code isDockerReachable} is the method {@link ElastiCacheContainerManager} uses to tell
+     * a missing daemon from a container that failed for its own reasons, and it pings the
+     * {@code DockerClient} bean the containers are actually started with. The {@code docker} CLI
+     * is a different oracle: {@code DockerClientProducer} resolves the daemon from the active
+     * Docker context, often not the platform default (an OrbStack socket, say), so {@code docker
+     * info} can fail, or the binary be absent, while Floci's client works.
+     *
+     * <p>This guard protects the only data-plane assertion in the class. One that fired
+     * spuriously would delete exactly the test the class exists for, silently and green, which is
+     * the one failure here that no amount of reading the output would catch.
+     */
+    private boolean isDockerAvailable() {
+        return containerManager.isDockerReachable();
     }
 }
