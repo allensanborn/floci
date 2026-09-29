@@ -158,7 +158,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String DEPLOYMENT_STATUS_IN_PROGRESS = "IN_PROGRESS";
     /** A service deployment whose target revision is running at its requested task count. */
     public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
-    /** A service deployment a later one took over from before it could converge. */
+    /**
+     * A service deployment that ended without completing: one a later deployment took over from,
+     * or one whose service was deleted before it converged.
+     */
     public static final String DEPLOYMENT_STATUS_STOPPED = "STOPPED";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
@@ -2594,6 +2597,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
         services.put(key, svc);
         persistCluster(region, cluster);
+        // An INACTIVE service can never converge, so any deployment still in flight has to be
+        // landed here: settleStatus finishes only an ACTIVE service's current deployment, and
+        // there is no later operation on a deleted service to do it instead.
+        //
+        // AWS goes further and removes the records outright: "Amazon ECS deletes the service
+        // deployment when you delete a service." Stopping them rather than deleting them is
+        // deliberate. It fixes the harm, which is a deployment reported as in flight for ever
+        // and returned by a listing filtered on IN_PROGRESS, without turning a
+        // DescribeServiceDeployments a client is mid-poll on into a failure. Full parity means
+        // deletion and is tracked separately.
+        stopNonTerminalDeployments(svc.getServiceArn(), Instant.now(), "The service was deleted.");
         // Stop tasks before removing the service from the map, so the per-task
         // ELBv2 deregistration hook can still resolve the service's loadBalancers.
         tasks.values().stream()
@@ -3940,7 +3954,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deployment.setUpdatedAt(now);
         deployment.setTargetServiceRevisionArn(revisionArn);
         deployment.setSourceServiceRevisionArns(priorRevisions);
-        stopSupersededDeployments(svc.getServiceArn(), now);
+        stopNonTerminalDeployments(svc.getServiceArn(), now,
+                "Superseded by service deployment " + deploymentArn + ".");
         serviceDeployments.put(deploymentArn, deployment);
 
         ServiceRevision revision = new ServiceRevision();
@@ -3962,32 +3977,50 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Lands every deployment of this service that the new one takes over from in a terminal
-     * status. A rolling update can supersede a deployment before its tasks converge, and
-     * {@link #settleStatus} finishes only the deployment the service is <em>currently</em> on,
-     * which a superseded one is not and can never become again: the service's deployment id has
-     * already moved. Left alone it would stay IN_PROGRESS with no finish time for ever,
-     * describing a rollout that can no longer happen. STOPPED is the status AWS lands a
-     * deployment in that ended without completing.
+     * Lands this service's unfinished deployments in a terminal status, for a caller that has
+     * just made them unfinishable.
      *
-     * <p>Only a deployment still in progress is moved. One that already reached SUCCESSFUL
-     * completed before it was superseded, and that record is history rather than something to
-     * rewrite.
+     * <p>{@link #settleStatus} finishes only the deployment a service is <em>currently</em> on,
+     * and only while that service is ACTIVE. Two operations take a deployment permanently out of
+     * that reach, and neither used to touch the deployment records at all:
+     *
+     * <ul>
+     *   <li>{@link #recordServiceDeployment} moves the service onto a new deployment, so a
+     *       rolling update supersedes whatever was in flight;</li>
+     *   <li>{@link #deleteService} makes the service INACTIVE, so nothing it owns can converge
+     *       again.</li>
+     * </ul>
+     *
+     * <p>Left alone, such a deployment sits IN_PROGRESS with no finish time for the life of the
+     * emulator, claiming a rollout that can no longer happen is still happening. A client
+     * listing a service's deployments reads a growing pile of them apparently in flight at once,
+     * and one filtering on IN_PROGRESS gets every rollout the service ever abandoned. STOPPED is
+     * the status AWS uses for a deployment that ended without completing.
+     *
+     * <p>Only a deployment still in progress is moved, so the caller's {@code reason} describes
+     * why it could not finish rather than restating the status. One that already reached
+     * SUCCESSFUL completed before any of this happened, and that record is history rather than
+     * something a later operation rewrites.
+     *
+     * <p>Both {@code finishedAt} and {@code stoppedAt} are stamped. AWS files STOPPED under its
+     * "Completed" lifecycle stage, where {@code finishedAt} belongs, and documents
+     * {@code stoppedAt} as specifically the stop time, so a client reading either to learn when
+     * the deployment ended gets an answer.
      *
      * <p>Whether a converged deployment has reached SUCCESSFUL by this point depends on it
      * having been read, because the transition is made at read time. Every response that
      * serialises a service settles its current deployment, so a deployment that converged under
      * any client that went on to describe the service is already terminal here; one that
      * converged with nothing ever describing the service is stopped instead. The alternative is
-     * a second place that decides convergence, which is the disagreement this latch exists to
-     * remove.
+     * a second place that decides convergence, which is the disagreement that read-time latch
+     * exists to remove.
      *
      * <p>Written under the same monitor {@code settleStatus} writes under, because the two race:
      * a read settling the outgoing deployment can run beside the update that mints its
      * replacement. Both transitions require IN_PROGRESS, so whichever lands second finds a
      * terminal status and leaves it alone, and neither can undo the other.
      */
-    private void stopSupersededDeployments(String serviceArn, Instant now) {
+    private void stopNonTerminalDeployments(String serviceArn, Instant now, String reason) {
         if (serviceArn == null) {
             return;
         }
@@ -3998,7 +4031,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (prior) {
                 if (DEPLOYMENT_STATUS_IN_PROGRESS.equals(prior.getStatus())) {
                     prior.setStatus(DEPLOYMENT_STATUS_STOPPED);
+                    prior.setStatusReason(reason);
                     prior.setFinishedAt(now);
+                    prior.setStoppedAt(now);
                     prior.setUpdatedAt(now);
                 }
             }
@@ -4008,8 +4043,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Finishes the deployment a service is <em>currently</em> on, once that deployment's own
      * tasks are running. A deployment the service has already moved off is history: it was
-     * landed in a terminal status by {@link #stopSupersededDeployments} when its replacement was
-     * recorded, and is left as it is.
+     * landed in a terminal status by {@link #stopNonTerminalDeployments} when its replacement
+     * was recorded, and is left as it is.
      *
      * <p>This status is what a steady-state wait reads. The Terraform AWS provider polls
      * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL
@@ -4097,6 +4132,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         copy.setCreatedAt(source.getCreatedAt());
         copy.setStartedAt(source.getStartedAt());
         copy.setFinishedAt(source.getFinishedAt());
+        copy.setStoppedAt(source.getStoppedAt());
+        copy.setStatusReason(source.getStatusReason());
         copy.setUpdatedAt(source.getUpdatedAt());
         copy.setTargetServiceRevisionArn(source.getTargetServiceRevisionArn());
         copy.setSourceServiceRevisionArns(source.getSourceServiceRevisionArns());

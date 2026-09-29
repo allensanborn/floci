@@ -11,6 +11,8 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,6 +58,17 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .extract().response();
+    }
+
+    /** As {@link #seedService}, but at a task count the service has not reached yet. */
+    private static String seedUnconvergedService(String name) {
+        call("CreateCluster", "{\"clusterName\":\"" + CLUSTER + "\"}");
+        call("RegisterTaskDefinition", "{\"family\":\"" + name + "-td\",\"networkMode\":\"awsvpc\","
+                + "\"containerDefinitions\":[{\"name\":\"app\",\"image\":\"nginx\",\"memory\":128}]}");
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + name + "\","
+                + "\"taskDefinition\":\"" + name + "-td\",\"desiredCount\":1,"
+                + "\"launchType\":\"FARGATE\"," + NETWORK + "}");
+        return name;
     }
 
     /** Creates the cluster, a task definition and a service, and returns the service name. */
@@ -129,6 +142,52 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
         call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
                 .then()
                 .body("serviceDeployments", hasSize(1))
-                .body("serviceDeployments[0].status", equalTo("SUCCESSFUL"));
+                .body("serviceDeployments[0].status", equalTo("SUCCESSFUL"))
+                // A deployment that succeeded was never stopped, so AWS reports neither field and
+                // nor do we. Absent, not null: a client reading stoppedAt to learn when a
+                // deployment ended must not be handed a value for one that did not stop.
+                .body("serviceDeployments[0].stoppedAt", nullValue())
+                .body("serviceDeployments[0].statusReason", nullValue());
+    }
+
+    /**
+     * The stopped fields over the wire. A deployment that ends without completing carries
+     * {@code stoppedAt} and {@code statusReason}, both of which are members of AWS's
+     * {@code ServiceDeployment} shape and neither of which floci used to write at all, so a
+     * client asking when a stopped deployment ended, or why, got nothing.
+     *
+     * <p>Driven through DeleteService rather than through a rolling update because it is
+     * deterministic inside a {@code @QuarkusTest}: the service is created at a task count it has
+     * not reached, and nothing reads it between the create and the delete, so the deployment is
+     * still in flight when the delete lands however the 5-second reconciler happens to fall.
+     */
+    @Test
+    void aStoppedDeploymentReportsWhenItStoppedAndWhy() {
+        String service = seedUnconvergedService("waiter-stop-svc");
+        String taskSetId = primaryTaskSetId(service);
+
+        call("DeleteService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + service
+                + "\",\"force\":true}");
+
+        Response listed = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
+                + "\",\"service\":\"" + service + "\"}");
+        String deploymentArn = null;
+        for (Object brief : listed.jsonPath().getList("serviceDeployments")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> map = (Map<String, Object>) brief;
+            Object revision = map.get("targetServiceRevisionArn");
+            if (revision != null && revision.toString().contains(taskSetId)) {
+                deploymentArn = String.valueOf(map.get("serviceDeploymentArn"));
+            }
+        }
+        assertNotNull(deploymentArn, "the deleted service's deployment is still describable");
+
+        call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
+                .then()
+                .body("serviceDeployments", hasSize(1))
+                .body("serviceDeployments[0].status", equalTo("STOPPED"))
+                .body("serviceDeployments[0].stoppedAt", notNullValue())
+                .body("serviceDeployments[0].finishedAt", notNullValue())
+                .body("serviceDeployments[0].statusReason", equalTo("The service was deleted."));
     }
 }

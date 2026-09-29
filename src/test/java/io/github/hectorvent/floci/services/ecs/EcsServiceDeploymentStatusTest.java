@@ -438,6 +438,12 @@ class EcsServiceDeploymentStatusTest {
                 "a deployment another one took over from is finished, not still rolling out");
         assertNotNull(superseded.getFinishedAt(),
                 "and reports when it ended, like every deployment that is no longer running");
+        assertNotNull(superseded.getStoppedAt(), "and when it was stopped");
+        assertTrue(superseded.getStatusReason() != null
+                        && superseded.getStatusReason().contains(deploymentArnOf(service,
+                                "dsup-svc", "dsup-cluster", second)),
+                "the reason names the deployment that took over, which is what a reader needs "
+                        + "and the status alone does not say; was: " + superseded.getStatusReason());
 
         assertEquals("IN_PROGRESS",
                 deploymentOf(service, "dsup-svc", "dsup-cluster", second).getStatus(),
@@ -512,6 +518,79 @@ class EcsServiceDeploymentStatusTest {
                 "a deployment that completed was not stopped by the one that followed it");
         assertEquals(finishedAt, after.getFinishedAt(),
                 "and keeps the instant it finished at, not the instant it was superseded");
+        assertNull(after.getStoppedAt(), "a deployment that succeeded was never stopped");
+        assertNull(after.getStatusReason(), "and has no reason it failed to finish");
+    }
+
+    /**
+     * The second route into Greptile's finding, and the one supersession does not cover.
+     * {@code settleStatus} finishes a deployment only while its service is ACTIVE, and
+     * {@code deleteService} makes the service INACTIVE. Delete a service before its first
+     * rollout converges and the deployment could never be moved by anything: no later update
+     * supersedes it, because there are no later updates on a deleted service.
+     *
+     * <p>{@code ListServiceDeployments} filtered on IN_PROGRESS returned it for the life of the
+     * emulator, which is the same symptom a superseded deployment had, reached through a
+     * different door. Asserted on the filtered listing rather than only on the record, because
+     * the filter is what a client actually uses to ask what is rolling out.
+     */
+    @Test
+    void deletingAServiceStopsTheDeploymentItLeavesUnfinished() {
+        EcsService service = newMockModeService();
+        service.createCluster("ddel-cluster", REGION);
+        registerTaskDef(service, "ddel-fam", "app:1");
+        String only = service.createService("ddel-cluster", "ddel-svc", "ddel-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+
+        // No tick, so nothing was ever launched and the deployment is still rolling out.
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "ddel-svc", "ddel-cluster", only).getStatus(),
+                "precondition: the deployment never converged");
+        assertEquals(1, service.listServiceDeployments("ddel-svc", "ddel-cluster",
+                List.of("IN_PROGRESS"), REGION).size(), "precondition: and reads as in flight");
+
+        service.deleteService("ddel-cluster", "ddel-svc", true, REGION);
+
+        ServiceDeployment stopped = deploymentOf(service, "ddel-svc", "ddel-cluster", only);
+        assertEquals("STOPPED", stopped.getStatus(),
+                "a deployment whose service is gone has ended, and nothing else can ever say so");
+        assertNotNull(stopped.getFinishedAt(), "it reports when it ended");
+        assertNotNull(stopped.getStoppedAt(), "and when it was stopped");
+        assertEquals("The service was deleted.", stopped.getStatusReason(),
+                "naming the reason it could not finish");
+
+        assertTrue(service.listServiceDeployments("ddel-svc", "ddel-cluster",
+                        List.of("IN_PROGRESS"), REGION).isEmpty(),
+                "and a client asking what is rolling out is no longer told this is");
+    }
+
+    /**
+     * Deleting a service does not rewrite the rollouts that finished before it. The same
+     * already-terminal guard supersession relies on, reached through the delete path, because a
+     * shared helper is only correct at both call sites if both are asserted.
+     */
+    @Test
+    void deletingAServiceLeavesItsFinishedDeploymentsSuccessful() {
+        EcsService service = newMockModeService();
+        service.createCluster("ddel2-cluster", REGION);
+        registerTaskDef(service, "ddel2-fam", "app:1");
+        String only = service.createService("ddel2-cluster", "ddel2-svc", "ddel2-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+        service.reconcileServices();
+
+        ServiceDeployment finished = deploymentOf(service, "ddel2-svc", "ddel2-cluster", only);
+        assertEquals("SUCCESSFUL", finished.getStatus(), "precondition: it converged and was read");
+        Instant finishedAt = finished.getFinishedAt();
+        assertNotNull(finishedAt);
+
+        service.deleteService("ddel2-cluster", "ddel2-svc", true, REGION);
+
+        ServiceDeployment after = deploymentOf(service, "ddel2-svc", "ddel2-cluster", only);
+        assertEquals("SUCCESSFUL", after.getStatus(),
+                "a rollout that completed is history, and deleting the service does not undo it");
+        assertEquals(finishedAt, after.getFinishedAt(), "keeping the instant it finished at");
+        assertNull(after.getStoppedAt(), "and carrying none of the stopped fields");
+        assertNull(after.getStatusReason());
     }
 
     /** The one place the provider's join is asserted: the revision ARN carries the task set id. */
@@ -539,6 +618,12 @@ class EcsServiceDeploymentStatusTest {
                         && d.getTargetServiceRevisionArn().endsWith("/" + taskSetId))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no deployment for " + deploymentId));
+    }
+
+    /** The ARN of the deployment carrying {@code deploymentId}, selected the same way. */
+    private static String deploymentArnOf(EcsService service, String name, String cluster,
+                                          String deploymentId) {
+        return deploymentOf(service, name, cluster, deploymentId).getServiceDeploymentArn();
     }
 
     private static ServiceDeployment onlyDeployment(EcsService service, String name, String cluster) {

@@ -21,6 +21,15 @@ public class ServiceDeployment {
     private Instant createdAt;
     private Instant startedAt;
     private Instant finishedAt;
+    /**
+     * When a deployment that ended without completing was stopped. AWS files STOPPED under its
+     * "Completed" lifecycle stage, so a stopped deployment carries both this and
+     * {@link #finishedAt}; a deployment that is still running, or that succeeded, carries
+     * neither this nor {@link #statusReason}.
+     */
+    private Instant stoppedAt;
+    /** Why the deployment is in the status it is in. Set for a deployment that was stopped. */
+    private String statusReason;
     private Instant updatedAt;
     private String targetServiceRevisionArn;
     private List<String> sourceServiceRevisionArns;
@@ -30,6 +39,12 @@ public class ServiceDeployment {
 
     public Instant getFinishedAt() { return finishedAt; }
     public void setFinishedAt(Instant finishedAt) { this.finishedAt = finishedAt; }
+
+    public Instant getStoppedAt() { return stoppedAt; }
+    public void setStoppedAt(Instant stoppedAt) { this.stoppedAt = stoppedAt; }
+
+    public String getStatusReason() { return statusReason; }
+    public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
 
     public String getTargetServiceRevisionArn() { return targetServiceRevisionArn; }
     public void setTargetServiceRevisionArn(String targetServiceRevisionArn) {
