@@ -75,11 +75,21 @@ whatever port its new container lands on, so it can move across a restart.
 On AWS a cache's `Port` belongs to its own endpoint: 6379 is the Redis default, so clusters
 share it routinely, and two replication groups on 6379 coexist. A host TCP port is exclusive,
 though, and Floci multiplexes every group's auth proxy onto one host — so the two are separate
-here. On every Redis or Valkey cache — a replication group, cluster-mode or not, and a
-standalone `Engine=redis`/`Engine=valkey` cluster — the port you pass is the port
-`DescribeReplicationGroups` and `DescribeCacheClusters` report; the port the proxy binds is
-Floci's own, taken from `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` and preferring
-the one you asked for when it is free.
+here. On every Redis or Valkey cache, the port you pass is the port that cache's own endpoint
+reports — a cluster-mode-disabled group's `PrimaryEndpoint` and `ReaderEndpoint`, a cluster-mode
+group's `ConfigurationEndpoint`, a standalone `Engine=redis`/`Engine=valkey` cluster's node
+endpoint — while the port the proxy binds is Floci's own, taken from
+`FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` and preferring the one you asked for
+when it is free.
+
+One exception, and it is deliberate: the *members* of a cluster-mode group report the ports they
+actually listen on rather than the group's. `DescribeCacheClusters` on `my-cache-0001-001`
+answers with that node's own port, because a cluster-aware client follows `MOVED`/`ASK`
+redirects to those ports and a redirect to a port nothing is listening on is useless. So a
+cluster-mode group pinned to 6379 whose first node had to bind 6380 reports 6379 from
+`DescribeReplicationGroups` and 6380 from `DescribeCacheClusters` on its members. A
+cluster-mode-*disabled* group's members report the group's advertised port, there being no
+redirects to follow.
 
 `Engine=memcached` is not in this at all. It has no auth proxy and takes no port from that
 range: its endpoint is its container's published port, which is the only port it has. A `Port`
