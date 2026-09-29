@@ -203,6 +203,16 @@ class EcsServiceDeploymentStatusTest {
         Instant finishedAt = finished.getFinishedAt();
         assertNotNull(finishedAt);
 
+        // Read again WHILE STILL CONVERGED. This is the read that pins the latch itself: without
+        // the already-SUCCESSFUL guard, the converged branch is taken on every read and stamps a
+        // fresh finishedAt each time, so a caller polling a finished deployment watches the
+        // instant it finished at drift forwards. Re-reading only after the tasks die cannot see
+        // that, because the converged branch is not taken then -- which is why this assertion
+        // has to happen here and not below.
+        assertEquals(finishedAt,
+                deploymentOf(service, "ddie-svc", "ddie-cluster", deploymentId).getFinishedAt(),
+                "finishedAt is stamped once, not re-stamped on every read while converged");
+
         String taskArn = runningTasks(service).getFirst().getTaskArn();
         service.stopTask("ddie-cluster", taskArn, "test kill", REGION);
         assertEquals(0, runningTasks(service).size(), "precondition: nothing of it is running");
@@ -289,9 +299,18 @@ class EcsServiceDeploymentStatusTest {
         EcsService service = newMockModeService();
         service.createCluster("dboth-cluster", REGION);
         registerTaskDef(service, "dboth-fam", "app:1");
-        service.createService("dboth-cluster", "dboth-svc", "dboth-fam", 1,
+        EcsServiceModel created = service.createService("dboth-cluster", "dboth-svc", "dboth-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
+        // TWO ticks, and the second one is what makes this test able to fail. The first launches
+        // the task but sets svc.runningCount from a snapshot taken before the launch, so it is
+        // still 0; the second counts it. Changing the task definition after only one tick leaves
+        // the service-wide count at 0, which makes the buggy derivation give the right answer by
+        // accident and the assertions below hold either way. A genuine steady state -- the state
+        // anyone is actually in when they change an image -- is the state that exposes it.
         service.reconcileServices();
+        service.reconcileServices();
+        assertEquals(1, created.getRunningCount(),
+                "precondition: a genuine steady state, not one tick short of it");
 
         TaskDefinition rev2 = registerTaskDef(service, "dboth-fam", "app:2");
         String rolled = service.updateService("dboth-cluster", "dboth-svc",

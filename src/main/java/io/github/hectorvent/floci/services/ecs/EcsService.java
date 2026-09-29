@@ -3847,7 +3847,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return 0;
         }
         String currentDeploymentId = deploymentId(svc);
-        String taskDefinitionArn = svc.getTaskDefinition();
+        String taskDefinitionArn = resolvedTaskDefinitionArn(svc, serviceRegion(svc));
         return tasks.values().stream()
                 .filter(t -> ownedBy(t, svc, cluster))
                 .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
@@ -3951,20 +3951,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * terminal failure state and stays IN_PROGRESS; that is the loud direction, and
      * {@code floci-n5kb} tracks it.
      *
-     * <p>The task scan sits after the "is this the current deployment" guard, so a call costs at
-     * most one scan however many deployments it returns, and none at all once one has latched.
+     * <p>The task scan sits last in the condition, so listing a service's deployments costs at
+     * most one scan however many it returns, and none once the current one has latched. That
+     * bound is about this method only, and is not the cost of a response: {@link #deploymentsFor}
+     * and {@link #eventsFor} call {@link #runningOnCurrentDeployment} unconditionally, because
+     * there is nothing to latch on the live side, so a {@code DescribeServices} now walks the
+     * task map twice per service where upstream walked it not at all — on the API a waiter polls
+     * hardest. Accepted: the alternative is a cached count carrying an invalidation obligation at
+     * every future site that mints a deployment id, and emulator task maps are small.
      */
     private ServiceDeployment settleStatus(ServiceDeployment deployment) {
         EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
-        if (svc == null || deployment.getTargetServiceRevisionArn() == null
-                || !deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))) {
-            // Not the deployment the service is on: history, already final, and the only path
-            // that skips the task scan. Copied all the same, so no caller reaches the stored
-            // record.
-            return copyOf(deployment);
-        }
+        // Every copy is taken under the lock, including the one for a deployment this call judged
+        // to be history. "Current" is decided against a deploymentId that UpdateService can mint
+        // at any moment, so two threads can disagree about which deployment is current, and an
+        // unsynchronised copy on this path could then run beside the write below -- producing
+        // exactly the torn record the lock exists to prevent.
         synchronized (deployment) {
-            if (!DEPLOYMENT_STATUS_SUCCESSFUL.equals(deployment.getStatus())
+            if (svc != null && deployment.getTargetServiceRevisionArn() != null
+                    && deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))
+                    && !DEPLOYMENT_STATUS_SUCCESSFUL.equals(deployment.getStatus())
                     && STATUS_ACTIVE.equals(svc.getStatus())
                     && runningOnCurrentDeployment(svc) >= svc.getDesiredCount()) {
                 Instant now = Instant.now();
@@ -4040,10 +4046,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc == null) {
             return null;
         }
+        // Settled and copied like every other read. Today's caller reads only the two ARN
+        // fields, which never change after the record is minted, so handing out the stored
+        // instance would be safe by accident; it is one added field-read away from being the
+        // torn-record bug copyOf exists to prevent.
+        //
+        // This is a THIRD read path calling settleStatus, which is only safe because settling
+        // returns a copy: if that copy were ever optimised away, this line would put a stored,
+        // concurrently-mutated record straight onto the DescribeServices response. The copy is
+        // load-bearing here, not a tidiness measure.
         return serviceDeployments.values().stream()
                 .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
                 .max(Comparator.comparing(ServiceDeployment::getCreatedAt,
                         Comparator.nullsFirst(Comparator.naturalOrder())))
+                .map(this::settleStatus)
                 .orElse(null);
     }
 
@@ -4249,6 +4265,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** The region a service lives in, read off its ARN, falling back to the default region. */
+    private String serviceRegion(EcsServiceModel svc) {
+        if (svc.getServiceArn() != null) {
+            try {
+                String region = AwsArnUtils.parse(svc.getServiceArn()).region();
+                if (region != null && !region.isBlank()) {
+                    return region;
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not parse region from service ARN {0}", svc.getServiceArn());
+            }
+        }
+        return regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
+    }
+
     /** The region a task lives in, read off its ARN, falling back to the default region. */
     private String taskRegion(EcsTask task) {
         if (task.getTaskArn() != null) {
@@ -4414,14 +4445,32 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private String pinnedTaskDefinitionArn(EcsServiceModel svc, String key, String region) {
         String ref = svc.getTaskDefinition();
+        String arn = resolvedTaskDefinitionArn(svc, region);
+        if (arn != null && !arn.equals(ref)) {
+            svc.setTaskDefinition(arn);
+            services.put(key, svc);
+        }
+        return arn;
+    }
+
+    /**
+     * The service's task definition as an ARN, resolving a {@code family} or
+     * {@code family:revision} reference without storing the result.
+     *
+     * <p>Split out of {@link #pinnedTaskDefinitionArn} so the read path and the reconciler ask
+     * the question the same way. They must: {@link #isStaleForDeployment} falls back to comparing
+     * this against a task's {@code taskDefinitionArn} for tasks minted before deployment ids were
+     * stamped, so a caller that passed the raw reference would match nothing, call every task
+     * stale and report a converged service as having no tasks at all. The reconciler caches the
+     * resolution and this does not, because a read has no business writing to the service.
+     */
+    private String resolvedTaskDefinitionArn(EcsServiceModel svc, String region) {
+        String ref = svc.getTaskDefinition();
         if (ref == null || ref.startsWith("arn:")) {
             return ref;
         }
         try {
-            String arn = resolveTaskDefinitionOrThrow(ref, region).getTaskDefinitionArn();
-            svc.setTaskDefinition(arn);
-            services.put(key, svc);
-            return arn;
+            return resolveTaskDefinitionOrThrow(ref, region).getTaskDefinitionArn();
         } catch (AwsException e) {
             return ref;
         }
