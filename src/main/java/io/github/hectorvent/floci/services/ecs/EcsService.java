@@ -3959,10 +3959,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@link #runningOnCurrentDeployment}:
      *
      * <pre>
-     *   ACTIVE, first poll after a create or a rollout   3   (1 + 1 + 1)
-     *   ACTIVE, every later poll of a settled service    2   (1 + 1 + 0)
-     *   not ACTIVE, or the service is gone               0
+     *   ACTIVE, every poll while the current deployment has not latched   3   (1 + 1 + 1)
+     *   ACTIVE, every poll after it has latched                           2   (1 + 1 + 0)
+     *   not ACTIVE, or the service is gone                                0
      * </pre>
+     *
+     * <p>The first row is not a one-off: a deployment stays unlatched for as long as it takes to
+     * converge, so a rollout that is slow, or one that never converges at all, pays 3 on every
+     * poll for its whole duration — which is exactly when a waiter is polling hardest.</p>
      *
      * where the three are {@link #deploymentsFor}, {@link #eventsFor} and
      * {@link #currentServiceDeployment}. {@code deploymentsFor} scans unconditionally.
