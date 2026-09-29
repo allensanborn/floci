@@ -3952,13 +3952,28 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code floci-n5kb} tracks it.
      *
      * <p>The task scan sits last in the condition, so listing a service's deployments costs at
-     * most one scan however many it returns, and none once the current one has latched. That
-     * bound is about this method only, and is not the cost of a response: {@link #deploymentsFor}
-     * and {@link #eventsFor} call {@link #runningOnCurrentDeployment} unconditionally, because
-     * there is nothing to latch on the live side, so a {@code DescribeServices} now walks the
-     * task map twice per service where upstream walked it not at all — on the API a waiter polls
-     * hardest. Accepted: the alternative is a cached count carrying an invalidation obligation at
-     * every future site that mints a deployment id, and emulator task maps are small.
+     * most one scan however many it returns, and none once the current one has latched.
+     *
+     * <p>That bound is about this method, not about the cost of a response. Measured per
+     * {@code DescribeServices}, per service, by counting calls to
+     * {@link #runningOnCurrentDeployment}:
+     *
+     * <pre>
+     *   ACTIVE, first poll after a create or a rollout   3   (1 + 1 + 1)
+     *   ACTIVE, every later poll of a settled service    2   (1 + 1 + 0)
+     *   not ACTIVE, or the service is gone               0
+     * </pre>
+     *
+     * where the three are {@link #deploymentsFor}, {@link #eventsFor} and
+     * {@link #currentServiceDeployment}. {@code deploymentsFor} scans unconditionally.
+     * {@code eventsFor} scans only for a service that exists and is ACTIVE — its call is the last
+     * disjunct of an {@code ||} chain, so it short-circuits, and widening that chain would change
+     * this. {@code currentServiceDeployment} settles, so it scans until the current deployment
+     * latches and never again: the poll that reads 1 is the poll that latches it.
+     *
+     * <p>Upstream walked the map not at all, on the API a waiter polls hardest. Accepted: the
+     * alternative is a cached count carrying an invalidation obligation at every future site that
+     * mints a deployment id, and emulator task maps are small.
      */
     private ServiceDeployment settleStatus(ServiceDeployment deployment) {
         EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
