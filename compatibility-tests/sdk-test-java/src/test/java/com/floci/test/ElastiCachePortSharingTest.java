@@ -6,9 +6,12 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupRequest;
+import software.amazon.awssdk.services.elasticache.model.CreateReplicationGroupResponse;
 import software.amazon.awssdk.services.elasticache.model.DeleteReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeCacheClustersResponse;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
+import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsResponse;
 import software.amazon.awssdk.services.elasticache.model.Endpoint;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
 
@@ -93,7 +96,7 @@ class ElastiCachePortSharingTest {
     }
 
     private static int createOnSharedPort(String groupId) {
-        var response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
+        CreateReplicationGroupResponse response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
                 .replicationGroupId(groupId)
                 .replicationGroupDescription("port sharing compat test")
                 .engine("redis")
@@ -114,7 +117,7 @@ class ElastiCachePortSharingTest {
     }
 
     private static int describedPort(String groupId) {
-        var response = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
+        DescribeReplicationGroupsResponse response = elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
                 .replicationGroupId(groupId)
                 .build());
         assertThat(response.replicationGroups()).hasSize(1);
@@ -122,7 +125,7 @@ class ElastiCachePortSharingTest {
     }
 
     private static int memberPort(String groupId) {
-        var response = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
+        DescribeCacheClustersResponse response = elasticache.describeCacheClusters(DescribeCacheClustersRequest.builder()
                 .cacheClusterId(groupId + "-001")
                 .showCacheNodeInfo(true)
                 .build());
