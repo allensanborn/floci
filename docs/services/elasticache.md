@@ -63,20 +63,28 @@ remove the first's container.
 back. (`CreateReplicationGroup` does not check it either, so a replication group can still be
 created against a name nothing resolves.)
 
-Each record re-reserves the port it listens on as it is restored, before Floci serves anything,
-so a create is never handed a port a surviving cluster or replication group still listens on.
-What a record *advertises* is replayed from the record instead of re-derived, so a restart never
-moves a port a caller pinned.
+Each Redis or Valkey record re-reserves the port it listens on as it is restored, before Floci
+serves anything, so a create is never handed a port a surviving cluster or replication group
+still listens on. What such a record *advertises* is replayed from the record rather than
+re-derived, so a restart never moves a port a caller pinned. A Memcached cluster has neither
+half of that: it reserves nothing from the proxy range, and its endpoint is rebuilt from
+whatever port its new container lands on, so it can move across a restart.
 
 #### The advertised port and the host port
 
 On AWS a cache's `Port` belongs to its own endpoint: 6379 is the Redis default, so clusters
 share it routinely, and two replication groups on 6379 coexist. A host TCP port is exclusive,
 though, and Floci multiplexes every group's auth proxy onto one host — so the two are separate
-here. The port you pass is the port `DescribeReplicationGroups` and `DescribeCacheClusters`
-report, on every cache that asks for it; the port the proxy binds is Floci's own, taken from
-`FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` and preferring the one you asked for
-when it is free.
+here. On every Redis or Valkey cache — a replication group, cluster-mode or not, and a
+standalone `Engine=redis`/`Engine=valkey` cluster — the port you pass is the port
+`DescribeReplicationGroups` and `DescribeCacheClusters` report; the port the proxy binds is
+Floci's own, taken from `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` and preferring
+the one you asked for when it is free.
+
+`Engine=memcached` is not in this at all. It has no auth proxy and takes no port from that
+range: its endpoint is its container's published port, which is the only port it has. A `Port`
+on `CreateCacheCluster` is dropped for that engine rather than honored, and the cluster still
+answers `DescribeCacheClusters` alongside the rest.
 
 When they differ — a second cache on 6379, say — the endpoint still reads 6379, because that is
 what AWS would say and what terraform must read back to avoid a permanent diff, and the create
