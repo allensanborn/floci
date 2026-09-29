@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,12 +33,21 @@ import static org.mockito.Mockito.when;
  * What a service deployment reports, driven off the reconciler tick by tick (floci-rddp).
  *
  * <p>The deployment a service is currently on is the resource a steady-state wait polls, so its
- * status has to mean something: IN_PROGRESS while the service is short of its requested task
- * count, SUCCESSFUL once it is running at it. A deployment that is SUCCESSFUL the instant it is
- * recorded makes {@code wait_for_steady_state} return before any task exists, which is a wait
- * that can never fail and therefore reports nothing.
+ * status has to mean something, and three things have to be true of it at once:
  *
- * <p>Ticks are driven explicitly here rather than waited on, so there is no timing in the test.
+ * <ul>
+ *   <li>it is IN_PROGRESS until the deployment's tasks are up — one that is SUCCESSFUL the
+ *       instant it is recorded makes {@code wait_for_steady_state} a wait that can never fail;</li>
+ *   <li>the tasks it counts are its <em>own</em>, not the service's — counting the ones still
+ *       draining from the deployment it replaced reports a task-definition change finished
+ *       before the new revision has started;</li>
+ *   <li>SUCCESSFUL is terminal — tasks dying afterwards do not un-finish a finished
+ *       deployment.</li>
+ * </ul>
+ *
+ * <p>Reconciler ticks are driven explicitly rather than waited on, and deployments are selected
+ * by their task set id rather than by position in a listing, so nothing here depends on timing
+ * or on map iteration order.
  */
 class EcsServiceDeploymentStatusTest {
 
@@ -81,7 +91,7 @@ class EcsServiceDeploymentStatusTest {
      * instead of at read time, would amount to for a service that never needs a tick.
      *
      * <p>Two other tests catch that mutation too -- this class's integration twin
-     * {@code theJoinedDeploymentIsDescribableAndReportsTheServicesProgress} and the pre-existing
+     * {@code theJoinedDeploymentIsDescribable} and the pre-existing
      * {@code EcsFargateEdgeCaseIntegrationTest.aServiceDeploymentPointsAtTheRevisionItDeployed},
      * both of which also use desiredCount 0. So this is not independent coverage. It is kept
      * because it is the only one of the three that fails with the condition named in the message;
@@ -142,20 +152,21 @@ class EcsServiceDeploymentStatusTest {
         EcsService service = newMockModeService();
         service.createCluster("dupd-cluster", REGION);
         registerTaskDef(service, "dupd-fam", "app:1");
-        service.createService("dupd-cluster", "dupd-svc", "dupd-fam", 1,
+        EcsServiceModel created = service.createService("dupd-cluster", "dupd-svc", "dupd-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
+        String firstDeploymentId = created.getDeploymentId();
         service.reconcileServices();
-        service.reconcileServices();
-        assertEquals("SUCCESSFUL", currentDeployment(service, "dupd-svc", "dupd-cluster").getStatus(),
+        assertEquals("SUCCESSFUL", deploymentOf(service, "dupd-svc", "dupd-cluster",
+                        firstDeploymentId).getStatus(),
                 "precondition: the first deployment converged");
 
         TaskDefinition rev2 = registerTaskDef(service, "dupd-fam", "app:2");
-        service.updateService("dupd-cluster", "dupd-svc", "dupd-fam:" + rev2.getRevision(),
-                null, null, REGION);
+        String rolled = service.updateService("dupd-cluster", "dupd-svc",
+                "dupd-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
 
         // No tick yet. The only RUNNING task belongs to the superseded deployment, so the new
         // deployment has nothing of its own up.
-        ServiceDeployment rolling = currentDeployment(service, "dupd-svc", "dupd-cluster");
+        ServiceDeployment rolling = deploymentOf(service, "dupd-svc", "dupd-cluster", rolled);
         assertEquals("IN_PROGRESS", rolling.getStatus(),
                 "a deployment with none of its own tasks running is not finished");
         assertNull(rolling.getFinishedAt(), "and carries no finishedAt");
@@ -163,34 +174,42 @@ class EcsServiceDeploymentStatusTest {
         // One tick launches the new revision's task; now the deployment really has converged,
         // even though the old task is still draining beside it.
         service.reconcileServices();
-        ServiceDeployment settled = currentDeployment(service, "dupd-svc", "dupd-cluster");
+        ServiceDeployment settled = deploymentOf(service, "dupd-svc", "dupd-cluster", rolled);
         assertEquals("SUCCESSFUL", settled.getStatus(),
                 "its own task is running, so it is finished even while the old one drains");
         assertNotNull(settled.getFinishedAt());
     }
 
     /**
-     * A deployment that lost its task is no longer finished. Tasks die, and a status derived from
-     * what is running now has to be able to go backwards; a deployment latched SUCCESSFUL would
-     * tell a client the service is healthy while nothing of it is up.
+     * A finished deployment stays finished when its tasks later die. SUCCESSFUL is terminal in
+     * AWS: a deployment that completed does not un-complete because the service became unhealthy
+     * afterwards, and {@code finishedAt} records when it finished, not the last time it was
+     * asked about.
+     *
+     * <p>This is the half a deployment-scoped task count does NOT fix -- when the deployment's
+     * own tasks die, the scoped count drops too, so without the latch a terminal record would
+     * flip back to IN_PROGRESS under its readers and blank a timestamp it had already published.
      */
     @Test
-    void aDeploymentStopsBeingFinishedWhenItsTaskDies() {
+    void aFinishedDeploymentStaysFinishedWhenItsTasksDie() {
         EcsService service = newMockModeService();
         service.createCluster("ddie-cluster", REGION);
         registerTaskDef(service, "ddie-fam", "app:1");
-        service.createService("ddie-cluster", "ddie-svc", "ddie-fam", 1,
-                LaunchType.FARGATE, List.of(), null, REGION);
+        String deploymentId = service.createService("ddie-cluster", "ddie-svc", "ddie-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
         service.reconcileServices();
-        assertEquals("SUCCESSFUL", currentDeployment(service, "ddie-svc", "ddie-cluster").getStatus());
+        ServiceDeployment finished = deploymentOf(service, "ddie-svc", "ddie-cluster", deploymentId);
+        assertEquals("SUCCESSFUL", finished.getStatus());
+        Instant finishedAt = finished.getFinishedAt();
+        assertNotNull(finishedAt);
 
         String taskArn = runningTasks(service).getFirst().getTaskArn();
         service.stopTask("ddie-cluster", taskArn, "test kill", REGION);
+        assertEquals(0, runningTasks(service).size(), "precondition: nothing of it is running");
 
-        ServiceDeployment reopened = currentDeployment(service, "ddie-svc", "ddie-cluster");
-        assertEquals("IN_PROGRESS", reopened.getStatus(),
-                "nothing of this deployment is running any more");
-        assertNull(reopened.getFinishedAt(), "and its finishedAt is withdrawn with it");
+        ServiceDeployment after = deploymentOf(service, "ddie-svc", "ddie-cluster", deploymentId);
+        assertEquals("SUCCESSFUL", after.getStatus(), "a completed deployment does not un-complete");
+        assertEquals(finishedAt, after.getFinishedAt(), "and keeps the instant it finished at");
     }
 
     /**
@@ -205,17 +224,17 @@ class EcsServiceDeploymentStatusTest {
         EcsService service = newMockModeService();
         service.createCluster("dscale-cluster", REGION);
         registerTaskDef(service, "dscale-fam", "app:1");
-        service.createService("dscale-cluster", "dscale-svc", "dscale-fam", 1,
-                LaunchType.FARGATE, List.of(), null, REGION);
+        String id = service.createService("dscale-cluster", "dscale-svc", "dscale-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
         service.reconcileServices();
 
         service.updateService("dscale-cluster", "dscale-svc", null, 0, null, REGION);
         assertEquals(1, runningTasks(service).size(), "the task has not been drained yet");
-        assertEquals("SUCCESSFUL", currentDeployment(service, "dscale-svc", "dscale-cluster").getStatus());
+        assertEquals("SUCCESSFUL", deploymentOf(service, "dscale-svc", "dscale-cluster", id).getStatus());
 
         service.reconcileServices();
         assertEquals(0, runningTasks(service).size(), "and now it is drained");
-        assertEquals("SUCCESSFUL", currentDeployment(service, "dscale-svc", "dscale-cluster").getStatus());
+        assertEquals("SUCCESSFUL", deploymentOf(service, "dscale-svc", "dscale-cluster", id).getStatus());
     }
 
     /**
@@ -237,18 +256,18 @@ class EcsServiceDeploymentStatusTest {
         service.updateService("drapid-cluster", "drapid-svc", "drapid-fam:" + rev2.getRevision(),
                 null, null, REGION);
         TaskDefinition rev3 = registerTaskDef(service, "drapid-fam", "app:3");
-        service.updateService("drapid-cluster", "drapid-svc", "drapid-fam:" + rev3.getRevision(),
-                null, null, REGION);
+        String newest = service.updateService("drapid-cluster", "drapid-svc",
+                "drapid-fam:" + rev3.getRevision(), null, null, REGION).getDeploymentId();
 
-        List<ServiceDeployment> all = service.listServiceDeploymentsDetailed("drapid-svc",
-                "drapid-cluster", null, REGION);
-        assertEquals(3, all.size(), "one per create/update");
-        assertEquals("IN_PROGRESS", all.getFirst().getStatus(),
+        assertEquals(3, service.listServiceDeploymentsDetailed("drapid-svc", "drapid-cluster",
+                null, REGION).size(), "one per create/update");
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "drapid-svc", "drapid-cluster", newest).getStatus(),
                 "the newest has none of its own tasks running");
 
         service.reconcileServices();
         assertEquals("SUCCESSFUL",
-                currentDeployment(service, "drapid-svc", "drapid-cluster").getStatus(),
+                deploymentOf(service, "drapid-svc", "drapid-cluster", newest).getStatus(),
                 "and converges once its own task is up");
     }
 
@@ -256,15 +275,27 @@ class EcsServiceDeploymentStatusTest {
     private static void assertRevisionCarriesTaskSetId(EcsService service, String name,
                                                        String cluster, String deploymentId) {
         String taskSetId = deploymentId.substring(deploymentId.indexOf('/') + 1);
-        String current = service.listServiceDeploymentsDetailed(name, cluster, null, REGION)
-                .getFirst().getTargetServiceRevisionArn();
-        assertTrue(current != null && current.contains(taskSetId),
-                "revision ARN must carry task set id " + taskSetId + ", was: " + current);
+        List<String> targets = service.listServiceDeploymentsDetailed(name, cluster, null, REGION)
+                .stream().map(ServiceDeployment::getTargetServiceRevisionArn).toList();
+        assertTrue(targets.stream().anyMatch(arn -> arn != null && arn.contains(taskSetId)),
+                "some deployment's revision ARN must carry task set id " + taskSetId
+                        + ", targets were: " + targets);
     }
 
-    /** The deployment the service is currently on: the listing is newest-first. */
-    private static ServiceDeployment currentDeployment(EcsService service, String name, String cluster) {
-        return service.listServiceDeploymentsDetailed(name, cluster, null, REGION).getFirst();
+    /**
+     * The deployment carrying {@code deploymentId}, selected by the task set id inside its target
+     * revision ARN rather than by position in the listing. The listing sorts on createdAt, and two
+     * records minted in the same instant would then fall back to map iteration order -- position
+     * would make this class's "no timing" claim false.
+     */
+    private static ServiceDeployment deploymentOf(EcsService service, String name, String cluster,
+                                                  String deploymentId) {
+        String taskSetId = deploymentId.substring(deploymentId.indexOf('/') + 1);
+        return service.listServiceDeploymentsDetailed(name, cluster, null, REGION).stream()
+                .filter(d -> d.getTargetServiceRevisionArn() != null
+                        && d.getTargetServiceRevisionArn().endsWith("/" + taskSetId))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no deployment for " + deploymentId));
     }
 
     private static ServiceDeployment onlyDeployment(EcsService service, String name, String cluster) {

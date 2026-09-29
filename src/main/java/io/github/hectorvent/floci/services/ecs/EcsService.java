@@ -3730,12 +3730,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         String deploymentId = deploymentId(svc);
-        // This deployment's own tasks, not the service's. A Deployment's counts are per
-        // deployment in AWS, and reporting the service-wide total here would both overstate them
-        // mid-rollout and make rolloutState contradict the ServiceDeployment resource, which is
-        // derived from the same quantity. See runningOnCurrentDeployment.
-        long running = runningOnCurrentDeployment(svc);
-        boolean converged = running >= svc.getDesiredCount();
+        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -3743,7 +3738,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         d.setTaskDefinition(svc.getTaskDefinition());
         d.setDesiredCount(svc.getDesiredCount());
         d.setPendingCount(svc.getPendingCount());
-        d.setRunningCount((int) running);
+        d.setRunningCount(svc.getRunningCount());
         d.setFailedTasks(0);
         d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
         d.setRolloutStateReason("ECS deployment " + deploymentId
@@ -3782,7 +3777,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public List<ServiceEvent> eventsFor(EcsServiceModel svc) {
         if (svc == null || !"ACTIVE".equals(svc.getStatus())
-                || runningOnCurrentDeployment(svc) < svc.getDesiredCount()) {
+                || svc.getRunningCount() < svc.getDesiredCount()) {
             return List.of();
         }
         String deploymentId = deploymentId(svc);
@@ -3930,34 +3925,74 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Brings the deployment a service is <em>currently</em> on up to date with that service, the
-     * same way {@link #deploymentsFor} derives {@code rolloutState}: IN_PROGRESS until
-     * {@code runningCount} has reached {@code desiredCount}, SUCCESSFUL once it has. A deployment
-     * the service has already moved off keeps what it was last recorded with — it is history.
+     * Finishes the deployment a service is <em>currently</em> on, once that deployment's own
+     * tasks are running. A deployment the service has already moved off is history and is left
+     * as it is.
      *
-     * <p>Deriving it matters rather than being cosmetic, because this status is what a
-     * steady-state wait reads: the Terraform AWS provider polls
-     * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL from
-     * the moment it was recorded would make {@code wait_for_steady_state} return before a single
-     * task had started — a wait that always passes says nothing about the service.
+     * <p>This status is what a steady-state wait reads — the Terraform AWS provider polls
+     * {@code DescribeServiceDeployments} for SUCCESSFUL — so a deployment that was SUCCESSFUL
+     * from the moment it was recorded would make {@code wait_for_steady_state} return before a
+     * single task had started, a wait that always passes and therefore says nothing.
+     *
+     * <p><strong>SUCCESSFUL is terminal.</strong> The transition runs once and never reverses:
+     * in AWS a completed deployment does not un-complete because the service later became
+     * unhealthy, and {@code finishedAt} records when the deployment finished, not the last time
+     * someone looked. Deriving the status afresh on every read — the shape this started as —
+     * let tasks dying afterwards flip a finished record back to IN_PROGRESS and blank a
+     * {@code finishedAt} it had already published, then stamp a new one on recovery, so a
+     * terminal record mutated under its readers. A service that never converges still has no
+     * terminal failure state and stays IN_PROGRESS; that is the loud direction, and
+     * {@code floci-n5kb} tracks it.
+     *
+     * <p>The task scan sits after the "is this the current deployment" guard, so a call costs at
+     * most one scan however many deployments it returns, and none at all once one has latched.
      */
     private ServiceDeployment settleStatus(ServiceDeployment deployment) {
         EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
         if (svc == null || deployment.getTargetServiceRevisionArn() == null
                 || !deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))) {
-            return deployment;
+            // Not the deployment the service is on: history, already final, and the only path
+            // that skips the task scan. Copied all the same, so no caller reaches the stored
+            // record.
+            return copyOf(deployment);
         }
-        boolean converged = STATUS_ACTIVE.equals(svc.getStatus())
-                && runningOnCurrentDeployment(svc) >= svc.getDesiredCount();
-        deployment.setStatus(converged ? DEPLOYMENT_STATUS_SUCCESSFUL : DEPLOYMENT_STATUS_IN_PROGRESS);
-        if (!converged) {
-            deployment.setFinishedAt(null);
-        } else if (deployment.getFinishedAt() == null) {
-            Instant now = Instant.now();
-            deployment.setFinishedAt(now);
-            deployment.setUpdatedAt(now);
+        synchronized (deployment) {
+            if (!DEPLOYMENT_STATUS_SUCCESSFUL.equals(deployment.getStatus())
+                    && STATUS_ACTIVE.equals(svc.getStatus())
+                    && runningOnCurrentDeployment(svc) >= svc.getDesiredCount()) {
+                Instant now = Instant.now();
+                deployment.setStatus(DEPLOYMENT_STATUS_SUCCESSFUL);
+                deployment.setFinishedAt(now);
+                deployment.setUpdatedAt(now);
+            }
+            return copyOf(deployment);
         }
-        return deployment;
+    }
+
+    /**
+     * A detached copy of a deployment record, which is what every read hands back.
+     *
+     * <p>{@link #settleStatus} writes to the stored record and the response is serialised after
+     * it returns, so handing out the stored instance would let one request's settle land in the
+     * middle of another's serialisation; {@code ServiceDeployment}'s fields are plain and
+     * non-volatile, so a reader could see {@code status=SUCCESSFUL} beside a {@code finishedAt}
+     * that had not arrived yet. Taking the copy inside the lock that performs the transition
+     * means a caller always sees one consistent moment.
+     */
+    private static ServiceDeployment copyOf(ServiceDeployment source) {
+        ServiceDeployment copy = new ServiceDeployment();
+        copy.setServiceDeploymentArn(source.getServiceDeploymentArn());
+        copy.setServiceArn(source.getServiceArn());
+        copy.setClusterArn(source.getClusterArn());
+        copy.setTaskDefinition(source.getTaskDefinition());
+        copy.setStatus(source.getStatus());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setStartedAt(source.getStartedAt());
+        copy.setFinishedAt(source.getFinishedAt());
+        copy.setUpdatedAt(source.getUpdatedAt());
+        copy.setTargetServiceRevisionArn(source.getTargetServiceRevisionArn());
+        copy.setSourceServiceRevisionArns(source.getSourceServiceRevisionArns());
+        return copy;
     }
 
     /** The images the revision's task definition pins, one entry per container definition. */

@@ -95,8 +95,16 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
                         + targetRevision);
     }
 
+    /**
+     * Named for what it checks. It walks list -> join -> describe on an already-converged
+     * service, so it never observes a deployment mid-flight: {@code desiredCount} is 0, which is
+     * converged on arrival. Observing IN_PROGRESS over the wire would mean racing the 5-second
+     * reconciler inside a {@code @QuarkusTest}, so that direction is asserted deterministically
+     * in {@code EcsServiceDeploymentStatusTest} instead, and the writer echoes the field verbatim
+     * ({@code EcsResponseWriter.serviceDeploymentNode}).
+     */
     @Test
-    void theJoinedDeploymentIsDescribableAndReportsTheServicesProgress() {
+    void theJoinedDeploymentIsDescribable() {
         String service = seedService("waiter-walk-svc");
         String taskSetId = primaryTaskSetId(service);
 
