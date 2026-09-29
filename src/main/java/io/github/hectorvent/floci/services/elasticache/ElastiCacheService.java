@@ -1679,8 +1679,11 @@ public class ElastiCacheService implements ResourceProvider {
      *
      * <p>A port outside the proxy range is substituted for the same reason rather than refused:
      * the range bounds what this emulator may listen on, and never bounded what AWS accepts. The
-     * only rejection left is AWS's own, 1150 to 65535, which {@code RdsService.reserveProxyPort}
-     * applies to the same argument.
+     * only rejection left is a range check, 1150 to 65535, which is the bound
+     * {@code RdsService.reserveProxyPort} applies to the same argument. Nothing here establishes
+     * that it is ElastiCache's real lower bound on AWS, so do not read it as one; it is strictly
+     * more permissive than the proxy-range check it replaced, which bounds the risk to accepting
+     * a port AWS would refuse rather than refusing one AWS accepts.
      */
     private int allocateProxyPort(Integer requested) {
         int base = config.services().elasticache().proxyBasePort();

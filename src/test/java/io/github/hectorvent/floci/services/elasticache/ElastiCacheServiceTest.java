@@ -306,13 +306,24 @@ class ElastiCacheServiceTest {
                 "An endpoint never advertises a port nothing is listening on");
     }
 
+    // Both arms of the one range check that is left. The bound is RdsService's, applied to the
+    // same argument; nothing here establishes it is ElastiCache's real AWS limit.
     @Test
-    void aPortOutsideTheRangeAwsAcceptsIsStillRejected() {
+    void aPortBelowTheAcceptedRangeIsRejected() {
         AwsException thrown = assertThrows(AwsException.class,
                 () -> service.createReplicationGroup(singleNodeRequest("grp", 80)));
 
         assertEquals("InvalidParameterValue", thrown.getErrorCode());
         assertTrue(thrown.getMessage().contains("1150"));
+    }
+
+    @Test
+    void aPortAboveTheAcceptedRangeIsRejected() {
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> service.createReplicationGroup(singleNodeRequest("grp", 70000)));
+
+        assertEquals("InvalidParameterValue", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("65535"));
     }
 
     @Test
