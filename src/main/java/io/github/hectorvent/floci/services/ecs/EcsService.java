@@ -4002,10 +4002,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * SUCCESSFUL completed before any of this happened, and that record is history rather than
      * something a later operation rewrites.
      *
-     * <p>Both {@code finishedAt} and {@code stoppedAt} are stamped. AWS files STOPPED under its
-     * "Completed" lifecycle stage, where {@code finishedAt} belongs, and documents
-     * {@code stoppedAt} as specifically the stop time, so a client reading either to learn when
-     * the deployment ended gets an answer.
+     * <p>Both {@code finishedAt} and {@code stoppedAt} are stamped, and whether AWS sets both is
+     * an assumption rather than something measured. The developer guide's stage table files
+     * STOPPED under "Completed - a service deployment has finished (successfully or
+     * unsuccessfully)", which points at both. Against that, {@code stoppedAt}'s own field
+     * description enumerates a user stopping a deployment and a failure without rollback, and
+     * does not mention supersession at all, while the state table routes "a user starts a new
+     * service deployment" through STOP_REQUESTED to STOPPED. Those pages disagree with each
+     * other, so no finer distinction is drawn here. Setting both is the safe side of the
+     * uncertainty: nothing reads either field today, so being wrong about it costs nothing
+     * observable.
+     *
+     * <p>The transient STOP_REQUESTED that the state table passes through is skipped, the way
+     * PENDING already is: this emulator records the state a deployment settles in, not each
+     * state it moves through. The {@code reason} text is ours. {@code statusReason} is a real
+     * member of the shape, but there is no evidence here of AWS's wording for it, so nothing
+     * should read these strings as matching what AWS would say.
      *
      * <p>Whether a converged deployment has reached SUCCESSFUL by this point depends on it
      * having been read, because the transition is made at read time. Every response that
@@ -4019,11 +4031,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * a read settling the outgoing deployment can run beside the update that mints its
      * replacement. Both transitions require IN_PROGRESS, so whichever lands second finds a
      * terminal status and leaves it alone, and neither can undo the other.
+     *
+     * <p><strong>Called before the new deployment is published to the map, deliberately.</strong>
+     * Two concurrent UpdateService calls on one service can still leak a record: if each stops
+     * the priors it can see before either has published its own, neither sees the other's, and
+     * the one published first is left IN_PROGRESS and no longer current. That is this method's
+     * own failure mode and it is the better of the two available. Publishing first and then
+     * stopping everything but self lets one caller stop the <em>current</em> deployment, and a
+     * client polling that deployment for SUCCESSFUL then waits out its whole timeout. So this
+     * order fails toward one stale extra record, and the alternative fails toward hanging the
+     * wait this exists to make work. Neither is fixed by locking here: {@code updateService}
+     * already mutates the shared service model unsynchronised, so a deployment record is not the
+     * first thing concurrent updates to one service would tear.
      */
     private void stopNonTerminalDeployments(String serviceArn, Instant now, String reason) {
-        if (serviceArn == null) {
-            return;
-        }
         for (ServiceDeployment prior : serviceDeployments.values()) {
             if (!serviceArn.equals(prior.getServiceArn())) {
                 continue;

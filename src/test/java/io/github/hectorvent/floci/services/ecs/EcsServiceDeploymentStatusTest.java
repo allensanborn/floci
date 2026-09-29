@@ -50,7 +50,9 @@ import static org.mockito.Mockito.when;
  *
  * <p>Reconciler ticks are driven explicitly rather than waited on, and deployments are selected
  * by their task set id rather than by position in a listing, so nothing here depends on timing
- * or on map iteration order.
+ * or on map iteration order. That is a rule and not an observation: deployments minted inside a
+ * single clock tick share a createdAt, and the listing's sort is stable, so position in it is
+ * map iteration order. Name the record you mean.
  */
 class EcsServiceDeploymentStatusTest {
 
@@ -266,13 +268,16 @@ class EcsServiceDeploymentStatusTest {
         EcsService service = newMockModeService();
         service.createCluster("drapid-cluster", REGION);
         registerTaskDef(service, "drapid-fam", "app:1");
-        service.createService("drapid-cluster", "drapid-svc", "drapid-fam", 1,
-                LaunchType.FARGATE, List.of(), null, REGION);
+        // Each deployment id is read out as it is minted: createService and updateService hand
+        // back the same live model object, so the id has to be taken before the next update
+        // overwrites it.
+        String first = service.createService("drapid-cluster", "drapid-svc", "drapid-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
         service.reconcileServices();
 
         TaskDefinition rev2 = registerTaskDef(service, "drapid-fam", "app:2");
-        service.updateService("drapid-cluster", "drapid-svc", "drapid-fam:" + rev2.getRevision(),
-                null, null, REGION);
+        String second = service.updateService("drapid-cluster", "drapid-svc",
+                "drapid-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
         TaskDefinition rev3 = registerTaskDef(service, "drapid-fam", "app:3");
         String newest = service.updateService("drapid-cluster", "drapid-svc",
                 "drapid-fam:" + rev3.getRevision(), null, null, REGION).getDeploymentId();
@@ -282,10 +287,16 @@ class EcsServiceDeploymentStatusTest {
         assertEquals("IN_PROGRESS",
                 deploymentOf(service, "drapid-svc", "drapid-cluster", newest).getStatus(),
                 "the newest has none of its own tasks running");
-        assertEquals(List.of("STOPPED", "STOPPED"),
-                service.listServiceDeploymentsDetailed("drapid-svc", "drapid-cluster", null, REGION)
-                        .stream().skip(1).map(ServiceDeployment::getStatus).toList(),
-                "both deployments the service moved off are terminal, newest-first ordering");
+        // Each record is named, not taken by position. The listing sorts on createdAt and
+        // List.sort is stable, so three deployments minted inside one clock tick fall back to
+        // map iteration order: asserting on index 1 and 2 would pass or fail by hash order on
+        // any platform whose clock is coarser than the time it takes to mint them.
+        assertEquals("STOPPED",
+                deploymentOf(service, "drapid-svc", "drapid-cluster", first).getStatus(),
+                "the deployment two updates have passed over is terminal");
+        assertEquals("STOPPED",
+                deploymentOf(service, "drapid-svc", "drapid-cluster", second).getStatus(),
+                "and so is the one the last update passed over");
 
         service.reconcileServices();
         assertEquals("SUCCESSFUL",
