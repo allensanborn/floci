@@ -34,7 +34,6 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -262,22 +261,33 @@ class ElastiCacheServiceTest {
 
     /**
      * A proxy manager that refuses a port it is already listening on, the way a real
-     * {@code ServerSocket} does. Without this the restore paths can be asked to start two
-     * listeners on one port and a plain mock will happily agree, which is precisely the failure
-     * these tests exist to catch.
+     * {@code ServerSocket} does, and lets go of it on {@code stopProxy} so create-delete-create
+     * against one instance behaves like the real thing rather than exhausting itself.
+     *
+     * <p>This is not what makes the tests using it bite. Their assertions compare the port each
+     * restore was handed against that record's own bound port, and those fail against a plain
+     * mock on their own. What the stub changes is the failure <em>mode</em>: a restore reaching
+     * for a port another record holds fails the way it fails in production — that record coming
+     * back restore-failed with its endpoint dropped — instead of as a mockito verify mismatch.
+     * Worth having for what it shows a reader; not load-bearing.
      */
     private static ElastiCacheProxyManager exclusivePortProxyManager() {
         ElastiCacheProxyManager proxyManager = mock(ElastiCacheProxyManager.class);
-        Set<Integer> bound = ConcurrentHashMap.newKeySet();
+        Map<String, Integer> boundByKey = new ConcurrentHashMap<>();
         doAnswer(invocation -> {
+            String proxyKey = invocation.getArgument(0);
             int port = invocation.getArgument(2);
-            if (!bound.add(port)) {
-                throw new RuntimeException("Failed to start proxy for "
-                        + invocation.getArgument(0, String.class) + " on port " + port,
-                        new BindException("Address already in use"));
+            if (boundByKey.containsValue(port)) {
+                throw new RuntimeException("Failed to start proxy for " + proxyKey
+                        + " on port " + port, new BindException("Address already in use"));
             }
+            boundByKey.put(proxyKey, port);
             return null;
         }).when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+        doAnswer(invocation -> {
+            boundByKey.remove(invocation.getArgument(0, String.class));
+            return null;
+        }).when(proxyManager).stopProxy(anyString());
         return proxyManager;
     }
 
@@ -1304,6 +1314,29 @@ class ElastiCacheServiceTest {
         // the freed proxy port goes to the next cluster rather than being leaked
         assertEquals(16379, service.createCacheCluster(cacheClusterRequest("cc2", "redis", 1))
                 .getConfigurationEndpoint().port());
+    }
+
+    /**
+     * The release path for the record whose port field this change split. CacheCluster gained
+     * {@code proxyPort} here, so every reader of its endpoint port is a candidate for still
+     * meaning the old single number — {@code deleteCacheCluster} among them. Releasing the
+     * advertised port would free one the first cluster is still listening on and leak the one
+     * nothing is on, which shows up as the next create receiving 16379 rather than 16380.
+     *
+     * <p>A guard rather than a regression test: it cannot be written against upstream main, where
+     * the second create is refused outright.
+     */
+    @Test
+    void deletingACacheClusterReleasesTheHostPortItWasBoundTo() {
+        service.createCacheCluster(cacheClusterRequestOnPort("cc1", 16379));
+        CacheCluster shared = service.createCacheCluster(cacheClusterRequestOnPort("cc2", 16379));
+        assertEquals(16379, shared.getConfigurationEndpoint().port());
+        assertEquals(16380, shared.getProxyPort());
+
+        service.deleteCacheCluster("cc2");
+
+        assertEquals(16380, service.createCacheCluster(cacheClusterRequest("cc3", "redis", 1)).getProxyPort(),
+                "cc2's listener port must come back, and cc1's must not be handed out");
     }
 
     @Test
