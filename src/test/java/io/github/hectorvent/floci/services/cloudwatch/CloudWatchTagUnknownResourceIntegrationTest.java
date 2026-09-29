@@ -198,6 +198,52 @@ class CloudWatchTagUnknownResourceIntegrationTest {
     }
 
     /**
+     * The dashboard ARN AWS documents carries no region, and the one Floci mints does. A
+     * caller sending the documented form for a dashboard that exists must not be told the
+     * dashboard does not exist, which is what raising on a miss would otherwise have made of
+     * a shape that used to fall through to an empty tag map.
+     */
+    @Test
+    void theRegionlessDashboardArnAwsDocumentsAlsoResolves() {
+        query("PutDashboard")
+                .formParam("DashboardName", "tag-regionless-dashboard")
+                .formParam("DashboardBody", "{\"widgets\":[]}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        assertQueryTagOpsSucceed("arn:aws:cloudwatch::000000000000:dashboard/tag-regionless-dashboard");
+
+        // Still only an absent region: another region's ARN remains a miss.
+        assertQueryTagOpsNotFound(
+                "arn:aws:cloudwatch:eu-west-1:000000000000:dashboard/tag-regionless-dashboard");
+    }
+
+    /**
+     * Both handlers route every ARN that is not a dashboard and not a metric stream to the
+     * alarm path, so a Contributor Insights ARN, which AWS documents as taggable and Floci
+     * does not serve, lands there. Reporting it as not found is right; calling it an alarm
+     * that was not found is not, so the message names the ARN instead.
+     */
+    @Test
+    void anArnOfAKindFlociDoesNotServeIsReportedAgainstTheArn() {
+        query("TagResource")
+                .formParam("ResourceARN", PREFIX + "insight-rule/no-such-rule")
+                .formParam("Tags.member.1.Key", "env")
+                .formParam("Tags.member.1.Value", "prod")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("ResourceNotFoundException"))
+                .body("ErrorResponse.Error.Message",
+                        containsString("insight-rule/no-such-rule"))
+                .body("ErrorResponse.Error.Message",
+                        org.hamcrest.Matchers.not(containsString("Alarm")));
+    }
+
+    /**
      * CloudWatch Metrics serves the same three operations over JSON as well as Query, and
      * AGENTS.md requires the two handlers not to drift. A fix applied to only one of them
      * would leave the CLI and SDK v3 route still answering 200.

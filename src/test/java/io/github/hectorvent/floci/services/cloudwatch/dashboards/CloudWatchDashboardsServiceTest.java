@@ -150,6 +150,43 @@ class CloudWatchDashboardsServiceTest {
     }
 
     /**
+     * AWS documents the dashboard ARN without a region and Floci mints one with a region, so
+     * both forms have to resolve. Before the tag operations raised on a miss this divergence
+     * was invisible here: the documented ARN matched nothing and got an empty tag map back.
+     */
+    @Test
+    void bothTheRegionlessAndTheRegionfulDashboardArnResolve() {
+        service.putDashboard("ops", BODY, REGION);
+        String regionful = service.getDashboard("ops", REGION).getDashboardArn();
+        String regionless = "arn:aws:cloudwatch::000000000000:dashboard/ops";
+
+        assertEquals("arn:aws:cloudwatch:us-east-1:000000000000:dashboard/ops", regionful);
+        assertTrue(CloudWatchDashboardsService.isDashboardArn(regionless));
+
+        service.tagResource(regionless, java.util.Map.of("env", "dev"), REGION);
+        // Read back through the other form: one dashboard, reachable either way.
+        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(regionful, REGION));
+        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(regionless, REGION));
+
+        service.untagResource(regionless, List.of("env"), REGION);
+        assertEquals(java.util.Map.of(), service.listTagsForResource(regionful, REGION));
+    }
+
+    /**
+     * Only an absent region stands in for the dashboard's own. An ARN naming a different
+     * region must not resolve to the same-named dashboard in this one.
+     */
+    @Test
+    void anArnNamingAnotherRegionDoesNotResolve() {
+        service.putDashboard("ops", BODY, REGION);
+        String elsewhere = "arn:aws:cloudwatch:eu-west-1:000000000000:dashboard/ops";
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listTagsForResource(elsewhere, REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
      * An ARN naming no dashboard is an error on all three operations, not a silent no-op. The
      * ARN used here differs from a working one only in the dashboard name, so the outcome
      * cannot be explained by the ARN failing to parse as a dashboard ARN.

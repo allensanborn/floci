@@ -339,6 +339,12 @@ public class CloudWatchMetricsService {
      * which is a different shape from the {@code ResourceNotFound} that {@code SetAlarmState}
      * and {@code GetDashboard} declare; the SDK maps the two codes to two exception classes,
      * so the tag path uses the longer one rather than the code used elsewhere in this service.
+     *
+     * <p>The message names the ARN rather than asserting it was an alarm, because both tag
+     * handlers route every ARN that is not a dashboard and not a metric stream here. That
+     * includes kinds AWS considers taggable and Floci does not serve, a Contributor Insights
+     * {@code insight-rule/} ARN being the one AWS documents; reporting that no resource
+     * matches the ARN is true of those, where "alarm not found" would not be.
      */
     private MetricAlarm requireAlarm(String resourceArn, String region) {
         return alarmStore.scan(k -> k.startsWith(region + "::"))
@@ -346,7 +352,7 @@ public class CloudWatchMetricsService {
                 .filter(a -> a.getAlarmArn() != null && a.getAlarmArn().equals(resourceArn))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Alarm not found: " + resourceArn, 404));
+                        "No CloudWatch resource matches the ARN " + resourceArn + ".", 404));
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
