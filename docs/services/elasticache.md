@@ -74,11 +74,11 @@ whatever port its new container lands on, so it can move across a restart.
 
 On AWS a cache's `Port` belongs to its own endpoint: 6379 is the Redis default, so clusters
 share it routinely, and two replication groups on 6379 coexist. A host TCP port is exclusive,
-though, and Floci multiplexes every group's auth proxy onto one host — so the two are separate
+though, and Floci multiplexes every group's auth proxy onto one host, so the two are separate
 here. On every Redis or Valkey cache, the port you pass is the port that cache's own endpoint
-reports — a cluster-mode-disabled group's `PrimaryEndpoint` and `ReaderEndpoint`, a cluster-mode
+reports: a cluster-mode-disabled group's `PrimaryEndpoint` and `ReaderEndpoint`, a cluster-mode
 group's `ConfigurationEndpoint`, a standalone `Engine=redis`/`Engine=valkey` cluster's node
-endpoint — while the port the proxy binds is Floci's own, taken from
+endpoint. The port the proxy binds is Floci's own, taken from
 `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT`/`_MAX_PORT` and preferring the one you asked for
 when it is free.
 
@@ -96,7 +96,7 @@ range: its endpoint is its container's published port, which is the only port it
 on `CreateCacheCluster` is dropped for that engine rather than honored, and the cluster still
 answers `DescribeCacheClusters` alongside the rest.
 
-When they differ — a second cache on 6379, say — the endpoint still reads 6379, because that is
+When they differ, say a second cache on 6379, the endpoint still reads 6379, because that is
 what AWS would say and what terraform must read back to avoid a permanent diff, and the create
 logs a warning naming the port that cache actually answers on. Size the proxy range to the
 number of caches you run concurrently; exhausting it fails the create with

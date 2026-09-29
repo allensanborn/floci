@@ -679,7 +679,7 @@ public class ElastiCacheService implements ResourceProvider {
      * the advertised port is replayed exactly because it is the caller's.
      *
      * <p>A record written before the two ports were separate carries no {@code proxyPort}, so its
-     * endpoint port stands in as the port it was listening on — which is what it was.
+     * endpoint port stands in as the port it was listening on, which is what it was.
      *
      * <p>A cluster whose port cannot be reserved is reported {@code restore-failed}, the status
      * AWS models on {@code CacheCluster}; a replication group reports {@code create-failed},
@@ -733,7 +733,7 @@ public class ElastiCacheService implements ResourceProvider {
                     cluster.setContainerId(handle.getContainerId());
                     cluster.setContainerHost(handle.getHost());
                     cluster.setContainerPort(handle.getPort());
-                    // The bound port, which reserveCacheCluster just claimed — not the endpoint's,
+                    // The bound port, which reserveCacheCluster just claimed, not the endpoint's,
                     // which is the caller's and may be a port another record is listening on or
                     // one outside the range this process can serve at all.
                     startProxyOn(clusterId, cluster.getAuthMode(), cluster.getProxyPort(),
@@ -1696,8 +1696,8 @@ public class ElastiCacheService implements ResourceProvider {
      * AWS accepts any cache port from 1150 to 65535 and rejects the rest with
      * InvalidParameterValue; {@code RdsService.reserveProxyPort} applies that same range to the
      * same argument. Floci used to reject anything outside its own proxy range instead, which is
-     * an emulator-shaped limit no AWS caller can anticipate — and, now that the advertised port
-     * is no longer the bound one, a limit that constrains nothing.
+     * an emulator-shaped limit no AWS caller can anticipate. Now that the advertised port is no
+     * longer the bound one, it is also a limit that constrains nothing.
      */
     private static Integer validateRequestedPort(Integer requested) {
         if (requested != null && (requested < 1150 || requested > 65535)) {
@@ -1709,7 +1709,7 @@ public class ElastiCacheService implements ResourceProvider {
 
     /**
      * Says where a record can actually be reached when Floci could not listen on the port it
-     * advertises, and why — the two reasons are different problems and only one of them is
+     * advertises, and why: the two reasons are different problems, and only one of them is
      * fixed by stopping something. Silent on the common case, where the two are one number.
      */
     private void logPortRebind(String kind, String recordId, String endpointHost,
@@ -1735,11 +1735,11 @@ public class ElastiCacheService implements ResourceProvider {
      * one compiles, and on the create path even works, because the two are usually equal.
      *
      * <p>Be precise about what this catches, because it is narrower than it looks: only the
-     * instance where the wrong pick lands on a port nothing reserved — an advertised port outside
-     * the proxy range, which no record here can be listening on. It does <em>not</em> catch the
+     * instance where the wrong pick lands on a port nothing reserved, such as an advertised port
+     * outside the proxy range, which no record here can be listening on. It does <em>not</em> catch the
      * shared-port instance, which is the case this whole split exists for. Two records pinned to
      * 6379 come back with both their bound ports reserved, so a restore reaching for the
-     * advertised 6379 finds it in {@link #usedPorts} — held by the <em>other</em> record — and is
+     * advertised 6379 finds it in {@link #usedPorts}, held by the <em>other</em> record, and is
      * waved through to the BindException. The question the guard can ask is "reserved by anyone";
      * the question it needs is "reserved by this record", which wants a port-to-owner map rather
      * than a set. floci-b12b tracks that.
@@ -1768,8 +1768,8 @@ public class ElastiCacheService implements ResourceProvider {
      * own endpoint: 6379 is the Redis default, so nearly every ElastiCache cluster in the world
      * uses it and they coexist. Floci multiplexes every group's proxy onto one host, where a TCP
      * port really is exclusive, and it used to advertise the listener's port as the AWS one. That
-     * conflation made the AWS port globally scarce — a second group asking for 6379 was refused
-     * with {@code InvalidParameterValue}, which AWS never does — so any module standing up two
+     * conflation made the AWS port globally scarce: a second group asking for 6379 was refused
+     * with {@code InvalidParameterValue}, which AWS never does, so any module standing up two
      * Redis clusters, or any suite standing up one per test, failed at the second create.
      *
      * <p>The two are separate now. {@link #advertisedPort} answers the caller with the port it

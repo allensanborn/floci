@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -141,7 +142,7 @@ class ElastiCachePortSharingIntegrationTest {
     // exact port the next create receives, which is the observable that does move when the
     // release is wrong.
 
-    private static io.restassured.response.ValidatableResponse createGroup(String groupId, int port) {
+    private static ValidatableResponse createGroup(String groupId, int port) {
         return given()
                 .formParam("Action", "CreateReplicationGroup")
                 .formParam("ReplicationGroupId", groupId)
@@ -155,7 +156,7 @@ class ElastiCachePortSharingIntegrationTest {
             .then();
     }
 
-    private static io.restassured.response.ValidatableResponse describeGroup(String groupId) {
+    private static ValidatableResponse describeGroup(String groupId) {
         return given()
                 .formParam("Action", "DescribeReplicationGroups")
                 .formParam("ReplicationGroupId", groupId)
@@ -166,7 +167,7 @@ class ElastiCachePortSharingIntegrationTest {
                 .statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse describeMember(String cacheClusterId) {
+    private static ValidatableResponse describeMember(String cacheClusterId) {
         return given()
                 .formParam("Action", "DescribeCacheClusters")
                 .formParam("CacheClusterId", cacheClusterId)

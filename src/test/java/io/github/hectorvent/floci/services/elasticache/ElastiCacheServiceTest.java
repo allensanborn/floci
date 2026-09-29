@@ -267,8 +267,8 @@ class ElastiCacheServiceTest {
      * <p>This is not what makes the tests using it bite. Their assertions compare the port each
      * restore was handed against that record's own bound port, and those fail against a plain
      * mock on their own. What the stub changes is the failure <em>mode</em>: a restore reaching
-     * for a port another record holds fails the way it fails in production — that record coming
-     * back restore-failed with its endpoint dropped — instead of as a mockito verify mismatch.
+     * for a port another record holds fails the way it fails in production, as that record coming
+     * back restore-failed with its endpoint dropped, instead of as a mockito verify mismatch.
      * Worth having for what it shows a reader; not load-bearing.
      */
     private static ElastiCacheProxyManager exclusivePortProxyManager() {
@@ -758,7 +758,7 @@ class ElastiCacheServiceTest {
      * The restart the shared-port case has to survive, and the one the create-path tests cannot
      * see. Both clusters pin one port: the first binds it, the second advertises it and binds the
      * next one. Restoring the second on the port it *advertises* collides with the first's
-     * listener, and the collision is reported as that cluster failing — so the restart destroys
+     * listener, and the collision is reported as that cluster failing, so the restart destroys
      * the cache the first one survives. The proxy manager here refuses a repeated port, as a real
      * ServerSocket would, so the collision is a failure rather than a silent double-bind.
      */
@@ -1319,7 +1319,7 @@ class ElastiCacheServiceTest {
     /**
      * The release path for the record whose port field this change split. CacheCluster gained
      * {@code proxyPort} here, so every reader of its endpoint port is a candidate for still
-     * meaning the old single number — {@code deleteCacheCluster} among them. Releasing the
+     * meaning the old single number, {@code deleteCacheCluster} among them. Releasing the
      * advertised port would free one the first cluster is still listening on and leak the one
      * nothing is on, which shows up as the next create receiving 16379 rather than 16380.
      *
