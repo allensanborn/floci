@@ -29,10 +29,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.net.BindException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -50,6 +52,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -246,10 +249,36 @@ class ElastiCacheServiceTest {
 
     private static ElastiCacheService.CreateReplicationGroupRequest clusterRequest(
             String groupId, Integer numNodeGroups, Integer replicasPerNodeGroup) {
+        return clusterRequest(groupId, numNodeGroups, replicasPerNodeGroup, null);
+    }
+
+    private static ElastiCacheService.CreateReplicationGroupRequest clusterRequest(
+            String groupId, Integer numNodeGroups, Integer replicasPerNodeGroup, Integer port) {
         return new ElastiCacheService.CreateReplicationGroupRequest(groupId, "test",
                 AuthMode.NO_AUTH, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
                 "default.valkey8.cluster.on", null, null, numNodeGroups, replicasPerNodeGroup,
-                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of());
+                null, true, null, port, ReplicationGroupSettings.defaults(), Map.of());
+    }
+
+    /**
+     * A proxy manager that refuses a port it is already listening on, the way a real
+     * {@code ServerSocket} does. Without this the restore paths can be asked to start two
+     * listeners on one port and a plain mock will happily agree, which is precisely the failure
+     * these tests exist to catch.
+     */
+    private static ElastiCacheProxyManager exclusivePortProxyManager() {
+        ElastiCacheProxyManager proxyManager = mock(ElastiCacheProxyManager.class);
+        Set<Integer> bound = ConcurrentHashMap.newKeySet();
+        doAnswer(invocation -> {
+            int port = invocation.getArgument(2);
+            if (!bound.add(port)) {
+                throw new RuntimeException("Failed to start proxy for "
+                        + invocation.getArgument(0, String.class) + " on port " + port,
+                        new BindException("Address already in use"));
+            }
+            return null;
+        }).when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+        return proxyManager;
     }
 
     private static ElastiCacheService.CreateReplicationGroupRequest singleNodeRequest(
@@ -307,6 +336,25 @@ class ElastiCacheServiceTest {
         assertEquals(9999, group.getConfigurationEndpoint().port());
         assertEquals(16379, group.getProxyPort(),
                 "The listener falls back to the base port, the advertised one being unservable");
+    }
+
+    /**
+     * Deleting a group that shares an advertised port must free the port it was *bound* to, which
+     * is not the port on its endpoint. Releasing the endpoint's port instead would free a port the
+     * holder is still listening on and leak the one nothing is on, so the assertion is on the exact
+     * port the next unpinned create receives: 16380 only if grp2's own port came back.
+     */
+    @Test
+    void deletingAGroupReleasesTheHostPortItWasBoundTo() {
+        service.createReplicationGroup(singleNodeRequest("grp1", 16379));
+        ReplicationGroup shared = service.createReplicationGroup(singleNodeRequest("grp2", 16379));
+        assertEquals(16380, shared.getProxyPort());
+
+        service.deleteReplicationGroup("grp2");
+
+        ReplicationGroup next = service.createReplicationGroup(singleNodeRequest("grp3", null));
+        assertEquals(16380, next.getProxyPort(),
+                "The freed listener port must go to the next create, and 16379 must not");
     }
 
     @Test
@@ -694,6 +742,81 @@ class ElastiCacheServiceTest {
                 restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
         assertEquals(16383, next.getProxyPort(),
                 "Restored node ports must be reserved again so new groups cannot take them");
+    }
+
+    /**
+     * The restart the shared-port case has to survive, and the one the create-path tests cannot
+     * see. Both clusters pin one port: the first binds it, the second advertises it and binds the
+     * next one. Restoring the second on the port it *advertises* collides with the first's
+     * listener, and the collision is reported as that cluster failing — so the restart destroys
+     * the cache the first one survives. The proxy manager here refuses a repeated port, as a real
+     * ServerSocket would, so the collision is a failure rather than a silent double-bind.
+     */
+    @Test
+    void aRestartKeepsBothCacheClustersOnTheirAdvertisedPortAndOnDistinctListeners() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                exclusivePortProxyManager(), mock(ValkeyClusterFormation.class));
+        before.createCacheCluster(cacheClusterRequestOnPort("cc-a", 16379));
+        before.createCacheCluster(cacheClusterRequestOnPort("cc-b", 16379));
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheProxyManager restartedProxies = exclusivePortProxyManager();
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                restartedProxies, mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        CacheCluster a = restarted.findCacheClusters("cc-a").getFirst();
+        CacheCluster b = restarted.findCacheClusters("cc-b").getFirst();
+        assertEquals(CacheClusterStatus.AVAILABLE, a.getCacheClusterStatus());
+        assertEquals(CacheClusterStatus.AVAILABLE, b.getCacheClusterStatus(),
+                "The second cluster must survive the restart the first one survives");
+        assertEquals(16379, a.getConfigurationEndpoint().port());
+        assertEquals(16379, b.getConfigurationEndpoint().port(),
+                "A pinned port is the caller's, and a restart must not move it");
+        assertNotEquals(a.getProxyPort(), b.getProxyPort(),
+                "...while the two listeners stay on ports of their own");
+        verify(restartedProxies).startProxy(eq("cc-a"), any(), eq(a.getProxyPort()),
+                anyString(), anyInt(), any());
+        verify(restartedProxies).startProxy(eq("cc-b"), any(), eq(b.getProxyPort()),
+                anyString(), anyInt(), any());
+    }
+
+    /**
+     * The same replay rule on the cluster-mode path, where the advertised port sits on the
+     * configuration endpoint and the bound ports sit on the nodes. Rebuilding the endpoint from
+     * the first node's bound port moves a pinned port across a restart, which terraform treats as
+     * replacement-forcing drift on a group nobody touched.
+     */
+    @Test
+    void aRestartKeepsAClusterModeGroupsAdvertisedPort() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                exclusivePortProxyManager(), mock(ValkeyClusterFormation.class));
+        // The holder first, so the cluster-mode group's pinned port is one it cannot bind.
+        before.createReplicationGroup(singleNodeRequest("holder", 16379));
+        ReplicationGroup created = before.createReplicationGroup(clusterRequest("cm", 1, 0, 16379));
+        assertEquals(16379, created.getConfigurationEndpoint().port());
+        assertNotEquals(16379, created.getClusterNodes().getFirst().getProxyPort());
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubPerNodeContainers(restartedContainers);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                exclusivePortProxyManager(), mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        ReplicationGroup restoredGroup = restarted.getReplicationGroup("cm");
+        assertEquals(ReplicationGroupStatus.AVAILABLE, restoredGroup.getStatus());
+        assertEquals(16379, restoredGroup.getConfigurationEndpoint().port(),
+                "The restart must replay the pinned port, not re-derive it from a node");
     }
 
     @Test
@@ -1097,6 +1220,13 @@ class ElastiCacheServiceTest {
     private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequest(
             String clusterId, String engine, Integer numCacheNodes) {
         return cacheClusterRequest(clusterId, engine, numCacheNodes, AuthMode.NO_AUTH, null, null);
+    }
+
+    private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequestOnPort(
+            String clusterId, Integer port) {
+        return new ElastiCacheService.CreateCacheClusterRequest(clusterId, "redis", null, null,
+                1, port, AuthMode.NO_AUTH, null, null, null,
+                null, null, null, null, null, null, null, null, "us-east-1", Map.of());
     }
 
     private static ElastiCacheService.CreateCacheClusterRequest cacheClusterRequest(

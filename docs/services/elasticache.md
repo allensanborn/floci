@@ -63,8 +63,10 @@ remove the first's container.
 back. (`CreateReplicationGroup` does not check it either, so a replication group can still be
 created against a name nothing resolves.)
 
-Each record re-reserves its proxy port as it is restored, before Floci serves anything, so a
-create is never handed a port a surviving cluster or replication group still listens on.
+Each record re-reserves the port it listens on as it is restored, before Floci serves anything,
+so a create is never handed a port a surviving cluster or replication group still listens on.
+What a record *advertises* is replayed from the record instead of re-derived, so a restart never
+moves a port a caller pinned.
 
 #### The advertised port and the host port
 
