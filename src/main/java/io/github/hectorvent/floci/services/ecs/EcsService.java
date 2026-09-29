@@ -158,6 +158,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String DEPLOYMENT_STATUS_IN_PROGRESS = "IN_PROGRESS";
     /** A service deployment whose target revision is running at its requested task count. */
     public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
+    /** A service deployment a later one took over from before it could converge. */
+    public static final String DEPLOYMENT_STATUS_STOPPED = "STOPPED";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
     /** A listing returns at most a hundred ARNs per page. */
@@ -3938,6 +3940,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deployment.setUpdatedAt(now);
         deployment.setTargetServiceRevisionArn(revisionArn);
         deployment.setSourceServiceRevisionArns(priorRevisions);
+        stopSupersededDeployments(svc.getServiceArn(), now);
         serviceDeployments.put(deploymentArn, deployment);
 
         ServiceRevision revision = new ServiceRevision();
@@ -3959,16 +3962,62 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Lands every deployment of this service that the new one takes over from in a terminal
+     * status. A rolling update can supersede a deployment before its tasks converge, and
+     * {@link #settleStatus} finishes only the deployment the service is <em>currently</em> on,
+     * which a superseded one is not and can never become again: the service's deployment id has
+     * already moved. Left alone it would stay IN_PROGRESS with no finish time for ever,
+     * describing a rollout that can no longer happen. STOPPED is the status AWS lands a
+     * deployment in that ended without completing.
+     *
+     * <p>Only a deployment still in progress is moved. One that already reached SUCCESSFUL
+     * completed before it was superseded, and that record is history rather than something to
+     * rewrite.
+     *
+     * <p>Whether a converged deployment has reached SUCCESSFUL by this point depends on it
+     * having been read, because the transition is made at read time. Every response that
+     * serialises a service settles its current deployment, so a deployment that converged under
+     * any client that went on to describe the service is already terminal here; one that
+     * converged with nothing ever describing the service is stopped instead. The alternative is
+     * a second place that decides convergence, which is the disagreement this latch exists to
+     * remove.
+     *
+     * <p>Written under the same monitor {@code settleStatus} writes under, because the two race:
+     * a read settling the outgoing deployment can run beside the update that mints its
+     * replacement. Both transitions require IN_PROGRESS, so whichever lands second finds a
+     * terminal status and leaves it alone, and neither can undo the other.
+     */
+    private void stopSupersededDeployments(String serviceArn, Instant now) {
+        if (serviceArn == null) {
+            return;
+        }
+        for (ServiceDeployment prior : serviceDeployments.values()) {
+            if (!serviceArn.equals(prior.getServiceArn())) {
+                continue;
+            }
+            synchronized (prior) {
+                if (DEPLOYMENT_STATUS_IN_PROGRESS.equals(prior.getStatus())) {
+                    prior.setStatus(DEPLOYMENT_STATUS_STOPPED);
+                    prior.setFinishedAt(now);
+                    prior.setUpdatedAt(now);
+                }
+            }
+        }
+    }
+
+    /**
      * Finishes the deployment a service is <em>currently</em> on, once that deployment's own
-     * tasks are running. A deployment the service has already moved off is history and is left
-     * as it is.
+     * tasks are running. A deployment the service has already moved off is history: it was
+     * landed in a terminal status by {@link #stopSupersededDeployments} when its replacement was
+     * recorded, and is left as it is.
      *
      * <p>This status is what a steady-state wait reads. The Terraform AWS provider polls
      * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL
      * from the moment it was recorded would make {@code wait_for_steady_state} return before a
      * single task had started, a wait that always passes and therefore says nothing.
      *
-     * <p><strong>SUCCESSFUL is terminal.</strong> The transition runs once and never reverses:
+     * <p><strong>A terminal status is terminal.</strong> The transition runs on a deployment
+     * that is still IN_PROGRESS and so runs once and never reverses:
      * in AWS a completed deployment does not un-complete because the service later became
      * unhealthy, and {@code finishedAt} records when the deployment finished, not the last time
      * someone looked. Deriving the status afresh on every read, the shape this started as,
@@ -4016,7 +4065,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (deployment) {
             if (svc != null && deployment.getTargetServiceRevisionArn() != null
                     && deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))
-                    && !DEPLOYMENT_STATUS_SUCCESSFUL.equals(deployment.getStatus())
+                    && DEPLOYMENT_STATUS_IN_PROGRESS.equals(deployment.getStatus())
                     && STATUS_ACTIVE.equals(svc.getStatus())
                     && runningOnCurrentDeployment(svc) >= svc.getDesiredCount()) {
                 Instant now = Instant.now();

@@ -42,7 +42,10 @@ import static org.mockito.Mockito.when;
  *       draining from the deployment it replaced reports a task-definition change finished
  *       before the new revision has started;</li>
  *   <li>SUCCESSFUL is terminal. Tasks dying afterwards do not un-finish a finished
- *       deployment.</li>
+ *       deployment;</li>
+ *   <li>a deployment ends. One superseded before it converged can never be settled, because
+ *       settling finishes the deployment the service is currently on, so it is stopped when its
+ *       replacement is recorded rather than left in flight for ever.</li>
  * </ul>
  *
  * <p>Reconciler ticks are driven explicitly rather than waited on, and deployments are selected
@@ -249,9 +252,14 @@ class EcsServiceDeploymentStatusTest {
 
     /**
      * Two task-definition changes in a row, with no tick between them. Only the newest deployment
-     * is the one the service is on, so only it is settled from live tasks; the one skipped over
-     * keeps what it was last read as, which is the documented behaviour for a superseded
-     * deployment ({@code floci-n5kb} tracks closing those out properly).
+     * is the one the service is on, so only it is settled from live tasks; the two it skipped
+     * over are landed in STOPPED as each replacement is recorded.
+     *
+     * <p>The first of those had in fact converged, on the tick before the updates, and is stopped
+     * anyway: convergence is decided at read time and nothing read it. This pins that consequence
+     * rather than hiding it. It needs a client that reconciles a service to a steady state and
+     * then changes it again without ever describing it in between, which no real client does,
+     * because every response carrying a service settles that service's current deployment.
      */
     @Test
     void twoUpdatesInSuccessionSettleOnlyTheNewestDeployment() {
@@ -274,6 +282,10 @@ class EcsServiceDeploymentStatusTest {
         assertEquals("IN_PROGRESS",
                 deploymentOf(service, "drapid-svc", "drapid-cluster", newest).getStatus(),
                 "the newest has none of its own tasks running");
+        assertEquals(List.of("STOPPED", "STOPPED"),
+                service.listServiceDeploymentsDetailed("drapid-svc", "drapid-cluster", null, REGION)
+                        .stream().skip(1).map(ServiceDeployment::getStatus).toList(),
+                "both deployments the service moved off are terminal, newest-first ordering");
 
         service.reconcileServices();
         assertEquals("SUCCESSFUL",
@@ -385,6 +397,121 @@ class EcsServiceDeploymentStatusTest {
         assertEquals(rev1.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn(),
                 "DAEMON does not roll on a task-definition change; the count is honest about that");
         assertNotEquals(rev2.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn());
+    }
+
+    /**
+     * A deployment superseded before it converged has to end somewhere. {@code settleStatus}
+     * finishes only the deployment the service is currently on, and a superseded one never is
+     * again, so nothing else can ever move it: it would sit IN_PROGRESS with no finish time for
+     * the life of the emulator, claiming a rollout that can no longer happen is still happening.
+     * A client listing a service's deployments would read an unbounded pile of them in flight at
+     * once, and one filtering on IN_PROGRESS would get every rollout the service ever abandoned.
+     *
+     * <p>STOPPED is the status AWS uses for a deployment that ended without completing, and is
+     * one of the nine in {@code ServiceDeploymentStatus}.
+     *
+     * <p>The second service is not decoration: it is never updated, so its own deployment is
+     * still in flight, and it fails this test if the stop is not scoped to one service ARN.
+     */
+    @Test
+    void supersedingAnUnconvergedDeploymentStopsIt() {
+        EcsService service = newMockModeService();
+        service.createCluster("dsup-cluster", REGION);
+        registerTaskDef(service, "dsup-fam", "app:1");
+        String first = service.createService("dsup-cluster", "dsup-svc", "dsup-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+        registerTaskDef(service, "dsup-other-fam", "other:1");
+        String bystander = service.createService("dsup-cluster", "dsup-other", "dsup-other-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+
+        // No tick: neither service has launched anything, so both deployments are in flight.
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "dsup-svc", "dsup-cluster", first).getStatus(),
+                "precondition: the first deployment never converged");
+
+        TaskDefinition rev2 = registerTaskDef(service, "dsup-fam", "app:2");
+        String second = service.updateService("dsup-cluster", "dsup-svc",
+                "dsup-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
+
+        ServiceDeployment superseded = deploymentOf(service, "dsup-svc", "dsup-cluster", first);
+        assertEquals("STOPPED", superseded.getStatus(),
+                "a deployment another one took over from is finished, not still rolling out");
+        assertNotNull(superseded.getFinishedAt(),
+                "and reports when it ended, like every deployment that is no longer running");
+
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "dsup-svc", "dsup-cluster", second).getStatus(),
+                "while the deployment that took over is the one now in flight");
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "dsup-other", "dsup-cluster", bystander).getStatus(),
+                "another service's deployment is none of this update's business");
+    }
+
+    /**
+     * STOPPED is terminal in the same sense SUCCESSFUL is. Once the replacement converges, the
+     * service is at its requested count and a status derived from that would call the superseded
+     * deployment finished too, which would be reporting that a rollout nobody is on succeeded.
+     * The stopped record keeps both its status and the instant it ended.
+     */
+    @Test
+    void aSupersededDeploymentDoesNotSucceedWhenItsReplacementDoes() {
+        EcsService service = newMockModeService();
+        service.createCluster("dsup2-cluster", REGION);
+        registerTaskDef(service, "dsup2-fam", "app:1");
+        String first = service.createService("dsup2-cluster", "dsup2-svc", "dsup2-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+
+        TaskDefinition rev2 = registerTaskDef(service, "dsup2-fam", "app:2");
+        String second = service.updateService("dsup2-cluster", "dsup2-svc",
+                "dsup2-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
+        Instant stoppedAt = deploymentOf(service, "dsup2-svc", "dsup2-cluster", first).getFinishedAt();
+        assertNotNull(stoppedAt, "precondition: the superseded deployment ended");
+
+        service.reconcileServices();
+        assertEquals("SUCCESSFUL",
+                deploymentOf(service, "dsup2-svc", "dsup2-cluster", second).getStatus(),
+                "precondition: the replacement converged");
+
+        ServiceDeployment superseded = deploymentOf(service, "dsup2-svc", "dsup2-cluster", first);
+        assertEquals("STOPPED", superseded.getStatus(),
+                "the deployment that was taken over from did not succeed, its replacement did");
+        assertEquals(stoppedAt, superseded.getFinishedAt(),
+                "and still reports the instant it ended");
+    }
+
+    /**
+     * The other direction: a deployment that completed before it was superseded is history and
+     * must not be rewritten. Stopping every prior deployment unconditionally would turn a
+     * service's whole completed rollout history into a list of stopped ones.
+     *
+     * <p>The read before the update is load-bearing rather than an assertion for its own sake:
+     * the SUCCESSFUL transition is made at read time, so this is what puts the first deployment
+     * into the terminal state the update then has to leave alone. That is the ordering a real
+     * client is in, because every response carrying a service settles its current deployment.
+     */
+    @Test
+    void aDeploymentThatFinishedBeforeItWasSupersededStaysSuccessful() {
+        EcsService service = newMockModeService();
+        service.createCluster("dsup3-cluster", REGION);
+        registerTaskDef(service, "dsup3-fam", "app:1");
+        String first = service.createService("dsup3-cluster", "dsup3-svc", "dsup3-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+        service.reconcileServices();
+
+        ServiceDeployment finished = deploymentOf(service, "dsup3-svc", "dsup3-cluster", first);
+        assertEquals("SUCCESSFUL", finished.getStatus(), "precondition: it converged and was read");
+        Instant finishedAt = finished.getFinishedAt();
+        assertNotNull(finishedAt);
+
+        TaskDefinition rev2 = registerTaskDef(service, "dsup3-fam", "app:2");
+        service.updateService("dsup3-cluster", "dsup3-svc", "dsup3-fam:" + rev2.getRevision(),
+                null, null, REGION);
+
+        ServiceDeployment after = deploymentOf(service, "dsup3-svc", "dsup3-cluster", first);
+        assertEquals("SUCCESSFUL", after.getStatus(),
+                "a deployment that completed was not stopped by the one that followed it");
+        assertEquals(finishedAt, after.getFinishedAt(),
+                "and keeps the instant it finished at, not the instant it was superseded");
     }
 
     /** The one place the provider's join is asserted: the revision ARN carries the task set id. */
