@@ -271,6 +271,49 @@ class EcsServiceDeploymentStatusTest {
                 "and converges once its own task is up");
     }
 
+    /**
+     * The two views of one deployment must agree about the same moment. Right after a
+     * task-definition change, {@code DescribeServices} deployments[0].rolloutState and the
+     * {@code ServiceDeployment} record are both describing a rollout that has not started, and a
+     * client reading either has to be told the same thing -- otherwise it has no way to know
+     * which to believe. Both are derived from the deployment's own task count for that reason.
+     *
+     * <p>They are allowed to diverge later, and that is not the same thing: the record is
+     * history and latches SUCCESSFUL, while rolloutState is live and follows the service. A
+     * deployment that completed and then lost its tasks reports a finished record beside a
+     * rollout that is no longer complete, which is two different questions with two correct
+     * answers rather than one question with two.
+     */
+    @Test
+    void theRolloutStateAndTheDeploymentRecordAgreeWhileARolloutIsInFlight() {
+        EcsService service = newMockModeService();
+        service.createCluster("dboth-cluster", REGION);
+        registerTaskDef(service, "dboth-fam", "app:1");
+        service.createService("dboth-cluster", "dboth-svc", "dboth-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION);
+        service.reconcileServices();
+
+        TaskDefinition rev2 = registerTaskDef(service, "dboth-fam", "app:2");
+        String rolled = service.updateService("dboth-cluster", "dboth-svc",
+                "dboth-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
+
+        EcsServiceModel svc = service.serviceByArn(
+                service.describeServices("dboth-cluster", List.of("dboth-svc"), REGION)
+                        .getFirst().getServiceArn());
+        assertEquals("IN_PROGRESS", service.deploymentsFor(svc).getFirst().getRolloutState(),
+                "the live rollout has not started: only the old revision's task is up");
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "dboth-svc", "dboth-cluster", rolled).getStatus(),
+                "and the record says the same about the same moment");
+        assertTrue(service.eventsFor(svc).isEmpty(),
+                "no steady-state event while the rollout is in flight");
+
+        service.reconcileServices();
+        assertEquals("COMPLETED", service.deploymentsFor(svc).getFirst().getRolloutState());
+        assertEquals("SUCCESSFUL",
+                deploymentOf(service, "dboth-svc", "dboth-cluster", rolled).getStatus());
+    }
+
     /** The one place the provider's join is asserted: the revision ARN carries the task set id. */
     private static void assertRevisionCarriesTaskSetId(EcsService service, String name,
                                                        String cluster, String deploymentId) {

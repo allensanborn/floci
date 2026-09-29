@@ -3730,7 +3730,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         String deploymentId = deploymentId(svc);
-        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
+        // This deployment's own tasks, not the service's. Counting the tasks still draining from
+        // the deployment this one replaced would report a task-definition change COMPLETED the
+        // instant UpdateService returned -- the same miscount that made the ServiceDeployment
+        // record lie, and at that moment the two would contradict each other about one
+        // deployment, leaving a client no way to tell which to believe. A Deployment's counts
+        // are per deployment in AWS, so the running count reported here is this deployment's too.
+        long running = runningOnCurrentDeployment(svc);
+        boolean converged = running >= svc.getDesiredCount();
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -3738,7 +3745,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         d.setTaskDefinition(svc.getTaskDefinition());
         d.setDesiredCount(svc.getDesiredCount());
         d.setPendingCount(svc.getPendingCount());
-        d.setRunningCount(svc.getRunningCount());
+        d.setRunningCount((int) running);
         d.setFailedTasks(0);
         d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
         d.setRolloutStateReason("ECS deployment " + deploymentId
@@ -3777,7 +3784,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public List<ServiceEvent> eventsFor(EcsServiceModel svc) {
         if (svc == null || !"ACTIVE".equals(svc.getStatus())
-                || svc.getRunningCount() < svc.getDesiredCount()) {
+                || runningOnCurrentDeployment(svc) < svc.getDesiredCount()) {
             return List.of();
         }
         String deploymentId = deploymentId(svc);
