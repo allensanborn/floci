@@ -9,7 +9,9 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -52,6 +54,18 @@ class Ec2VpcEndpointNetworkInterfaceLookupIntegrationTest {
             "DescribeVpcEndpointsResponse.vpcEndpointSet.item.networkInterfaceIdSet.item";
     private static final String NI_SET =
             "DescribeNetworkInterfacesResponse.networkInterfaceSet.item";
+
+    private static final String AUTH_ACCOUNT_2 =
+            "AWS4-HMAC-SHA256 Credential=000000000002/20260205/us-east-1/ec2/aws4_request";
+
+    private RequestSpecification ec2As(String auth, String action, String... formParams) {
+        RequestSpecification req = given().formParam("Action", action)
+                .header("Authorization", auth);
+        for (int i = 0; i < formParams.length; i += 2) {
+            req = req.formParam(formParams[i], formParams[i + 1]);
+        }
+        return req;
+    }
 
     private RequestSpecification ec2(String action, String... formParams) {
         RequestSpecification req = given().formParam("Action", action)
@@ -185,6 +199,57 @@ class Ec2VpcEndpointNetworkInterfaceLookupIntegrationTest {
     }
 
     @Test
+    void anEndpointInterfaceCarriesTheEndpointsSecurityGroups() {
+        // The security groups on an interface endpoint are enforced on its INTERFACES, so AWS
+        // reports them in each interface's groupSet. Without them the groupSet came back empty
+        // and a group-id filter excluded the very interfaces the group is attached to -- which
+        // is asserted here too, because the empty-groupSet bug would satisfy the first half
+        // alone.
+        String vpcId = createVpc("10.89.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.89.1.0/24", "us-east-1a");
+        String sgId = ec2Value("CreateSecurityGroup", "CreateSecurityGroupResponse.groupId",
+                "GroupName", "vpce-eni-sg", "GroupDescription", "endpoint sg", "VpcId", vpcId);
+
+        String endpointId = ec2Value("CreateVpcEndpoint",
+                "CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId",
+                "VpcId", vpcId, "ServiceName", "com.amazonaws.us-east-1.ec2",
+                "VpcEndpointType", "Interface", "SubnetId.1", subnetId,
+                "SecurityGroupId.1", sgId);
+        String eniId = publishedEniIds(endpointId).get(0);
+
+        XmlPath answer = ec2Xml("DescribeNetworkInterfaces", "NetworkInterfaceId.1", eniId);
+        assertEquals(List.of(sgId),
+                answer.getList(NI_SET + ".groupSet.item.groupId", String.class),
+                "the interface carries the endpoint's security group");
+        assertEquals("vpce-eni-sg", answer.getString(NI_SET + ".groupSet.item.groupName"));
+
+        // And the filter that group id is for actually selects it.
+        assertThat(filteredIds("group-id", sgId), hasItem(eniId));
+    }
+
+    @Test
+    void anEndpointInterfaceReportsItsOwnAccountAsOwner() {
+        // Not the caller's account merely because the caller asked. The two coincide here --
+        // one account in this test app -- so what this pins is that ownerId is populated from
+        // the endpoint's owner at all, and is a live account id rather than blank.
+        String vpcId = createVpc("10.90.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.90.1.0/24", "us-east-1a");
+        String endpointId = createInterfaceEndpoint(vpcId, subnetId);
+        String eniId = publishedEniIds(endpointId).get(0);
+
+        String ownerId = ec2Xml("DescribeNetworkInterfaces", "NetworkInterfaceId.1", eniId)
+                .getString(NI_SET + ".ownerId");
+        assertThat(ownerId, matchesPattern("[0-9]{12}"));
+
+        // The VPC the endpoint sits in is owned by the same account, and that is the account
+        // the interface must name.
+        String vpcOwner = ec2Xml("DescribeVpcs", "VpcId.1", vpcId)
+                .getString("DescribeVpcsResponse.vpcSet.item.ownerId");
+        assertEquals(vpcOwner, ownerId,
+                "the interface reports the account that owns the endpoint");
+    }
+
+    @Test
     void filtersSelectEndpointInterfaces() {
         String vpcId = createVpc("10.88.0.0/16");
         String subnetA = createSubnet(vpcId, "10.88.1.0/24", "us-east-1a");
@@ -217,6 +282,56 @@ class Ec2VpcEndpointNetworkInterfaceLookupIntegrationTest {
     }
 
     @Test
+    void anotherAccountsEndpointInterfacesAreInvisible() {
+        // A CHARACTERIZATION TEST, and honest about it: it passes both with and without an
+        // explicit account filter in the describe arm, because the scoping it observes is done
+        // twice over in the storage layer and neither copy is visible at the call site.
+        // endpointNetworkInterfaces does vpcEndpoints.scan(k -> true) -- which reads as "every
+        // endpoint" and means "every endpoint of the calling account", since
+        // AccountAwareStorageBackend.scan filters to the caller's partition before the predicate
+        // ever runs -- and the subnet lookup inside endpointNetworkInterfacesOf is scoped the
+        // same way, so a foreign endpoint would yield no interfaces even if it were reached.
+        // Measured: removing an account filter from the describe arm does not fail this test.
+        //
+        // It is kept because it pins the BEHAVIOUR rather than the mechanism. A reviewer read
+        // the k -> true as cross-account and concluded this code leaked; the answer to that is
+        // an executable demonstration that it does not, positioned to fail if a future change
+        // to either scoping layer makes it start.
+        String vpcId = createVpc("10.91.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.91.1.0/24", "us-east-1a");
+        String endpointId = createInterfaceEndpoint(vpcId, subnetId);
+        String eniId = publishedEniIds(endpointId).get(0);
+
+        // Account 2 is not handed the endpoint at all.
+        ec2As(AUTH_ACCOUNT_2, "DescribeVpcEndpoints", "VpcEndpointId.1", endpointId)
+                .when().post("/")
+                .then().statusCode(400);
+
+        // ... so it must not resolve the interface either. Consistent, not merely restrictive:
+        // an id this caller was never given is an id that does not exist for it.
+        ec2As(AUTH_ACCOUNT_2, "DescribeNetworkInterfaces", "NetworkInterfaceId.1", eniId)
+                .when().post("/")
+                .then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidNetworkInterfaceID.NotFound"));
+
+        // ... nor enumerate it.
+        List<String> account2List = ec2As(AUTH_ACCOUNT_2, "DescribeNetworkInterfaces")
+                .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getList(NI_SET + ".networkInterfaceId", String.class);
+        assertThat("account 2 must not enumerate account 1's endpoint interfaces",
+                account2List, not(hasItem(eniId)));
+
+        // The owning account still sees its own, by id and in the list. Without this the test
+        // would pass equally against a build that had simply stopped reporting endpoint
+        // interfaces to anyone.
+        assertEquals(eniId, ec2Xml("DescribeNetworkInterfaces", "NetworkInterfaceId.1", eniId)
+                .getString(NI_SET + ".networkInterfaceId"));
+        assertThat(ec2Xml("DescribeNetworkInterfaces")
+                        .getList(NI_SET + ".networkInterfaceId", String.class),
+                hasItem(eniId));
+    }
+
+    @Test
     void anIdThatWasNeverPublishedStillDoesNotExist() {
         // GUARD on the validation sweep. Teaching the lookup about endpoint interfaces must not
         // turn InvalidNetworkInterfaceID.NotFound into something that never fires -- a store
@@ -225,8 +340,7 @@ class Ec2VpcEndpointNetworkInterfaceLookupIntegrationTest {
         ec2("DescribeNetworkInterfaces", "NetworkInterfaceId.1", "eni-00000000000000000")
                 .when().post("/")
                 .then().statusCode(400)
-                .body("Response.Errors.Error.Code", org.hamcrest.Matchers.equalTo(
-                        "InvalidNetworkInterfaceID.NotFound"));
+                .body("Response.Errors.Error.Code", equalTo("InvalidNetworkInterfaceID.NotFound"));
     }
 
     private List<String> filteredIds(String... nameValuePairs) {

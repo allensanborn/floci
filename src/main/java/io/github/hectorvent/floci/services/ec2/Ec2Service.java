@@ -4621,6 +4621,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             // cannot describe the same interface two ways. requesterId is deliberately left
             // unset -- see NetworkInterface#requesterId.
             ni.setRequesterManaged(true);
+            // An interface endpoint's security groups are enforced ON its interfaces -- that is
+            // the whole mechanism by which a PrivateLink endpoint is firewalled -- and AWS reports
+            // them in each interface's groupSet. Without them DescribeNetworkInterfaces answered
+            // with an empty groupSet and a group-id filter excluded the very interfaces the group
+            // is attached to. The name is best-effort: it is cosmetic, the id is what filters and
+            // rules match on, and the lookup reads the caller's account while FlowLogService runs
+            // on the default one, so a miss omits the name rather than inventing it.
+            for (String securityGroupId : endpoint.getSecurityGroupIds()) {
+                GroupIdentifier group = new GroupIdentifier();
+                group.setGroupId(securityGroupId);
+                securityGroups.get(key(region, securityGroupId))
+                        .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
+                ni.getGroups().add(group);
+            }
             ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
             result.add(ni);
         }
@@ -9220,9 +9234,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             result.add(ni);
         }
 
-        // The ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes
-        // these ids in networkInterfaceIdSet, so without this arm the same emulator that just
-        // handed out an id answers InvalidNetworkInterfaceID.NotFound when asked about it.
+        // The ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes these ids in
+        // networkInterfaceIdSet, so without this arm the same emulator that just handed out an id
+        // answers InvalidNetworkInterfaceID.NotFound when asked about it.
         //
         // That is not a cosmetic gap. The Terraform AWS provider's aws_vpc_endpoint read calls
         // findSubnetConfigurationsByNetworkInterfaceIDs over EVERY id in network_interface_ids to
@@ -9231,11 +9245,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         // pointedly does not here. So an unresolvable id fails every interface endpoint read,
         // where publishing no ids at all had merely left the list empty.
         //
-        // NOT account-scoped, deliberately, unlike the two arms above. describeVpcEndpoints is
-        // not account-scoped either -- it scans every endpoint in the region -- so scoping here
-        // would leave an id that IS published to a caller unresolvable BY that caller, which is
-        // the exact defect this arm closes. The two sides have to agree about which endpoints
-        // exist, and the endpoint side is the one already on the wire.
+        // The ENIs an interface VPC endpoint owns, so that an id DescribeVpcEndpoints published
+        // resolves instead of answering InvalidNetworkInterfaceID.NotFound. The Terraform AWS
+        // provider's aws_vpc_endpoint read calls findSubnetConfigurationsByNetworkInterfaceIDs
+        // over EVERY id in network_interface_ids to build subnet_configuration, and returns the
+        // lookup error rather than tolerating a NotFound -- note it handles retry.NotFound for
+        // the prefix list a few lines above and pointedly does not here. So an unresolvable id
+        // fails every interface endpoint read, where publishing no ids had merely left the list
+        // empty.
+        //
+        // ACCOUNT SCOPING IS ALREADY DONE, TWICE, BY THE STORAGE LAYER -- which is worth stating
+        // because nothing at this call site shows it, and a reviewer reasonably read it the
+        // other way. endpointNetworkInterfaces does vpcEndpoints.scan(k -> true), and plain scan
+        // on an AccountAwareStorageBackend filters to the caller's partition first: the
+        // k -> true predicate selects every KEY within that account, not every account. The
+        // subnet lookup inside endpointNetworkInterfacesOf is scoped the same way, so even a
+        // foreign endpoint would yield no interfaces. Nothing here crosses an account boundary,
+        // and an id is only ever published to the account that can resolve it.
+        //
+        // ownerId therefore comes from callerAccountId(), the account these were actually read
+        // under, rather than from safeAccount: the explicit-account overload can set safeAccount
+        // to an account this ambient-scoped arm cannot honour, and labelling a resource with an
+        // account it did not come from is worse than either showing or hiding it.
+        String endpointOwnerAccountId = callerAccountId();
         for (NetworkInterface endpointNi : endpointNetworkInterfaces(region)) {
             String endpointEniId = endpointNi.getNetworkInterfaceId();
             if (foundIds.contains(endpointEniId)) {
@@ -9247,7 +9279,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             // Added before the filter check, matching the arms above: an id that was asked for
             // by name and then excluded by a filter is absent from the answer, not NotFound.
             foundIds.add(endpointEniId);
-            endpointNi.setOwnerId(safeAccount);
+            endpointNi.setOwnerId(endpointOwnerAccountId);
             if (!matchesFilters(endpointNi, filters, region)) {
                 continue;
             }
