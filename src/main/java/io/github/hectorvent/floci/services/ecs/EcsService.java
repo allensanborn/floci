@@ -3730,7 +3730,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         String deploymentId = deploymentId(svc);
-        boolean converged = svc.getRunningCount() >= svc.getDesiredCount();
+        // This deployment's own tasks, not the service's. A Deployment's counts are per
+        // deployment in AWS, and reporting the service-wide total here would both overstate them
+        // mid-rollout and make rolloutState contradict the ServiceDeployment resource, which is
+        // derived from the same quantity. See runningOnCurrentDeployment.
+        long running = runningOnCurrentDeployment(svc);
+        boolean converged = running >= svc.getDesiredCount();
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -3738,7 +3743,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         d.setTaskDefinition(svc.getTaskDefinition());
         d.setDesiredCount(svc.getDesiredCount());
         d.setPendingCount(svc.getPendingCount());
-        d.setRunningCount(svc.getRunningCount());
+        d.setRunningCount((int) running);
         d.setFailedTasks(0);
         d.setRolloutState(converged ? "COMPLETED" : "IN_PROGRESS");
         d.setRolloutStateReason("ECS deployment " + deploymentId
@@ -3777,7 +3782,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public List<ServiceEvent> eventsFor(EcsServiceModel svc) {
         if (svc == null || !"ACTIVE".equals(svc.getStatus())
-                || svc.getRunningCount() < svc.getDesiredCount()) {
+                || runningOnCurrentDeployment(svc) < svc.getDesiredCount()) {
             return List.of();
         }
         String deploymentId = deploymentId(svc);
@@ -3812,6 +3817,40 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             hash = (hash ^ seed.charAt(i)) * 0x100000001b3L;
         }
         return "ecs-svc/" + Long.toUnsignedString(hash);
+    }
+
+    /**
+     * How many of the service's RUNNING tasks belong to the deployment it is currently on.
+     *
+     * <p>{@code svc.getRunningCount()} is the wrong number for this and must not be substituted
+     * for it. The reconciler sets that field from <em>every</em> RUNNING task the service owns,
+     * which during a rolling change includes the ones still draining from the deployment this one
+     * replaced. Judging a deployment by it reports a task-definition change finished the instant
+     * {@code UpdateService} returns — on the strength of the old revision's task — so a new image
+     * that cannot start reads as stable and a steady-state wait returns at once. The reconciler
+     * derives the right quantity one line before it sets that field, as
+     * {@code running - staleTasks.size()}.
+     *
+     * <p>Recomputed here rather than carried over from the reconciler, for two reasons. A cached
+     * count is a fact about the last tick, and this is read on demand between ticks — right after
+     * {@code UpdateService}, which is exactly the moment that matters. And caching it would add
+     * per-deployment state to the service model for a value that is cheap to derive from the
+     * tasks already in hand, which is the same trade {@link #deploymentsFor} already makes.
+     */
+    private long runningOnCurrentDeployment(EcsServiceModel svc) {
+        EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
+        if (cluster == null) {
+            // Nothing can be confirmed running, so report none: an unfinished deployment is the
+            // safe direction to be wrong in, since it stalls a wait rather than passing it.
+            return 0;
+        }
+        String currentDeploymentId = deploymentId(svc);
+        String taskDefinitionArn = svc.getTaskDefinition();
+        return tasks.values().stream()
+                .filter(t -> ownedBy(t, svc, cluster))
+                .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
+                .filter(t -> !isStaleForDeployment(t, currentDeploymentId, taskDefinitionArn))
+                .count();
     }
 
     /**
@@ -3909,7 +3948,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return deployment;
         }
         boolean converged = STATUS_ACTIVE.equals(svc.getStatus())
-                && svc.getRunningCount() >= svc.getDesiredCount();
+                && runningOnCurrentDeployment(svc) >= svc.getDesiredCount();
         deployment.setStatus(converged ? DEPLOYMENT_STATUS_SUCCESSFUL : DEPLOYMENT_STATUS_IN_PROGRESS);
         if (!converged) {
             deployment.setFinishedAt(null);
