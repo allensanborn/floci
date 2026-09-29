@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.services.elasticache.model.Endpoint;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupSettings;
 import io.github.hectorvent.floci.services.elasticache.model.ReplicationGroupStatus;
+import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheAuthProxy;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
@@ -299,7 +300,7 @@ public class ElastiCacheService implements ResourceProvider {
             synchronized (lockFor("rg:" + groupId)) {
                 groups.put(groupId, group);
                 if (handle != null) {
-                    proxyManager.startProxy(groupId, authMode, proxyPort,
+                    startProxyOn(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
                             (username, password) -> validatePassword(groupId, username, password));
                 } else {
@@ -381,7 +382,7 @@ public class ElastiCacheService implements ResourceProvider {
             for (int i = 0; i < nodes.size(); i++) {
                 ClusterNode node = nodes.get(i);
                 ElastiCacheContainerHandle handle = handles.get(i);
-                proxyManager.startProxy(node.getMemberClusterId(), authMode, node.getProxyPort(),
+                startProxyOn(node.getMemberClusterId(), authMode, node.getProxyPort(),
                         handle.getHost(), handle.getPort(),
                         (username, password) -> validatePassword(groupId, username, password));
                 startedProxyKeys.add(node.getMemberClusterId());
@@ -732,8 +733,11 @@ public class ElastiCacheService implements ResourceProvider {
                     cluster.setContainerId(handle.getContainerId());
                     cluster.setContainerHost(handle.getHost());
                     cluster.setContainerPort(handle.getPort());
-                    proxyManager.startProxy(clusterId, cluster.getAuthMode(),
-                            cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
+                    // The bound port, which reserveCacheCluster just claimed — not the endpoint's,
+                    // which is the caller's and may be a port another record is listening on or
+                    // one outside the range this process can serve at all.
+                    startProxyOn(clusterId, cluster.getAuthMode(), cluster.getProxyPort(),
+                            handle.getHost(), handle.getPort(),
                             (username, password) -> validateCacheClusterPassword(clusterId, username, password));
                 } else {
                     // Cleared rather than left alone: whatever the record carried describes a
@@ -861,7 +865,7 @@ public class ElastiCacheService implements ResourceProvider {
                     group.setContainerId(handle.getContainerId());
                     group.setContainerHost(handle.getHost());
                     group.setContainerPort(handle.getPort());
-                    proxyManager.startProxy(groupId, group.getAuthMode(), group.getProxyPort(),
+                    startProxyOn(groupId, group.getAuthMode(), group.getProxyPort(),
                             handle.getHost(), handle.getPort(),
                             (username, password) -> validatePassword(groupId, username, password));
                 } else {
@@ -876,8 +880,9 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 group.setStatus(ReplicationGroupStatus.AVAILABLE);
                 groups.put(groupId, group);
-                LOG.infov("Restored replication group {0}, endpoint={1}:{2}", groupId,
-                        group.getConfigurationEndpoint().address(),
+                LOG.infov("Restored replication group {0}, endpoint={1}:{2} (proxy bound to {3})",
+                        groupId, group.getConfigurationEndpoint().address(),
+                        String.valueOf(group.getConfigurationEndpoint().port()),
                         String.valueOf(group.getProxyPort()));
             }
         } catch (RuntimeException e) {
@@ -1013,13 +1018,21 @@ public class ElastiCacheService implements ResourceProvider {
                 for (int i = 0; i < nodes.size(); i++) {
                     ClusterNode node = nodes.get(i);
                     ElastiCacheContainerHandle handle = handles.get(i);
-                    proxyManager.startProxy(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
+                    startProxyOn(node.getMemberClusterId(), group.getAuthMode(), node.getProxyPort(),
                             handle.getHost(), handle.getPort(),
                             (username, password) -> validatePassword(groupId, username, password));
                     startedProxyKeys.add(node.getMemberClusterId());
                 }
 
-                group.setConfigurationEndpoint(new Endpoint(endpointHost, nodes.getFirst().getProxyPort()));
+                // The host is re-derived so a group restored under a changed FLOCI_HOSTNAME
+                // announces the name this process answers to; the port is replayed, because it is
+                // the one the caller pinned. Rebuilding it from the first node's bound port would
+                // move a pinned port across a restart, which terraform treats as
+                // replacement-forcing drift on a group nobody touched.
+                Endpoint persisted = group.getConfigurationEndpoint();
+                int advertised = persisted != null && persisted.port() > 0
+                        ? persisted.port() : nodes.getFirst().getProxyPort();
+                group.setConfigurationEndpoint(new Endpoint(endpointHost, advertised));
                 group.setStatus(ReplicationGroupStatus.AVAILABLE);
                 groups.put(groupId, group);
                 LOG.infov("Restored cluster-mode replication group {0}: {1} node(s), configuration endpoint={2}:{3}",
@@ -1308,7 +1321,7 @@ public class ElastiCacheService implements ResourceProvider {
             synchronized (lockFor("cc:" + clusterId)) {
                 cacheClusters.put(clusterId, cluster);
                 if (handle != null) {
-                    proxyManager.startProxy(clusterId, authMode, proxyPort,
+                    startProxyOn(clusterId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
                             (username, password) -> validateCacheClusterPassword(clusterId, username, password));
                 } else {
@@ -1712,6 +1725,31 @@ public class ElastiCacheService implements ResourceProvider {
         LOG.warnv("{0} {1} advertises port {2}, as AWS does, but {3}; its proxy is bound to {4} "
                         + "instead. Reach this cache at {5}:{4}.",
                 kind, recordId, String.valueOf(advertised), reason, String.valueOf(bound), endpointHost);
+    }
+
+    /**
+     * Starts a record's auth proxy, refusing any port this process has not reserved.
+     *
+     * <p>The guard exists because the advertised port and the bound port are now different
+     * numbers that both sit on the record, and every caller here has to pick the bound one. A
+     * caller that picks the advertised one compiles, and on the create path even works, because
+     * the two are usually equal — it only fails later, on the restart where the record advertises
+     * a port another record is listening on, and it fails by reporting that record failed and
+     * dropping its endpoint. That was {@link #restoreCacheCluster}'s bug. A port outside
+     * {@link #usedPorts} is not a request this process can serve, so it is a programming error
+     * rather than an operating condition, and it says so before binding anything.
+     */
+    private void startProxyOn(String proxyKey, AuthMode authMode, int boundPort,
+                              String backendHost, int backendPort,
+                              ElastiCacheAuthProxy.PasswordValidator passwordValidator) {
+        if (!usedPorts.contains(boundPort)) {
+            throw new IllegalStateException("Refusing to start the ElastiCache proxy for "
+                    + proxyKey + " on port " + boundPort + ": this process has not reserved that "
+                    + "port. Start a proxy on the record's bound port, never on the port its "
+                    + "endpoint advertises.");
+        }
+        proxyManager.startProxy(proxyKey, authMode, boundPort, backendHost, backendPort,
+                passwordValidator);
     }
 
     /**

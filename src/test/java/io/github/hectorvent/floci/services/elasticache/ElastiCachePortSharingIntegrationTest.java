@@ -135,28 +135,11 @@ class ElastiCachePortSharingIntegrationTest {
             .body(containsString("<Error>"));
     }
 
-    /**
-     * Deleting a group frees the port it was listening on, so a suite that stands one up per test
-     * does not run the proxy range down. The recorded sweep could not tell this apart from the
-     * shared-port refusal, since both fail the second create.
-     */
-    @Test
-    @Order(7)
-    void deletingAGroupReleasesItsHostPort() {
-        for (int i = 0; i < 3; i++) {
-            createGroup("it-ec-share-cycle", SHARED_PORT)
-                .statusCode(200)
-                .body(CREATED_PORT, equalTo(String.valueOf(SHARED_PORT)));
-            given()
-                .formParam("Action", "DeleteReplicationGroup")
-                .formParam("ReplicationGroupId", "it-ec-share-cycle")
-                .header("Authorization", AUTH_HEADER)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-        }
-    }
+    // There is deliberately no create-delete-create test here. Three cycles over a 21-port range
+    // cannot exhaust it, so such a test passes whether or not the port is released and asserts
+    // nothing. ElastiCacheServiceTest.deletingAGroupReleasesTheHostPortItWasBoundTo asserts the
+    // exact port the next create receives, which is the observable that does move when the
+    // release is wrong.
 
     private static io.restassured.response.ValidatableResponse createGroup(String groupId, int port) {
         return given()
