@@ -9220,7 +9220,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             result.add(ni);
         }
 
-        // floci-5wby: the ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes
+        // The ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes
         // these ids in networkInterfaceIdSet, so without this arm the same emulator that just
         // handed out an id answers InvalidNetworkInterfaceID.NotFound when asked about it.
         //

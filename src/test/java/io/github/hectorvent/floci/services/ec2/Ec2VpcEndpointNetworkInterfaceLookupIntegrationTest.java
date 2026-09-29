@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * than tolerating a NotFound -- it handles {@code retry.NotFound} for the prefix list a few lines
  * above and pointedly does not here. So publishing ids that do not resolve makes every interface
  * endpoint read FAIL, where publishing none had merely left the list empty. Reported as blocking
- * on floci-io/floci#4598; tracked as floci-5wby.
+ * on floci-io/floci#4598.
  *
  * <p>The round-trip test below walks exactly that path -- read the ids off a DescribeVpcEndpoints
  * response, then describe each one -- because that is the call sequence that breaks, and a test
