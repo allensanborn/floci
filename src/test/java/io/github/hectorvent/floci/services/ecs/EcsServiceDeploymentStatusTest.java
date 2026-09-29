@@ -333,6 +333,56 @@ class EcsServiceDeploymentStatusTest {
                 deploymentOf(service, "dboth-svc", "dboth-cluster", rolled).getStatus());
     }
 
+    /**
+     * A DAEMON service still reaches a finished deployment after a task-definition change.
+     *
+     * <p>Scoping the count to the current deployment is right for REPLICA and wrong for DAEMON,
+     * because {@code reconcileDaemonService} has no notion of staleness: it keeps whichever task
+     * already covers a container instance, so the old revision's task holds its slot and no
+     * replacement is ever launched. A deployment-scoped count would therefore sit at zero
+     * permanently and a steady-state wait would hang, which is worse than the wrong-but-prompt
+     * answer main gives.
+     *
+     * <p>Measured on the commit before this one: {@code rolloutState} stayed IN_PROGRESS and the
+     * record stayed IN_PROGRESS with no finish time across four reconciler ticks, with the old
+     * task still the only one running. This test fails there for that reason, which is the hang
+     * itself and not an incidental difference.
+     *
+     * <p>The assertions below deliberately pin the limitation as well as the fix: the task still
+     * running is the OLD revision's. That is what makes the count honest about what it is
+     * counting, and it is the thing that changes when DAEMON rolling is implemented.
+     */
+    @Test
+    void aDaemonServiceStillFinishesItsDeploymentAfterATaskDefinitionChange() {
+        EcsService service = newMockModeService();
+        service.createCluster("ddmn-cluster", REGION);
+        service.registerContainerInstance("ddmn-cluster", null, List.of(), REGION);
+        TaskDefinition rev1 = registerTaskDef(service, "ddmn-fam", "app:1");
+        service.createService("ddmn-cluster", "ddmn-svc", "ddmn-fam", 1, LaunchType.EC2,
+                List.of(), null, null, "DAEMON", null, null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+
+        TaskDefinition rev2 = registerTaskDef(service, "ddmn-fam", "app:2");
+        String rolled = service.updateService("ddmn-cluster", "ddmn-svc",
+                "ddmn-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
+        service.reconcileServices();
+        service.reconcileServices();
+
+        ServiceDeployment record = deploymentOf(service, "ddmn-svc", "ddmn-cluster", rolled);
+        assertEquals("SUCCESSFUL", record.getStatus(),
+                "a DAEMON deployment must still finish, or a steady-state wait hangs for ever");
+        assertNotNull(record.getFinishedAt());
+
+        // The limitation this count is built around: the daemon reconciler never replaced the
+        // task, so what is running is still the previous revision.
+        List<EcsTask> live = runningTasks(service);
+        assertEquals(1, live.size(), "one task per container instance");
+        assertEquals(rev1.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn(),
+                "DAEMON does not roll on a task-definition change; the count is honest about that");
+        assertNotEquals(rev2.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn());
+    }
+
     /** The one place the provider's join is asserted: the revision ARN carries the task set id. */
     private static void assertRevisionCarriesTaskSetId(EcsService service, String name,
                                                        String cluster, String deploymentId) {

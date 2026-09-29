@@ -3846,11 +3846,32 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             // safe direction to be wrong in, since it stalls a wait rather than passing it.
             return 0;
         }
+        Stream<EcsTask> running = tasks.values().stream()
+                .filter(t -> ownedBy(t, svc, cluster))
+                .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()));
+
+        // DAEMON counts every task it owns, stale or not, and that is deliberate.
+        // {@link #reconcileDaemonService} has no notion of staleness at all: it decides which
+        // tasks to keep purely by which container instances they cover, with no deploymentId or
+        // task-definition comparison anywhere in it. So a task from a superseded revision holds
+        // its instance slot indefinitely and no replacement is ever launched. Scoping the count
+        // here would be reporting a truth the scheduler cannot act on: the new deployment would
+        // sit at zero for ever, and a steady-state wait on a DAEMON service would hang rather
+        // than return.
+        //
+        // Counting them keeps DAEMON exactly as it behaves on main, which reports the deployment
+        // finished while the old revision is still what is running. That is wrong, and this is a
+        // mitigation rather than a claim it is right: the fault is that DAEMON services do not
+        // roll on a task-definition change, which is floci-n5kb's sibling bead, not something to
+        // fix from inside a counting helper. Do not "tidy" this branch away to match the one
+        // below without fixing the reconciler first.
+        if (SCHEDULING_DAEMON.equals(svc.getSchedulingStrategy())) {
+            return running.count();
+        }
+
         String currentDeploymentId = deploymentId(svc);
         String taskDefinitionArn = resolvedTaskDefinitionArn(svc, serviceRegion(svc));
-        return tasks.values().stream()
-                .filter(t -> ownedBy(t, svc, cluster))
-                .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
+        return running
                 .filter(t -> !isStaleForDeployment(t, currentDeploymentId, taskDefinitionArn))
                 .count();
     }
