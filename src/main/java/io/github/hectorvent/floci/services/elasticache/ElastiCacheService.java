@@ -1730,14 +1730,22 @@ public class ElastiCacheService implements ResourceProvider {
     /**
      * Starts a record's auth proxy, refusing any port this process has not reserved.
      *
-     * <p>The guard exists because the advertised port and the bound port are now different
-     * numbers that both sit on the record, and every caller here has to pick the bound one. A
-     * caller that picks the advertised one compiles, and on the create path even works, because
-     * the two are usually equal — it only fails later, on the restart where the record advertises
-     * a port another record is listening on, and it fails by reporting that record failed and
-     * dropping its endpoint. That was {@link #restoreCacheCluster}'s bug. A port outside
-     * {@link #usedPorts} is not a request this process can serve, so it is a programming error
-     * rather than an operating condition, and it says so before binding anything.
+     * <p>The advertised port and the bound port are different numbers that both sit on the
+     * record, and every caller here has to pick the bound one. A caller that picks the advertised
+     * one compiles, and on the create path even works, because the two are usually equal.
+     *
+     * <p>Be precise about what this catches, because it is narrower than it looks: only the
+     * instance where the wrong pick lands on a port nothing reserved — an advertised port outside
+     * the proxy range, which no record here can be listening on. It does <em>not</em> catch the
+     * shared-port instance, which is the case this whole split exists for. Two records pinned to
+     * 6379 come back with both their bound ports reserved, so a restore reaching for the
+     * advertised 6379 finds it in {@link #usedPorts} — held by the <em>other</em> record — and is
+     * waved through to the BindException. The question the guard can ask is "reserved by anyone";
+     * the question it needs is "reserved by this record", which wants a port-to-owner map rather
+     * than a set. floci-b12b tracks that.
+     *
+     * <p>So this is defense in depth, not the fix. What makes the shared-port restart work is
+     * {@link #restoreCacheCluster} binding the record's own port.
      */
     private void startProxyOn(String proxyKey, AuthMode authMode, int boundPort,
                               String backendHost, int backendPort,
