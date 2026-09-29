@@ -2593,13 +2593,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
         }
         svc.setStatus("INACTIVE");
-        svc.setDesiredCount(0);
-        cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
-        services.put(key, svc);
-        persistCluster(region, cluster);
         // An INACTIVE service can never converge, so any deployment still in flight has to be
         // landed here: settleStatus finishes only an ACTIVE service's current deployment, and
         // there is no later operation on a deleted service to do it instead.
+        //
+        // THIS CALL MUST STAY BETWEEN setStatus AND setDesiredCount, and the two setters must
+        // stay in this order. Both fields are plain non-volatile fields of a service model
+        // shared with every reader, and settleStatus reads them under synchronized (deployment),
+        // a monitor nothing takes for the service. So a reader can see the new desiredCount of 0
+        // beside a status it still reads as ACTIVE, and 0 running tasks satisfies
+        // "runningOnCurrentDeployment(svc) >= svc.getDesiredCount()" trivially: the deployment
+        // latches SUCCESSFUL, reporting a rollout that never happened as having succeeded. The
+        // already-terminal guard does not save it, because at that point the record is still
+        // IN_PROGRESS and its revision ARN still matches.
+        //
+        // Stopping the records first closes that window rather than narrowing it. A reader
+        // arriving before this line still sees the honest pre-delete desiredCount, so it can
+        // only latch a deployment that really converged. One arriving after finds the record
+        // already STOPPED, so the guard blocks the latch whatever it sees of the service. The
+        // dangerous pairing is then only observable once the record is terminal anyway.
+        //
+        // Safe here because the helper reads nothing about the service: it takes an ARN, a
+        // timestamp and a string, and branches only on each deployment's own status. It is also
+        // below the !force validation above, so a request that throws stops nothing.
         //
         // AWS goes further and removes the records outright: "Amazon ECS deletes the service
         // deployment when you delete a service." Stopping them rather than deleting them is
@@ -2608,6 +2624,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // DescribeServiceDeployments a client is mid-poll on into a failure. Full parity means
         // deletion and is tracked separately.
         stopNonTerminalDeployments(svc.getServiceArn(), Instant.now(), "The service was deleted.");
+        svc.setDesiredCount(0);
+        cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
+        services.put(key, svc);
+        persistCluster(region, cluster);
         // Stop tasks before removing the service from the map, so the per-task
         // ELBv2 deregistration hook can still resolve the service's loadBalancers.
         tasks.values().stream()
