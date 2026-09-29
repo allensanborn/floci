@@ -4349,6 +4349,11 @@ public class Ec2QueryHandler {
                 .elem("availabilityZone", ni.getAvailabilityZone())
                 .elem("description", ni.getDescription())
                 .elem("ownerId", ni.getOwnerId())
+                // AWS emits requesterManaged on every interface, false included -- see the
+                // DescribeNetworkInterfaces sample response -- and requesterId only where
+                // there is a requester. floci leaves requesterId unset; see the field's javadoc.
+                .elem("requesterId", ni.getRequesterId())
+                .elem("requesterManaged", ni.isRequesterManaged())
                 .elem("status", ni.getStatus())
                 .elem("interfaceType", ni.getInterfaceType())
                 .elem("macAddress", ni.getMacAddress())

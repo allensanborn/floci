@@ -4615,6 +4615,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             ni.setAvailabilityZone(subnet.getAvailabilityZone());
             ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
             ni.setInterfaceType("vpc_endpoint");
+            // AWS creates an interface endpoint's ENIs on the customer's behalf and reports
+            // them as requester-managed. Set here, on the one derivation, so that the objects
+            // flow-log attribution reads and the ones DescribeNetworkInterfaces answers with
+            // cannot describe the same interface two ways. requesterId is deliberately left
+            // unset -- see NetworkInterface#requesterId.
+            ni.setRequesterManaged(true);
             ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint, subnetId));
             result.add(ni);
         }
@@ -8660,6 +8666,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "group-id" -> ni.getGroups().stream()
                         .anyMatch(g -> g != null && matchesValue(values, g.getGroupId()));
                 case "status" -> matchesValue(values, ni.getStatus());
+                // interface-type is how a caller asks for exactly the endpoint interfaces this
+                // store now answers with; without an arm here the default below would match
+                // every interface instead and the filter would read as doing nothing.
+                case "interface-type" -> matchesValue(values, ni.getInterfaceType());
+                case "requester-managed" -> matchesValue(values, String.valueOf(ni.isRequesterManaged()));
                 case "attachment.instance-id" -> ni.getAttachment() != null
                         && matchesValue(values, ni.getAttachment().getInstanceId());
                 case "private-ip-address" ->
@@ -9207,6 +9218,40 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 continue;
             }
             result.add(ni);
+        }
+
+        // floci-5wby: the ENIs an interface VPC endpoint owns. DescribeVpcEndpoints publishes
+        // these ids in networkInterfaceIdSet, so without this arm the same emulator that just
+        // handed out an id answers InvalidNetworkInterfaceID.NotFound when asked about it.
+        //
+        // That is not a cosmetic gap. The Terraform AWS provider's aws_vpc_endpoint read calls
+        // findSubnetConfigurationsByNetworkInterfaceIDs over EVERY id in network_interface_ids to
+        // build subnet_configuration, and returns the lookup error rather than tolerating a
+        // NotFound -- note it handles retry.NotFound for the prefix list a few lines above and
+        // pointedly does not here. So an unresolvable id fails every interface endpoint read,
+        // where publishing no ids at all had merely left the list empty.
+        //
+        // NOT account-scoped, deliberately, unlike the two arms above. describeVpcEndpoints is
+        // not account-scoped either -- it scans every endpoint in the region -- so scoping here
+        // would leave an id that IS published to a caller unresolvable BY that caller, which is
+        // the exact defect this arm closes. The two sides have to agree about which endpoints
+        // exist, and the endpoint side is the one already on the wire.
+        for (NetworkInterface endpointNi : endpointNetworkInterfaces(region)) {
+            String endpointEniId = endpointNi.getNetworkInterfaceId();
+            if (foundIds.contains(endpointEniId)) {
+                continue;
+            }
+            if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(endpointEniId)) {
+                continue;
+            }
+            // Added before the filter check, matching the arms above: an id that was asked for
+            // by name and then excluded by a filter is absent from the answer, not NotFound.
+            foundIds.add(endpointEniId);
+            endpointNi.setOwnerId(safeAccount);
+            if (!matchesFilters(endpointNi, filters, region)) {
+                continue;
+            }
+            result.add(endpointNi);
         }
 
         // Phase 6: validate requested IDs exist
