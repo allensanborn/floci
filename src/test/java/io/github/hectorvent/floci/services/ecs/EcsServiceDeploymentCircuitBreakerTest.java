@@ -367,6 +367,29 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 "superseding it later does not rewrite why it ended; was: " + failed.getStatusReason());
     }
 
+    /**
+     * Services persist across a restart but deployment records live only in memory. The failed
+     * deployment must stay halted anyway, or the reconciler retries its tasks forever with no
+     * record left to count them against.
+     */
+    @Test
+    void aFailedDeploymentStaysHaltedAcrossARestart() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        EcsService before = newService(storage);
+        createService(before, "cb-restart", 1, breaker(true, false));
+        for (int i = 0; i < 3; i++) {
+            before.reconcileServices();
+        }
+        assertEquals(3, stoppedTasks(before).size());
+
+        EcsService after = newService(storage);
+        after.reconcileServices();
+        after.reconcileServices();
+
+        assertTrue(stoppedTasks(after).isEmpty(), "a restart does not resume a failed deployment");
+        assertEquals("FAILED", liveDeployment(after, "cb-restart").getRolloutState());
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static Map<String, Object> breaker(boolean enable, boolean rollback) {
@@ -428,6 +451,11 @@ class EcsServiceDeploymentCircuitBreakerTest {
 
     /** Docker mode over a container manager whose launches succeed or throw as the test says. */
     private EcsService newService() {
+        return newService(new InMemoryStorageFactory());
+    }
+
+    /** A service over {@code storage}; a second one over the same storage is a restart. */
+    private EcsService newService(InMemoryStorageFactory storage) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -449,7 +477,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 containerManager,
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
+                storage,
                 null);
         service.initializeStorage();
         return service;

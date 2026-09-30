@@ -3886,7 +3886,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         long running = runningOnCurrentDeployment(svc);
         boolean converged = running >= svc.getDesiredCount();
         ServiceDeployment record = lockedCopyOf(deploymentRecordOf(svc));
-        boolean failed = record != null && record.isCircuitBreakerTriggered();
+        boolean failed = deploymentId.equals(svc.getFailedDeploymentId());
 
         Deployment d = new Deployment();
         d.setId(deploymentId);
@@ -4165,7 +4165,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 return false;
             }
             Instant now = Instant.now();
-            deployment.setCircuitBreakerTriggered(true);
             deployment.setStatus(DEPLOYMENT_STATUS_STOPPED);
             deployment.setStatusReason(CIRCUIT_BREAKER_REASON);
             deployment.setFinishedAt(now);
@@ -4233,7 +4232,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         copy.setTargetServiceRevisionArn(source.getTargetServiceRevisionArn());
         copy.setSourceServiceRevisionArns(source.getSourceServiceRevisionArns());
         copy.setFailedTasks(source.getFailedTasks());
-        copy.setCircuitBreakerTriggered(source.isCircuitBreakerTriggered());
         return copy;
     }
 
@@ -4803,12 +4801,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (!leftoverContainersCleared()) {
                 return;
             }
-            ServiceDeployment deployment = deploymentRecordOf(svc);
-            ServiceDeployment snapshot = lockedCopyOf(deployment);
-            if (snapshot != null && snapshot.isCircuitBreakerTriggered()) {
-                // A deployment the circuit breaker failed launches no new tasks.
+            // A deployment the circuit breaker failed launches no new tasks. That is read off the
+            // persisted service, not the in-memory deployment record, so it survives a restart.
+            if (currentDeploymentId.equals(svc.getFailedDeploymentId())) {
                 return;
             }
+            ServiceDeployment deployment = deploymentRecordOf(svc);
             int toStart = svc.getDesiredCount() - (int) current;
             for (int i = 0; i < toStart; i++) {
                 try {
@@ -4816,6 +4814,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
                     if (countLaunch(svc, deployment, launched)) {
+                        svc.setFailedDeploymentId(currentDeploymentId);
+                        services.put(key, svc);
                         break;
                     }
                 } catch (Exception e) {

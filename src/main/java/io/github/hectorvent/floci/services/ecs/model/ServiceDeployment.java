@@ -30,8 +30,6 @@ public class ServiceDeployment {
     private List<String> sourceServiceRevisionArns;
     /** Tasks the circuit breaker has counted as failing to start. */
     private int failedTasks;
-    /** Whether the circuit breaker ended this deployment. */
-    private boolean circuitBreakerTriggered;
 
     public Instant getStartedAt() { return startedAt; }
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
@@ -57,11 +55,6 @@ public class ServiceDeployment {
 
     public int getFailedTasks() { return failedTasks; }
     public void setFailedTasks(int failedTasks) { this.failedTasks = failedTasks; }
-
-    public boolean isCircuitBreakerTriggered() { return circuitBreakerTriggered; }
-    public void setCircuitBreakerTriggered(boolean circuitBreakerTriggered) {
-        this.circuitBreakerTriggered = circuitBreakerTriggered;
-    }
 
     public String getServiceDeploymentArn() { return serviceDeploymentArn; }
     public void setServiceDeploymentArn(String serviceDeploymentArn) { this.serviceDeploymentArn = serviceDeploymentArn; }
