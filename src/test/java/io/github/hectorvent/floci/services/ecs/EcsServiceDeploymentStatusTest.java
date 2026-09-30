@@ -30,29 +30,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * What a service deployment reports, driven off the reconciler tick by tick.
- *
- * <p>The deployment a service is currently on is the resource a steady-state wait polls, so its
- * status has to mean something, and three things have to be true of it at once:
- *
- * <ul>
- *   <li>it is IN_PROGRESS until the deployment's tasks are up. One that is SUCCESSFUL the
- *       instant it is recorded makes {@code wait_for_steady_state} a wait that can never fail;</li>
- *   <li>the tasks it counts are its <em>own</em>, not the service's. Counting the ones still
- *       draining from the deployment it replaced reports a task-definition change finished
- *       before the new revision has started;</li>
- *   <li>SUCCESSFUL is terminal. Tasks dying afterwards do not un-finish a finished
- *       deployment;</li>
- *   <li>a deployment ends. One superseded before it converged can never be settled, because
- *       settling finishes the deployment the service is currently on, so it is stopped when its
- *       replacement is recorded rather than left in flight for ever.</li>
- * </ul>
- *
- * <p>Reconciler ticks are driven explicitly rather than waited on, and deployments are selected
- * by their task set id rather than by position in a listing, so nothing here depends on timing
- * or on map iteration order. That is a rule and not an observation: deployments minted inside a
- * single clock tick share a createdAt, and the listing's sort is stable, so position in it is
- * map iteration order. Name the record you mean.
+ * What a service deployment reports, driven off the reconciler tick by tick. Deployments are
+ * selected by task set id rather than by position in a listing: several minted in one clock tick
+ * share a createdAt, so their order in the listing is map iteration order.
  */
 class EcsServiceDeploymentStatusTest {
 
@@ -71,9 +51,8 @@ class EcsServiceDeploymentStatusTest {
         assertEquals("IN_PROGRESS", pending.getStatus());
         assertNull(pending.getFinishedAt(), "an unfinished deployment has no finishedAt");
 
-        // One tick is enough. The count is taken from the tasks at read time, not carried over
-        // from svc.runningCount, which the reconciler sets from a snapshot taken *before* it
-        // launches and so lags a tick behind the thing it describes.
+        // One tick: the count is taken from the tasks at read time, not from svc.runningCount,
+        // which lags a tick behind.
         service.reconcileServices();
 
         ServiceDeployment done = onlyDeployment(service, "dstat-svc", "dstat-cluster");
@@ -81,27 +60,7 @@ class EcsServiceDeploymentStatusTest {
         assertNotNull(done.getFinishedAt(), "a finished deployment reports when it finished");
     }
 
-    /**
-     * A guard, not a repro: this one passes on the build the bug was found on, because there
-     * every deployment was born SUCCESSFUL and so a zero-desired service trivially was too. It
-     * exists to pin a direction the fix must not break -- a service already at its requested
-     * count has converged, so its deployment is finished immediately and a steady-state wait
-     * returns at once rather than stalling for something that is never going to happen.
-     *
-     * <p>What it catches, measured rather than asserted: make {@code settleStatus} refuse to call
-     * a zero-desired service converged (add {@code && svc.getDesiredCount() > 0}, the shape a
-     * defensive "nothing was asked for, so nothing succeeded" slip takes) and this goes red with
-     * {@code expected: <SUCCESSFUL> but was: <IN_PROGRESS>} while the two desiredCount-1 tests in
-     * this class stay green. The same mutation is what deriving the status on a reconciler tick,
-     * instead of at read time, would amount to for a service that never needs a tick.
-     *
-     * <p>Two other tests catch that mutation too -- this class's integration twin
-     * {@code theJoinedDeploymentIsDescribable} and the pre-existing
-     * {@code EcsFargateEdgeCaseIntegrationTest.aServiceDeploymentPointsAtTheRevisionItDeployed},
-     * both of which also use desiredCount 0. So this is not independent coverage. It is kept
-     * because it is the only one of the three that fails with the condition named in the message;
-     * the other two report "1 expectation failed" from a wire assertion.
-     */
+    /** A service already at its requested count has converged, so its deployment is finished. */
     @Test
     void aServiceAlreadyAtItsRequestedCountHasNothingToWaitFor() {
         EcsService service = newMockModeService();
@@ -142,15 +101,8 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * The update path, which is the most common real use of {@code wait_for_steady_state}: you
-     * change the image and wait to find out whether the new one comes up.
-     *
-     * <p>A service's {@code runningCount} counts every task it owns, including the ones still
-     * running on the deployment this one replaced. Settling a deployment on that number means a
-     * task-definition change is reported finished the instant UpdateService returns, on the
-     * strength of the OLD revision's task -- so a new image that cannot start reports stable and
-     * the wait returns immediately. The deployment being settled has to be judged on its own
-     * tasks.
+     * A task-definition change is judged on the new deployment's own tasks, not on the old
+     * revision's task that is still running.
      */
     @Test
     void aTaskDefinitionChangeIsNotFinishedWhileOnlyTheOldTasksAreRunning() {
@@ -185,16 +137,7 @@ class EcsServiceDeploymentStatusTest {
         assertNotNull(settled.getFinishedAt());
     }
 
-    /**
-     * A finished deployment stays finished when its tasks later die. SUCCESSFUL is terminal in
-     * AWS: a deployment that completed does not un-complete because the service became unhealthy
-     * afterwards, and {@code finishedAt} records when it finished, not the last time it was
-     * asked about.
-     *
-     * <p>This is the half a deployment-scoped task count does NOT fix -- when the deployment's
-     * own tasks die, the scoped count drops too, so without the latch a terminal record would
-     * flip back to IN_PROGRESS under its readers and blank a timestamp it had already published.
-     */
+    /** SUCCESSFUL is terminal: tasks dying afterwards do not un-finish the deployment. */
     @Test
     void aFinishedDeploymentStaysFinishedWhenItsTasksDie() {
         EcsService service = newMockModeService();
@@ -208,12 +151,7 @@ class EcsServiceDeploymentStatusTest {
         Instant finishedAt = finished.getFinishedAt();
         assertNotNull(finishedAt);
 
-        // Read again WHILE STILL CONVERGED. This is the read that pins the latch itself: without
-        // the already-SUCCESSFUL guard, the converged branch is taken on every read and stamps a
-        // fresh finishedAt each time, so a caller polling a finished deployment watches the
-        // instant it finished at drift forwards. Re-reading only after the tasks die cannot see
-        // that, because the converged branch is not taken then -- which is why this assertion
-        // has to happen here and not below.
+        // Read again while still converged: finishedAt is stamped once, not on every read.
         assertEquals(finishedAt,
                 deploymentOf(service, "ddie-svc", "ddie-cluster", deploymentId).getFinishedAt(),
                 "finishedAt is stamped once, not re-stamped on every read while converged");
@@ -228,11 +166,8 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * Scaling to zero. The deployment's own task is still up for a tick after desiredCount drops,
-     * and {@code >=} calls that converged -- which is the direction that matters, since a client
-     * waiting on a scale-to-zero should not be told it is still rolling out. Recorded as measured
-     * behaviour rather than asserted as ideal: AWS's own waiter compares counts with {@code ==},
-     * so it would hold this one pending until the task actually stops.
+     * Scaling to zero is converged while the task is still draining, since {@code >=} is used.
+     * AWS's own waiter compares with {@code ==} and would wait for the task to stop.
      */
     @Test
     void scalingToZeroIsConvergedBeforeTheTaskHasActuallyStopped() {
@@ -253,24 +188,16 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * Two task-definition changes in a row, with no tick between them. Only the newest deployment
-     * is the one the service is on, so only it is settled from live tasks; the two it skipped
-     * over are landed in STOPPED as each replacement is recorded.
-     *
-     * <p>The first of those had in fact converged, on the tick before the updates, and is stopped
-     * anyway: convergence is decided at read time and nothing read it. This pins that consequence
-     * rather than hiding it. It needs a client that reconciles a service to a steady state and
-     * then changes it again without ever describing it in between, which no real client does,
-     * because every response carrying a service settles that service's current deployment.
+     * Two task-definition changes in a row with no read between them. The first deployment had
+     * converged, so the update that supersedes it settles it SUCCESSFUL; the second never had a
+     * task of its own, so the next update stops it.
      */
     @Test
     void twoUpdatesInSuccessionSettleOnlyTheNewestDeployment() {
         EcsService service = newMockModeService();
         service.createCluster("drapid-cluster", REGION);
         registerTaskDef(service, "drapid-fam", "app:1");
-        // Each deployment id is read out as it is minted: createService and updateService hand
-        // back the same live model object, so the id has to be taken before the next update
-        // overwrites it.
+        // createService and updateService return the same live model, so read each id at once.
         String first = service.createService("drapid-cluster", "drapid-svc", "drapid-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
         service.reconcileServices();
@@ -287,16 +214,12 @@ class EcsServiceDeploymentStatusTest {
         assertEquals("IN_PROGRESS",
                 deploymentOf(service, "drapid-svc", "drapid-cluster", newest).getStatus(),
                 "the newest has none of its own tasks running");
-        // Each record is named, not taken by position. The listing sorts on createdAt and
-        // List.sort is stable, so three deployments minted inside one clock tick fall back to
-        // map iteration order: asserting on index 1 and 2 would pass or fail by hash order on
-        // any platform whose clock is coarser than the time it takes to mint them.
-        assertEquals("STOPPED",
+        assertEquals("SUCCESSFUL",
                 deploymentOf(service, "drapid-svc", "drapid-cluster", first).getStatus(),
-                "the deployment two updates have passed over is terminal");
+                "the first had converged before it was superseded, though nothing read it");
         assertEquals("STOPPED",
                 deploymentOf(service, "drapid-svc", "drapid-cluster", second).getStatus(),
-                "and so is the one the last update passed over");
+                "the second never had a task of its own");
 
         service.reconcileServices();
         assertEquals("SUCCESSFUL",
@@ -305,17 +228,9 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * The two views of one deployment must agree about the same moment. Right after a
-     * task-definition change, {@code DescribeServices} deployments[0].rolloutState and the
-     * {@code ServiceDeployment} record are both describing a rollout that has not started, and a
-     * client reading either has to be told the same thing -- otherwise it has no way to know
-     * which to believe. Both are derived from the deployment's own task count for that reason.
-     *
-     * <p>They are allowed to diverge later, and that is not the same thing: the record is
-     * history and latches SUCCESSFUL, while rolloutState is live and follows the service. A
-     * deployment that completed and then lost its tasks reports a finished record beside a
-     * rollout that is no longer complete, which is two different questions with two correct
-     * answers rather than one question with two.
+     * Right after a task-definition change, {@code rolloutState} and the deployment record
+     * describe the same moment and must agree. Later they may differ: the record is history,
+     * rolloutState follows the live service.
      */
     @Test
     void theRolloutStateAndTheDeploymentRecordAgreeWhileARolloutIsInFlight() {
@@ -324,12 +239,8 @@ class EcsServiceDeploymentStatusTest {
         registerTaskDef(service, "dboth-fam", "app:1");
         EcsServiceModel created = service.createService("dboth-cluster", "dboth-svc", "dboth-fam", 1,
                 LaunchType.FARGATE, List.of(), null, REGION);
-        // TWO ticks, and the second one is what makes this test able to fail. The first launches
-        // the task but sets svc.runningCount from a snapshot taken before the launch, so it is
-        // still 0; the second counts it. Changing the task definition after only one tick leaves
-        // the service-wide count at 0, which makes the buggy derivation give the right answer by
-        // accident and the assertions below hold either way. A genuine steady state -- the state
-        // anyone is actually in when they change an image -- is the state that exposes it.
+        // Two ticks: the first launches the task, the second counts it in svc.runningCount.
+        // With only one, the service-wide count is 0 and the old miscount passes by accident.
         service.reconcileServices();
         service.reconcileServices();
         assertEquals(1, created.getRunningCount(),
@@ -357,27 +268,9 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * A DAEMON service still reaches a finished deployment after a task-definition change.
-     *
-     * <p>Scoping the count to the current deployment is right for REPLICA and wrong for DAEMON,
-     * because {@code reconcileDaemonService} has no notion of staleness: it keeps whichever task
-     * already covers a container instance, so the old revision's task holds its slot and no
-     * replacement is ever launched. A deployment-scoped count would therefore sit at zero
-     * permanently and a steady-state wait would hang, which is worse than the wrong-but-prompt
-     * answer main gives.
-     *
-     * <p>Measured on the commit before this one: {@code rolloutState} stayed IN_PROGRESS and the
-     * record stayed IN_PROGRESS with no finish time across four reconciler ticks, with the old
-     * task still the only one running. This test fails there for that reason, which is the hang
-     * itself and not an incidental difference.
-     *
-     * <p>The assertions below deliberately pin the limitation as well as the fix: the task still
-     * running is the OLD revision's. That coupling is load-bearing, not documentation. The day
-     * DAEMON rolling is implemented, counting stale tasks would reproduce on DAEMON the exact
-     * REPLICA bug this branch exists to remove, so the DAEMON branch of the count has to come
-     * out at the same moment. This assertion is what forces that: it fails as soon as the
-     * reconciler starts replacing the task, instead of letting the mitigation quietly outlive
-     * the reason for it.
+     * A DAEMON service still finishes its deployment after a task-definition change. DAEMON
+     * services do not roll yet, so the old revision's task is still the one running; the last
+     * assertions fail once they do, which is when the DAEMON case in the count should go.
      */
     @Test
     void aDaemonServiceStillFinishesItsDeploymentAfterATaskDefinitionChange() {
@@ -401,8 +294,6 @@ class EcsServiceDeploymentStatusTest {
                 "a DAEMON deployment must still finish, or a steady-state wait hangs for ever");
         assertNotNull(record.getFinishedAt());
 
-        // The limitation this count is built around: the daemon reconciler never replaced the
-        // task, so what is running is still the previous revision.
         List<EcsTask> live = runningTasks(service);
         assertEquals(1, live.size(), "one task per container instance");
         assertEquals(rev1.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn(),
@@ -411,18 +302,8 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * A deployment superseded before it converged has to end somewhere. {@code settleStatus}
-     * finishes only the deployment the service is currently on, and a superseded one never is
-     * again, so nothing else can ever move it: it would sit IN_PROGRESS with no finish time for
-     * the life of the emulator, claiming a rollout that can no longer happen is still happening.
-     * A client listing a service's deployments would read an unbounded pile of them in flight at
-     * once, and one filtering on IN_PROGRESS would get every rollout the service ever abandoned.
-     *
-     * <p>STOPPED is the status AWS uses for a deployment that ended without completing, and is
-     * one of the nine in {@code ServiceDeploymentStatus}.
-     *
-     * <p>The second service is not decoration: it is never updated, so its own deployment is
-     * still in flight, and it fails this test if the stop is not scoped to one service ARN.
+     * A deployment superseded before it converged is STOPPED, not left IN_PROGRESS. The second
+     * service is never updated, so its deployment must stay in flight.
      */
     @Test
     void supersedingAnUnconvergedDeploymentStopsIt() {
@@ -464,12 +345,7 @@ class EcsServiceDeploymentStatusTest {
                 "another service's deployment is none of this update's business");
     }
 
-    /**
-     * STOPPED is terminal in the same sense SUCCESSFUL is. Once the replacement converges, the
-     * service is at its requested count and a status derived from that would call the superseded
-     * deployment finished too, which would be reporting that a rollout nobody is on succeeded.
-     * The stopped record keeps both its status and the instant it ended.
-     */
+    /** STOPPED is terminal: the replacement converging does not make the stopped one succeed. */
     @Test
     void aSupersededDeploymentDoesNotSucceedWhenItsReplacementDoes() {
         EcsService service = newMockModeService();
@@ -496,16 +372,7 @@ class EcsServiceDeploymentStatusTest {
                 "and still reports the instant it ended");
     }
 
-    /**
-     * The other direction: a deployment that completed before it was superseded is history and
-     * must not be rewritten. Stopping every prior deployment unconditionally would turn a
-     * service's whole completed rollout history into a list of stopped ones.
-     *
-     * <p>The read before the update is load-bearing rather than an assertion for its own sake:
-     * the SUCCESSFUL transition is made at read time, so this is what puts the first deployment
-     * into the terminal state the update then has to leave alone. That is the ordering a real
-     * client is in, because every response carrying a service settles its current deployment.
-     */
+    /** A deployment that finished, and was read, before it was superseded keeps its record. */
     @Test
     void aDeploymentThatFinishedBeforeItWasSupersededStaysSuccessful() {
         EcsService service = newMockModeService();
@@ -534,16 +401,37 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * The second route into Greptile's finding, and the one supersession does not cover.
-     * {@code settleStatus} finishes a deployment only while its service is ACTIVE, and
-     * {@code deleteService} makes the service INACTIVE. Delete a service before its first
-     * rollout converges and the deployment could never be moved by anything: no later update
-     * supersedes it, because there are no later updates on a deleted service.
-     *
-     * <p>{@code ListServiceDeployments} filtered on IN_PROGRESS returned it for the life of the
-     * emulator, which is the same symptom a superseded deployment had, reached through a
-     * different door. Asserted on the filtered listing rather than only on the record, because
-     * the filter is what a client actually uses to ask what is rolling out.
+     * The update settles the outgoing deployment itself, so whether it finished does not depend
+     * on anything having read it. Changing the desired count in the same request must not count
+     * against it either: it had reached the count it was asked for.
+     */
+    @Test
+    void aConvergedDeploymentNobodyReadIsSuccessfulWhenSuperseded() {
+        EcsService service = newMockModeService();
+        service.createCluster("dunread-cluster", REGION);
+        registerTaskDef(service, "dunread-fam", "app:1");
+        String first = service.createService("dunread-cluster", "dunread-svc", "dunread-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+        service.reconcileServices();
+
+        TaskDefinition rev2 = registerTaskDef(service, "dunread-fam", "app:2");
+        String second = service.updateService("dunread-cluster", "dunread-svc",
+                "dunread-fam:" + rev2.getRevision(), 3, null, REGION).getDeploymentId();
+
+        ServiceDeployment finished = deploymentOf(service, "dunread-svc", "dunread-cluster", first);
+        assertEquals("SUCCESSFUL", finished.getStatus(),
+                "its task was running when the update arrived");
+        assertNotNull(finished.getFinishedAt());
+        assertNull(finished.getStoppedAt());
+        assertEquals(List.of(deploymentArnOf(service, "dunread-svc", "dunread-cluster", second)),
+                service.listServiceDeployments("dunread-svc", "dunread-cluster",
+                        List.of("IN_PROGRESS"), REGION),
+                "only the new deployment is in progress");
+    }
+
+    /**
+     * Deleting a service stops a deployment it leaves unfinished, so a listing filtered on
+     * IN_PROGRESS no longer returns it.
      */
     @Test
     void deletingAServiceStopsTheDeploymentItLeavesUnfinished() {
@@ -575,11 +463,7 @@ class EcsServiceDeploymentStatusTest {
                 "and a client asking what is rolling out is no longer told this is");
     }
 
-    /**
-     * Deleting a service does not rewrite the rollouts that finished before it. The same
-     * already-terminal guard supersession relies on, reached through the delete path, because a
-     * shared helper is only correct at both call sites if both are asserted.
-     */
+    /** Deleting a service leaves its finished deployments SUCCESSFUL. */
     @Test
     void deletingAServiceLeavesItsFinishedDeploymentsSuccessful() {
         EcsService service = newMockModeService();
@@ -615,12 +499,7 @@ class EcsServiceDeploymentStatusTest {
                         + ", targets were: " + targets);
     }
 
-    /**
-     * The deployment carrying {@code deploymentId}, selected by the task set id inside its target
-     * revision ARN rather than by position in the listing. The listing sorts on createdAt, and two
-     * records minted in the same instant would then fall back to map iteration order -- position
-     * would make this class's "no timing" claim false.
-     */
+    /** The deployment carrying {@code deploymentId}, found by the task set id in its revision ARN. */
     private static ServiceDeployment deploymentOf(EcsService service, String name, String cluster,
                                                   String deploymentId) {
         String taskSetId = deploymentId.substring(deploymentId.indexOf('/') + 1);

@@ -2347,6 +2347,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("ServiceNotActiveException",
                     "Service " + serviceName + " is not active.", 400);
         }
+        // Settle the outgoing deployment against the service as it stands, before this request
+        // changes its desired count or task definition: one whose tasks are up has finished,
+        // whether or not anything read it. recordServiceDeployment stops it if it has not.
+        currentServiceDeployment(svc);
         if (request.getDesiredCount() != null) {
             if (request.getDesiredCount() < 0) {
                 throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
