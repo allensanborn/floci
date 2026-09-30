@@ -206,8 +206,8 @@ They behave as AWS's keys, not the account's:
 - They encrypt and decrypt like any other symmetric key.
 - Every administrative operation is refused with `AccessDeniedException`: `ScheduleKeyDeletion`,
   `CancelKeyDeletion`, `PutKeyPolicy`, `UpdateKeyDescription`, `EnableKey`, `DisableKey`,
-  `EnableKeyRotation`, `DisableKeyRotation`, `RotateKeyOnDemand`, `TagResource` and
-  `UntagResource`.
+  `EnableKeyRotation`, `DisableKeyRotation`, `RotateKeyOnDemand`, `TagResource`,
+  `UntagResource` and `CreateGrant` (AWS's key policy allows grants only via the owning service).
 - The `alias/aws/` namespace is reserved. `CreateAlias` under it is rejected with
   `InvalidAliasNameException`, and `UpdateAlias` or `DeleteAlias` against one of these aliases is
   rejected with `AccessDeniedException`.

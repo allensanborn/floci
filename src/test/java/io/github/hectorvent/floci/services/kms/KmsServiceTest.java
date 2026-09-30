@@ -3819,6 +3819,9 @@ class KmsServiceTest {
             denied.put("RotateKeyOnDemand", () -> kmsService.rotateKeyOnDemand(alias, REGION));
             denied.put("TagResource", () -> kmsService.tagResource(alias, Map.of("a", "b"), REGION));
             denied.put("UntagResource", () -> kmsService.untagResource(alias, List.of("a"), REGION));
+            // The key policy allows kms:CreateGrant only via the owning service, never directly.
+            denied.put("CreateGrant", () -> kmsService.createGrant(alias, "arn:aws:iam::000000000000:role/r",
+                    List.of("Decrypt"), REGION));
 
             denied.forEach((operation, call) -> {
                 AwsException exception = assertThrows(AwsException.class, call,
@@ -3831,6 +3834,8 @@ class KmsServiceTest {
             assertEquals("Enabled", key.getKeyState());
             assertTrue(key.getTags().isEmpty());
             assertTrue(key.isKeyRotationEnabled());
+            assertEquals(List.of(), kmsService.listGrants(alias, REGION, null, null, null, null).get("Grants"),
+                    "CreateGrant was refused but left a grant behind");
         }
 
         @Test

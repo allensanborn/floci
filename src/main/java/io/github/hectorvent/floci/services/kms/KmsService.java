@@ -500,6 +500,9 @@ public class KmsService implements ResourceProvider {
         validateGrantConstraints(constraints);
 
         KmsKey key = resolveKey(keyId, region);
+        // An AWS managed key's policy allows kms:CreateGrant only through the service that owns
+        // it (a kms:ViaService condition), never to the account directly.
+        requireCustomerManaged(key, "kms:CreateGrant");
         requireNotPendingDeletion(key);
         String grantId = UUID.randomUUID().toString();
         byte[] tokenBytes = new byte[32];
