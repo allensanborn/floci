@@ -107,6 +107,7 @@ class CloudWatchMetricsTagsTest {
         }
 
         // The failures wrote nothing: the real alarm still carries only what it was given.
+        assertEquals(Map.of(), service.listTagsForResource(alarm.getAlarmArn(), REGION));
         service.tagResource(alarm.getAlarmArn(), Map.of("env", "dev"), REGION);
         assertEquals(Map.of("env", "dev"), service.listTagsForResource(alarm.getAlarmArn(), REGION));
     }

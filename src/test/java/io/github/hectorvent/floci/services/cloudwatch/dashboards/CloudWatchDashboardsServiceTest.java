@@ -208,6 +208,7 @@ class CloudWatchDashboardsServiceTest {
         }
 
         // The failures wrote nothing: the real dashboard still carries only what it was given.
+        assertEquals(java.util.Map.of(), service.listTagsForResource(arn, REGION));
         service.tagResource(arn, java.util.Map.of("env", "dev"), REGION);
         assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
     }
