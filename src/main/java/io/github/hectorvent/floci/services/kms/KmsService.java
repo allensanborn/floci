@@ -1215,9 +1215,11 @@ public class KmsService implements ResourceProvider {
      * <p>Both stores are written once, as a batch, rather than per entry: {@code PersistentStorage}
      * serialises its whole map on every {@code put}, so per-entry writes cost two file rewrites per
      * catalog entry, on the first read of every region, while holding this lock. The aliases are
-     * written before the keys deliberately. A crash between the two batches then leaves aliases
-     * whose target is missing, which the gate above repairs on the next read; the other order would
-     * leave keys with no alias, which nothing repairs and which would sit in ListKeys forever.
+     * written before the keys deliberately, for the case of a crash between the two batches: it
+     * then leaves aliases whose target is missing, which the gate above repairs on the next read,
+     * where the other order would leave keys with no alias that sit in ListKeys forever. The order
+     * does not help when {@code kms-aliases.json} alone is lost: the gate then mints fresh keys
+     * and the old AWS managed keys stay in ListKeys unaliased. Nothing reuses them.
      */
     private void ensureAwsManagedKeys(String region) {
         synchronized (awsManagedKeyLock) {
@@ -1282,14 +1284,6 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private static void requireCustomerManagedTarget(KmsKey key, String operation) {
-        if (AWS_KEY_MANAGER.equals(key.getKeyManager())) {
-            throw new AwsException("AccessDeniedException",
-                    "User is not authorized to perform " + operation + " on resource " + key.getArn()
-                            + " because it is an AWS managed key.", 400);
-        }
-    }
-
     private static void requireUnreservedAlias(String aliasName, String operation) {
         if (AwsManagedKeys.isReservedAlias(aliasName)) {
             throw new AwsException("AccessDeniedException",
@@ -1318,7 +1312,7 @@ public class KmsService implements ResourceProvider {
         // AccessDeniedException rather than a CreateAlias-specific code, because the refusal is an
         // authorization outcome (the key's policy grants the account nothing) and CreateAlias
         // publishes no error for this case.
-        requireCustomerManagedTarget(key, "kms:CreateAlias");
+        requireCustomerManaged(key, "kms:CreateAlias");
         requireNotPendingDeletion(key);
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
@@ -1338,7 +1332,7 @@ public class KmsService implements ResourceProvider {
 
         // Same reason as CreateAlias: repointing a customer alias at an AWS managed key would
         // succeed here and fail against AWS.
-        requireCustomerManagedTarget(newKey, "kms:UpdateAlias");
+        requireCustomerManaged(newKey, "kms:UpdateAlias");
         requireNotPendingDeletion(newKey);
         if (currentKey.getKeyUsage() != newKey.getKeyUsage() || !sameKeyFamily(currentKey.getKeySpec(), newKey.getKeySpec())) {
             throw new AwsException("ValidationException",
