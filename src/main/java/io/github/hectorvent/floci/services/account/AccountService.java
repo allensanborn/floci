@@ -52,8 +52,16 @@ public class AccountService implements Resettable {
         String targetAccountId = resolveTargetAccount(callerAccountId, request);
         String type = requireContactType(request);
         return contacts.getForAccount(targetAccountId, type)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "The alternate contact does not exist for the specified account and contact type.", 404));
+                .orElseThrow(AccountService::notFound);
+    }
+
+    public void deleteAlternateContact(String callerAccountId, JsonNode request) {
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        String type = requireContactType(request);
+        if (contacts.getForAccount(targetAccountId, type).isEmpty()) {
+            throw notFound();
+        }
+        contacts.deleteForAccount(targetAccountId, type);
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
@@ -135,6 +143,11 @@ public class AccountService implements Resettable {
     private static String text(JsonNode request, String field) {
         JsonNode value = request == null ? null : request.get(field);
         return value != null && value.isTextual() ? value.textValue() : null;
+    }
+
+    private static AwsException notFound() {
+        return new AwsException("ResourceNotFoundException",
+                "The alternate contact does not exist for the specified account and contact type.", 404);
     }
 
     private static AwsException validation(String message) {
