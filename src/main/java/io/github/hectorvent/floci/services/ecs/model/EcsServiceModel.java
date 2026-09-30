@@ -49,7 +49,7 @@ public class EcsServiceModel {
     private String propagateTags;
     private Integer healthCheckGracePeriodSeconds;
     private String roleArn;
-    /** {@code deploymentConfiguration}, kept raw: Floci reports it but runs no rollout against it. */
+    /** {@code deploymentConfiguration}, kept raw; only its {@code deploymentCircuitBreaker} is acted on. */
     private Map<String, Object> deploymentConfiguration;
     /**
      * {@code serviceRegistries}, kept raw. {@link EcsServiceDiscoveryRegistrar}
