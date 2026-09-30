@@ -4152,6 +4152,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 return false;
             }
+            // Only a task that failed to start counts, not one a user stopped during its pull.
+            if (!TaskStatus.STOPPED.name().equals(task.getLastStatus())
+                    || !STOP_CODE_TASK_FAILED_TO_START.equals(task.getStopCode())) {
+                return false;
+            }
             deployment.setFailedTasks(deployment.getFailedTasks() + 1);
             // With rollback on, AWS rolls back instead of stopping; that is not modelled.
             if (!flag(breaker.get("enable"), false) || flag(breaker.get("rollback"), false)

@@ -46,6 +46,9 @@ class EcsServiceDeploymentCircuitBreakerTest {
     /** Launch outcomes, consumed one per launch; empty means every launch fails. */
     private final Deque<Boolean> launches = new ArrayDeque<>();
     private boolean healthy;
+    /** When set, the next launch is stopped by a user while its image is still pulling. */
+    private boolean stopDuringPull;
+    private EcsService service;
 
     @Test
     void aDeploymentWhoseTasksNeverStartIsStoppedAtTheDefaultThreshold() {
@@ -201,6 +204,29 @@ class EcsServiceDeploymentCircuitBreakerTest {
         ServiceDeployment deployment = deploymentOf(service, "cb-rb", id);
         assertEquals("IN_PROGRESS", deployment.getStatus());
         assertNull(deployment.getStoppedAt());
+    }
+
+    /** Only a task that failed to start counts; one a user stopped while it pulled did not fail. */
+    @Test
+    void aTaskAUserStopsDuringItsPullIsNotAFailure() {
+        EcsService service = newService();
+        Map<String, Object> breaker = breaker(true, false);
+        breaker.put("thresholdConfiguration", Map.of("type", "COUNT", "value", 1));
+        healthy = true;
+        stopDuringPull = true;
+        String id = createService(service, "cb-user", 1, breaker).getDeploymentId();
+
+        service.reconcileServices();
+
+        EcsTask stopped = stoppedTasks(service).getFirst();
+        assertEquals(EcsService.STOP_CODE_USER_INITIATED, stopped.getStopCode(),
+                "precondition: the launch came back stopped by the user, not failed");
+        assertEquals("IN_PROGRESS", deploymentOf(service, "cb-user", id).getStatus(),
+                "a threshold of 1 would have tripped had it counted");
+        assertEquals(0, liveDeployment(service, "cb-user").getFailedTasks());
+
+        service.reconcileServices();
+        assertEquals("SUCCESSFUL", deploymentOf(service, "cb-user", id).getStatus());
     }
 
     @Test
@@ -414,9 +440,13 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 throw new RuntimeException("CannotPullContainerError: image not found");
             }
             EcsTask task = invocation.getArgument(0);
+            if (stopDuringPull) {
+                stopDuringPull = false;
+                service.stopTask(null, task.getTaskArn(), "user stop", REGION);
+            }
             return new EcsTaskHandle(task.getTaskArn(), Map.of("app", "docker-id"), Map.of());
         });
-        EcsService service = new EcsService(
+        service = new EcsService(
                 new RegionResolver(REGION, "000000000000"),
                 containerManager,
                 config,
