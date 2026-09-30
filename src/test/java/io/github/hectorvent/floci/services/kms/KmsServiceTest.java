@@ -3838,6 +3838,44 @@ class KmsServiceTest {
                     "CreateGrant was refused but left a grant behind");
         }
 
+        /**
+         * Minting is check-then-write across two stores, so two cold reads racing each other must
+         * not both mint: the loser's keys would sit in ListKeys unaliased forever.
+         */
+        @Test
+        void concurrentColdReadsMintEachAwsManagedKeyOnce() throws Exception {
+            int threads = 16;
+            ExecutorService pool = Executors.newFixedThreadPool(threads);
+            try {
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<List<KmsAlias>>> reads = new ArrayList<>();
+                for (int i = 0; i < threads; i++) {
+                    reads.add(pool.submit(() -> {
+                        start.await();
+                        return kmsService.listAliases(REGION);
+                    }));
+                }
+                start.countDown();
+                for (Future<List<KmsAlias>> read : reads) {
+                    read.get(30, TimeUnit.SECONDS);
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+
+            // Read the key store directly, not through listKeys, which would mint again.
+            assertEquals(AwsManagedKeys.KEYS.size(), keyStore.scan(k -> k.startsWith(REGION + "::")).size(),
+                    "concurrent cold reads minted more AWS managed keys than the catalog holds");
+            List<String> reserved = kmsService.listAliases(REGION).stream()
+                    .map(KmsAlias::getAliasName)
+                    .filter(name -> name.startsWith("alias/aws/"))
+                    .toList();
+            assertEquals(AwsManagedKeys.KEYS.size(), reserved.size());
+            for (AwsManagedKeys.AwsManagedKeyDef def : AwsManagedKeys.KEYS) {
+                assertEquals(1, reserved.stream().filter(def.aliasName()::equals).count(), def.aliasName());
+            }
+        }
+
         @Test
         void refusesToClaimAnAliasInTheReservedNamespace() {
             KmsKey mine = kmsService.createKey("mine", REGION);
