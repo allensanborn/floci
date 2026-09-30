@@ -2737,6 +2737,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                 t.getTaskArn(), e.getMessage());
                     }
                 });
+        // AWS deletes the service's deployments and revisions with the service.
+        String serviceArn = svc.getServiceArn();
+        serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
+        serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
         return svc;
     }
 
