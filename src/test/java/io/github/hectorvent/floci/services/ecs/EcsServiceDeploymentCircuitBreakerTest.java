@@ -68,14 +68,12 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 "without rollback a failed deployment is stopped; there is no FAILED status");
         assertNotNull(failed.getFinishedAt());
         assertNotNull(failed.getStoppedAt());
-        assertNotNull(failed.getStatusReason());
-        assertTrue(failed.getStatusReason().contains("circuit breaker"),
-                "the reason says the circuit breaker ended it; was: " + failed.getStatusReason());
+        assertEquals("The deployment circuit breaker detected a failure.", failed.getStatusReason());
 
         Deployment rollout = liveDeployment(service, "cb-fail");
         assertEquals("FAILED", rollout.getRolloutState());
-        assertTrue(rollout.getRolloutStateReason().contains("circuit breaker"),
-                "was: " + rollout.getRolloutStateReason());
+        assertEquals("The deployment circuit breaker detected a failure.",
+                rollout.getRolloutStateReason());
         assertEquals(3, rollout.getFailedTasks());
 
         assertTrue(service.listServiceDeployments("cb-fail", "cb-fail-cluster",

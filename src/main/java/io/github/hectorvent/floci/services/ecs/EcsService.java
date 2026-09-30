@@ -165,7 +165,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
     /** A service deployment that ended without completing. */
     public static final String DEPLOYMENT_STATUS_STOPPED = "STOPPED";
-    public static final String CIRCUIT_BREAKER_REASON = "ECS deployment circuit breaker: tasks failed to start.";
+    /** Why a deployment the circuit breaker ended stopped, and why its rollout FAILED. */
+    public static final String CIRCUIT_BREAKER_REASON = "The deployment circuit breaker detected a failure.";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
     /** A listing returns at most a hundred ARNs per page. */
