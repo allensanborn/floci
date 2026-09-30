@@ -4506,6 +4506,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .map(ContainerInstance::getContainerInstanceArn)
                 .collect(Collectors.toSet());
 
+        String currentDeploymentId = deploymentId(svc);
+        String currentTaskDefinitionArn = pinnedTaskDefinitionArn(svc, key, region);
+
         // Every task that still occupies its instance: RUNNING, PENDING (Docker start in
         // flight) and STOPPING (teardown in flight, possibly stranded). Only STOPPED frees the
         // slot — otherwise a stranded STOPPING task would get a duplicate next to it.
@@ -4521,6 +4524,25 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         for (EcsTask t : liveTasks) {
             String instanceArn = t.getContainerInstanceArn();
             boolean keep = instanceArn != null && activeArns.contains(instanceArn) && covered.add(instanceArn);
+            if (keep && isStaleForDeployment(t, currentDeploymentId, currentTaskDefinitionArn)) {
+                // maximumPercent is 100 for DAEMON: the replacement starts once this is STOPPED.
+                if (!TaskStatus.STOPPING.name().equals(t.getLastStatus())) {
+                    try {
+                        stopTask(clusterName, t.getTaskArn(),
+                                "Service deployment replaced task definition " + t.getTaskDefinitionArn(),
+                                STOP_CODE_SERVICE_SCHEDULER_INITIATED, region);
+                    } catch (Exception e) {
+                        LOG.warnv("Service reconciler failed to stop daemon task {0}: {1}",
+                                t.getTaskArn(), e.getMessage());
+                    }
+                }
+                if (TaskStatus.STOPPED.name().equals(t.getLastStatus())) {
+                    covered.remove(instanceArn);
+                } else if (TaskStatus.RUNNING.name().equals(t.getLastStatus())) {
+                    running++;
+                }
+                continue;
+            }
             if (keep) {
                 if (TaskStatus.RUNNING.name().equals(t.getLastStatus())) {
                     running++;
