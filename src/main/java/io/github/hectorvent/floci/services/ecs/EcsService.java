@@ -4065,6 +4065,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * first thing concurrent updates to one service would tear.
      */
     private void stopNonTerminalDeployments(String serviceArn, Instant now, String reason) {
+        // Not dead code. A service model can arrive by deserialisation from the services store
+        // rather than through createService, so a null ARN is not an invariant here; ownedBy
+        // guards the same field for the same reason. Without this, DeleteService would NPE on
+        // the first iteration below instead of doing nothing.
+        if (serviceArn == null) {
+            return;
+        }
         for (ServiceDeployment prior : serviceDeployments.values()) {
             if (!serviceArn.equals(prior.getServiceArn())) {
                 continue;

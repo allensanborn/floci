@@ -60,7 +60,11 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
                 .extract().response();
     }
 
-    /** As {@link #seedService}, but at a task count the service has not reached yet. */
+    /**
+     * As {@link #seedService}, but at a task count the service has not reached yet, so its
+     * deployment is in flight. Whatever is done with it must not read the service back: see
+     * {@link #aStoppedDeploymentReportsWhenItStoppedAndWhy}.
+     */
     private static String seedUnconvergedService(String name) {
         call("CreateCluster", "{\"clusterName\":\"" + CLUSTER + "\"}");
         call("RegisterTaskDefinition", "{\"family\":\"" + name + "-td\",\"networkMode\":\"awsvpc\","
@@ -156,30 +160,36 @@ class EcsServiceSteadyStateWaiterIntegrationTest {
      * {@code ServiceDeployment} shape and neither of which floci used to write at all, so a
      * client asking when a stopped deployment ended, or why, got nothing.
      *
-     * <p>Driven through DeleteService rather than through a rolling update because it is
-     * deterministic inside a {@code @QuarkusTest}: the service is created at a task count it has
-     * not reached, and nothing reads it between the create and the delete, so the deployment is
-     * still in flight when the delete lands however the 5-second reconciler happens to fall.
+     * <p><strong>Nothing reads the service before it is deleted, and that is the whole
+     * construction.</strong> The SUCCESSFUL transition is made at read time, and every response
+     * that serialises a service settles that service's current deployment, so a single
+     * {@code DescribeServices} between the create and the delete is enough to latch the
+     * deployment SUCCESSFUL if the 5-second reconciler happened to launch the task first. The
+     * delete would then find a terminal record and correctly leave it alone, and the assertions
+     * below would fail. So the deployment is identified after the delete instead: the service was
+     * created once and never updated, so it has exactly one deployment, and a terminal record
+     * cannot change under a read.
+     *
+     * <p>One window is left and cannot be closed from a test: a tick that fires between
+     * CreateService putting the service in the map and that same response being serialised would
+     * latch it. That is sub-millisecond against a 5000ms period, where reading the service first
+     * left several. It is not zero, so it is written down rather than called deterministic. The
+     * behaviour itself is pinned without any timing in
+     * {@code EcsServiceDeploymentStatusTest.deletingAServiceStopsTheDeploymentItLeavesUnfinished};
+     * what only this test can show is that the two fields reach the wire.
      */
     @Test
     void aStoppedDeploymentReportsWhenItStoppedAndWhy() {
         String service = seedUnconvergedService("waiter-stop-svc");
-        String taskSetId = primaryTaskSetId(service);
 
         call("DeleteService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + service
                 + "\",\"force\":true}");
 
         Response listed = call("ListServiceDeployments", "{\"cluster\":\"" + CLUSTER
                 + "\",\"service\":\"" + service + "\"}");
-        String deploymentArn = null;
-        for (Object brief : listed.jsonPath().getList("serviceDeployments")) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> map = (Map<String, Object>) brief;
-            Object revision = map.get("targetServiceRevisionArn");
-            if (revision != null && revision.toString().contains(taskSetId)) {
-                deploymentArn = String.valueOf(map.get("serviceDeploymentArn"));
-            }
-        }
+        listed.then().body("serviceDeployments", hasSize(1));
+        String deploymentArn = listed.jsonPath()
+                .getString("serviceDeployments[0].serviceDeploymentArn");
         assertNotNull(deploymentArn, "the deleted service's deployment is still describable");
 
         call("DescribeServiceDeployments", "{\"serviceDeploymentArns\":[\"" + deploymentArn + "\"]}")
