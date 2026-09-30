@@ -99,7 +99,8 @@ class Route53ResolverIntegrationTest {
         return "{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
              + "\"CreatorRequestId\":\"" + creatorRequestId + "\","
              + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"}]}";
+             + "\"" + ipMember + "\":[{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.0.10\"},"
+             + "{\"SubnetId\":\"subnet-def\",\"Ip\":\"10.0.1.10\"}]}";
     }
 
     @Test
@@ -115,7 +116,7 @@ class Route53ResolverIntegrationTest {
             .statusCode(200)
             .body("ResolverEndpoint.Id", startsWith("rslvr-in-"))
             .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -129,7 +130,7 @@ class Route53ResolverIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -153,7 +154,7 @@ class Route53ResolverIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResolverEndpoint.IpAddressCount", equalTo(1));
+            .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
@@ -171,5 +172,68 @@ class Route53ResolverIntegrationTest {
         .then()
             .statusCode(400)
             .body("message", equalTo("IpAddresses is required"));
+    }
+
+    // ── CreateResolverEndpoint: IpAddressesRequest is modelled min 2, max 20 ──────
+
+    private static String endpointBodyWithAddresses(String name, int count) {
+        StringBuilder ips = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            if (i > 0) {
+                ips.append(',');
+            }
+            ips.append("{\"SubnetId\":\"subnet-abc\",\"Ip\":\"10.0.2.").append(10 + i).append("\"}");
+        }
+        return "{\"Name\":\"" + name + "\",\"Direction\":\"INBOUND\","
+             + "\"CreatorRequestId\":\"" + name + "\",\"SecurityGroupIds\":[\"sg-abc123\"],"
+             + "\"IpAddresses\":[" + ips + "]}";
+    }
+
+    private static void assertEndpointRejectedAndNotStored(String name, int count) {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBodyWithAddresses(name, count))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoints.findAll { it.Name == '" + name + "' }.size()", equalTo(0));
+    }
+
+    @Test
+    void createResolverEndpoint_withOneAddressIsRejected() {
+        assertEndpointRejectedAndNotStored("one-address", 1);
+    }
+
+    @Test
+    void createResolverEndpoint_withTwentyOneAddressesIsRejected() {
+        assertEndpointRejectedAndNotStored("twenty-one-addresses", 21);
+    }
+
+    @Test
+    void createResolverEndpoint_withTwentyAddressesIsAccepted() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body(endpointBodyWithAddresses("twenty-addresses", 20))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResolverEndpoint.IpAddressCount", equalTo(20));
     }
 }
