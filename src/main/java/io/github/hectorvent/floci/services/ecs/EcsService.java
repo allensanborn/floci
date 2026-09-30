@@ -2728,15 +2728,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterException",
                     "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
         }
-        // Settle against the service as it stands, as UpdateService does: a deployment whose
-        // tasks are up has finished, whether or not anything read it.
-        currentServiceDeployment(svc);
         svc.setStatus("INACTIVE");
-        // A deleted service's deployments can never finish, so stop them. This must come before
-        // setDesiredCount(0): a concurrent read that saw desiredCount 0 on a still-ACTIVE service
-        // would otherwise mark the deployment SUCCESSFUL. AWS deletes the records instead; that
-        // is not done here yet.
-        stopNonTerminalDeployments(svc.getServiceArn(), Instant.now(), "The service was deleted.");
         svc.setDesiredCount(0);
         cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
         services.put(key, svc);
@@ -2755,6 +2747,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                 t.getTaskArn(), e.getMessage());
                     }
                 });
+        // AWS deletes the service's deployments and revisions with the service. A service model
+        // restored from the store may have no ARN, and then owns none.
+        String serviceArn = svc.getServiceArn();
+        if (serviceArn != null) {
+            serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
+            serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
+        }
         return svc;
     }
 
@@ -4066,9 +4065,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Marks the service's IN_PROGRESS deployments STOPPED, for a caller that has made them
-     * unable to finish: a new deployment superseding them, or the service being deleted. Runs
-     * before the new deployment is added to the map, so it never stops the current one.
+     * Marks the service's IN_PROGRESS deployments STOPPED, because a new deployment has
+     * superseded them and they can no longer finish. Runs before the new deployment is added to
+     * the map, so it never stops the current one.
      */
     private void stopNonTerminalDeployments(String serviceArn, Instant now, String reason) {
         // A service model restored from the store may have no ARN.
