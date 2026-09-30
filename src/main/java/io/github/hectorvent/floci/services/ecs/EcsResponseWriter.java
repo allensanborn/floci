@@ -957,9 +957,6 @@ public class EcsResponseWriter {
         putInstant(n, "finishedAt", d.getFinishedAt());
         putInstant(n, "stoppedAt", d.getStoppedAt());
         putInstant(n, "updatedAt", d.getUpdatedAt());
-        // Both are absent rather than null for a deployment that is running or that succeeded,
-        // which is how AWS answers: putInstant already omits a null, and this does the same for
-        // the one field of the two that is not an Instant.
         if (d.getStatusReason() != null) {
             n.put("statusReason", d.getStatusReason());
         }

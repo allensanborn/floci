@@ -158,10 +158,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public static final String DEPLOYMENT_STATUS_IN_PROGRESS = "IN_PROGRESS";
     /** A service deployment whose target revision is running at its requested task count. */
     public static final String DEPLOYMENT_STATUS_SUCCESSFUL = "SUCCESSFUL";
-    /**
-     * A service deployment that ended without completing: one a later deployment took over from,
-     * or one whose service was deleted before it converged.
-     */
+    /** A service deployment that ended without completing. */
     public static final String DEPLOYMENT_STATUS_STOPPED = "STOPPED";
     /** RunTask places at most ten tasks in one call, and StartTask at most ten instances. */
     public static final int MAX_TASKS_PER_RUN = 10;
@@ -2597,36 +2594,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
         }
         svc.setStatus("INACTIVE");
-        // An INACTIVE service can never converge, so any deployment still in flight has to be
-        // landed here: settleStatus finishes only an ACTIVE service's current deployment, and
-        // there is no later operation on a deleted service to do it instead.
-        //
-        // THIS CALL MUST STAY BETWEEN setStatus AND setDesiredCount, and the two setters must
-        // stay in this order. Both fields are plain non-volatile fields of a service model
-        // shared with every reader, and settleStatus reads them under synchronized (deployment),
-        // a monitor nothing takes for the service. So a reader can see the new desiredCount of 0
-        // beside a status it still reads as ACTIVE, and 0 running tasks satisfies
-        // "runningOnCurrentDeployment(svc) >= svc.getDesiredCount()" trivially: the deployment
-        // latches SUCCESSFUL, reporting a rollout that never happened as having succeeded. The
-        // already-terminal guard does not save it, because at that point the record is still
-        // IN_PROGRESS and its revision ARN still matches.
-        //
-        // Stopping the records first closes that window rather than narrowing it. A reader
-        // arriving before this line still sees the honest pre-delete desiredCount, so it can
-        // only latch a deployment that really converged. One arriving after finds the record
-        // already STOPPED, so the guard blocks the latch whatever it sees of the service. The
-        // dangerous pairing is then only observable once the record is terminal anyway.
-        //
-        // Safe here because the helper reads nothing about the service: it takes an ARN, a
-        // timestamp and a string, and branches only on each deployment's own status. It is also
-        // below the !force validation above, so a request that throws stops nothing.
-        //
-        // AWS goes further and removes the records outright: "Amazon ECS deletes the service
-        // deployment when you delete a service." Stopping them rather than deleting them is
-        // deliberate. It fixes the harm, which is a deployment reported as in flight for ever
-        // and returned by a listing filtered on IN_PROGRESS, without turning a
-        // DescribeServiceDeployments a client is mid-poll on into a failure. Full parity means
-        // deletion and is tracked separately.
+        // A deleted service's deployments can never finish, so stop them. This must come before
+        // setDesiredCount(0): a concurrent read that saw desiredCount 0 on a still-ACTIVE service
+        // would otherwise mark the deployment SUCCESSFUL. AWS deletes the records instead; that
+        // is not done here yet.
         stopNonTerminalDeployments(svc.getServiceArn(), Instant.now(), "The service was deleted.");
         svc.setDesiredCount(0);
         cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
@@ -3770,12 +3741,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         String deploymentId = deploymentId(svc);
-        // This deployment's own tasks, not the service's. Counting the tasks still draining from
-        // the deployment this one replaced would report a task-definition change COMPLETED the
-        // instant UpdateService returned -- the same miscount that made the ServiceDeployment
-        // record lie, and at that moment the two would contradict each other about one
-        // deployment, leaving a client no way to tell which to believe. A Deployment's counts
-        // are per deployment in AWS, so the running count reported here is this deployment's too.
+        // This deployment's own tasks: counting the ones still draining from the previous
+        // deployment would report a task-definition change COMPLETED as soon as it was made.
         long running = runningOnCurrentDeployment(svc);
         boolean converged = running >= svc.getDesiredCount();
 
@@ -3863,54 +3830,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * How many of the service's RUNNING tasks belong to the deployment it is currently on.
-     *
-     * <p>{@code svc.getRunningCount()} is the wrong number for this and must not be substituted
-     * for it. The reconciler sets that field from <em>every</em> RUNNING task the service owns,
-     * which during a rolling change includes the ones still draining from the deployment this one
-     * replaced. Judging a deployment by it reports a task-definition change finished the instant
-     * {@code UpdateService} returns, on the strength of the old revision's task, so a new image
-     * that cannot start reads as stable and a steady-state wait returns at once. The reconciler
-     * derives the right quantity one line before it sets that field, as
-     * {@code running - staleTasks.size()}.
-     *
-     * <p>Recomputed here rather than carried over from the reconciler, for two reasons. A cached
-     * count is a fact about the last tick, and this is read on demand between ticks, right after
-     * {@code UpdateService}, which is exactly the moment that matters. And caching it would add
-     * per-deployment state to the service model for a value that is cheap to derive from the
-     * tasks already in hand, which is the same trade {@link #deploymentsFor} already makes.
+     * Not {@code svc.getRunningCount()}, which also counts tasks still draining from the
+     * previous deployment.
      */
     private long runningOnCurrentDeployment(EcsServiceModel svc) {
         EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
         if (cluster == null) {
-            // Nothing can be confirmed running, so report none: an unfinished deployment is the
-            // safe direction to be wrong in, since it stalls a wait rather than passing it.
             return 0;
         }
         Stream<EcsTask> running = tasks.values().stream()
                 .filter(t -> ownedBy(t, svc, cluster))
                 .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()));
 
-        // DAEMON counts every task it owns, stale or not, and that is deliberate.
-        // {@link #reconcileDaemonService} has no notion of staleness at all: it decides which
-        // tasks to keep purely by which container instances they cover, with no deploymentId or
-        // task-definition comparison anywhere in it. So a task from a superseded revision holds
-        // its instance slot indefinitely and no replacement is ever launched. Scoping the count
-        // here would be reporting a truth the scheduler cannot act on: the new deployment would
-        // sit at zero for ever, and a steady-state wait on a DAEMON service would hang rather
-        // than return.
-        //
-        // Counting them makes a DAEMON deployment converge on the same tick as main. The one
-        // difference is the birth state: a deployment with no tasks running yet reads
-        // IN_PROGRESS here and SUCCESSFUL on main, which is this branch's subject applied
-        // uniformly rather than a DAEMON-specific behaviour change.
-        //
-        // It is still a mitigation and not a claim DAEMON is right: what it preserves is main
-        // reporting a deployment finished while the previous revision is what is actually
-        // running. The fault is that DAEMON services do not roll on a task-definition change,
-        // which is a reconciler defect with its own bead, not something to fix from inside a
-        // counting helper. Do not "tidy" this branch away to match the one below without fixing
-        // the reconciler first: once DAEMON rolls, counting stale tasks reproduces the exact
-        // REPLICA bug this branch exists to remove, on DAEMON.
+        // reconcileDaemonService does not replace a DAEMON service's tasks when its task
+        // definition changes, so the stale ones are the only ones there will ever be; counting
+        // them keeps main's behaviour. Scope this like REPLICA once DAEMON services roll.
         if (SCHEDULING_DAEMON.equals(svc.getSchedulingStrategy())) {
             return running.count();
         }
@@ -3938,17 +3872,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * later; the deployment links to it, which is how a caller gets from
      * {@code DescribeServiceDeployments} to what was actually deployed.
      *
-     * <p>The revision is named by the deployment's <em>task set id</em> rather than by an id of
-     * its own, because AWS mints the two together: a service reports {@code deployments[].id} as
-     * {@code ecs-svc/<id>} and the revision that deployment targets as
-     * {@code .../service-revision/<cluster>/<service>/<id>}, the same {@code <id>}. Clients join
-     * the two on it. The Terraform AWS provider's {@code wait_for_steady_state} does exactly
-     * that: it reads the PRIMARY deployment's id out of {@code DescribeServices}, then looks for
-     * that id inside each {@code ListServiceDeployments} brief's
-     * {@code targetServiceRevisionArn} to find the deployment to poll. Minting the revision id
-     * independently left that join with nothing to match, so the provider never resolved a
-     * deployment and reported {@code tfPENDING} until its twenty-minute timeout, on a service
-     * that was running and reporting itself stable everywhere else.
+     * <p>The revision ARN ends in the deployment's task set id, the {@code <id>} of
+     * {@code ecs-svc/<id>}, as AWS's does. The Terraform AWS provider's
+     * {@code wait_for_steady_state} finds the deployment to poll by looking for that id in each
+     * deployment's {@code targetServiceRevisionArn}. The ARN built here is
+     * {@code service-revision/<id>}; AWS's is {@code service-revision/<cluster>/<service>/<id>}.
      */
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
@@ -3971,7 +3899,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         deployment.setServiceArn(svc.getServiceArn());
         deployment.setClusterArn(svc.getClusterArn());
         deployment.setTaskDefinition(taskDefinition);
-        // Born in progress; settleStatus finishes it once the service's tasks are up.
         deployment.setStatus(DEPLOYMENT_STATUS_IN_PROGRESS);
         deployment.setCreatedAt(now);
         deployment.setStartedAt(now);
@@ -4001,78 +3928,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Lands this service's unfinished deployments in a terminal status, for a caller that has
-     * just made them unfinishable.
-     *
-     * <p>{@link #settleStatus} finishes only the deployment a service is <em>currently</em> on,
-     * and only while that service is ACTIVE. Two operations take a deployment permanently out of
-     * that reach, and neither used to touch the deployment records at all:
-     *
-     * <ul>
-     *   <li>{@link #recordServiceDeployment} moves the service onto a new deployment, so a
-     *       rolling update supersedes whatever was in flight;</li>
-     *   <li>{@link #deleteService} makes the service INACTIVE, so nothing it owns can converge
-     *       again.</li>
-     * </ul>
-     *
-     * <p>Left alone, such a deployment sits IN_PROGRESS with no finish time for the life of the
-     * emulator, claiming a rollout that can no longer happen is still happening. A client
-     * listing a service's deployments reads a growing pile of them apparently in flight at once,
-     * and one filtering on IN_PROGRESS gets every rollout the service ever abandoned. STOPPED is
-     * the status AWS uses for a deployment that ended without completing.
-     *
-     * <p>Only a deployment still in progress is moved, so the caller's {@code reason} describes
-     * why it could not finish rather than restating the status. One that already reached
-     * SUCCESSFUL completed before any of this happened, and that record is history rather than
-     * something a later operation rewrites.
-     *
-     * <p>Both {@code finishedAt} and {@code stoppedAt} are stamped, and whether AWS sets both is
-     * an assumption rather than something measured. The developer guide's stage table files
-     * STOPPED under "Completed - a service deployment has finished (successfully or
-     * unsuccessfully)", which points at both. Against that, {@code stoppedAt}'s own field
-     * description enumerates a user stopping a deployment and a failure without rollback, and
-     * does not mention supersession at all, while the state table routes "a user starts a new
-     * service deployment" through STOP_REQUESTED to STOPPED. Those pages disagree with each
-     * other, so no finer distinction is drawn here. Setting both is the safe side of the
-     * uncertainty: nothing reads either field today, so being wrong about it costs nothing
-     * observable.
-     *
-     * <p>The transient STOP_REQUESTED that the state table passes through is skipped, the way
-     * PENDING already is: this emulator records the state a deployment settles in, not each
-     * state it moves through. The {@code reason} text is ours. {@code statusReason} is a real
-     * member of the shape, but there is no evidence here of AWS's wording for it, so nothing
-     * should read these strings as matching what AWS would say.
-     *
-     * <p>Whether a converged deployment has reached SUCCESSFUL by this point depends on it
-     * having been read, because the transition is made at read time. Every response that
-     * serialises a service settles its current deployment, so a deployment that converged under
-     * any client that went on to describe the service is already terminal here; one that
-     * converged with nothing ever describing the service is stopped instead. The alternative is
-     * a second place that decides convergence, which is the disagreement that read-time latch
-     * exists to remove.
-     *
-     * <p>Written under the same monitor {@code settleStatus} writes under, because the two race:
-     * a read settling the outgoing deployment can run beside the update that mints its
-     * replacement. Both transitions require IN_PROGRESS, so whichever lands second finds a
-     * terminal status and leaves it alone, and neither can undo the other.
-     *
-     * <p><strong>Called before the new deployment is published to the map, deliberately.</strong>
-     * Two concurrent UpdateService calls on one service can still leak a record: if each stops
-     * the priors it can see before either has published its own, neither sees the other's, and
-     * the one published first is left IN_PROGRESS and no longer current. That is this method's
-     * own failure mode and it is the better of the two available. Publishing first and then
-     * stopping everything but self lets one caller stop the <em>current</em> deployment, and a
-     * client polling that deployment for SUCCESSFUL then waits out its whole timeout. So this
-     * order fails toward one stale extra record, and the alternative fails toward hanging the
-     * wait this exists to make work. Neither is fixed by locking here: {@code updateService}
-     * already mutates the shared service model unsynchronised, so a deployment record is not the
-     * first thing concurrent updates to one service would tear.
+     * Marks the service's IN_PROGRESS deployments STOPPED, for a caller that has made them
+     * unable to finish: a new deployment superseding them, or the service being deleted. Runs
+     * before the new deployment is added to the map, so it never stops the current one.
      */
     private void stopNonTerminalDeployments(String serviceArn, Instant now, String reason) {
-        // Not dead code. A service model can arrive by deserialisation from the services store
-        // rather than through createService, so a null ARN is not an invariant here; ownedBy
-        // guards the same field for the same reason. Without this, DeleteService would NPE on
-        // the first iteration below instead of doing nothing.
+        // A service model restored from the store may have no ARN.
         if (serviceArn == null) {
             return;
         }
@@ -4093,62 +3954,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Finishes the deployment a service is <em>currently</em> on, once that deployment's own
-     * tasks are running. A deployment the service has already moved off is history: it was
-     * landed in a terminal status by {@link #stopNonTerminalDeployments} when its replacement
-     * was recorded, and is left as it is.
-     *
-     * <p>This status is what a steady-state wait reads. The Terraform AWS provider polls
-     * {@code DescribeServiceDeployments} for SUCCESSFUL, so a deployment that was SUCCESSFUL
-     * from the moment it was recorded would make {@code wait_for_steady_state} return before a
-     * single task had started, a wait that always passes and therefore says nothing.
-     *
-     * <p><strong>A terminal status is terminal.</strong> The transition runs on a deployment
-     * that is still IN_PROGRESS and so runs once and never reverses:
-     * in AWS a completed deployment does not un-complete because the service later became
-     * unhealthy, and {@code finishedAt} records when the deployment finished, not the last time
-     * someone looked. Deriving the status afresh on every read, the shape this started as,
-     * let tasks dying afterwards flip a finished record back to IN_PROGRESS and blank a
-     * {@code finishedAt} it had already published, then stamp a new one on recovery, so a
-     * terminal record mutated under its readers. A service that never converges still has no
-     * terminal failure state and stays IN_PROGRESS; that is the loud direction, and is
-     * tracked separately.
-     *
-     * <p>The task scan sits last in the condition, so listing a service's deployments costs at
-     * most one scan however many it returns, and none once the current one has latched.
-     *
-     * <p>That bound is about this method, not about the cost of a response. Measured per
-     * {@code DescribeServices}, per service, by counting calls to
-     * {@link #runningOnCurrentDeployment}:
-     *
-     * <pre>
-     *   ACTIVE, every poll while the current deployment has not latched   3   (1 + 1 + 1)
-     *   ACTIVE, every poll after it has latched                           2   (1 + 1 + 0)
-     *   not ACTIVE, or the service is gone                                0
-     * </pre>
-     *
-     * <p>The first row is not a one-off: a deployment stays unlatched for as long as it takes to
-     * converge, so a rollout that is slow, or one that never converges at all, pays 3 on every
-     * poll for its whole duration, which is exactly when a waiter is polling hardest.</p>
-     *
-     * where the three are {@link #deploymentsFor}, {@link #eventsFor} and
-     * {@link #currentServiceDeployment}. {@code deploymentsFor} scans unconditionally.
-     * {@code eventsFor} scans only for a service that exists and is ACTIVE: its call is the last
-     * disjunct of an {@code ||} chain, so it short-circuits, and widening that chain would change
-     * this. {@code currentServiceDeployment} settles, so it scans until the current deployment
-     * latches and never again: the poll that reads 1 is the poll that latches it.
-     *
-     * <p>Upstream walked the map not at all, on the API a waiter polls hardest. Accepted: the
-     * alternative is a cached count carrying an invalidation obligation at every future site that
-     * mints a deployment id, and emulator task maps are small.
+     * Marks the service's current deployment SUCCESSFUL once its own tasks are all running.
+     * Only an IN_PROGRESS deployment moves, so a finished one never changes again.
      */
     private ServiceDeployment settleStatus(ServiceDeployment deployment) {
         EcsServiceModel svc = serviceByArn(deployment.getServiceArn());
-        // Every copy is taken under the lock, including the one for a deployment this call judged
-        // to be history. "Current" is decided against a deploymentId that UpdateService can mint
-        // at any moment, so two threads can disagree about which deployment is current, and an
-        // unsynchronised copy on this path could then run beside the write below -- producing
-        // exactly the torn record the lock exists to prevent.
         synchronized (deployment) {
             if (svc != null && deployment.getTargetServiceRevisionArn() != null
                     && deployment.getTargetServiceRevisionArn().endsWith("/" + taskSetId(svc))
@@ -4165,14 +3975,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * A detached copy of a deployment record, which is what every read hands back.
-     *
-     * <p>{@link #settleStatus} writes to the stored record and the response is serialised after
-     * it returns, so handing out the stored instance would let one request's settle land in the
-     * middle of another's serialisation; {@code ServiceDeployment}'s fields are plain and
-     * non-volatile, so a reader could see {@code status=SUCCESSFUL} beside a {@code finishedAt}
-     * that had not arrived yet. Taking the copy inside the lock that performs the transition
-     * means a caller always sees one consistent moment.
+     * A copy taken under the deployment's lock, so a response never sees a half-applied
+     * transition.
      */
     private static ServiceDeployment copyOf(ServiceDeployment source) {
         ServiceDeployment copy = new ServiceDeployment();
@@ -4230,15 +4034,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc == null) {
             return null;
         }
-        // Settled and copied like every other read. Today's caller reads only the two ARN
-        // fields, which never change after the record is minted, so handing out the stored
-        // instance would be safe by accident; it is one added field-read away from being the
-        // torn-record bug copyOf exists to prevent.
-        //
-        // This is a THIRD read path calling settleStatus, which is only safe because settling
-        // returns a copy: if that copy were ever optimised away, this line would put a stored,
-        // concurrently-mutated record straight onto the DescribeServices response. The copy is
-        // load-bearing here, not a tidiness measure.
         return serviceDeployments.values().stream()
                 .filter(d -> svc.getServiceArn().equals(d.getServiceArn()))
                 .max(Comparator.comparing(ServiceDeployment::getCreatedAt,
@@ -4461,11 +4256,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 LOG.debugv("Could not parse region from service ARN {0}", svc.getServiceArn());
             }
         }
-        // Straight to the resolver, with no hardcoded fallback behind a null check. The sibling
-        // below guards, but the guard is unreachable here: nothing constructs an EcsService
-        // without a resolver, and the class dereferences it unguarded in the create paths, so a
-        // null one would fail long before this line. A fallback region literal that cannot be
-        // reached is still a wrong answer waiting in a non-default partition.
         return regionResolver.getDefaultRegion();
     }
 
@@ -4646,12 +4436,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * The service's task definition as an ARN, resolving a {@code family} or
      * {@code family:revision} reference without storing the result.
      *
-     * <p>Split out of {@link #pinnedTaskDefinitionArn} so the read path and the reconciler ask
-     * the question the same way. They must: {@link #isStaleForDeployment} falls back to comparing
-     * this against a task's {@code taskDefinitionArn} for tasks minted before deployment ids were
-     * stamped, so a caller that passed the raw reference would match nothing, call every task
-     * stale and report a converged service as having no tasks at all. The reconciler caches the
-     * resolution and this does not, because a read has no business writing to the service.
+     * <p>Shared with {@link #pinnedTaskDefinitionArn} so that the read path and the reconciler
+     * decide staleness the same way.
      */
     private String resolvedTaskDefinitionArn(EcsServiceModel svc, String region) {
         String ref = svc.getTaskDefinition();

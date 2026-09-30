@@ -21,14 +21,9 @@ public class ServiceDeployment {
     private Instant createdAt;
     private Instant startedAt;
     private Instant finishedAt;
-    /**
-     * When a deployment that ended without completing was stopped. A stopped deployment carries
-     * both this and {@link #finishedAt}, on the assumption that AWS does the same; its pages
-     * point both ways and none of this was measured. A deployment that is still running, or that
-     * succeeded, carries neither this nor {@link #statusReason}.
-     */
+    /** When a deployment that ended without completing was stopped. */
     private Instant stoppedAt;
-    /** Why the deployment is in the status it is in. Set for a deployment that was stopped. */
+    /** Why the deployment is in its status; set when it is stopped. */
     private String statusReason;
     private Instant updatedAt;
     private String targetServiceRevisionArn;
