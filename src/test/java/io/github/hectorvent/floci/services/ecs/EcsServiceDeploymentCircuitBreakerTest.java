@@ -98,6 +98,44 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals(5, liveDeployment(service, "cb-ten").getFailedTasks());
     }
 
+    /** 50% of 7 is 3.5, rounded up to 4. */
+    @Test
+    void aPercentThresholdIsRoundedUp() {
+        EcsService service = newService();
+        String id = createService(service, "cb-ceil", 7, breaker(true, false)).getDeploymentId();
+
+        service.reconcileServices();
+
+        assertEquals("STOPPED", deploymentOf(service, "cb-ceil", id).getStatus());
+        assertEquals(4, liveDeployment(service, "cb-ceil").getFailedTasks());
+    }
+
+    /** 50% of 402 is 201, clamped to the 200 maximum. */
+    @Test
+    void aBoundedPercentThresholdIsCappedAt200() {
+        EcsService service = newService();
+        String id = createService(service, "cb-cap", 402, breaker(true, false)).getDeploymentId();
+
+        service.reconcileServices();
+
+        assertEquals("STOPPED", deploymentOf(service, "cb-cap", id).getStatus());
+        assertEquals(200, liveDeployment(service, "cb-cap").getFailedTasks());
+    }
+
+    /** UNBOUNDED_PERCENT has no 200 cap: 100% of 201 is 201. */
+    @Test
+    void anUnboundedPercentThresholdCanExceed200() {
+        EcsService service = newService();
+        Map<String, Object> breaker = breaker(true, false);
+        breaker.put("thresholdConfiguration", Map.of("type", "UNBOUNDED_PERCENT", "value", 100));
+        String id = createService(service, "cb-unb", 201, breaker).getDeploymentId();
+
+        service.reconcileServices();
+
+        assertEquals("STOPPED", deploymentOf(service, "cb-unb", id).getStatus());
+        assertEquals(201, liveDeployment(service, "cb-unb").getFailedTasks());
+    }
+
     @Test
     void aCountThresholdIsUsedAsIs() {
         EcsService service = newService();
