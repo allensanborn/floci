@@ -27,6 +27,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -204,18 +205,7 @@ class EcsServiceDaemonSchedulingTest {
     void staleDaemonTaskStuckStoppingDelaysItsReplacement() {
         // AWS caps a DAEMON service's maximumPercent at 100: the old task has to be gone before its
         // replacement starts on that instance. A Docker teardown that fails leaves it STOPPING.
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(false);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsContainerManager containerManager = mock(EcsContainerManager.class);
-        when(containerManager.removeLeftoverContainers()).thenReturn(true);
-        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(inv ->
-                new EcsTaskHandle(inv.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
-        when(containerManager.stopTaskAndCollectExitCodes(any()))
-                .thenThrow(new RuntimeException("docker unavailable"));
-        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
-        service.initializeStorage();
+        EcsService service = newDockerModeServiceWhoseStopsFail();
         service.createCluster("daemon-slow", REGION);
         ContainerInstance a = service.registerContainerInstance("daemon-slow", null, List.of(), REGION);
         registerTaskDef(service);
@@ -235,6 +225,45 @@ class EcsServiceDaemonSchedulingTest {
         old.setLastStatus("STOPPED");
         service.reconcileServices();
         assertConvergedOn(service, "daemon-slow", revision2, Set.of(a));
+    }
+
+    @Test
+    void currentDaemonTaskWinsItsInstanceOverAStaleOneThatWillNotStop() {
+        // Map order decides which of two RUNNING tasks is seen first; build until the stale one is.
+        for (int attempt = 0; attempt < 50; attempt++) {
+            EcsService service = newDockerModeServiceWhoseStopsFail();
+            service.createCluster("daemon-pair", REGION);
+            ContainerInstance a = service.registerContainerInstance("daemon-pair", null, List.of(), REGION);
+            registerTaskDef(service);
+            service.createService("daemon-pair", "daemon-svc", "daemon-fam", 1, LaunchType.EC2,
+                    List.of(), null, null, "DAEMON", null, null, REGION);
+            service.reconcileServices();
+            EcsTask stale = runningTasks(service).getFirst();
+
+            registerTaskDef(service);
+            service.updateService("daemon-pair", "daemon-svc", "daemon-fam:2", null, null, REGION);
+            ContainerInstance b = service.registerContainerInstance("daemon-pair", null, List.of(), REGION);
+            service.reconcileServices();
+            EcsTask current = runningTasks(service).getFirst();
+            assertEquals(b.getContainerInstanceArn(), current.getContainerInstanceArn());
+
+            // Both RUNNING on instance a.
+            stale.setLastStatus("RUNNING");
+            stale.setDesiredStatus("RUNNING");
+            current.setContainerInstanceArn(a.getContainerInstanceArn());
+            service.updateContainerInstancesState("daemon-pair", List.of(b.getContainerInstanceArn()), "DRAINING", REGION);
+            if (!service.listTasks(null, null, null, null, REGION).getFirst().equals(stale.getTaskArn())) {
+                continue;
+            }
+
+            service.reconcileServices();
+            assertEquals("RUNNING", current.getLastStatus(), "the current task keeps the instance");
+            assertEquals("STOPPING", stale.getLastStatus());
+            assertEquals(1, service.describeServices("daemon-pair", List.of("daemon-svc"), REGION)
+                    .getFirst().getRunningCount());
+            return;
+        }
+        fail("never built the stale-first ordering");
     }
 
     @Test
@@ -292,6 +321,22 @@ class EcsServiceDaemonSchedulingTest {
         cd.setName("agent");
         cd.setImage("agent:1");
         return service.registerTaskDefinition("daemon-fam", List.of(cd), null, null, null, null, null, List.of(), REGION);
+    }
+
+    private static EcsService newDockerModeServiceWhoseStopsFail() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager containerManager = mock(EcsContainerManager.class);
+        when(containerManager.removeLeftoverContainers()).thenReturn(true);
+        when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(inv ->
+                new EcsTaskHandle(inv.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
+        when(containerManager.stopTaskAndCollectExitCodes(any()))
+                .thenThrow(new RuntimeException("docker unavailable"));
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
+                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
+        service.initializeStorage();
+        return service;
     }
 
     private static EcsService newMockModeService() {
