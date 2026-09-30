@@ -26,13 +26,24 @@
 # purpose: add a line only when AWS itself shows or documents the alias aws/<service> as a key
 # selectable or defaulted in *your* account, and prefer dropping an entry to guessing.
 #
-# Many services encrypt at rest with an AWS owned key and offer no alias at all, and several
-# offer only a customer managed key. Both are absent from this list deliberately. EKS is the
-# clearest example: its API-data envelope encryption uses an AWS owned key by default and a
-# customer managed key otherwise, so there is no alias/aws/eks to resolve.
+# The alias always takes the form aws/<service-name>, following the service's API namespace
+# rather than its brand name: EFS is alias/aws/elasticfilesystem, OpenSearch Service is
+# alias/aws/es and MSK is alias/aws/kafka. That pattern constrains the spelling but is NOT
+# evidence the key exists, which is the trap: alias/aws/eks fits it perfectly and no account
+# has one, because EKS API-data envelope encryption uses an AWS owned key by default and a
+# customer managed key otherwise.
 #
-# The alias follows the service's API namespace rather than its brand name: EFS is
-# alias/aws/elasticfilesystem, OpenSearch Service is alias/aws/es and MSK is alias/aws/kafka.
+# WHAT EACH ENTRY RESTS ON. The entries are grouped below by the strength of their evidence, so
+# a future editor knows which lines are safe to trust and which deserve a second look. Keep the
+# grouping accurate when you add or move a line.
+#
+#   cited          AWS documentation names the alias: elasticfilesystem, kinesisvideo, glue.
+#   corroborated   production code in this repository already names the alias, independently of
+#                  any external source: ebs, ssm, redshift, codeartifact.
+#   recollection   not doc-verified. Believed correct, and each was checked against the test
+#                  above (does the service's own encryption selector offer this key in your
+#                  account?), but nobody has read an AWS page that prints the alias. If you are
+#                  touching one of these and can cite it, move it up a group.
 #
 # The descriptions follow the template AWS uses for these keys, "Default master key that
 # protects my <resources> when no other key is defined". AWS has reworded individual entries
@@ -40,10 +51,31 @@
 # string as illustrative rather than authoritative. Nothing resolves a key by its description.
 # ---------------------------------------------------------------------------------------------
 keys:
-  - alias: "alias/aws/s3"
-    description: "Default master key that protects my S3 objects when no other key is defined"
+
+  # ---- cited: AWS documentation names the alias ----
+
+  - alias: "alias/aws/elasticfilesystem"
+    description: "Default master key that protects my EFS file systems when no other key is defined"
+  - alias: "alias/aws/kinesisvideo"
+    description: "Default master key that protects my Kinesis Video streams when no other key is defined"
+  - alias: "alias/aws/glue"
+    description: "Default master key that protects my Glue data when no other key is defined"
+
+  # ---- corroborated: named by production code in this repository ----
+
   - alias: "alias/aws/ebs"
     description: "Default master key that protects my EBS volumes when no other key is defined"
+  - alias: "alias/aws/ssm"
+    description: "Default master key that protects my Systems Manager data when no other key is defined"
+  - alias: "alias/aws/redshift"
+    description: "Default master key that protects my Redshift clusters when no other key is defined"
+  - alias: "alias/aws/codeartifact"
+    description: "Default master key that protects my CodeArtifact packages when no other key is defined"
+
+  # ---- recollection: not doc-verified ----
+
+  - alias: "alias/aws/s3"
+    description: "Default master key that protects my S3 objects when no other key is defined"
   - alias: "alias/aws/rds"
     description: "Default master key that protects my RDS database volumes when no other key is defined"
   - alias: "alias/aws/dynamodb"
@@ -54,12 +86,8 @@ keys:
     description: "Default master key that protects my SQS queues when no other key is defined"
   - alias: "alias/aws/sns"
     description: "Default master key that protects my SNS data when no other key is defined"
-  - alias: "alias/aws/ssm"
-    description: "Default master key that protects my Systems Manager data when no other key is defined"
   - alias: "alias/aws/secretsmanager"
     description: "Default master key that protects my Secrets Manager secrets when no other key is defined"
-  - alias: "alias/aws/elasticfilesystem"
-    description: "Default master key that protects my EFS file systems when no other key is defined"
   - alias: "alias/aws/elasticache"
     description: "Default master key that protects my ElastiCache data when no other key is defined"
   - alias: "alias/aws/es"
@@ -68,8 +96,6 @@ keys:
     description: "Default master key that protects my Kinesis data when no other key is defined"
   - alias: "alias/aws/kafka"
     description: "Default master key that protects my MSK clusters when no other key is defined"
-  - alias: "alias/aws/redshift"
-    description: "Default master key that protects my Redshift clusters when no other key is defined"
   - alias: "alias/aws/backup"
     description: "Default master key that protects my AWS Backup data when no other key is defined"
   - alias: "alias/aws/ecr"
@@ -78,8 +104,6 @@ keys:
     description: "Default master key that protects my FSx file systems when no other key is defined"
   - alias: "alias/aws/dms"
     description: "Default master key that protects my DMS replication instance storage when no other key is defined"
-  - alias: "alias/aws/codeartifact"
-    description: "Default master key that protects my CodeArtifact packages when no other key is defined"
   - alias: "alias/aws/codecommit"
     description: "Default master key that protects my CodeCommit repositories when no other key is defined"
   - alias: "alias/aws/ses"

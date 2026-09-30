@@ -1205,7 +1205,7 @@ public class KmsService implements ResourceProvider {
      * <p>An entry is skipped only when its alias is present <em>and</em> the key that alias
      * targets is present. Gating on the alias alone is not enough, because the two live in
      * different files and {@code PersistentStorage} quarantines an unreadable one and starts that
-     * store empty on its own: a lost key store would leave forty aliases dangling for the life of
+     * store empty on its own: a lost key store would leave every alias dangling for the life of
      * the instance, with {@code DescribeKey alias/aws/s3} reporting NotFoundException while
      * {@code ListAliases} still advertised it. The catalog is checked into the repository, so this
      * is the one part of a damaged store that can rebuild itself, and it does. This follows
