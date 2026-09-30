@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -268,12 +269,12 @@ class EcsServiceDeploymentStatusTest {
     }
 
     /**
-     * A DAEMON service still finishes its deployment after a task-definition change. DAEMON
-     * services do not roll yet, so the old revision's task is still the one running; the last
-     * assertions fail once they do, which is when the DAEMON case in the count should go.
+     * A DAEMON service's deployment is not done until its task has rolled to the new revision.
+     * Before the reconciler has replaced the old task, counting it would report COMPLETED and
+     * settle the new deployment SUCCESSFUL, which is terminal, while only the old revision runs.
      */
     @Test
-    void aDaemonServiceStillFinishesItsDeploymentAfterATaskDefinitionChange() {
+    void aDaemonServiceFinishesItsDeploymentOnlyOnceItsTaskHasRolled() {
         EcsService service = newMockModeService();
         service.createCluster("ddmn-cluster", REGION);
         service.registerContainerInstance("ddmn-cluster", null, List.of(), REGION);
@@ -282,23 +283,36 @@ class EcsServiceDeploymentStatusTest {
                 List.of(), null, null, "DAEMON", null, null, REGION);
         service.reconcileServices();
         service.reconcileServices();
+        assertEquals(rev1.getTaskDefinitionArn(), runningTasks(service).getFirst().getTaskDefinitionArn(),
+                "precondition: the old revision's task is up");
 
         TaskDefinition rev2 = registerTaskDef(service, "ddmn-fam", "app:2");
         String rolled = service.updateService("ddmn-cluster", "ddmn-svc",
                 "ddmn-fam:" + rev2.getRevision(), null, null, REGION).getDeploymentId();
-        service.reconcileServices();
-        service.reconcileServices();
 
-        ServiceDeployment record = deploymentOf(service, "ddmn-svc", "ddmn-cluster", rolled);
-        assertEquals("SUCCESSFUL", record.getStatus(),
-                "a DAEMON deployment must still finish, or a steady-state wait hangs for ever");
-        assertNotNull(record.getFinishedAt());
+        EcsServiceModel svc = service.serviceByArn(
+                service.describeServices("ddmn-cluster", List.of("ddmn-svc"), REGION)
+                        .getFirst().getServiceArn());
+        assertEquals("IN_PROGRESS", service.deploymentsFor(svc).getFirst().getRolloutState(),
+                "only the old revision's task is running");
+        assertEquals("IN_PROGRESS",
+                deploymentOf(service, "ddmn-svc", "ddmn-cluster", rolled).getStatus(),
+                "a deployment settled now could never move again");
+        assertTrue(service.eventsFor(svc).isEmpty(),
+                "no steady-state event before the task has rolled");
+
+        service.reconcileServices();
+        service.reconcileServices();
 
         List<EcsTask> live = runningTasks(service);
         assertEquals(1, live.size(), "one task per container instance");
-        assertEquals(rev1.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn(),
-                "DAEMON does not roll on a task-definition change; the count is honest about that");
-        assertNotEquals(rev2.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn());
+        assertEquals(rev2.getTaskDefinitionArn(), live.getFirst().getTaskDefinitionArn(),
+                "the task rolled to the new revision");
+        assertEquals("COMPLETED", service.deploymentsFor(svc).getFirst().getRolloutState());
+        ServiceDeployment record = deploymentOf(service, "ddmn-svc", "ddmn-cluster", rolled);
+        assertEquals("SUCCESSFUL", record.getStatus());
+        assertNotNull(record.getFinishedAt());
+        assertFalse(service.eventsFor(svc).isEmpty(), "steady state once the task has rolled");
     }
 
     /**

@@ -3976,20 +3976,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (cluster == null) {
             return 0;
         }
-        Stream<EcsTask> running = tasks.values().stream()
-                .filter(t -> ownedBy(t, svc, cluster))
-                .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()));
-
-        // reconcileDaemonService does not replace a DAEMON service's tasks when its task
-        // definition changes, so the stale ones are the only ones there will ever be; counting
-        // them keeps main's behaviour. Scope this like REPLICA once DAEMON services roll.
-        if (SCHEDULING_DAEMON.equals(svc.getSchedulingStrategy())) {
-            return running.count();
-        }
-
         String currentDeploymentId = deploymentId(svc);
         String taskDefinitionArn = resolvedTaskDefinitionArn(svc, serviceRegion(svc));
-        return running
+        return tasks.values().stream()
+                .filter(t -> ownedBy(t, svc, cluster))
+                .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
                 .filter(t -> !isStaleForDeployment(t, currentDeploymentId, taskDefinitionArn))
                 .count();
     }
