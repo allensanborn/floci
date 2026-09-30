@@ -4363,11 +4363,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // Every task that still occupies its instance: RUNNING, PENDING (Docker start in
         // flight) and STOPPING (teardown in flight, possibly stranded). Only STOPPED frees the
         // slot — otherwise a stranded STOPPING task would get a duplicate next to it.
-        // RUNNING tasks are preferred as the instance's daemon when there are several.
+        // RUNNING tasks are preferred as the instance's daemon when there are several, and
+        // among those the ones on the current deployment.
         List<EcsTask> liveTasks = tasks.values().stream()
                 .filter(t -> ownedBy(t, svc, cluster))
                 .filter(t -> !TaskStatus.STOPPED.name().equals(t.getLastStatus()))
-                .sorted(Comparator.comparingInt(t -> daemonTaskRank(t.getLastStatus())))
+                .sorted(Comparator.<EcsTask>comparingInt(t -> daemonTaskRank(t.getLastStatus()))
+                        .thenComparing(t -> isStaleForDeployment(t, currentDeploymentId,
+                                currentTaskDefinitionArn) ? 1 : 0))
                 .toList();
 
         Set<String> covered = new HashSet<>();
@@ -4389,8 +4392,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 if (TaskStatus.STOPPED.name().equals(t.getLastStatus())) {
                     covered.remove(instanceArn);
-                } else if (TaskStatus.RUNNING.name().equals(t.getLastStatus())) {
-                    running++;
                 }
                 continue;
             }
