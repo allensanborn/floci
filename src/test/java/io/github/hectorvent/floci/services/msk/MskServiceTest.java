@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.msk;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -428,6 +429,18 @@ class MskServiceTest {
         assertEquals(1L, configuration.getLatestRevision().getRevision());
         assertEquals("auto.create.topics.enable=true",
                 configuration.getServerPropertiesByRevision().get(1L));
+    }
+
+    @Test
+    void createConfigurationArnUsesRequestRegion() {
+        when(regionResolver.getRegion()).thenReturn("eu-west-2");
+        MskConfiguration created = mskService.createConfiguration(
+                "regional-config", null, List.of("3.6.0"), "");
+
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(
+                mskService.describeConfiguration(created.getArn()).getArn());
+        assertEquals("eu-west-2", arn.region());
+        assertEquals("000000000000", arn.accountId());
     }
 
     @Test
