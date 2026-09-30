@@ -4806,11 +4806,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                             svc.getServiceName(), e.getMessage());
                 }
             }
-            // Settle on the tick: a deployment whose tasks came up has finished, so a task dying
-            // afterwards cannot count against it.
-            if (deployment != null) {
-                settleStatus(deployment);
-            }
         } else if (running > svc.getDesiredCount()) {
             int toStop = (int) running - svc.getDesiredCount();
             // Drain stale tasks first: once their replacements are RUNNING this is the second
@@ -4830,6 +4825,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                     t.getTaskArn(), e.getMessage());
                         }
                     });
+        }
+        // Settle on every tick, not only on a read: a deployment that has converged is finished,
+        // so a task dying afterwards cannot count against it.
+        ServiceDeployment settled = deploymentRecordOf(svc);
+        if (settled != null) {
+            settleStatus(settled);
         }
     }
 

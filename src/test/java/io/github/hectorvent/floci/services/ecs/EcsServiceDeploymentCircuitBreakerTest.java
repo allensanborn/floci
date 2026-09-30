@@ -239,6 +239,32 @@ class EcsServiceDeploymentCircuitBreakerTest {
     }
 
     /**
+     * A deployment can converge without a launch, here by scaling in to the task that did start.
+     * The tick settles it all the same, so the failures that follow cannot count against it.
+     */
+    @Test
+    void aDeploymentThatConvergesByScalingInIsNotFailedLater() {
+        EcsService service = newService();
+        Map<String, Object> breaker = breaker(true, false);
+        breaker.put("thresholdConfiguration", Map.of("type", "COUNT", "value", 3));
+        launches.addAll(List.of(true, false));
+        String id = createService(service, "cb-scale", 2, breaker).getDeploymentId();
+        service.reconcileServices();
+
+        // No new deployment: a desired-count change rolls nothing.
+        service.updateService("cb-scale-cluster", "cb-scale", null, 1, null, REGION);
+        service.reconcileServices();
+
+        EcsTask task = runningTasks(service).getFirst();
+        service.stopTask("cb-scale-cluster", task.getTaskArn(), "test kill", REGION);
+        for (int i = 0; i < 4; i++) {
+            service.reconcileServices();
+        }
+
+        assertEquals("SUCCESSFUL", deploymentOf(service, "cb-scale", id).getStatus());
+    }
+
+    /**
      * The realistic case: a good deployment, then an update to a revision that cannot start. The
      * update fails, the earlier deployment keeps its record and its task, and the next update
      * starts from scratch.
