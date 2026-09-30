@@ -26,6 +26,11 @@
 # purpose: add a line only when AWS itself shows or documents the alias aws/<service> as a key
 # selectable or defaulted in *your* account, and prefer dropping an entry to guessing.
 #
+# ElastiCache is the worked example of a line that was dropped: its at-rest encryption guide
+# describes the default as a service managed key, and serverless caches as using an AWS owned
+# key, and never names alias/aws/elasticache. That is not evidence the alias exists, so it is
+# not seeded.
+#
 # The alias always takes the form aws/<service-name>, following the service's API namespace
 # rather than its brand name: EFS is alias/aws/elasticfilesystem, OpenSearch Service is
 # alias/aws/es and MSK is alias/aws/kafka. That pattern constrains the spelling but is NOT
@@ -37,7 +42,8 @@
 # a future editor knows which lines are safe to trust and which deserve a second look. Keep the
 # grouping accurate when you add or move a line.
 #
-#   cited          AWS documentation names the alias: elasticfilesystem, kinesisvideo, glue.
+#   cited          AWS documentation names the alias: elasticfilesystem, kinesisvideo, glue,
+#                  acm.
 #   corroborated   production code in this repository already names the alias, independently of
 #                  any external source: ebs, ssm, redshift, codeartifact.
 #   recollection   not doc-verified. Believed correct, and each was checked against the test
@@ -60,6 +66,10 @@ keys:
     description: "Default master key that protects my Kinesis Video streams when no other key is defined"
   - alias: "alias/aws/glue"
     description: "Default master key that protects my Glue data when no other key is defined"
+  # The KMS ListAliases API reference prints alias/aws/acm with a TargetKeyId in its example
+  # output: https://docs.aws.amazon.com/kms/latest/APIReference/API_ListAliases.html
+  - alias: "alias/aws/acm"
+    description: "Default master key that protects my ACM private keys when no other key is defined"
 
   # ---- corroborated: named by production code in this repository ----
 
@@ -88,8 +98,6 @@ keys:
     description: "Default master key that protects my SNS data when no other key is defined"
   - alias: "alias/aws/secretsmanager"
     description: "Default master key that protects my Secrets Manager secrets when no other key is defined"
-  - alias: "alias/aws/elasticache"
-    description: "Default master key that protects my ElastiCache data when no other key is defined"
   - alias: "alias/aws/es"
     description: "Default master key that protects my OpenSearch domains when no other key is defined"
   - alias: "alias/aws/kinesis"
