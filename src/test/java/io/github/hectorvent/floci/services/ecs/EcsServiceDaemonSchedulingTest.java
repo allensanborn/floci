@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
@@ -290,7 +291,7 @@ class EcsServiceDaemonSchedulingTest {
         assertEquals(instances.stream().map(ContainerInstance::getContainerInstanceArn).collect(Collectors.toSet()),
                 live.stream().map(EcsTask::getContainerInstanceArn).collect(Collectors.toSet()));
         assertEquals(instances.size(), live.size(), "one daemon task per instance");
-        var svc = service.describeServices(cluster, List.of("daemon-svc"), REGION).getFirst();
+        EcsServiceModel svc = service.describeServices(cluster, List.of("daemon-svc"), REGION).getFirst();
         for (EcsTask t : live) {
             assertEquals("RUNNING", t.getLastStatus());
             assertEquals(taskDefinitionArn, t.getTaskDefinitionArn());
