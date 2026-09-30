@@ -488,6 +488,30 @@ class EcsServiceDeploymentStatusTest {
         assertNull(after.getStatusReason());
     }
 
+    /**
+     * As {@link #aConvergedDeploymentNobodyReadIsSuccessfulWhenSuperseded}, for a delete: the
+     * delete settles the deployment against the service as it stood, so a rollout that had
+     * finished is SUCCESSFUL whether or not anything read it first.
+     */
+    @Test
+    void deletingAServiceSettlesAConvergedDeploymentNobodyRead() {
+        EcsService service = newMockModeService();
+        service.createCluster("ddel3-cluster", REGION);
+        registerTaskDef(service, "ddel3-fam", "app:1");
+        String only = service.createService("ddel3-cluster", "ddel3-svc", "ddel3-fam", 1,
+                LaunchType.FARGATE, List.of(), null, REGION).getDeploymentId();
+        service.reconcileServices();
+
+        service.deleteService("ddel3-cluster", "ddel3-svc", true, REGION);
+
+        ServiceDeployment after = deploymentOf(service, "ddel3-svc", "ddel3-cluster", only);
+        assertEquals("SUCCESSFUL", after.getStatus(),
+                "its task was running when the delete arrived");
+        assertNotNull(after.getFinishedAt());
+        assertNull(after.getStoppedAt(), "a deployment that succeeded was never stopped");
+        assertNull(after.getStatusReason());
+    }
+
     /** The one place the provider's join is asserted: the revision ARN carries the task set id. */
     private static void assertRevisionCarriesTaskSetId(EcsService service, String name,
                                                        String cluster, String deploymentId) {

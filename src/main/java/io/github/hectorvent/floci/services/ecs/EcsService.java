@@ -2593,6 +2593,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterException",
                     "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
         }
+        // Settle against the service as it stands, as UpdateService does: a deployment whose
+        // tasks are up has finished, whether or not anything read it.
+        currentServiceDeployment(svc);
         svc.setStatus("INACTIVE");
         // A deleted service's deployments can never finish, so stop them. This must come before
         // setDesiredCount(0): a concurrent read that saw desiredCount 0 on a still-ACTIVE service
