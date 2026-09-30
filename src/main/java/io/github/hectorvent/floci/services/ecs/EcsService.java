@@ -3884,7 +3884,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // deployment would report a task-definition change COMPLETED as soon as it was made.
         long running = runningOnCurrentDeployment(svc);
         boolean converged = running >= svc.getDesiredCount();
-        ServiceDeployment record = deploymentRecordOf(svc);
+        ServiceDeployment record = lockedCopyOf(deploymentRecordOf(svc));
         boolean failed = record != null && record.isCircuitBreakerTriggered();
 
         Deployment d = new Deployment();
@@ -4195,6 +4195,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private static boolean flag(Object value, boolean fallback) {
         return value == null ? fallback : Boolean.parseBoolean(value.toString());
+    }
+
+    /** {@link #copyOf} under the deployment's lock, or null for no deployment. */
+    private static ServiceDeployment lockedCopyOf(ServiceDeployment deployment) {
+        if (deployment == null) {
+            return null;
+        }
+        synchronized (deployment) {
+            return copyOf(deployment);
+        }
     }
 
     /**
@@ -4788,7 +4798,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 return;
             }
             ServiceDeployment deployment = deploymentRecordOf(svc);
-            if (deployment != null && deployment.isCircuitBreakerTriggered()) {
+            ServiceDeployment snapshot = lockedCopyOf(deployment);
+            if (snapshot != null && snapshot.isCircuitBreakerTriggered()) {
                 // A deployment the circuit breaker failed launches no new tasks.
                 return;
             }
