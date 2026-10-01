@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -29,6 +30,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -50,6 +52,7 @@ public class SsmService implements ResourceProvider {
     private static final Set<String> DESCRIBE_PARAMETERS_FILTER_KEYS =
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
+    private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
@@ -183,6 +186,12 @@ public class SsmService implements ResourceProvider {
 
     public long putParameter(String name, String value, String type, String description, boolean overwrite,
                              Map<String, String> tags, String region) {
+        return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
+    }
+
+    public long putParameter(String name, String value, String type, String description, boolean overwrite,
+                             Map<String, String> tags, String keyId, String allowedPattern, String tier,
+                             List<JsonNode> policies, String region) {
         validateTagKeys(tags);
         rejectReservedName(name);
         String storageKey = regionKey(region, name);
@@ -202,11 +211,28 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
+        if (allowedPattern != null && !Pattern.compile(allowedPattern).matcher(value).matches()) {
+            throw new AwsException("ParameterPatternMismatchException",
+                    "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
+        }
+
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
 
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
+        if ("SecureString".equals(parameter.getType())) {
+            parameter.setKeyId(keyId);
+        }
+        parameter.setAllowedPattern(allowedPattern);
+        parameter.setPolicies(policies == null || policies.isEmpty() ? null : List.copyOf(policies));
+        if ("Intelligent-Tiering".equals(tier)) {
+            boolean advanced = parameter.getPolicies() != null
+                    || value.getBytes(StandardCharsets.UTF_8).length > STANDARD_TIER_MAX_VALUE_BYTES;
+            tier = advanced ? "Advanced" : "Standard";
+        }
+        // AWS never moves an Advanced parameter back to Standard behind an overwrite that omits the tier.
+        parameter.setTier(tier != null ? tier : existing != null ? tierOf(existing) : "Standard");
         parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
         parameter.setLastModifiedDate(Instant.now());
 
@@ -569,13 +595,24 @@ public class SsmService implements ResourceProvider {
             case "Name" -> parameter.getName();
             case "Type" -> parameter.getType();
             case "DataType" -> parameter.getDataType();
-            // Floci stores neither a tier nor a customer key, so every parameter is Standard and
-            // a SecureString is encrypted with the AWS managed key, as AWS defaults them.
-            case "Tier" -> "Standard";
-            case "KeyId" -> "SecureString".equals(parameter.getType()) ? DEFAULT_SSM_KEY_ID : null;
+            case "Tier" -> tierOf(parameter);
+            case "KeyId" -> keyIdOf(parameter);
             default -> null;
         };
         return actual != null && matchesAny(actual, filter);
+    }
+
+    /** Parameters stored before Floci kept a tier are Standard, as AWS defaults them. */
+    static String tierOf(Parameter parameter) {
+        return parameter.getTier() != null ? parameter.getTier() : "Standard";
+    }
+
+    /** A SecureString put without a KeyId is encrypted with the AWS managed key. */
+    static String keyIdOf(Parameter parameter) {
+        if (!"SecureString".equals(parameter.getType())) {
+            return null;
+        }
+        return parameter.getKeyId() != null ? parameter.getKeyId() : DEFAULT_SSM_KEY_ID;
     }
 
     private static boolean matchesAny(String actual, ParameterStringFilter filter) {

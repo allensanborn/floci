@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
 import io.github.hectorvent.floci.services.ssm.model.SsmAssociation;
 import io.github.hectorvent.floci.services.ssm.model.SsmDocument;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -126,7 +127,19 @@ public class SsmJsonHandler {
             }
         }
 
-        long version = ssmService.putParameter(name, value, type, description, overwrite, tags, region);
+        List<JsonNode> policies = null;
+        if (request.hasNonNull("Policies")) {
+            policies = new ArrayList<>();
+            try {
+                objectMapper.readTree(request.path("Policies").asText()).forEach(policies::add);
+            } catch (JsonProcessingException e) {
+                throw new AwsException("ValidationException", "Invalid policies input: " + e.getOriginalMessage(), 400);
+            }
+        }
+
+        long version = ssmService.putParameter(name, value, type, description, overwrite, tags,
+                request.path("KeyId").asText(null), request.path("AllowedPattern").asText(null),
+                request.path("Tier").asText(null), policies, region);
 
         return Response.ok(new PutParameterResponse(version)).build();
     }
@@ -315,6 +328,22 @@ public class SsmJsonHandler {
                 node.put("Description", p.getDescription());
             }
             node.put("DataType", p.getDataType());
+            if (SsmService.keyIdOf(p) != null) {
+                node.put("KeyId", SsmService.keyIdOf(p));
+            }
+            if (p.getAllowedPattern() != null) {
+                node.put("AllowedPattern", p.getAllowedPattern());
+            }
+            node.put("Tier", SsmService.tierOf(p));
+            if (p.getPolicies() != null) {
+                ArrayNode policies = node.putArray("Policies");
+                for (JsonNode policy : p.getPolicies()) {
+                    policies.addObject()
+                            .put("PolicyText", policy.toString())
+                            .put("PolicyType", policy.path("Type").asText(null))
+                            .put("PolicyStatus", "Pending");
+                }
+            }
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
