@@ -223,4 +223,29 @@ class Ec2DedicatedHostIntegrationTest {
             .body("ReleaseHostsResponse.unsuccessful.item[0].error.code", equalTo("Client.InvalidHostID.NotFound"))
             .body("ReleaseHostsResponse.unsuccessful.item[1].resourceId", equalTo(hostId));
     }
+
+    @Test
+    @Order(9)
+    void allocationThatOmitsAutoPlacementDefaultsItToOff() {
+        String defaultedHostId = given()
+            .formParam("Action", "AllocateHosts")
+            .formParam("InstanceFamily", "m5")
+            .formParam("AvailabilityZone", "us-east-1a")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("AllocateHostsResponse.hostIdSet.item");
+
+        given()
+            .formParam("Action", "DescribeHosts")
+            .formParam("HostId.1", defaultedHostId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeHostsResponse.hostSet.item.autoPlacement", equalTo("off"));
+    }
 }

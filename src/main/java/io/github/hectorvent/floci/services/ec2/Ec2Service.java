@@ -9064,7 +9064,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 case "instance-type" -> matchesValue(values, host.getInstanceType());
                 case "state" -> matchesValue(values, host.getState());
                 case "auto-placement" -> matchesValue(values, host.getAutoPlacement());
-                case "host-recovery" -> matchesValue(values, host.getHostRecovery());
                 default -> true;
             };
         }

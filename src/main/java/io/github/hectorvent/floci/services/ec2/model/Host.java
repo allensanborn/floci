@@ -26,7 +26,7 @@ public class Host {
     private String availabilityZone;
     private String instanceFamily;
     private String instanceType;
-    private String autoPlacement = "on";
+    private String autoPlacement = "off";
     private String hostRecovery = "off";
     private String hostMaintenance = "on";
     private String outpostArn;

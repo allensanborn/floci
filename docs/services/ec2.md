@@ -552,7 +552,7 @@ through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports t
 | ReleaseHosts | Marks hosts `released`; they stay visible in `DescribeHosts`, as on AWS. |
 
 `AvailabilityZone` and exactly one of `InstanceType` or `InstanceFamily` are required.
-`AutoPlacement` defaults to `on`, `HostRecovery` to `off` and `HostMaintenance` to `on`.
+`AutoPlacement` and `HostRecovery` default to `off` and `HostMaintenance` to `on`.
 `DescribeHosts` with an unknown id fails with `InvalidHostID.NotFound`. `ModifyHosts` and
 `ReleaseHosts` report each host separately: an unknown or already released host, or a host
 still carrying instances on release, goes to `unsuccessful` instead of failing the call.
