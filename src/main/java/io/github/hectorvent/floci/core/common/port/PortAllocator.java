@@ -5,6 +5,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -12,8 +15,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
- * Hands out ports from a configured range for Lambda Runtime API servers.
- * Throws {@link IllegalStateException} when the range is exhausted; the
+ * Hands out ports from a configured range for Lambda Runtime API servers,
+ * skipping any port another process already holds. Throws {@link IllegalStateException} when the range is exhausted; the
  * caller releases a port back to the pool via {@link #release(int)}.
  */
 @ApplicationScoped
@@ -52,6 +55,14 @@ public class PortAllocator {
     public int allocate() {
         for (int p = basePort; p <= maxPort; p++) {
             if (inUse.add(p)) {
+                // inUse only knows this JVM's ports. A port held by anything else in the same
+                // network namespace (a second floci, another JVM) would leave RuntimeApiServer
+                // retrying a bind it cannot win while the rest of the range sits idle. A held
+                // port is not kept reserved: a later allocate() takes it once its holder lets go.
+                if (!isBindable(p)) {
+                    inUse.remove(p);
+                    continue;
+                }
                 warnIfUnderPressure();
                 return p;
             }
@@ -90,5 +101,17 @@ public class PortAllocator {
                         + "floci.services.lambda.runtime-api-base-port / floci.services.lambda.runtime-api-max-port "
                         + "before the pool is exhausted.",
                 (allocated * 100) / poolSize, allocated, poolSize, basePort, maxPort));
+    }
+
+    // Binds the same address RuntimeApiServer listens on, with SO_REUSEADDR as Vert.x sets it,
+    // so a port only lingering in TIME_WAIT from a stopped server still counts as free.
+    private static boolean isBindable(int port) {
+        try (ServerSocket socket = new ServerSocket()) {
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress("0.0.0.0", port));
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
     }
 }

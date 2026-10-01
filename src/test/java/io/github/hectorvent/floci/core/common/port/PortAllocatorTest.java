@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.core.common.port;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -12,6 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -111,5 +114,24 @@ class PortAllocatorTest {
 
         allocator.release(first);
         assertEquals(first, allocator.allocate());
+    }
+
+    @Test
+    void skipsPortHeldByAnotherProcessAndReusesItOnceReleased() throws IOException {
+        // Holding the base port from outside the allocator stands in for a second floci (or any
+        // other process) in the same network namespace. Handing it out would leave the Runtime
+        // API server retrying a bind it can never win while the rest of the range sits idle.
+        int held;
+        PortAllocator allocator;
+        try (ServerSocket holder = new ServerSocket(0)) {
+            held = holder.getLocalPort();
+            allocator = new PortAllocator(held, held + 50);
+            int first = allocator.allocate();
+            assertNotEquals(held, first, "allocate() must skip a port another process holds");
+            assertTrue(first > held && first <= held + 50);
+        }
+
+        assertEquals(held, allocator.allocate(),
+                "a port skipped while held must be handed out once its holder lets go");
     }
 }
