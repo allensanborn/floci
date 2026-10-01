@@ -16,7 +16,7 @@ class AccountAlternateContactIntegrationTest {
     static void configureRestAssured() { RestAssuredJsonUtils.configureAwsContentTypes(); }
 
     @Test
-    void createsUpdatesReadsAndDeletesAlternateContact() {
+    void createsUpdatesAndReadsAlternateContact() {
         put("security@example.com").statusCode(200);
         get().statusCode(200).body("AlternateContact.EmailAddress", equalTo("security@example.com"));
         put("security-updated@example.com").statusCode(200);
