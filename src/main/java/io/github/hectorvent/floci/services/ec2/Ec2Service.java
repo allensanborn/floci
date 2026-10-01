@@ -105,6 +105,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -7572,8 +7573,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     "Value (" + count + ") for parameter Quantity is invalid.", 400);
         }
         validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
-        boolean zoneExists = subnets.scan(k -> true).stream()
-                .anyMatch(sn -> region.equals(sn.getRegion()) && availabilityZone.equals(sn.getAvailabilityZone()));
+        boolean zoneExists = Arrays.stream(MODELLED_ZONE_SUFFIXES)
+                .anyMatch(suffix -> availabilityZone.equals(region + suffix));
         if (!zoneExists) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid availability zone: [" + availabilityZone + "]", 400);

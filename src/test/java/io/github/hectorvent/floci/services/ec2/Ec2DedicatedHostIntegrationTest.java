@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
+import java.util.Arrays;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -249,8 +252,8 @@ class Ec2DedicatedHostIntegrationTest {
             .body("DescribeHostsResponse.hostSet.item.autoPlacement", equalTo("off"));
     }
 
-    private static io.restassured.response.ValidatableResponse post(String... kv) {
-        io.restassured.specification.RequestSpecification r = given().header("Authorization", AUTH_HEADER);
+    private static ValidatableResponse post(String... kv) {
+        RequestSpecification r = given().header("Authorization", AUTH_HEADER);
         for (int i = 0; i < kv.length; i += 2) {
             r = r.formParam(kv[i], kv[i + 1]);
         }
@@ -308,7 +311,7 @@ class Ec2DedicatedHostIntegrationTest {
     }
 
     private static String[] concat(String[] a, String... b) {
-        String[] out = java.util.Arrays.copyOf(a, a.length + b.length);
+        String[] out = Arrays.copyOf(a, a.length + b.length);
         System.arraycopy(b, 0, out, a.length, b.length);
         return out;
     }

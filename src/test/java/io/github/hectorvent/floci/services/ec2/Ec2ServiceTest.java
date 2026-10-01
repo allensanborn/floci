@@ -4933,4 +4933,17 @@ class Ec2ServiceTest {
         assertEquals("InvalidHostID.NotFound", e.getErrorCode());
         assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
     }
+
+    @Test
+    void allocateHostsAcceptsModelledZoneWithNoSubnet() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        service.describeSubnets("us-east-1", List.of(), Map.of()).stream()
+                .filter(sn -> "us-east-1c".equals(sn.getAvailabilityZone()))
+                .forEach(sn -> service.deleteSubnet("us-east-1", sn.getSubnetId()));
+
+        assertEquals(1, service.allocateHosts("us-east-1", "us-east-1c", "m5.large", null, 1,
+                null, null, null, null, null).size());
+    }
 }
