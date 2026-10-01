@@ -264,7 +264,7 @@ public class IamQueryHandler {
         String userName = getParam(params, "UserName");
         String path = getParam(params, "Path");
         Map<String, String> tags = extractTags(params, true);
-        IamUser user = iamService.createUser(userName, path);
+        IamUser user = iamService.createUser(userName, path, getParam(params, "PermissionsBoundary"));
         if (!tags.isEmpty()) iamService.tagUser(userName, tags);
         user = iamService.getUser(userName);
         String result = new XmlBuilder().start("User").raw(userXml(user, true)).end("User").build();
@@ -787,7 +787,8 @@ public class IamQueryHandler {
         String description = getParam(params, "Description");
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
         Map<String, String> tags = extractTags(params, true);
-        IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags);
+        IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags,
+                getParam(params, "PermissionsBoundary"));
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
     }
@@ -990,7 +991,6 @@ public class IamQueryHandler {
         }
         return xml.end("GroupList")
                 .raw(attachedManagedPoliciesXml(iamService.listAttachedUserPolicies(u.getUserName(), null)))
-                .raw(permissionsBoundaryXml(u.getPermissionsBoundaryArn()))
                 .build();
     }
 
@@ -2015,6 +2015,7 @@ public class IamQueryHandler {
                 .elem("UserId", u.getUserId())
                 .elem("Arn", u.getArn())
                 .elem("CreateDate", isoDate(u.getCreateDate()))
+                .raw(detailed ? permissionsBoundaryXml(u.getPermissionsBoundaryArn()) : "")
                 .raw(detailed ? tagsElement(u.getTags()) : "")
                 .build();
     }
@@ -2047,6 +2048,7 @@ public class IamQueryHandler {
                 .elem("MaxSessionDuration", (long) r.getMaxSessionDuration())
                 .elem("AssumeRolePolicyDocument", r.getAssumeRolePolicyDocument())
                 .elem("Description", r.getDescription())
+                .raw(detailed ? permissionsBoundaryXml(r.getPermissionsBoundaryArn()) : "")
                 .raw(detailed ? tagsElement(r.getTags()) : "")
                 .build();
     }
