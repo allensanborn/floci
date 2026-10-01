@@ -197,7 +197,7 @@ public class CloudWatchDashboardsService {
     /**
      * Resolves the dashboard an ARN names, or reports that nothing does. The tag operations
      * declare {@code ResourceNotFoundException}, which is a different shape from the
-     * {@code ResourceNotFound} that {@code GetDashboard} and {@code DeleteDashboards} declare,
+     * {@code ResourceNotFound} that {@code GetDashboard} declares,
      * so this is not the {@link #notFound(String)} used by the rest of this service.
      */
     private Dashboard requireDashboard(String resourceArn, String region) {

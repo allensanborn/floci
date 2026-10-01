@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -116,10 +117,10 @@ class CloudWatchDashboardsServiceTest {
 
     @Test
     void tagsGivenOnCreateAreReadableByArn() {
-        service.putDashboard("ops", BODY, java.util.Map.of("team", "platform"), REGION);
+        service.putDashboard("ops", BODY, Map.of("team", "platform"), REGION);
         String arn = service.getDashboard("ops", REGION).getDashboardArn();
 
-        assertEquals(java.util.Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
+        assertEquals(Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
         assertTrue(CloudWatchDashboardsService.isDashboardArn(arn));
     }
 
@@ -129,12 +130,12 @@ class CloudWatchDashboardsServiceTest {
      */
     @Test
     void tagsOnAReplacingPutDoNotOverwriteTheExistingOnes() {
-        service.putDashboard("ops", BODY, java.util.Map.of("team", "platform"), REGION);
+        service.putDashboard("ops", BODY, Map.of("team", "platform"), REGION);
         String arn = service.getDashboard("ops", REGION).getDashboardArn();
 
-        service.putDashboard("ops", BODY, java.util.Map.of("team", "someone-else"), REGION);
+        service.putDashboard("ops", BODY, Map.of("team", "someone-else"), REGION);
 
-        assertEquals(java.util.Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
+        assertEquals(Map.of("team", "platform"), service.listTagsForResource(arn, REGION));
     }
 
     @Test
@@ -142,11 +143,11 @@ class CloudWatchDashboardsServiceTest {
         service.putDashboard("ops", BODY, REGION);
         String arn = service.getDashboard("ops", REGION).getDashboardArn();
 
-        service.tagResource(arn, java.util.Map.of("env", "dev"), REGION);
-        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
+        service.tagResource(arn, Map.of("env", "dev"), REGION);
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
 
         service.untagResource(arn, List.of("env"), REGION);
-        assertEquals(java.util.Map.of(), service.listTagsForResource(arn, REGION));
+        assertEquals(Map.of(), service.listTagsForResource(arn, REGION));
     }
 
     /**
@@ -163,13 +164,13 @@ class CloudWatchDashboardsServiceTest {
         assertEquals("arn:aws:cloudwatch:us-east-1:000000000000:dashboard/ops", regionful);
         assertTrue(CloudWatchDashboardsService.isDashboardArn(regionless));
 
-        service.tagResource(regionless, java.util.Map.of("env", "dev"), REGION);
+        service.tagResource(regionless, Map.of("env", "dev"), REGION);
         // Read back through the other form: one dashboard, reachable either way.
-        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(regionful, REGION));
-        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(regionless, REGION));
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(regionful, REGION));
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(regionless, REGION));
 
         service.untagResource(regionless, List.of("env"), REGION);
-        assertEquals(java.util.Map.of(), service.listTagsForResource(regionful, REGION));
+        assertEquals(Map.of(), service.listTagsForResource(regionful, REGION));
     }
 
     /**
@@ -199,7 +200,7 @@ class CloudWatchDashboardsServiceTest {
         assertTrue(CloudWatchDashboardsService.isDashboardArn(ghost));
 
         for (Runnable call : List.<Runnable>of(
-                () -> service.tagResource(ghost, java.util.Map.of("env", "prod"), REGION),
+                () -> service.tagResource(ghost, Map.of("env", "prod"), REGION),
                 () -> service.untagResource(ghost, List.of("env"), REGION),
                 () -> service.listTagsForResource(ghost, REGION))) {
             AwsException e = assertThrows(AwsException.class, call::run);
@@ -208,9 +209,9 @@ class CloudWatchDashboardsServiceTest {
         }
 
         // The failures wrote nothing: the real dashboard still carries only what it was given.
-        assertEquals(java.util.Map.of(), service.listTagsForResource(arn, REGION));
-        service.tagResource(arn, java.util.Map.of("env", "dev"), REGION);
-        assertEquals(java.util.Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
+        assertEquals(Map.of(), service.listTagsForResource(arn, REGION));
+        service.tagResource(arn, Map.of("env", "dev"), REGION);
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(arn, REGION));
     }
 
     @Test

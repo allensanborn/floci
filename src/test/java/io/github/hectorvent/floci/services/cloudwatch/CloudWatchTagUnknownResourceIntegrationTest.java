@@ -1,10 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
-import io.restassured.config.EncoderConfig;
-import io.restassured.http.ContentType;
-import io.restassured.parsing.Parser;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -12,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Tagging a CloudWatch resource whose ARN names nothing has to fail, on every one of the three
@@ -46,9 +44,8 @@ class CloudWatchTagUnknownResourceIntegrationTest {
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/metric-stream-role";
 
     @BeforeAll
-    static void registerJsonParsers() {
-        RestAssured.registerParser(JSON_1_0, Parser.JSON);
-        RestAssured.registerParser(JSON_1_1, Parser.JSON);
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     private static RequestSpecification query(String action) {
@@ -58,11 +55,8 @@ class CloudWatchTagUnknownResourceIntegrationTest {
                 .formParam("Action", action);
     }
 
-    // RestAssured has no built-in serializer for the x-amz-json content types; send raw text.
     private static RequestSpecification json(String contentType, String scope, String target, String body) {
         return given()
-                .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()
-                        .encodeContentTypeAs(contentType, ContentType.TEXT)))
                 .contentType(contentType)
                 .header("Authorization", scope)
                 .header("X-Amz-Target", target)
@@ -143,7 +137,7 @@ class CloudWatchTagUnknownResourceIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(org.hamcrest.Matchers.not(containsString("<Key>env</Key>")));
+                .body(not(containsString("<Key>env</Key>")));
     }
 
     @Test
@@ -240,7 +234,7 @@ class CloudWatchTagUnknownResourceIntegrationTest {
                 .body("ErrorResponse.Error.Message",
                         containsString("insight-rule/no-such-rule"))
                 .body("ErrorResponse.Error.Message",
-                        org.hamcrest.Matchers.not(containsString("Alarm")));
+                        not(containsString("Alarm")));
     }
 
     /**
