@@ -13,11 +13,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.IntPredicate;
 
 /**
- * Hands out ports from a configured range for Lambda Runtime API servers,
- * skipping any port another process already holds. Throws {@link IllegalStateException} when the range is exhausted; the
- * caller releases a port back to the pool via {@link #release(int)}.
+ * Hands out ports from a configured range for Lambda Runtime API servers, skipping any port
+ * another process already holds. Throws {@link IllegalStateException} when the range is
+ * exhausted; the caller releases a port back to the pool via {@link #release(int)}.
  */
 @ApplicationScoped
 public class PortAllocator {
@@ -32,6 +33,7 @@ public class PortAllocator {
     private final Set<Integer> inUse = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean pressureWarningEmitted = new AtomicBoolean();
     private final Consumer<String> warningSink;
+    private final IntPredicate bindable;
 
     @Inject
     public PortAllocator(EmulatorConfig config) {
@@ -44,12 +46,17 @@ public class PortAllocator {
     }
 
     PortAllocator(int basePort, int maxPort, Consumer<String> warningSink) {
+        this(basePort, maxPort, warningSink, PortAllocator::isBindable);
+    }
+
+    PortAllocator(int basePort, int maxPort, Consumer<String> warningSink, IntPredicate bindable) {
         this.basePort = basePort;
         this.maxPort = maxPort;
         this.poolSize = maxPort - basePort + 1;
         this.pressureWarningThreshold = Math.max(1,
                 (int) Math.ceil(poolSize * (PRESSURE_WARNING_PERCENT / 100.0)));
         this.warningSink = warningSink;
+        this.bindable = bindable;
     }
 
     public int allocate() {
@@ -59,7 +66,7 @@ public class PortAllocator {
                 // network namespace (a second floci, another JVM) would leave RuntimeApiServer
                 // retrying a bind it cannot win while the rest of the range sits idle. A held
                 // port is not kept reserved: a later allocate() takes it once its holder lets go.
-                if (!isBindable(p)) {
+                if (!bindable.test(p)) {
                     inUse.remove(p);
                     continue;
                 }
@@ -75,8 +82,9 @@ public class PortAllocator {
         throw new IllegalStateException(
                 "Lambda Runtime API port pool exhausted: no free ports in range "
                         + basePort + "-" + maxPort + " (" + poolSize
-                        + " ports, all in use). One port is held per running Lambda container, "
-                        + "so this is the concurrent-execution ceiling. Widen it with "
+                        + " ports, all in use by this floci or held by another process). One port "
+                        + "is held per running Lambda container, so this is the concurrent-execution "
+                        + "ceiling. Widen it with "
                         + "floci.services.lambda.runtime-api-base-port / "
                         + "floci.services.lambda.runtime-api-max-port.");
     }
