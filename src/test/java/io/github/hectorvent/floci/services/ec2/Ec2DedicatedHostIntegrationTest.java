@@ -298,11 +298,11 @@ class Ec2DedicatedHostIntegrationTest {
         String[] base = {"Action", "RunInstances", "ImageId", "ami-0abcdef1234567891", "MinCount", "1",
                 "MaxCount", "1", "Placement.HostId", id};
         post(concat(base, "InstanceType", "m5.large", "SubnetId", subnetInB))
-                .statusCode(400).body(containsString("InvalidParameterCombination"));
+                .statusCode(400).body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
         post(concat(base, "InstanceType", "m5.large", "Placement.Tenancy", "default"))
-                .statusCode(400).body(containsString("InvalidParameterCombination"));
+                .statusCode(400).body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
         post(concat(base, "InstanceType", "c5.large"))
-                .statusCode(400).body(containsString("InvalidParameter"));
+                .statusCode(400).body("Response.Errors.Error.Code", equalTo("InvalidParameter"));
         post("Action", "DescribeHosts", "HostId.1", id).statusCode(200)
                 .body("DescribeHostsResponse.hostSet.item.instances.item.size()", equalTo(0));
     }

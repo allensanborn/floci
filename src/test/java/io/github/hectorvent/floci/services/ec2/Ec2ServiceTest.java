@@ -4898,4 +4898,39 @@ class Ec2ServiceTest {
         // Provider remains untouched
         assertEquals(1, nodeInstance.getTags().size());
     }
+
+    // The host is released after runInstances' unlocked availability check and before its instances
+    // are stored. The instance-type catalog lookup sits between the two, so it stands in for the
+    // concurrent ReleaseHosts. Only the re-check under hostLock can still reject the launch.
+    @Test
+    void launchOntoAHostReleasedAfterTheUnlockedCheckIsRejected() {
+        Ec2Service[] holder = new Ec2Service[1];
+        String[] hostId = new String[1];
+        boolean[] released = {false};
+        Ec2InstanceTypeCatalog releasingCatalog = new Ec2InstanceTypeCatalog() {
+            @Override
+            public Optional<CatalogInstanceType> find(String instanceType) {
+                if (hostId[0] != null && !released[0]) {
+                    released[0] = true;
+                    holder[0].releaseHost("us-east-1", hostId[0]);
+                }
+                return super.find(instanceType);
+            }
+        };
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), new AmiImageResolver(imageCatalog), imageCatalog,
+                releasingCatalog, new InMemoryStorageFactory());
+        holder[0] = service;
+        hostId[0] = service.allocateHosts("us-east-1", "us-east-1a", "m5.large", null, 1,
+                null, null, null, null, null).get(0).getHostId();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m5.large", 1, 1, null, List.of(), null, null, List.of(), null, null,
+                null, null, 0, null, null, null, null, false, hostId[0], null));
+
+        assertTrue(released[0], "the hook must have released the host between the two checks");
+        assertEquals("InvalidHostID.NotFound", e.getErrorCode());
+        assertTrue(service.hostInstances("us-east-1", hostId[0]).isEmpty());
+    }
 }
