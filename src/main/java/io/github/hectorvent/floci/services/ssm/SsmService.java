@@ -38,6 +38,7 @@ import java.util.*;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
 public class SsmService implements ResourceProvider {
@@ -211,9 +212,18 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
-        if (allowedPattern != null && !Pattern.compile(allowedPattern).matcher(value).matches()) {
-            throw new AwsException("ParameterPatternMismatchException",
-                    "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
+        if (allowedPattern != null) {
+            Pattern pattern;
+            try {
+                pattern = Pattern.compile(allowedPattern);
+            } catch (PatternSyntaxException e) {
+                throw new AwsException("InvalidAllowedPatternException",
+                        "The request doesn't meet the regular expression requirement.", 400);
+            }
+            if (!pattern.matcher(value).matches()) {
+                throw new AwsException("ParameterPatternMismatchException",
+                        "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
+            }
         }
 
         long version = (existing != null) ? existing.getVersion() + 1 : 1;
@@ -225,7 +235,12 @@ public class SsmService implements ResourceProvider {
             parameter.setKeyId(keyId);
         }
         parameter.setAllowedPattern(allowedPattern);
-        parameter.setPolicies(policies == null || policies.isEmpty() ? null : List.copyOf(policies));
+        // AWS keeps existing policies until new ones, or an empty list, are sent.
+        if (policies == null) {
+            parameter.setPolicies(existing != null ? existing.getPolicies() : null);
+        } else {
+            parameter.setPolicies(policies.isEmpty() ? null : List.copyOf(policies));
+        }
         if ("Intelligent-Tiering".equals(tier)) {
             boolean advanced = parameter.getPolicies() != null
                     || value.getBytes(StandardCharsets.UTF_8).length > STANDARD_TIER_MAX_VALUE_BYTES;

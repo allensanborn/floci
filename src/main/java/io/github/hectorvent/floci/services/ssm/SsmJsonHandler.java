@@ -127,14 +127,20 @@ public class SsmJsonHandler {
             }
         }
 
+        // Null when the request has no Policies, so an overwrite keeps the existing ones.
         List<JsonNode> policies = null;
         if (request.hasNonNull("Policies")) {
-            policies = new ArrayList<>();
+            JsonNode parsed;
             try {
-                objectMapper.readTree(request.path("Policies").asText()).forEach(policies::add);
+                parsed = objectMapper.readTree(request.path("Policies").asText());
             } catch (JsonProcessingException e) {
                 throw new AwsException("ValidationException", "Invalid policies input: " + e.getOriginalMessage(), 400);
             }
+            if (!parsed.isArray()) {
+                throw new AwsException("ValidationException", "Invalid policies input: expected a JSON array.", 400);
+            }
+            policies = new ArrayList<>();
+            parsed.forEach(policies::add);
         }
 
         long version = ssmService.putParameter(name, value, type, description, overwrite, tags,

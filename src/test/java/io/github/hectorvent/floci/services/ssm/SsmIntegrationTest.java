@@ -1725,6 +1725,48 @@ class SsmIntegrationTest {
             .body("__type", equalTo("ParameterPatternMismatchException"));
     }
 
+    @Test
+    void putParameterOverwriteKeepsPoliciesUntilNewOrEmptyPoliciesAreSent() {
+        putFilterFixture("/pol/keep", "String", ", \"Tier\": \"Advanced\", \"Policies\":"
+                + " \"[{\\\"Type\\\":\\\"NoChangeNotification\\\",\\\"Version\\\":\\\"1.0\\\","
+                + "\\\"Attributes\\\":{\\\"After\\\":\\\"30\\\",\\\"Unit\\\":\\\"Days\\\"}}]\"");
+        String byName = """
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/pol/keep"] }] }
+                """;
+
+        putFilterFixture("/pol/keep", "String", ", \"Overwrite\": true");
+        describeParameters(byName)
+            .body("Parameters[0].Version", equalTo(2))
+            .body("Parameters[0].Policies.PolicyType", contains("NoChangeNotification"));
+
+        putFilterFixture("/pol/keep", "String", ", \"Overwrite\": true, \"Policies\": \"[]\"");
+        describeParameters(byName)
+            .body("Parameters[0].Version", equalTo(3))
+            .body("Parameters[0]", not(hasKey("Policies")));
+    }
+
+    @Test
+    void putParameterRejectsMalformedAllowedPatternAndNonArrayPolicies() {
+        putParameterError("""
+                { "Name": "/pol/bad-pattern", "Value": "v", "Type": "String", "AllowedPattern": "[" }
+                """, "InvalidAllowedPatternException");
+        putParameterError("""
+                { "Name": "/pol/bad-policies", "Value": "v", "Type": "String", "Policies": "{}" }
+                """, "ValidationException");
+    }
+
+    private void putParameterError(String body, String errorType) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo(errorType));
+    }
+
     private void putFilterFixture(String name, String type, String extra) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")
