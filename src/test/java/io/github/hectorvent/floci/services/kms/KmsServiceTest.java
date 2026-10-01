@@ -81,6 +81,7 @@ class KmsServiceTest {
 
     private KmsService kmsService;
     private InMemoryStorage<String, KmsKey> keyStore;
+    private InMemoryStorage<String, KmsAlias> aliasStore;
 
     @BeforeAll
     static void registerBouncyCastle() {
@@ -92,9 +93,10 @@ class KmsServiceTest {
     @BeforeEach
     void setUp() {
         keyStore = new InMemoryStorage<>();
+        aliasStore = new InMemoryStorage<>();
         kmsService = new KmsService(
                 keyStore,
-                new InMemoryStorage<>(),
+                aliasStore,
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
         );
@@ -3931,6 +3933,48 @@ class KmsServiceTest {
             // The repair must not duplicate the alias.
             assertEquals(1, kmsService.listAliases(REGION).stream()
                     .filter(alias -> "alias/aws/s3".equals(alias.getAliasName())).count());
+        }
+
+        /**
+         * Before alias/aws/ was reserved, a customer could create alias/aws/s3 on their own key and
+         * persist it. Gating on "the target exists" kept that alias pointing at a CUSTOMER key, so
+         * DescribeKey reported CUSTOMER and the AWS managed key guards let ScheduleKeyDeletion
+         * through the reserved alias.
+         */
+        @Test
+        void repointsAReservedAliasPersistedOnACustomerKey() {
+            KmsKey mine = kmsService.createKey("mine", REGION);
+            aliasStore.put(REGION + "::alias/aws/s3", new KmsAlias("alias/aws/s3",
+                    "arn:aws:kms:us-east-1:000000000000:alias/aws/s3", mine.getKeyId()));
+
+            KmsKey resolved = kmsService.describeKey("alias/aws/s3", REGION);
+
+            assertEquals("AWS", resolved.getKeyManager());
+            assertNotEquals(mine.getKeyId(), resolved.getKeyId());
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> kmsService.scheduleKeyDeletion("alias/aws/s3", 7, REGION));
+            assertEquals("AccessDeniedException", refused.getErrorCode());
+            // The customer key itself is untouched.
+            assertEquals("CUSTOMER", kmsService.describeKey(mine.getKeyId(), REGION).getKeyManager());
+        }
+
+        /**
+         * kms-aliases.json lost while kms-keys.json survives: the AWS managed keys are re-aliased
+         * rather than minted again, so ListKeys holds no duplicates and ciphertext bound to the old
+         * key still decrypts and still belongs to the key alias/aws/s3 names.
+         */
+        @Test
+        void reusesSurvivingAwsManagedKeysWhenTheAliasStoreIsLost() {
+            byte[] plaintext = "before the alias store was lost".getBytes(StandardCharsets.UTF_8);
+            byte[] ciphertext = kmsService.encrypt("alias/aws/s3", plaintext, REGION);
+            String original = kmsService.describeKey("alias/aws/s3", REGION).getKeyId();
+            aliasStore.scan(k -> true).forEach(a -> aliasStore.delete(REGION + "::" + a.getAliasName()));
+            assertTrue(aliasStore.scan(k -> true).isEmpty());
+
+            assertEquals(AwsManagedKeys.KEYS.size(), kmsService.listKeys(REGION).size(),
+                    "losing the alias store minted a second set of AWS managed keys");
+            assertEquals(original, kmsService.describeKey("alias/aws/s3", REGION).getKeyId());
+            assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, REGION));
         }
 
         @Test

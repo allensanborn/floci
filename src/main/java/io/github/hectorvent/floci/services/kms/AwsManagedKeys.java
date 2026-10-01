@@ -26,9 +26,9 @@ import java.util.Set;
  * lookup succeeds against any real account.
  *
  * <p>The catalog is data rather than a list in Java so that adding a service is a line in the
- * YAML. It is parsed once into an immutable list; Quarkus initialises application classes at
- * build time in native mode, so the parsed catalog lives in the image heap and the YAML does not
- * need registering as a native resource, the same as the IAM managed policy catalog.
+ * YAML. It is parsed once into an immutable list. The YAML is read through a constant, which
+ * Quarkus's native resource analysis cannot follow, so it is registered under
+ * {@code quarkus.native.resources.includes} in {@code application.yml}.
  */
 final class AwsManagedKeys {
 
@@ -68,6 +68,7 @@ final class AwsManagedKeys {
             Catalog catalog = new ObjectMapper(new YAMLFactory()).readValue(in, Catalog.class);
             List<AwsManagedKeyDef> defs = new ArrayList<>();
             Set<String> seen = new LinkedHashSet<>();
+            Set<String> seenDescriptions = new LinkedHashSet<>();
             for (CatalogEntry entry : catalog.keys == null ? List.<CatalogEntry>of() : catalog.keys) {
                 if (entry.alias == null || entry.alias.isBlank()) {
                     continue;
@@ -84,7 +85,14 @@ final class AwsManagedKeys {
                     LOG.warnv("Ignoring duplicate AWS managed key entry for {0}", alias);
                     continue;
                 }
-                defs.add(new AwsManagedKeyDef(alias, entry.description == null ? "" : entry.description));
+                String description = entry.description == null ? "" : entry.description;
+                if (!seenDescriptions.add(description)) {
+                    // Surviving keys are re-aliased by description, so a shared one could hand
+                    // a key the other entry's alias.
+                    LOG.warnv("Ignoring AWS managed key {0}: its description duplicates another entry", alias);
+                    continue;
+                }
+                defs.add(new AwsManagedKeyDef(alias, description));
             }
             LOG.debugv("Loaded {0} AWS managed keys from {1}", defs.size(), CATALOG_RESOURCE_NAME);
             return List.copyOf(defs);

@@ -197,8 +197,10 @@ aws kms describe-key --key-id alias/aws/s3 \
 
 A region's AWS managed keys are minted the first time anything reads that region's key or alias
 namespace: `ListKeys`, `ListAliases`, or a lookup naming one of the reserved aliases. An entry is
-skipped only when its alias is present *and* the key that alias targets is present, so a lost or
-quarantined `kms-keys.json` rebuilds from the catalog rather than leaving every alias dangling.
+skipped only when its alias is present *and* targets an AWS managed key, so a lost or
+quarantined `kms-keys.json` rebuilds from the catalog rather than leaving every alias dangling,
+and a reserved alias persisted on a customer key is re-pointed. A lost `kms-aliases.json`
+re-aliases the surviving AWS managed keys instead of minting a second set.
 They behave as AWS's keys, not the account's:
 
 - `DescribeKey` reports `KeyManager: AWS`, and `GetKeyRotationStatus` reports `true`, since AWS

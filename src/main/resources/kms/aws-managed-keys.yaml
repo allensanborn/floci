@@ -53,8 +53,9 @@
 #
 # The descriptions follow the template AWS uses for these keys, "Default master key that
 # protects my <resources> when no other key is defined". AWS has reworded individual entries
-# over the years and a given account may show slightly different phrasing, so treat the exact
-# string as illustrative rather than authoritative. Nothing resolves a key by its description.
+# over the years and a given account may show slightly different phrasing. Each description must
+# stay unique and should not be reworded casually: when kms-aliases.json is lost, the surviving
+# keys are re-aliased by matching their description, and a reworded entry mints a second key.
 # ---------------------------------------------------------------------------------------------
 keys:
 

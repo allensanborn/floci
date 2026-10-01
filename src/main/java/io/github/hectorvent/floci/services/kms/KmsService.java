@@ -1221,16 +1221,28 @@ public class KmsService implements ResourceProvider {
      * written before the keys deliberately, for the case of a crash between the two batches: it
      * then leaves aliases whose target is missing, which the gate above repairs on the next read,
      * where the other order would leave keys with no alias that sit in ListKeys forever. The order
-     * does not help when {@code kms-aliases.json} alone is lost: the gate then mints fresh keys
-     * and the old AWS managed keys stay in ListKeys unaliased. Nothing reuses them.
+     * does not cover {@code kms-aliases.json} alone being lost; for that, a surviving AWS managed
+     * key no reserved alias targets is re-aliased by description rather than minted again. A
+     * reserved alias whose target is a customer key (one created before the namespace was
+     * reserved) counts as missing and is re-pointed.
      */
     private void ensureAwsManagedKeys(String region) {
         synchronized (awsManagedKeyLock) {
             Map<String, KmsKey> newKeys = new LinkedHashMap<>();
             Map<String, KmsAlias> newAliases = new LinkedHashMap<>();
+            Map<String, KmsKey> orphans = null;
             for (AwsManagedKeys.AwsManagedKeyDef def : AwsManagedKeys.KEYS) {
                 String aliasStorageKey = region + "::" + def.aliasName();
-                if (resolvesToAStoredKey(aliasStore.get(aliasStorageKey), region)) {
+                if (resolvesToAnAwsManagedKey(aliasStore.get(aliasStorageKey), region)) {
+                    continue;
+                }
+                if (orphans == null) {
+                    orphans = unaliasedAwsManagedKeysByDescription(region);
+                }
+                KmsKey orphan = orphans.remove(def.description());
+                if (orphan != null) {
+                    newAliases.put(aliasStorageKey, new KmsAlias(def.aliasName(),
+                            regionResolver.buildArn("kms", region, def.aliasName()), orphan.getKeyId()));
                     continue;
                 }
                 String keyId = UUID.randomUUID().toString();
@@ -1257,10 +1269,38 @@ public class KmsService implements ResourceProvider {
         }
     }
 
-    private boolean resolvesToAStoredKey(Optional<KmsAlias> alias, String region) {
+    /**
+     * Whether a reserved alias already points at an AWS managed key. Presence of the target alone
+     * is not enough: before {@code alias/aws/*} was reserved a customer could create
+     * {@code alias/aws/s3} on their own key, and a store persisted then would otherwise keep that
+     * customer key behind a reserved alias, where the AWS managed key guards do not apply.
+     */
+    private boolean resolvesToAnAwsManagedKey(Optional<KmsAlias> alias, String region) {
         return alias.filter(a -> a.getTargetKeyId() != null)
-                .map(a -> keyStore.get(region + "::" + a.getTargetKeyId()).isPresent())
+                .flatMap(a -> keyStore.get(region + "::" + a.getTargetKeyId()))
+                .map(k -> AWS_KEY_MANAGER.equals(k.getKeyManager()))
                 .orElse(false);
+    }
+
+    /**
+     * AWS managed keys no reserved alias targets, keyed by description. They are what a lost
+     * {@code kms-aliases.json} leaves behind; re-aliasing them instead of minting keeps ciphertext
+     * bound to them decryptable through the alias and keeps ListKeys free of duplicates. The
+     * catalog's descriptions are unique per service, which is what makes them usable as the key.
+     */
+    private Map<String, KmsKey> unaliasedAwsManagedKeysByDescription(String region) {
+        String prefix = region + "::";
+        Set<String> aliased = new HashSet<>();
+        for (KmsAlias a : aliasStore.scan(k -> k.startsWith(prefix + AwsManagedKeys.RESERVED_ALIAS_PREFIX))) {
+            aliased.add(a.getTargetKeyId());
+        }
+        Map<String, KmsKey> byDescription = new HashMap<>();
+        for (KmsKey k : keyStore.scan(key -> key.startsWith(prefix))) {
+            if (AWS_KEY_MANAGER.equals(k.getKeyManager()) && !aliased.contains(k.getKeyId())) {
+                byDescription.putIfAbsent(k.getDescription(), k);
+            }
+        }
+        return byDescription;
     }
 
     private static boolean referencesReservedAlias(String keyIdOrArn) {
