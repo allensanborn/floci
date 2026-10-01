@@ -5005,6 +5005,30 @@ class Ec2IntegrationTest {
             .body("DescribeIpamScopesResponse.ipamScopeSet.item.isDefault", equalTo("true"))
             .body("DescribeIpamScopesResponse.ipamScopeSet.item.ipamScopeArn", endsWith("ipam-scope/" + scopeId));
 
+        // aws_vpc_ipam_pool's Read splits ipamScopeArn on "/" and reads ipamScopeType off the pool
+        String poolId = given()
+            .formParam("Action", "CreateIpamPool")
+            .formParam("IpamScopeId", scopeId)
+            .formParam("AddressFamily", "ipv4")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateIpamPoolResponse.ipamPool.ipamPoolId");
+        given()
+            .formParam("Action", "DescribeIpamPools")
+            .formParam("IpamPoolId.1", poolId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamScopeArn", endsWith("ipam-scope/" + scopeId))
+            .body("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamScopeType", equalTo("private"))
+            .body("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamArn", equalTo(ipamArn))
+            .body("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamRegion", equalTo("us-east-1"));
+
         given()
             .formParam("Action", "DescribeIpamScopes")
             .formParam("IpamScopeId.1", "ipam-scope-doesnotexist")

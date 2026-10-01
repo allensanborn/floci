@@ -332,6 +332,18 @@ public class Ec2IpamService {
         return result;
     }
 
+    /** The scope and its IPAM, or empty when the scope is not visible (e.g. its IPAM was deleted). */
+    public Optional<ScopeOfIpam> findScope(String ipamScopeId) {
+        for (Ipam ipam : ipams.scan(k -> true)) {
+            for (IpamScope scope : ipam.getScopes()) {
+                if (scope.getIpamScopeId().equals(ipamScopeId)) {
+                    return Optional.of(new ScopeOfIpam(ipam, scope));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     public long poolCount(String ipamScopeId) {
         return pools.scan(k -> true).stream().filter(p -> ipamScopeId.equals(p.getIpamScopeId())).count();
     }

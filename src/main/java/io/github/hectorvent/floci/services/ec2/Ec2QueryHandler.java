@@ -2109,6 +2109,11 @@ public class Ec2QueryHandler {
                 .elem("addressFamily", pool.getAddressFamily())
                 .elem("state", pool.getState())
                 .elem("autoImport", String.valueOf(pool.isAutoImport()));
+        ipamService.findScope(pool.getIpamScopeId()).ifPresent(s -> xml
+                .elem("ipamScopeArn", s.scope().getIpamScopeArn())
+                .elem("ipamScopeType", s.scope().getScopeType())
+                .elem("ipamArn", s.ipam().getIpamArn())
+                .elem("ipamRegion", s.ipam().getRegion()));
         if (pool.getSourceIpamPoolId() != null) {
             xml.elem("sourceIpamPoolId", pool.getSourceIpamPoolId());
         }
