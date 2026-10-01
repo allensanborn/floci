@@ -309,6 +309,33 @@ public class Ec2IpamService {
         return result;
     }
 
+    /** A scope with the IPAM that owns it; {@link IpamScope} itself carries no ARN, region or owner. */
+    public record ScopeOfIpam(Ipam ipam, IpamScope scope) {}
+
+    public List<ScopeOfIpam> describeIpamScopes(String region, List<String> ipamScopeIds) {
+        List<ScopeOfIpam> result = new ArrayList<>();
+        for (Ipam ipam : describeIpams(region, null)) {
+            for (IpamScope scope : ipam.getScopes()) {
+                if (ipamScopeIds == null || ipamScopeIds.isEmpty() || ipamScopeIds.contains(scope.getIpamScopeId())) {
+                    result.add(new ScopeOfIpam(ipam, scope));
+                }
+            }
+        }
+        if (ipamScopeIds != null) {
+            for (String id : ipamScopeIds) {
+                if (result.stream().noneMatch(s -> id.equals(s.scope().getIpamScopeId()))) {
+                    throw new AwsException("InvalidIpamScopeId.NotFound",
+                            "IPAM scope " + id + " does not exist.", 400);
+                }
+            }
+        }
+        return result;
+    }
+
+    public long poolCount(String ipamScopeId) {
+        return pools.scan(k -> true).stream().filter(p -> ipamScopeId.equals(p.getIpamScopeId())).count();
+    }
+
     public AsnAssociation associateIpamByoasn(String region, String asn, String cidr) {
         if (asn == null || asn.isBlank()) {
             throw new AwsException("MissingParameter", "Asn is required.", 400);

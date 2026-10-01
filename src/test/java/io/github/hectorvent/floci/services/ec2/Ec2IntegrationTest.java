@@ -4964,6 +4964,58 @@ class Ec2IntegrationTest {
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidIpamId.NotFound"));
     }
+
+    @Test
+    @Order(322)
+    void describeIpamScopesReturnsTheDefaultScopesOverQuery() {
+        // aws_vpc_ipam_pool reads its scope through DescribeIpamScopes before CreateIpamPool
+        io.restassured.path.xml.XmlPath created = given()
+            .formParam("Action", "CreateIpam")
+            .formParam("Description", "scope-ipam")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath();
+        String ipamId = created.getString("CreateIpamResponse.ipam.ipamId");
+        String ipamArn = created.getString("CreateIpamResponse.ipam.ipamArn");
+        String scopeId = given()
+            .formParam("Action", "DescribeIpams")
+            .formParam("IpamId.1", ipamId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeIpamsResponse.ipamSet.item.privateDefaultScopeId");
+
+        given()
+            .formParam("Action", "DescribeIpamScopes")
+            .formParam("IpamScopeId.1", scopeId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.size()", equalTo(1))
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.ipamScopeId", equalTo(scopeId))
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.ipamArn", equalTo(ipamArn))
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.ipamScopeType", equalTo("private"))
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.isDefault", equalTo("true"))
+            .body("DescribeIpamScopesResponse.ipamScopeSet.item.ipamScopeArn", endsWith("ipam-scope/" + scopeId));
+
+        given()
+            .formParam("Action", "DescribeIpamScopes")
+            .formParam("IpamScopeId.1", "ipam-scope-doesnotexist")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIpamScopeId.NotFound"));
+    }
+
     @Test
     @Order(323)
     void associateIpamByoasnSuccess() {

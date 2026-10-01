@@ -156,6 +156,20 @@ class Ec2IpamServiceTest {
     }
 
     @Test
+    void describeIpamScopesFindsTheDefaultScopesAndRejectsUnknownIds() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        assertEquals(2, service.describeIpamScopes(REGION, List.of()).size());
+        List<Ec2IpamService.ScopeOfIpam> one =
+                service.describeIpamScopes(REGION, List.of(ipam.getPublicDefaultScopeId()));
+        assertEquals(1, one.size());
+        assertEquals("public", one.get(0).scope().getScopeType());
+        assertEquals(ipam.getIpamId(), one.get(0).ipam().getIpamId());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describeIpamScopes(REGION, List.of("ipam-scope-doesnotexist")));
+        assertEquals("InvalidIpamScopeId.NotFound", e.getErrorCode());
+    }
+
+    @Test
     void deleteIpamRemovesItAndUnknownIdsThrow() {
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
         service.deleteIpam(REGION, ipam.getIpamId());

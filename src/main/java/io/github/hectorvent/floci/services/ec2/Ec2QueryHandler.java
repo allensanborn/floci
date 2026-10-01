@@ -282,6 +282,7 @@ public class Ec2QueryHandler {
                 case "DisableIpamOrganizationAdminAccount" -> handleDisableIpamOrgAdmin(params);
                 case "CreateIpam" -> handleCreateIpam(params, region);
                 case "DescribeIpams" -> handleDescribeIpams(params, region);
+                case "DescribeIpamScopes" -> handleDescribeIpamScopes(params, region);
                 case "DeleteIpam" -> handleDeleteIpam(params, region);
                 case "ModifyIpam" -> handleModifyIpam(params, region);
                 case "CreateIpamPool" -> handleCreateIpamPool(params, region);
@@ -1812,6 +1813,34 @@ public class Ec2QueryHandler {
             writeIpam(xml, "item", ipam);
         }
         xml.end("ipamSet").end("DescribeIpamsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIpamScopes(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        List<String> ids = getList(p, "IpamScopeId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "IpamScopeIds.member");
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIpamScopesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("ipamScopeSet");
+        for (Ec2IpamService.ScopeOfIpam s : ipamService.describeIpamScopes(region, ids)) {
+            IpamScope scope = s.scope();
+            xml.start("item")
+                    .elem("ownerId", s.ipam().getOwnerId())
+                    .elem("ipamScopeId", scope.getIpamScopeId())
+                    .elem("ipamScopeArn", scope.getIpamScopeArn())
+                    .elem("ipamArn", s.ipam().getIpamArn())
+                    .elem("ipamRegion", s.ipam().getRegion())
+                    .elem("ipamScopeType", scope.getScopeType())
+                    .elem("isDefault", String.valueOf(scope.isDefault()))
+                    .elem("poolCount", String.valueOf(ipamService.poolCount(scope.getIpamScopeId())))
+                    .elem("state", scope.getState())
+                    .end("item");
+        }
+        xml.end("ipamScopeSet").end("DescribeIpamScopesResponse");
         return xmlResponse(xml.build());
     }
 
