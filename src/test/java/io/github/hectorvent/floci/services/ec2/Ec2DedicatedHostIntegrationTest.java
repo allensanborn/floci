@@ -248,4 +248,68 @@ class Ec2DedicatedHostIntegrationTest {
             .statusCode(200)
             .body("DescribeHostsResponse.hostSet.item.autoPlacement", equalTo("off"));
     }
+
+    private static io.restassured.response.ValidatableResponse post(String... kv) {
+        io.restassured.specification.RequestSpecification r = given().header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < kv.length; i += 2) {
+            r = r.formParam(kv[i], kv[i + 1]);
+        }
+        return r.when().post("/").then();
+    }
+
+    private static String allocate(String zone) {
+        return post("Action", "AllocateHosts", "InstanceType", "m5.large", "AvailabilityZone", zone)
+                .statusCode(200).extract().path("AllocateHostsResponse.hostIdSet.item");
+    }
+
+    private static int hostCount() {
+        return post("Action", "DescribeHosts").statusCode(200)
+                .extract().xmlPath().getList("DescribeHostsResponse.hostSet.item").size();
+    }
+
+    @Test
+    @Order(10)
+    void allocateRejectsANonexistentZoneAndStoresNothing() {
+        int before = hostCount();
+        post("Action", "AllocateHosts", "InstanceType", "m5.large", "AvailabilityZone", "us-east-1z")
+                .statusCode(400).body(containsString("InvalidParameterValue"));
+        org.junit.jupiter.api.Assertions.assertEquals(before, hostCount());
+    }
+
+    @Test
+    @Order(11)
+    void invalidHostSettingsAreRejectedOnAllocateAndModifyAndNotStored() {
+        post("Action", "AllocateHosts", "InstanceType", "m5.large", "AvailabilityZone", "us-east-1a",
+                "AutoPlacement", "banana").statusCode(400).body(containsString("InvalidParameterValue"));
+        String id = allocate("us-east-1a");
+        post("Action", "ModifyHosts", "HostId.1", id, "HostRecovery", "banana")
+                .statusCode(400).body(containsString("InvalidParameterValue"));
+        post("Action", "DescribeHosts", "HostId.1", id).statusCode(200)
+                .body("DescribeHostsResponse.hostSet.item.hostRecovery", equalTo("off"));
+    }
+
+    @Test
+    @Order(12)
+    void launchPlacementThatContradictsTheHostIsRejected() {
+        String id = allocate("us-east-1a");
+        String subnetInB = post("Action", "DescribeSubnets", "Filter.1.Name", "availability-zone",
+                "Filter.1.Value.1", "us-east-1b").statusCode(200)
+                .extract().xmlPath().getList("DescribeSubnetsResponse.subnetSet.item.subnetId").get(0).toString();
+        String[] base = {"Action", "RunInstances", "ImageId", "ami-0abcdef1234567891", "MinCount", "1",
+                "MaxCount", "1", "Placement.HostId", id};
+        post(concat(base, "InstanceType", "m5.large", "SubnetId", subnetInB))
+                .statusCode(400).body(containsString("InvalidParameterCombination"));
+        post(concat(base, "InstanceType", "m5.large", "Placement.Tenancy", "default"))
+                .statusCode(400).body(containsString("InvalidParameterCombination"));
+        post(concat(base, "InstanceType", "c5.large"))
+                .statusCode(400).body(containsString("InvalidParameter"));
+        post("Action", "DescribeHosts", "HostId.1", id).statusCode(200)
+                .body("DescribeHostsResponse.hostSet.item.instances.item.size()", equalTo(0));
+    }
+
+    private static String[] concat(String[] a, String... b) {
+        String[] out = java.util.Arrays.copyOf(a, a.length + b.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
+    }
 }

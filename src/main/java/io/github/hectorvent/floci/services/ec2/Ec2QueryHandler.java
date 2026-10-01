@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.zip.GZIPInputStream;
 
 @ApplicationScoped
@@ -4069,6 +4070,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleModifyHosts(MultivaluedMap<String, String> p, String region) {
+        // Invalid values fail the whole call rather than landing in each host's unsuccessful item.
+        service.validateHostSettings(p.getFirst("AutoPlacement"), p.getFirst("HostRecovery"),
+                p.getFirst("HostMaintenance"));
         return hostBatchResponse("ModifyHosts", getList(p, "HostId"), id -> service.modifyHost(region, id,
                 p.getFirst("AutoPlacement"), p.getFirst("HostRecovery"), p.getFirst("HostMaintenance"),
                 p.getFirst("InstanceType"), p.getFirst("InstanceFamily")));
@@ -4081,7 +4085,7 @@ public class Ec2QueryHandler {
     // ModifyHosts and ReleaseHosts answer per host: a host that cannot be changed goes to
     // unsuccessful with a Client.-prefixed code instead of failing the whole call.
     private Response hostBatchResponse(String action, List<String> hostIds,
-                                       java.util.function.Consumer<String> perHost) {
+                                       Consumer<String> perHost) {
         if (hostIds.isEmpty()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter HostId.", 400);
         }

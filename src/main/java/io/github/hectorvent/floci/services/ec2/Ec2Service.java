@@ -260,9 +260,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final StorageBackend<String, CapacityReservation> capacityReservations;
-    // Not final for the same reason as vpcNetworkManager below: only the StorageFactory entry
-    // point swaps in the persistent store, so no hermetic fixture's constructor arity moves.
-    private StorageBackend<String, Host> hosts = new InMemoryStorage<>();
+    private final StorageBackend<String, Host> hosts;
+    // Serialises a launch onto a host against ModifyHosts/ReleaseHosts, so a host cannot be
+    // released between the launch's availability check and the store of its instance.
+    private final Object hostLock = new Object();
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
     // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
     // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
@@ -464,8 +465,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, CapacityReservation>>() {}),
                 storageFactory.create("ec2", "ec2-volume-modifications.json",
                         new TypeReference<Map<String, VolumeModification>>() {}),
-                requestContextInstance, iamService, volumeBlockDeviceManager);
-        this.hosts = storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {});
+                requestContextInstance, iamService, volumeBlockDeviceManager,
+                storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -664,6 +665,56 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                IamService iamService,
                Ec2VolumeBlockDeviceManager volumeBlockDeviceManager) {
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
+                instanceTypeCatalog, vpcs, subnets, securityGroups, securityGroupRules,
+                internetGateways, routeTables, keyPairs, addresses, instances,
+                volumes, registeredImages, snapshots, launchTemplates, vpcEndpoints,
+                natGateways, spotInstanceRequests, networkAcls, managedPrefixLists, tags,
+                transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
+                transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
+                networkInterfaces, capacityReservations, volumeModifications,
+                requestContextInstance, iamService, volumeBlockDeviceManager, new InMemoryStorage<>());
+    }
+
+    // The terminal constructor. Dedicated Hosts ride on their own parameter so the shorter
+    // overloads above keep their arity for existing fixtures.
+    Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
+               AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
+               StorageBackend<String, Vpc> vpcs,
+               StorageBackend<String, Subnet> subnets,
+               StorageBackend<String, SecurityGroup> securityGroups,
+               StorageBackend<String, SecurityGroupRule> securityGroupRules,
+               StorageBackend<String, InternetGateway> internetGateways,
+               StorageBackend<String, RouteTable> routeTables,
+               StorageBackend<String, KeyPair> keyPairs,
+               StorageBackend<String, Address> addresses,
+               StorageBackend<String, Instance> instances,
+               StorageBackend<String, Volume> volumes,
+               StorageBackend<String, Image> registeredImages,
+               StorageBackend<String, Snapshot> snapshots,
+               StorageBackend<String, LaunchTemplate> launchTemplates,
+               StorageBackend<String, VpcEndpoint> vpcEndpoints,
+               StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
+               StorageBackend<String, ManagedPrefixList> managedPrefixLists,
+               StorageBackend<String, List<Tag>> tags,
+               StorageBackend<String, TransitGateway> transitGateways,
+               StorageBackend<String, TransitGatewayRouteTable> transitGatewayRouteTables,
+               StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments,
+               StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations,
+               StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes,
+               StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections,
+               StorageBackend<String, NetworkInterface> networkInterfaces,
+               StorageBackend<String, CapacityReservation> capacityReservations,
+               StorageBackend<String, VolumeModification> volumeModifications,
+               jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
+               IamService iamService,
+               Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
+               StorageBackend<String, Host> hosts) {
+        this.hosts = hosts;
         this.iamService = iamService;
         this.volumeBlockDeviceManager = volumeBlockDeviceManager;
         this.defaultAccountId = config.defaultAccountId();
@@ -3009,6 +3060,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         reservation.setOwnerId(callerAccountId());
 
         String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
+        if (hostId != null) {
+            validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
+        }
         validateArchitectureCompatibility(region, imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
         String architecture = architectureFor(region, imageId, effectiveInstanceType);
@@ -3046,6 +3100,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             synchronized (privateIpAllocationLock) {
+              synchronized (hostLock) {
+                if (hostId != null) {
+                    // Re-checked under hostLock: a ReleaseHosts or ModifyHosts may have landed
+                    // since the unlocked check above.
+                    validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
+                }
                 List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
                 for (int i = 0; i < count; i++) {
                     String instanceId = "i-" + randomHex(17);
@@ -3158,6 +3218,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     launched.add(inst);
                     reservation.getInstances().add(inst);
                 }
+              }
             }
         }
 
@@ -7510,6 +7571,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "Value (" + count + ") for parameter Quantity is invalid.", 400);
         }
+        validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
+        boolean zoneExists = subnets.scan(k -> true).stream()
+                .anyMatch(sn -> region.equals(sn.getRegion()) && availabilityZone.equals(sn.getAvailabilityZone()));
+        if (!zoneExists) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid availability zone: [" + availabilityZone + "]", 400);
+        }
         List<Host> allocated = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             Host host = new Host();
@@ -7519,9 +7587,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             host.setAvailabilityZone(availabilityZone);
             host.setInstanceType(hasType ? instanceType : null);
             host.setInstanceFamily(hasFamily ? instanceFamily : null);
-            if (autoPlacement != null) host.setAutoPlacement(autoPlacement);
-            if (hostRecovery != null) host.setHostRecovery(hostRecovery);
-            if (hostMaintenance != null) host.setHostMaintenance(hostMaintenance);
+            if (autoPlacement != null) {
+                host.setAutoPlacement(autoPlacement);
+            }
+            if (hostRecovery != null) {
+                host.setHostRecovery(hostRecovery);
+            }
+            if (hostMaintenance != null) {
+                host.setHostMaintenance(hostMaintenance);
+            }
             host.setOutpostArn(outpostArn);
             host.setAssetId(assetId);
             host.setAllocationTime(Instant.now());
@@ -7556,18 +7630,61 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /** One host of a ModifyHosts batch; the caller reports a throw as that id's unsuccessful item. */
     public void modifyHost(String region, String hostId, String autoPlacement, String hostRecovery,
             String hostMaintenance, String instanceType, String instanceFamily) {
-        Host host = getRequiredAvailableHost(region, hostId);
-        if (autoPlacement != null) host.setAutoPlacement(autoPlacement);
-        if (hostRecovery != null) host.setHostRecovery(hostRecovery);
-        if (hostMaintenance != null) host.setHostMaintenance(hostMaintenance);
-        if (instanceType != null) {
-            host.setInstanceType(instanceType);
-            host.setInstanceFamily(null);
-        } else if (instanceFamily != null) {
-            host.setInstanceFamily(instanceFamily);
-            host.setInstanceType(null);
+        validateHostSettings(autoPlacement, hostRecovery, hostMaintenance);
+        synchronized (hostLock) {
+            Host host = getRequiredAvailableHost(region, hostId);
+            if (autoPlacement != null) {
+                host.setAutoPlacement(autoPlacement);
+            }
+            if (hostRecovery != null) {
+                host.setHostRecovery(hostRecovery);
+            }
+            if (hostMaintenance != null) {
+                host.setHostMaintenance(hostMaintenance);
+            }
+            if (instanceType != null) {
+                host.setInstanceType(instanceType);
+                host.setInstanceFamily(null);
+            } else if (instanceFamily != null) {
+                host.setInstanceFamily(instanceFamily);
+                host.setInstanceType(null);
+            }
+            hosts.put(key(region, hostId), host);
         }
-        hosts.put(key(region, hostId), host);
+    }
+
+    /** AutoPlacement, HostRecovery and HostMaintenance each take only on or off. */
+    public void validateHostSettings(String autoPlacement, String hostRecovery, String hostMaintenance) {
+        String[][] settings = {{"AutoPlacement", autoPlacement}, {"HostRecovery", hostRecovery},
+                {"HostMaintenance", hostMaintenance}};
+        for (String[] setting : settings) {
+            if (setting[1] != null && !setting[1].equals("on") && !setting[1].equals("off")) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value (" + setting[1] + ") for parameter " + setting[0] + " is invalid.", 400);
+            }
+        }
+    }
+
+    // A launch onto a host must land in the host's zone, with host tenancy, on a type it accepts.
+    private void validateHostPlacement(Host host, String az, String instanceType, String tenancy) {
+        if (!host.getAvailabilityZone().equals(az)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The Dedicated Host " + host.getHostId() + " is in availability zone '"
+                            + host.getAvailabilityZone() + "', not '" + az + "'.", 400);
+        }
+        if (tenancy != null && !tenancy.isBlank() && !"host".equals(tenancy)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Tenancy '" + tenancy + "' cannot be combined with a Dedicated Host placement.", 400);
+        }
+        boolean typeOk = host.getInstanceType() != null
+                ? host.getInstanceType().equals(instanceType)
+                : host.getInstanceFamily() == null
+                        || instanceType.startsWith(host.getInstanceFamily() + ".");
+        if (!typeOk) {
+            throw new AwsException("InvalidParameter",
+                    "The instance type " + instanceType + " is not supported on Dedicated Host "
+                            + host.getHostId() + ".", 400);
+        }
     }
 
     /**
@@ -7575,14 +7692,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * how AWS reports it afterwards, and a host still carrying instances cannot be released.
      */
     public void releaseHost(String region, String hostId) {
-        Host host = getRequiredAvailableHost(region, hostId);
-        if (!hostInstances(region, hostId).isEmpty()) {
-            throw new AwsException("InvalidHost.Occupied",
-                    "Dedicated host " + hostId + " has running instances.", 400);
+        synchronized (hostLock) {
+            Host host = getRequiredAvailableHost(region, hostId);
+            if (!hostInstances(region, hostId).isEmpty()) {
+                throw new AwsException("InvalidHost.Occupied",
+                        "Dedicated host " + hostId + " has running instances.", 400);
+            }
+            host.setState("released");
+            host.setReleaseTime(Instant.now());
+            hosts.put(key(region, hostId), host);
         }
-        host.setState("released");
-        host.setReleaseTime(Instant.now());
-        hosts.put(key(region, hostId), host);
     }
 
     // A released host is still describable but is gone for every other purpose.
