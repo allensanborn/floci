@@ -16,11 +16,27 @@ class AccountAlternateContactIntegrationTest {
     static void configureRestAssured() { RestAssuredJsonUtils.configureAwsContentTypes(); }
 
     @Test
-    void createsUpdatesReadsAndDeletesAlternateContact() {
+    void createsUpdatesAndReadsAlternateContact() {
         put("security@example.com").statusCode(200);
         get().statusCode(200).body("AlternateContact.EmailAddress", equalTo("security@example.com"));
         put("security-updated@example.com").statusCode(200);
         get().statusCode(200).body("AlternateContact.EmailAddress", equalTo("security-updated@example.com"));
+    }
+
+    @Test
+    void deleteRemovesContactAndSecondDeleteIsNotFound() {
+        put("security@example.com").statusCode(200);
+        get().statusCode(200).body("AlternateContact.EmailAddress", equalTo("security@example.com"));
+        delete().statusCode(200);
+        get().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+        delete().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deleteRejectsInvalidContactType() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"AlternateContactType\":\"OTHER\"}")
+                .post("/deleteAlternateContact").then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -48,6 +64,12 @@ class AccountAlternateContactIntegrationTest {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"" + email + "\",\"PhoneNumber\":\"+12025550123\"}")
                 .post("/putAlternateContact").then();
+    }
+
+    private static io.restassured.response.ValidatableResponse delete() {
+        return given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"AlternateContactType\":\"SECURITY\"}")
+                .post("/deleteAlternateContact").then();
     }
 
     private static io.restassured.response.ValidatableResponse get() {
