@@ -240,6 +240,11 @@ public class Ec2QueryHandler {
                 case "DescribeCapacityReservations" -> handleDescribeCapacityReservations(params, region);
                 case "ModifyCapacityReservation" -> handleModifyCapacityReservation(params, region);
                 case "CancelCapacityReservation" -> handleCancelCapacityReservation(params, region);
+                // Dedicated Hosts
+                case "AllocateHosts" -> handleAllocateHosts(params, region);
+                case "DescribeHosts" -> handleDescribeHosts(params, region);
+                case "ModifyHosts" -> handleModifyHosts(params, region);
+                case "ReleaseHosts" -> handleReleaseHosts(params, region);
                 // Elastic IPs
                 case "AllocateAddress" -> handleAllocateAddress(params, region);
                 case "AssociateAddress" -> handleAssociateAddress(params, region);
@@ -794,7 +799,8 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")));
+                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
@@ -4022,6 +4028,122 @@ public class Ec2QueryHandler {
         return xml.build();
     }
 
+    // ─── Dedicated Host handlers ──────────────────────────────────────────────
+
+    private Response handleAllocateHosts(MultivaluedMap<String, String> p, String region) {
+        List<String> assetIds = getList(p, "AssetId");
+        List<Host> allocated = service.allocateHosts(
+                region,
+                p.getFirst("AvailabilityZone"),
+                p.getFirst("InstanceType"),
+                p.getFirst("InstanceFamily"),
+                intOrNull(p, "Quantity"),
+                p.getFirst("AutoPlacement"),
+                p.getFirst("HostRecovery"),
+                p.getFirst("HostMaintenance"),
+                p.getFirst("OutpostArn"),
+                assetIds.isEmpty() ? null : assetIds.get(0));
+        XmlBuilder xml = new XmlBuilder()
+                .start("AllocateHostsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("hostIdSet");
+        for (Host host : allocated) {
+            applyResourceTags(p, region, "dedicated-host", host.getHostId());
+            xml.elem("item", host.getHostId());
+        }
+        xml.end("hostIdSet").end("AllocateHostsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeHosts(MultivaluedMap<String, String> p, String region) {
+        List<Host> found = service.describeHosts(region, getList(p, "HostId"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeHostsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("hostSet");
+        for (Host host : found) {
+            xml.start("item").raw(hostXml(region, host)).end("item");
+        }
+        xml.end("hostSet").end("DescribeHostsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyHosts(MultivaluedMap<String, String> p, String region) {
+        return hostBatchResponse("ModifyHosts", getList(p, "HostId"), id -> service.modifyHost(region, id,
+                p.getFirst("AutoPlacement"), p.getFirst("HostRecovery"), p.getFirst("HostMaintenance"),
+                p.getFirst("InstanceType"), p.getFirst("InstanceFamily")));
+    }
+
+    private Response handleReleaseHosts(MultivaluedMap<String, String> p, String region) {
+        return hostBatchResponse("ReleaseHosts", getList(p, "HostId"), id -> service.releaseHost(region, id));
+    }
+
+    // ModifyHosts and ReleaseHosts answer per host: a host that cannot be changed goes to
+    // unsuccessful with a Client.-prefixed code instead of failing the whole call.
+    private Response hostBatchResponse(String action, List<String> hostIds,
+                                       java.util.function.Consumer<String> perHost) {
+        if (hostIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter HostId.", 400);
+        }
+        XmlBuilder successful = new XmlBuilder();
+        XmlBuilder unsuccessful = new XmlBuilder();
+        for (String id : hostIds) {
+            try {
+                perHost.accept(id);
+                successful.elem("item", id);
+            } catch (AwsException e) {
+                unsuccessful.start("item")
+                        .start("error")
+                        .elem("code", "Client." + e.getErrorCode())
+                        .elem("message", e.getMessage())
+                        .end("error")
+                        .elem("resourceId", id)
+                        .end("item");
+            }
+        }
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("successful").raw(successful.build()).end("successful")
+                .start("unsuccessful").raw(unsuccessful.build()).end("unsuccessful")
+                .end(action + "Response");
+        return xmlResponse(xml.build());
+    }
+
+    // ponytail: hostProperties cores/sockets/totalVCpus are a fixed m5-sized host shape; derive
+    // per family from the instance type catalog if a caller ever asserts on them.
+    private String hostXml(String region, Host host) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("hostId", host.getHostId())
+                .elem("ownerId", host.getOwnerId())
+                .elem("availabilityZone", host.getAvailabilityZone())
+                .elem("autoPlacement", host.getAutoPlacement())
+                .elem("hostRecovery", host.getHostRecovery())
+                .elem("hostMaintenance", host.getHostMaintenance())
+                .elem("state", host.getState())
+                .elem("outpostArn", host.getOutpostArn())
+                .elem("assetId", host.getAssetId())
+                .elem("allocationTime", host.getAllocationTime() != null ? ISO_FMT.format(host.getAllocationTime()) : null)
+                .elem("releaseTime", host.getReleaseTime() != null ? ISO_FMT.format(host.getReleaseTime()) : null)
+                .start("hostProperties")
+                .elem("instanceFamily", host.getInstanceFamily())
+                .elem("instanceType", host.getInstanceType())
+                .elem("sockets", 2)
+                .elem("cores", 48)
+                .elem("totalVCpus", 96)
+                .end("hostProperties")
+                .start("instances");
+        for (Instance inst : service.hostInstances(region, host.getHostId())) {
+            xml.start("item")
+                    .elem("instanceId", inst.getInstanceId())
+                    .elem("instanceType", inst.getInstanceType())
+                    .elem("ownerId", host.getOwnerId())
+                    .end("item");
+        }
+        xml.end("instances").raw(tagSetXml(host.getTags()));
+        return xml.build();
+    }
+
     // Unlike intOrNull's silent skip of absent values, a present but unparseable timestamp is a
     // caller mistake and is rejected rather than coerced to null.
     private java.time.Instant instantOrNull(MultivaluedMap<String, String> p, String name) {
@@ -4507,6 +4629,7 @@ public class Ec2QueryHandler {
             xml.start("placement")
                     .elem("availabilityZone", inst.getPlacement().getAvailabilityZone())
                     .elem("tenancy", inst.getPlacement().getTenancy())
+                    .elem("hostId", inst.getPlacement().getHostId())
                     .end("placement");
         }
 
