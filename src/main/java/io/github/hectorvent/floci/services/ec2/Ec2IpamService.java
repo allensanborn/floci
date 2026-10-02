@@ -325,8 +325,7 @@ public class Ec2IpamService {
         if (ipamScopeIds != null) {
             for (String id : ipamScopeIds) {
                 if (result.stream().noneMatch(s -> id.equals(s.scope().getIpamScopeId()))) {
-                    throw new AwsException("InvalidIpamScopeId.NotFound",
-                            "IPAM scope " + id + " does not exist.", 400);
+                    throw scopeNotFound(id);
                 }
             }
         }
@@ -553,15 +552,7 @@ public class Ec2IpamService {
     /** Resolves the IPAM owning a scope. {@code IpamScopeId} is a required member of
      *  CreateIpamPool, so an unknown scope is an error rather than a null {@code ipamId}. */
     private String ipamIdOfScope(String ipamScopeId) {
-        for (Ipam ipam : ipams.scan(k -> true)) {
-            for (IpamScope scope : ipam.getScopes()) {
-                if (ipamScopeId.equals(scope.getIpamScopeId())) {
-                    return ipam.getIpamId();
-                }
-            }
-        }
-        throw new AwsException("InvalidIpamScopeId.NotFound",
-                "IPAM scope " + ipamScopeId + " does not exist.", 400);
+        return findScope(ipamScopeId).orElseThrow(() -> scopeNotFound(ipamScopeId)).ipam().getIpamId();
     }
 
     public List<IpamPool> describeIpamPools(String region, List<String> ipamPoolIds) {
@@ -816,6 +807,11 @@ public class Ec2IpamService {
             return;
         }
         ipams.delete(ipamKey);
+    }
+
+    private static AwsException scopeNotFound(String ipamScopeId) {
+        return new AwsException("InvalidIpamScopeId.NotFound",
+                "IPAM scope " + ipamScopeId + " does not exist.", 400);
     }
 
     private static AwsException ipamNotFound(String ipamId) {
