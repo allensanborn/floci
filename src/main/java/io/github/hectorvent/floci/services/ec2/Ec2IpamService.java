@@ -30,6 +30,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.stream.Collectors;
 
 /**
  * Amazon VPC IP Address Manager (IPAM) emulation: organization admin
@@ -344,8 +345,10 @@ public class Ec2IpamService {
         return Optional.empty();
     }
 
-    public long poolCount(String ipamScopeId) {
-        return pools.scan(k -> true).stream().filter(p -> ipamScopeId.equals(p.getIpamScopeId())).count();
+    /** Pool count per scope id, from a single pass over the pool store. */
+    public Map<String, Long> poolCountsByScope() {
+        return pools.scan(k -> true).stream()
+                .collect(Collectors.groupingBy(IpamPool::getIpamScopeId, Collectors.counting()));
     }
 
     public AsnAssociation associateIpamByoasn(String region, String asn, String cidr) {

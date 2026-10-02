@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.startsWith;
 
+import io.restassured.path.xml.XmlPath;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -4969,7 +4970,7 @@ class Ec2IntegrationTest {
     @Order(322)
     void describeIpamScopesReturnsTheDefaultScopesOverQuery() {
         // aws_vpc_ipam_pool reads its scope through DescribeIpamScopes before CreateIpamPool
-        io.restassured.path.xml.XmlPath created = given()
+        XmlPath created = given()
             .formParam("Action", "CreateIpam")
             .formParam("Description", "scope-ipam")
             .header("Authorization", AUTH_HEADER)

@@ -1826,6 +1826,7 @@ public class Ec2QueryHandler {
                 .start("DescribeIpamScopesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("ipamScopeSet");
+        Map<String, Long> poolCounts = ipamService.poolCountsByScope();
         for (Ec2IpamService.ScopeOfIpam s : ipamService.describeIpamScopes(region, ids)) {
             IpamScope scope = s.scope();
             xml.start("item")
@@ -1836,7 +1837,7 @@ public class Ec2QueryHandler {
                     .elem("ipamRegion", s.ipam().getRegion())
                     .elem("ipamScopeType", scope.getScopeType())
                     .elem("isDefault", String.valueOf(scope.isDefault()))
-                    .elem("poolCount", String.valueOf(ipamService.poolCount(scope.getIpamScopeId())))
+                    .elem("poolCount", String.valueOf(poolCounts.getOrDefault(scope.getIpamScopeId(), 0L)))
                     .elem("state", scope.getState())
                     .end("item");
         }
