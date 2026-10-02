@@ -38,6 +38,7 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskNetworkInterface;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import io.github.hectorvent.floci.services.ecs.model.VolumeFrom;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -95,7 +96,7 @@ public class EcsContainerManager {
 
     private static final String ATTACHMENT_DELETED = "DELETED";
     /** The label naming the Floci process that created a container, set by {@link #ownerLabels()}. */
-    public static final String RUN_LABEL = "floci.ecs-run";
+    public static final String RUN_LABEL = ContainerStorageHelper.ECS_RUN_LABEL;
 
     /** EC2 error codes the task ENI path can raise, none of which RunTask declares. */
     private static final Set<String> EC2_NETWORK_LOOKUP_FAILURES =
@@ -249,6 +250,7 @@ public class EcsContainerManager {
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
+        Map<String, String> imageDigestsByContainer = new LinkedHashMap<>();
         // The task metadata id has to exist before the container does: its own environment carries
         // the URI, so it cannot be derived from the Docker id the daemon hands back afterwards.
         Map<String, String> metadataIdsByContainer = new LinkedHashMap<>();
@@ -262,7 +264,20 @@ public class EcsContainerManager {
                 metadataIdsByContainer.put(def.getName(), metadataId);
                 envVarsByContainer.put(def, buildEnvVars(def, overridesByName.get(def.getName()), region,
                         metadataId, taskRoleEndpoint.vending()));
-                imagesByContainer.put(def, ecrRegistryManager.rewriteImageUri(def.getImage()));
+                imagesByContainer.put(def,
+                        containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(def.getImage())));
+            }
+            // Pulled for every container before any is created, as the ECS agent does, so a tag
+            // moved in its registry since the last launch is what this task runs. Each container is
+            // created from the image id its pull resolved to, so a concurrent launch that moves the
+            // tag again cannot swap the image under this task's reported digest.
+            for (ContainerDefinition def : launchOrder) {
+                LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                        config.services().ecs().imagePullBehavior());
+                imagesByContainer.put(def, launchImage.imageId());
+                if (launchImage.manifestDigest() != null) {
+                    imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
+                }
             }
 
             if (firelensRouter != null) {
@@ -324,7 +339,7 @@ public class EcsContainerManager {
                         .withLabels(ownerLabels());
                 if (protectedNetwork != null) {
                     specBuilder.withNetworkMode("container:" + protectedNetwork.namespace().helperId());
-                    specBuilder.withLabels(Map.of("floci.security-group-workload", "true"));
+                    specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
                 }
                 // Its own address in the credential endpoint's range, so this container has a
                 // connected route to 169.254.170.2 at all. One per container, not per task: each
@@ -489,16 +504,22 @@ public class EcsContainerManager {
                 // Build ECS container model
                 Container container = buildContainer(task.getTaskArn(), def, dockerId, networkBindings, region,
                         metadataIdsByContainer.get(def.getName()));
+                container.setImageDigest(imageDigestsByContainer.get(def.getName()));
                 runtimeContainers.add(container);
                 containerIds.put(def.getName(), dockerId);
 
                 // awsfirelens containers are shipped to Fluent Bit by Docker; don't also scrape json-file.
+                // Only awslogs containers go to CloudWatch Logs; the others stay on the console.
                 if (!awsFirelens) {
-                    String logGroup = "/ecs/" + taskDef.getFamily();
-                    String logStream = logStreamer.generateLogStreamName(def.getName() + "/" + taskId);
-                    Closeable logHandle = logStreamer.attach(
-                            dockerId, logGroup, logStream, region,
-                            "ecs:" + taskDef.getFamily() + ":" + def.getName());
+                    String logPrefix = "ecs:" + taskDef.getFamily() + ":" + def.getName();
+                    AwsLogsDestination awsLogs = awsLogsDestination(def, taskId, dockerId, region);
+                    // The lines are forwarded from Docker's log threads, which have no request context,
+                    // so name the task's account explicitly, as the other container-backed services do.
+                    Closeable logHandle = awsLogs == null
+                            ? logStreamer.attachConsoleOnly(dockerId, logPrefix)
+                            : logStreamer.attachForAccount(
+                                    AwsArnUtils.accountOrDefault(task.getTaskArn(), regionResolver.getAccountId()),
+                                    dockerId, awsLogs.group(), awsLogs.stream(), awsLogs.region(), logPrefix);
                     if (logHandle != null) {
                         logStreamsByContainerId.put(dockerId, logHandle);
                     }
@@ -1094,14 +1115,18 @@ public class EcsContainerManager {
     /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
     public boolean removeLeftoverContainers(String currentRunId) {
         String owner = ContainerStorageHelper.ownerIdentity(config);
+        ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
         List<com.github.dockerjava.api.model.Container> containers;
         try {
             // Docker's container summary, not the ECS model Container this class imports.
-            containers = lifecycleManager.getDockerClient()
-                    .listContainersCmd()
-                    .withShowAll(true)
-                    .withLabelFilter(Map.of("io.floci.service", "ecs", ContainerStorageHelper.OWNER_LABEL, owner))
-                    .exec();
+            containers = aliases.listByLabels(
+                    Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs", ContainerStorageHelper.OWNER_LABEL, owner),
+                    filter -> lifecycleManager.getDockerClient()
+                            .listContainersCmd()
+                            .withShowAll(true)
+                            .withLabelFilter(filter)
+                            .exec(),
+                    com.github.dockerjava.api.model.Container::getId);
         } catch (Exception e) {
             LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
                     "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
@@ -1111,7 +1136,10 @@ public class EcsContainerManager {
         leftoverListFailureReported = false;
         boolean allRemoved = true;
         for (com.github.dockerjava.api.model.Container container : containers) {
-            if (container.getLabels() != null && currentRunId.equals(container.getLabels().get(RUN_LABEL))) {
+            Map<String, String> labels = container.getLabels();
+            if (!aliases.consistent(container.getId(), labels)
+                    || !aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)
+                    || currentRunId.equals(aliases.labelValue(labels, RUN_LABEL))) {
                 continue;
             }
             try {
@@ -1445,6 +1473,35 @@ public class EcsContainerManager {
     private static boolean isAwsFirelens(ContainerDefinition def) {
         LogConfiguration log = def.getLogConfiguration();
         return log != null && "awsfirelens".equals(log.logDriver());
+    }
+
+    private record AwsLogsDestination(String group, String stream, String region) {}
+
+    /**
+     * Where a container's output goes in CloudWatch Logs. Only the {@code awslogs} driver sends it
+     * there, to its {@code awslogs-group}. The stream is {@code prefix/container-name/task-id}, or the
+     * Docker container ID when {@code awslogs-stream-prefix} is not set, as on AWS. Returns null when
+     * nothing must be sent.
+     */
+    private static AwsLogsDestination awsLogsDestination(
+            ContainerDefinition def, String taskId, String dockerId, String taskRegion) {
+        LogConfiguration log = def.getLogConfiguration();
+        if (log == null || !"awslogs".equals(log.logDriver())) {
+            return null;
+        }
+        Map<String, String> options = log.options() == null ? Map.of() : log.options();
+        String group = options.get("awslogs-group");
+        if (group == null || group.isBlank()) {
+            LOG.warnv("ECS task {0} container {1} uses awslogs without awslogs-group; its logs are not sent to CloudWatch Logs",
+                    taskId, def.getName());
+            return null;
+        }
+        String prefix = options.get("awslogs-stream-prefix");
+        String stream = prefix == null || prefix.isBlank()
+                ? dockerId
+                : prefix + "/" + def.getName() + "/" + taskId;
+        String region = options.get("awslogs-region");
+        return new AwsLogsDestination(group, stream, region == null || region.isBlank() ? taskRegion : region);
     }
 
     private static List<ContainerDefinition> launchOrder(

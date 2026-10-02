@@ -8,6 +8,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -189,6 +190,7 @@ public class RdsService implements Resettable, ResourceProvider {
     // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
     private final CloudWatchMetricsService metricsService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
@@ -415,6 +417,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public void clear() {
         usedPorts.clear();
+        reportedMemberRelayFailures.clear();
     }
 
     // ── DB Instances ──────────────────────────────────────────────────────────
@@ -597,7 +600,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
                 dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                 manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
-                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible, null);
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible, null, null);
     }
 
     public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
@@ -616,6 +619,31 @@ public class RdsService implements Resettable, ResourceProvider {
                                        DbInstanceSettings settings,
                                        Boolean publiclyAccessible,
                                        Integer requestedPort) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                requestedPort, null);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort,
+                                       Boolean deletionProtection) {
         validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
@@ -629,7 +657,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, requestedPort);
+                    settings, publiclyAccessible, requestedPort, deletionProtection);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -649,7 +677,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                           String region,
                                           boolean autoMinorVersionUpgrade,
                                           DbInstanceSettings settings,
-                                          Boolean publiclyAccessible, Integer requestedPort) {
+                                          Boolean publiclyAccessible, Integer requestedPort,
+                                          Boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -784,6 +813,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setPubliclyAccessible(publiclyAccessible != null
                 ? publiclyAccessible
                 : defaultPubliclyAccessible(engineParam, dbSubnetGroupName));
+        instance.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
 
         instance.setDbiResourceId(dbiResourceId);
         instance.setDbInstanceArn(dbInstanceArn);
@@ -1039,7 +1069,10 @@ public class RdsService implements Resettable, ResourceProvider {
         if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
             try {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
-                if (!"aws".equals(parsed.partition()) || !"rds".equals(parsed.service())
+                // A snapshot copies within its partition only, so a source ARN naming another
+                // partition than the target region's is not a snapshot this copy can read.
+                if (!AwsRegions.partitionFor(targetRegion).equals(parsed.partition())
+                        || !"rds".equals(parsed.service())
                         || !parsed.resource().startsWith("snapshot:")) {
                     throw new IllegalArgumentException("not an RDS snapshot ARN");
                 }
@@ -2497,6 +2530,17 @@ public class RdsService implements Resettable, ResourceProvider {
             String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
             DbInstanceSettings settings, Boolean publiclyAccessible,
             DbInstanceScalingChanges scaling) {
+        return modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName,
+                vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
+                settings, publiclyAccessible, scaling, null);
+    }
+
+    public synchronized DbInstance modifyDbInstance(
+            String id, String newPassword, Boolean iamEnabled,
+            String dbSubnetGroupName, List<String> vpcSecurityGroupIds,
+            String optionGroupName, String region, Boolean autoMinorVersionUpgrade,
+            DbInstanceSettings settings, Boolean publiclyAccessible,
+            DbInstanceScalingChanges scaling, Boolean deletionProtection) {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -2553,6 +2597,9 @@ public class RdsService implements Resettable, ResourceProvider {
         resolvedScaling.applyTo(instance);
         if (publiclyAccessible != null) {
             instance.setPubliclyAccessible(publiclyAccessible);
+        }
+        if (deletionProtection != null) {
+            instance.setDeletionProtection(deletionProtection);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
@@ -3205,6 +3252,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setStatus(DbInstanceStatus.AVAILABLE);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+        reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("Backing database container for DB instance {0} started on retry", id);
         return instance;
     }
@@ -3330,6 +3378,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     member.setContainerHost(cluster.getContainerHost());
                     member.setContainerPort(cluster.getContainerPort());
                 }
+                // A restart without a backend has not restored the relay; retry success clears the warning.
                 if (restart) {
                     member.setStatus(DbInstanceStatus.AVAILABLE);
                     putInstanceForScope(accountId, region, memberId, member);
@@ -3341,7 +3390,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 } catch (RuntimeException persistFailure) {
                     e.addSuppressed(persistFailure);
                 }
-                LOG.debugv(e, "Failed to restore RDS cluster member {0}; its relay can be retried", memberId);
+                Logger.Level level = reportedMemberRelayFailures.add(member.getDbInstanceArn())
+                        ? Logger.Level.WARN : Logger.Level.DEBUG;
+                LOG.logv(level, e, "Failed to restore RDS cluster member {0}; its relay can be retried", memberId);
                 if (restart) {
                     if (restartFailure == null) {
                         restartFailure = e;
@@ -3391,6 +3442,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 .orElseThrow(() ->
                 new AwsException("DBInstanceNotFound", "DB instance " + id + " not found.", 404));
 
+        if (instance.isDeletionProtection()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Cannot delete protected DB Instance, please disable deletion protection and try again.", 400);
+        }
+
         if (isRegisteredProxyTarget(
                 "RDS_INSTANCE", id, regionFromArn(instance.getDbInstanceArn()))) {
             throw new AwsException("InvalidDBInstanceState",
@@ -3437,6 +3493,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         releaseProxyPort(instance.getProxyPort());
         deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
+        reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("DB instance {0} deleted", id);
     }
 
@@ -6729,7 +6786,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         try {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(targetGroup.getTargetGroupArn());
-            return "aws".equals(arn.partition())
+            return AwsRegions.partitionFor(region).equals(arn.partition())
                     && "rds".equals(arn.service())
                     && Objects.equals(accountId, arn.accountId())
                     && Objects.equals(region, arn.region())
@@ -8213,7 +8270,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String resourceType, String resourceId) {
         try {
             AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            return "aws".equals(parsed.partition())
+            return AwsRegions.partitionFor(region).equals(parsed.partition())
                     && "rds".equals(parsed.service())
                     && Objects.equals(accountId, parsed.accountId())
                     && Objects.equals(region, parsed.region())

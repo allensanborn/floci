@@ -44,6 +44,8 @@ import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -54,6 +56,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -994,6 +997,66 @@ class EksClusterManagerTest {
     }
 
     @Nested
+    class LinkContainerdCertsDir {
+
+        private ContainerLifecycleManager lifecycleManager;
+        private DockerClient dockerClient;
+        private CopyArchiveToContainerCmd copyCmd;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            dockerClient = Mockito.mock(DockerClient.class);
+            copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+
+            manager = new EksClusterManager(
+                    Mockito.mock(ContainerBuilder.class), lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    Mockito.mock(EmulatorConfig.class), Mockito.mock(RegionResolver.class));
+        }
+
+        @Test
+        void copiesArchiveWithTargetDirectoryAndSymlinkAtContainerRoot() throws Exception {
+            manager.linkContainerdCertsDir("container-1", "demo");
+
+            verify(dockerClient).copyArchiveToContainerCmd("container-1");
+            verify(copyCmd).withRemotePath("/");
+            verify(copyCmd).exec();
+
+            ArgumentCaptor<InputStream> archive = ArgumentCaptor.forClass(InputStream.class);
+            verify(copyCmd).withTarInputStream(archive.capture());
+            try (TarArchiveInputStream tar = new TarArchiveInputStream(archive.getValue())) {
+                TarArchiveEntry targetDir = tar.getNextEntry();
+                assertNotNull(targetDir);
+                assertEquals("var/lib/rancher/k3s/agent/etc/containerd/certs.d/", targetDir.getName());
+                assertTrue(targetDir.isDirectory());
+
+                TarArchiveEntry etcDir = tar.getNextEntry();
+                assertNotNull(etcDir);
+                assertEquals("etc/containerd/", etcDir.getName());
+                assertTrue(etcDir.isDirectory());
+
+                TarArchiveEntry symlink = tar.getNextEntry();
+                assertNotNull(symlink);
+                assertEquals("etc/containerd/certs.d", symlink.getName());
+                assertTrue(symlink.isSymbolicLink());
+                assertEquals("/var/lib/rancher/k3s/agent/etc/containerd/certs.d", symlink.getLinkName());
+            }
+        }
+
+        @Test
+        void copyFailureDoesNotPropagate() {
+            when(copyCmd.exec()).thenThrow(new RuntimeException("docker copy failed"));
+
+            assertDoesNotThrow(() -> manager.linkContainerdCertsDir("container-1", "demo"));
+        }
+    }
+
+    @Nested
     class ConfigureLinkLocalMetadataEndpoint {
 
         private EmulatorConfig config;
@@ -1616,7 +1679,7 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
             assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
 
-            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            verify(copyCmd, never()).withHostResource(anyString());
             assertFalse(Files.exists(tempDir.resolve("keys")));
         }
 
@@ -2302,7 +2365,7 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
 
-            verify(copyCmd).exec();
+            verify(copyCmd, atLeastOnce()).exec();
             verify(lifecycleManager).startCreated(any(), any());
             assertEquals("container-1", cluster.getContainerId());
         }
@@ -2590,7 +2653,7 @@ class EksClusterManagerTest {
             assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxbackup=10"));
             assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-maxsize=100"));
 
-            verify(dockerClient).copyArchiveToContainerCmd("container-id-123456789012345678901234567890");
+            verify(dockerClient, atLeastOnce()).copyArchiveToContainerCmd("container-id-123456789012345678901234567890");
             verify(copyCmd).withRemotePath("/etc");
         }
 
@@ -2598,7 +2661,9 @@ class EksClusterManagerTest {
         void clusterWithoutAuditLoggingDoesNotAddAuditArgsOrInjectPolicyFile(@TempDir Path tempDir) {
             when(eks.dataPath()).thenReturn(tempDir.toString());
             DockerClient dockerClient = Mockito.mock(DockerClient.class);
+            CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
 
             Cluster cluster = new Cluster();
             cluster.setName("no-audit-cluster");
@@ -2614,7 +2679,7 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-policy-file")));
             assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-log-path")));
 
-            verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+            verify(copyCmd, never()).withRemotePath("/etc");
         }
 
         @Test
@@ -2681,6 +2746,145 @@ class EksClusterManagerTest {
             assertTrue(policy.contains("nonResourceURLs:"));
             assertTrue(policy.contains("/healthz*"));
             assertTrue(policy.contains("/version"));
+        }
+    }
+
+    @Nested
+    class ClusterArgsPassthrough {
+
+        private ContainerBuilder containerBuilder;
+        private ContainerBuilder.Builder builder;
+        private ContainerLifecycleManager lifecycleManager;
+        private EksClusterManager manager;
+
+        @BeforeEach
+        void setUp() {
+            EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.EksServiceConfig eks = Mockito.mock(EmulatorConfig.EksServiceConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.eks()).thenReturn(eks);
+            when(eks.defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+            when(eks.apiServerBasePort()).thenReturn(6440);
+            when(eks.apiServerMaxPort()).thenReturn(6499);
+            when(eks.dockerNetwork()).thenReturn(Optional.empty());
+            when(eks.disableCni()).thenReturn(false);
+            when(eks.iamAuthWebhook()).thenReturn(false);
+            when(eks.ecrRegistryMirror()).thenReturn(false);
+
+            lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.create(any())).thenReturn("container-id");
+            when(lifecycleManager.startCreated(any(), any())).thenReturn(
+                    new ContainerInfo("container-id", Map.of()));
+
+            containerBuilder = Mockito.mock(ContainerBuilder.class);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(Mockito.mock(ContainerSpec.class));
+
+            RegionResolver regionResolver = Mockito.mock(RegionResolver.class);
+            when(regionResolver.getAccountId()).thenReturn("000000000000");
+            when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+            when(regionResolver.buildGlobalArn(anyString(), anyString(), anyString())).thenAnswer(invocation ->
+                    "arn:aws:" + invocation.getArgument(0) + "::" + invocation.getArgument(1) + ":" + invocation.getArgument(2));
+
+            manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                    Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                    Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                    config, regionResolver);
+        }
+
+        @Test
+        void callerArgsAppearAlongsideFlociArgs() {
+            Cluster cluster = new Cluster();
+            cluster.setName("my-cluster");
+            cluster.setClusterArgs(List.of(
+                    "--kubelet-arg=max-pods=250",
+                    "--kube-apiserver-arg=feature-gates=CSIStorageCapacity=true"
+            ));
+
+            manager.startCluster(cluster);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertTrue(cmd.contains("server"));
+            assertTrue(cmd.contains("--kubelet-arg=max-pods=250"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=feature-gates=CSIStorageCapacity=true"));
+        }
+
+        @Test
+        void twoClustersWithDifferentArgsGetTheirOwn() {
+            Cluster cluster1 = new Cluster();
+            cluster1.setName("cluster-one");
+            cluster1.setClusterArgs(List.of("--kubelet-arg=max-pods=250"));
+
+            Cluster cluster2 = new Cluster();
+            cluster2.setName("cluster-two");
+            cluster2.setClusterArgs(List.of("--kubelet-arg=max-pods=500"));
+
+            manager.startCluster(cluster1);
+            manager.startCluster(cluster2);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder, Mockito.times(2)).withCmd(cmdCaptor.capture());
+            List<List<String>> allCmds = cmdCaptor.getAllValues();
+
+            List<String> cmd1 = allCmds.get(0);
+            List<String> cmd2 = allCmds.get(1);
+
+            assertTrue(cmd1.contains("--kubelet-arg=max-pods=250"));
+            assertFalse(cmd1.contains("--kubelet-arg=max-pods=500"));
+
+            assertTrue(cmd2.contains("--kubelet-arg=max-pods=500"));
+            assertFalse(cmd2.contains("--kubelet-arg=max-pods=250"));
+        }
+
+        @Test
+        void clusterWithoutCustomArgsProducesExactExistingArguments() {
+            Cluster clusterWithNoArgs = new Cluster();
+            clusterWithNoArgs.setName("plain-cluster");
+
+            manager.startCluster(clusterWithNoArgs);
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+
+            assertFalse(cmd.stream().anyMatch(a -> a.contains("max-pods")));
+        }
+
+        @Test
+        void collisionThrowsExpectedException() {
+            Cluster cluster = new Cluster();
+            cluster.setName("colliding-cluster");
+            cluster.setClusterArgs(List.of("--kubelet-arg=provider-id=custom-id"));
+
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                    () -> manager.startCluster(cluster));
+            assertTrue(e.getMessage().contains("collides with Floci-managed kubelet argument"));
+        }
+
+        @Test
+        void malformedInputLogsWarningAndStartsCluster() {
+            Cluster cluster = new Cluster();
+            cluster.setName("malformed-cluster");
+            cluster.setTags(Map.of(
+                    "floci:kubelet-arg:", "",
+                    "floci:kubelet-arg:max-pods=250", "true"
+            ));
+
+            assertDoesNotThrow(() -> manager.startCluster(cluster));
+
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+            verify(builder).withCmd(cmdCaptor.capture());
+            List<String> cmd = cmdCaptor.getValue();
+            assertTrue(cmd.contains("--kubelet-arg=max-pods=250"));
         }
     }
 }

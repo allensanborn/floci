@@ -6521,7 +6521,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
         launchTemplate.setLaunchTemplateName(name);
         launchTemplate.setCreateTime(Instant.now());
-        launchTemplate.setCreatedBy(AwsArnUtils.Arn.of("iam", "", callerAccountId(), "root").toString());
+        launchTemplate.setCreatedBy(
+                AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", callerAccountId(), "root").toString());
         launchTemplate.setRegion(region);
         launchTemplate.setData(new LaunchTemplateData(data != null ? data : new LaunchTemplateData()));
         if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
@@ -6785,13 +6786,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
+        return resolveLaunchTemplateData(region, id, name, version, true);
+    }
+
+    public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version,
+                                                        boolean decodeUserData) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         String resolvedVersion = resolveLaunchTemplateVersion(
                 launchTemplate,
                 version,
                 launchTemplate.getDefaultVersionNumber());
-        return new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+        if (decodeUserData) {
+            data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        }
+        return data;
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
@@ -6800,6 +6810,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
         tags.delete(launchTemplate.getLaunchTemplateId());
         return launchTemplate;
+    }
+
+    public void deleteLaunchTemplateVersion(String region, String id, String version) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, null);
+        ensureLaunchTemplateVersions(launchTemplate);
+        launchTemplate.getVersions().remove(version);
+        launchTemplate.getVersionDescriptions().remove(version);
+        int max = launchTemplate.getVersions().keySet().stream()
+                .mapToInt(this::parseLaunchTemplateVersion)
+                .max()
+                .orElse(1);
+        String maxStr = String.valueOf(max);
+        launchTemplate.setLatestVersionNumber(maxStr);
+        LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
+        if (latestData != null) {
+            launchTemplate.setData(new LaunchTemplateData(latestData));
+        }
+        launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
     }
 
     /**

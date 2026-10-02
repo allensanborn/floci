@@ -1,8 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.ContainerCaBundle;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerCmd;
@@ -22,6 +19,11 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -112,6 +114,15 @@ public class ContainerLifecycleManager {
             removeIfExists(containerId);
             throw e;
         }
+    }
+
+    /**
+     * Resolves the image a container launch is about to run, pulling it as the ECS agent does
+     * under {@code behavior}. A spec built from the returned image id runs exactly that image,
+     * whatever a later pull of the same reference moves its tag to.
+     */
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
+        return imageCacheService.resolveForLaunch(image, behavior);
     }
 
     /**
@@ -486,14 +497,15 @@ public class ContainerLifecycleManager {
 
     /**
      * Default emulator labels overlaid with the spec's labels; a per-spec label
-     * wins on key conflicts.
+     * wins on key conflicts. Each new key with a legacy alias also gets that alias, with the
+     * same value (see {@link ContainerStorageHelper#CONTAINER_LABEL_ALIASES}).
      */
     private Map<String, String> mergedLabels(Map<String, String> specLabels) {
         Map<String, String> labels = ContainerStorageHelper.defaultLabels(config);
         if (specLabels != null) {
             labels.putAll(specLabels);
         }
-        return labels;
+        return ContainerStorageHelper.CONTAINER_LABEL_ALIASES.withLegacyAliases(labels);
     }
 
     /**
@@ -928,6 +940,23 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * The labels on a named volume, or empty when it does not exist or the runtime cannot be
+     * queried, so a caller deciding whether a volume is its own can fail closed.
+     */
+    public Optional<Map<String, String>> tryVolumeLabels(String name) {
+        try {
+            Map<String, String> labels = dockerClient.inspectVolumeCmd(name).exec().getLabels();
+            return Optional.of(labels == null ? Map.of() : labels);
+        } catch (NotFoundException e) {
+            LOG.debugv("Volume ''{0}'' not found while reading its labels", name);
+            return Optional.empty();
+        } catch (DockerException e) {
+            LOG.warnv("Failed to read labels of volume ''{0}'': {1}", name, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Attempts to take an authoritative snapshot of all named volumes in the container runtime.
      * An empty optional means the runtime could not be queried; it is intentionally distinct from
      * a successful query that returned an empty set so cleanup callers fail closed.
@@ -962,12 +991,14 @@ public class ContainerLifecycleManager {
         if (spec.privileged()) {
             hostConfig.withPrivileged(true);
         }
-        if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-workload"))) {
+        if ("true".equals(ContainerStorageHelper.labelValue(
+                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL))) {
             hostConfig.withCapDrop(Capability.NET_ADMIN, Capability.NET_RAW);
         }
         // The firewall helper only has to program nftables in the namespace it already owns,
         // which needs CAP_NET_ADMIN and nothing else that privileged mode would also grant.
-        if (spec.labels() != null && "true".equals(spec.labels().get("floci.security-group-helper"))) {
+        if ("true".equals(ContainerStorageHelper.labelValue(
+                spec.labels(), ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL))) {
             hostConfig.withCapAdd(Capability.NET_ADMIN);
         }
 

@@ -44,6 +44,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyBinding;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -57,13 +58,14 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.OptionalInt;
+import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -187,6 +189,22 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    /** An instance created in China carries an aws-cn ARN, and its own lookup must still find it. */
+    @Test
+    void aChinaInstanceIsFoundAfterCreation() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        DbInstance instance = rdsService.createDbInstance("cn-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+
+        assertEquals("arn:aws-cn:rds:cn-north-1:123456789012:db:cn-db", instance.getDbInstanceArn());
+        assertEquals("cn-db", rdsService.getDbInstance("cn-db").getDbInstanceIdentifier());
     }
 
     @Test
@@ -350,6 +368,69 @@ class RdsServiceTest {
 
         assertFalse(modified.isPubliclyAccessible());
         assertFalse(rdsService.getDbInstance("pubdb").isPubliclyAccessible());
+    }
+
+    @Test
+    void createAndModifyDbInstancePersistDeletionProtection() {
+        DbInstance instance = rdsService.createDbInstance("prot-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, true);
+
+        assertTrue(instance.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance untouched = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), null);
+
+        assertTrue(untouched.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance modified = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), false);
+
+        assertFalse(modified.isDeletionProtection());
+        assertFalse(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance reEnabled = rdsService.modifyDbInstance("prot-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), true);
+
+        assertTrue(reEnabled.isDeletionProtection());
+        assertTrue(rdsService.getDbInstance("prot-db").isDeletionProtection());
+
+        DbInstance defaultInstance = rdsService.createDbInstance("unprot-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults());
+
+        assertFalse(defaultInstance.isDeletionProtection());
+        assertFalse(rdsService.getDbInstance("unprot-db").isDeletionProtection());
+    }
+
+    @Test
+    void deleteDbInstanceRefusesProtectedInstance() {
+        rdsService.createDbInstance("protected-db", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, true);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> rdsService.deleteDbInstance("protected-db"));
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("Cannot delete protected DB Instance, please disable deletion protection and try again.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+
+        assertNotNull(rdsService.getDbInstance("protected-db"));
+
+        rdsService.modifyDbInstance("protected-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                DbInstanceScalingChanges.unchanged(), false);
+
+        rdsService.deleteDbInstance("protected-db");
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("protected-db"));
     }
 
     @Test
@@ -1552,6 +1633,22 @@ class RdsServiceTest {
 
         rdsService.removeTagsFromResource(targetGroupArn, java.util.List.of("env"));
         assertEquals(java.util.Map.of(), rdsService.listTagsForResource(targetGroupArn));
+    }
+
+    @Test
+    void chinaDbProxyTargetGroupTagsRoundTripByArn() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        String targetGroupArn = rdsService.describeDbProxyTargetGroups("app-proxy")
+                .iterator().next().getTargetGroupArn();
+        assertTrue(targetGroupArn.startsWith("arn:aws-cn:rds:cn-north-1:"), targetGroupArn);
+
+        rdsService.addTagsToResource(targetGroupArn, Map.of("env", "test"));
+        assertEquals(Map.of("env", "test"), rdsService.listTagsForResource(targetGroupArn));
     }
 
     @Test
@@ -3398,6 +3495,30 @@ class RdsServiceTest {
         verify(containerManager).restorePostgresSnapshot(any(), eq("admin"), eq("MOCK_DUMP_DATA"));
     }
 
+    /** A China snapshot ARN is a source a China copy can read; a commercial one is not. */
+    @Test
+    void copyDbSnapshotReadsAChinaSourceArnWithinItsPartition() {
+        regionResolver = new RegionResolver("cn-north-1", "123456789012");
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        DbSnapshot source = rdsService.createDbSnapshot("source", "mydb");
+        assertEquals("arn:aws-cn:rds:cn-north-1:123456789012:snapshot:source", source.getDbSnapshotArn());
+
+        DbSnapshot copy = rdsService.copyDbSnapshot(source.getDbSnapshotArn(), "copy", false,
+                Map.of(), null, null, "cn-north-1");
+        assertEquals("copy", copy.getDbSnapshotIdentifier());
+
+        AwsException otherPartition = assertThrows(AwsException.class, () ->
+                rdsService.copyDbSnapshot("arn:aws:rds:us-east-1:123456789012:snapshot:source", "other", false,
+                        Map.of(), null, null, "cn-north-1"));
+        assertEquals("InvalidParameterValue", otherPartition.getErrorCode());
+    }
+
     @Test
     void copyDbSnapshotRejectsDuplicateTargetsAndUnavailableSources() {
         rdsService.createDbInstance("mydb", "postgres", "13",
@@ -4241,6 +4362,91 @@ class RdsServiceTest {
                 any(), any(), any(), any(), any(), any());
         verify(containerManager, times(2)).tryStart(eq(cluster.getDbClusterArn()), any(), any(),
                 any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void clusterMemberRelayFailureWarnsOncePerMemberUntilRecovery() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        DbCluster cluster = rdsService.createDbCluster("log-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        DbInstance first = rdsService.createDbInstance("log-first", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "log-cluster");
+        DbInstance second = rdsService.createDbInstance("log-second", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless", 0, false, null, null, "log-cluster");
+        IllegalStateException firstFailure = new IllegalStateException("first relay failed");
+        IllegalStateException secondFailure = new IllegalStateException("second relay failed");
+        IllegalStateException afterRecoveryFailure = new IllegalStateException("relay failed again");
+        doThrow(firstFailure).doThrow(firstFailure).doNothing().doThrow(afterRecoveryFailure)
+                .when(proxyManager).startProxy(eq("rds-resource:" + first.getDbInstanceArn()),
+                        any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+        doThrow(secondFailure).doThrow(secondFailure).doNothing()
+                .when(proxyManager).startProxy(eq("rds-resource:" + second.getDbInstanceArn()),
+                        any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("log-container", cluster.getDbClusterArn(),
+                        "log-cluster", "127.0.0.1", 15432));
+
+        List<LogRecord> records = LogCapture.capture(RdsService.class, () -> {
+            rdsService.ensureClusterBackend("log-cluster", "us-east-1");
+            rdsService.ensureClusterBackend("log-cluster", "us-east-1");
+            rdsService.ensureClusterBackend("log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.AVAILABLE, first.getStatus());
+            assertEquals(DbInstanceStatus.AVAILABLE, second.getStatus());
+            first.setContainerHost(null);
+            first.setContainerPort(0);
+            rdsService.ensureClusterBackend("log-cluster", "us-east-1");
+        });
+        List<LogRecord> failures = records.stream()
+                .filter(record -> record.getMessage().contains("Failed to restore RDS cluster member"))
+                .toList();
+        assertEquals(List.of("WARN", "WARN", "DEBUG", "DEBUG", "WARN"),
+                failures.stream().map(record -> record.getLevel().getName()).toList());
+        assertEquals(List.of(firstFailure, secondFailure, firstFailure, secondFailure,
+                        afterRecoveryFailure), failures.stream().map(LogRecord::getThrown).toList());
+    }
+
+    @Test
+    void clusterMemberRestartWithoutBackendKeepsRelayWarningUntilRecovery() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        DbCluster cluster = rdsService.createDbCluster("restart-log-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        DbInstance member = rdsService.createDbInstance("restart-log-member", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless", 0, false, null, null,
+                "restart-log-cluster");
+        IllegalStateException firstFailure = new IllegalStateException("first relay failed");
+        IllegalStateException ongoingFailure = new IllegalStateException("relay still failed after restart");
+        IllegalStateException afterRecoveryFailure = new IllegalStateException("relay failed after recovery");
+        doThrow(firstFailure).doThrow(ongoingFailure).doNothing().doThrow(afterRecoveryFailure)
+                .when(proxyManager).startProxy(eq("rds-resource:" + member.getDbInstanceArn()),
+                        any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+        RdsContainerHandle handle = new RdsContainerHandle("restart-log-container",
+                cluster.getDbClusterArn(), "restart-log-cluster", "127.0.0.1", 15432);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(handle, null, handle);
+
+        List<LogRecord> records = LogCapture.capture(RdsService.class, () -> {
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.FAILED, member.getStatus());
+            rdsService.rebootDbCluster("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
+            assertNull(member.getContainerHost());
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.FAILED, member.getStatus());
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+            assertEquals(DbInstanceStatus.AVAILABLE, member.getStatus());
+            member.setContainerHost(null);
+            member.setContainerPort(0);
+            rdsService.ensureClusterBackend("restart-log-cluster", "us-east-1");
+        });
+        List<LogRecord> failures = records.stream()
+                .filter(record -> record.getMessage().contains("Failed to restore RDS cluster member"))
+                .toList();
+        assertEquals(List.of("WARN", "DEBUG", "WARN"),
+                failures.stream().map(record -> record.getLevel().getName()).toList());
+        assertEquals(List.of(firstFailure, ongoingFailure, afterRecoveryFailure),
+                failures.stream().map(LogRecord::getThrown).toList());
     }
 
     @ParameterizedTest

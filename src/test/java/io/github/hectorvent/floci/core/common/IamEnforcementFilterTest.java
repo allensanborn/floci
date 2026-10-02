@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
@@ -43,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -98,7 +101,7 @@ class IamEnforcementFilterTest {
         when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
-        when(evaluator.evaluateResourcePolicy(any(), any(), any(), any(), any()))
+        when(evaluator.evaluateResourcePolicyFor(any(), any(), any(), any(), any()))
                 .thenReturn(ResourcePolicyDecision.NEUTRAL);
     }
 
@@ -218,7 +221,9 @@ class IamEnforcementFilterTest {
         when(containerRequest.getMediaType()).thenReturn(MediaType.valueOf(contentType));
         stubClaim(containerRequest, protocol, dynamoDbDescriptor());
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
-        when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        // A REST-claimed request resolves from its route, the others from the registry's full rules.
+        lenient().when(actionRegistry.resolve("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
+        lenient().when(actionRegistry.resolveRoute("dynamodb", containerRequest)).thenReturn("dynamodb:PutItem");
         when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("dynamodb:PutItem"), any(), any()))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
@@ -288,7 +293,9 @@ class IamEnforcementFilterTest {
 
         newFilter().filter(containerRequest);
 
-        verify(actionRegistry).resolve(eq("s3"), eq(containerRequest));
+        verify(actionRegistry).resolveRoute(eq("s3"), eq(containerRequest));
+        // Nor does the header name the action: a REST request never reaches the header-reading rules.
+        verify(actionRegistry, never()).resolve(any(), any());
     }
 
     @Test
@@ -305,14 +312,14 @@ class IamEnforcementFilterTest {
         when(catalog.byResourceClass(ApiGatewayController.class))
                 .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
                         Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
-        when(actionRegistry.resolve("apigateway", containerRequest)).thenReturn("apigateway:POST");
+        when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:POST");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
         IamEnforcementFilter filter = newFilter(resourceInfo(ApiGatewayController.class));
         filter.filter(containerRequest);
 
-        verify(actionRegistry).resolve("apigateway", containerRequest);
-        verify(actionRegistry, never()).resolve("iam", containerRequest);
+        verify(actionRegistry).resolveRoute("apigateway", containerRequest);
+        verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
         verify(arnBuilder).buildResources("apigateway", containerRequest,
                 "us-east-1", "000000000000");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
@@ -332,14 +339,14 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("s3", ServiceProtocol.REST_XML,
                         Set.of("s3", "s3express"), S3Controller.class)));
         when(catalog.canonicalCredentialScope("s3express")).thenReturn("s3");
-        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:CreateBucket");
+        when(actionRegistry.resolveRoute("s3", containerRequest)).thenReturn("s3:CreateBucket");
         when(iamService.resolveCallerContext("AKIAUSER")).thenReturn(CallerContext.of(List.of()));
 
         IamEnforcementFilter filter = newFilter(resourceInfo(S3Controller.class));
         filter.filter(containerRequest);
 
-        verify(actionRegistry).resolve("s3", containerRequest);
-        verify(actionRegistry, never()).resolve("apigateway", containerRequest);
+        verify(actionRegistry).resolveRoute("s3", containerRequest);
+        verify(actionRegistry, never()).resolveRoute("apigateway", containerRequest);
     }
 
     @Test
@@ -1197,9 +1204,9 @@ class IamEnforcementFilterTest {
     }
 
     // aws:PrincipalArn is populated only for principals whose ARN is known — IAM users and
-    // assumed-role sessions (IamService.resolveCallerArn). A condition-scoped SCP keyed on the
+    // assumed-role sessions (IamService.resolveCallerArns). A condition-scoped SCP keyed on the
     // principal ARN must therefore fire for a real IAM identity. It stays inert for the bare
-    // account-root key, whose resolveCallerArn is empty (see the workload-guardrails test above).
+    // account-root key, whose resolveCallerArns is empty (see the workload-guardrails test above).
     private static final String DENY_IAM_USER_PRINCIPAL =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"*\","
             + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
@@ -1224,8 +1231,8 @@ class IamEnforcementFilterTest {
         // A real IAM user: full-access identity policy plus a known principal ARN.
         when(iamService.resolveCallerContext(akid))
                 .thenReturn(CallerContext.of(List.of(FULL_AWS_ACCESS)));
-        when(iamService.resolveCallerArn(akid))
-                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/alice"));
+        String userArn = "arn:aws:iam::" + account + ":user/alice";
+        when(iamService.resolveCallerArns(akid)).thenReturn(Optional.of(new CallerArns(userArn, userArn)));
         when(arnBuilder.build(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
                 .thenReturn("*");
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
@@ -1248,7 +1255,7 @@ class IamEnforcementFilterTest {
     // lets a principal-scoped Allow match. An identity policy that grants access only when the caller
     // is an IAM user must therefore ALLOW a real IAM user. Before aws:PrincipalArn was populated the
     // key was absent, the StringLike failed, the sole Allow never matched, and the request was denied
-    // by default — so stubbing resolveCallerArn empty makes this test RED, proving it is load-bearing.
+    // by default, so stubbing resolveCallerArns empty makes this test RED, proving it is load-bearing.
     private static final String ALLOW_IF_IAM_USER_PRINCIPAL =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\","
             + "\"Resource\":\"*\",\"Condition\":{\"StringLike\":"
@@ -1272,8 +1279,8 @@ class IamEnforcementFilterTest {
         // A real IAM user whose ONLY grant is conditional on being an IAM-user principal.
         when(iamService.resolveCallerContext(akid))
                 .thenReturn(CallerContext.of(List.of(ALLOW_IF_IAM_USER_PRINCIPAL)));
-        when(iamService.resolveCallerArn(akid))
-                .thenReturn(Optional.of("arn:aws:iam::" + account + ":user/bob"));
+        String userArn = "arn:aws:iam::" + account + ":user/bob";
+        when(iamService.resolveCallerArns(akid)).thenReturn(Optional.of(new CallerArns(userArn, userArn)));
         when(arnBuilder.buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account)))
                 .thenReturn(List.of("*"));
         when(conditionContextResolver.resolve(eq("organizations"), anyString(), eq(containerRequest)))
@@ -1288,6 +1295,32 @@ class IamEnforcementFilterTest {
         // aws:PrincipalArn matches arn:aws:iam::*:user/* → the conditional Allow grants access.
         verify(containerRequest, never()).abortWith(any());
         verify(arnBuilder).buildResources(eq("organizations"), eq(containerRequest), eq("us-east-1"), eq(account));
+    }
+
+    @Test
+    void aRoleSessionReachesResourcePoliciesAsItsRoleWithItsPath() {
+        // The session ARN names the role without its path; a Principal naming the role is matched
+        // against the role's own ARN, which the caller lookup returns alongside it.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String account = "111122223333";
+        String akid = "ASIASESSIONEXAMPLE";
+        String auth = "AWS4-HMAC-SHA256 Credential=" + akid
+                + "/20260629/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId(account);
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn(akid);
+        when(accountResolver.resolve(auth)).thenReturn(account);
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn("s3:GetObject");
+        when(iamService.resolveCallerContext(akid)).thenReturn(CallerContext.of(List.of()));
+        String sessionArn = "arn:aws:sts::" + account + ":assumed-role/App/s";
+        String roleArn = "arn:aws:iam::" + account + ":role/team/App";
+        when(iamService.resolveCallerArns(akid)).thenReturn(Optional.of(new CallerArns(sessionArn, roleArn)));
+
+        newFilter().filter(containerRequest);
+
+        verify(evaluator, atLeastOnce()).evaluateResourcePolicyFor(
+                any(), eq(RequestPrincipal.roleSession(sessionArn, roleArn)), any(), any(), any());
     }
 
     // --- Presigned URL query-string credential (#3195): a presigned PUT/GET carries its
@@ -1525,7 +1558,7 @@ class IamEnforcementFilterTest {
                 conditions, "arn:aws:s3:::partner-bucket", "us-east-1", "222233334444", "111111111111");
         assertEquals(List.of("111111111111"), expected.get("aws:ResourceAccount"));
 
-        when(evaluator.evaluateResourcePolicy(any(), any(), anyString(), anyString(), any()))
+        when(evaluator.evaluateResourcePolicyFor(any(), any(), anyString(), anyString(), any()))
                 .thenReturn(ResourcePolicyDecision.NEUTRAL);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
