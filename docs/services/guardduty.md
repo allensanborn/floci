@@ -24,6 +24,11 @@ region and use the configured Floci storage mode.
 | `ListOrganizationAdminAccounts` | `GET /admin` | List the delegated administrator account |
 | `CreateMembers` | `POST /detector/{detectorId}/member` | Create GuardDuty member accounts for a detector |
 | `ListMembers` | `GET /detector/{detectorId}/member` | List detector members with pagination and association filtering |
+| `CreatePublishingDestination` | `POST /detector/{detectorId}/publishingDestination` | Create an S3 findings export destination |
+| `DescribePublishingDestination` | `GET /detector/{detectorId}/publishingDestination/{destinationId}` | Return the destination's properties and status |
+| `UpdatePublishingDestination` | `POST /detector/{detectorId}/publishingDestination/{destinationId}` | Update the destination ARN or KMS key ARN |
+| `DeletePublishingDestination` | `DELETE /detector/{detectorId}/publishingDestination/{destinationId}` | Delete the destination |
+| `ListPublishingDestinations` | `GET /detector/{detectorId}/publishingDestination` | List destinations with pagination |
 | `TagResource` | `POST /tags/{resourceArn}` | Add tags to a detector |
 | `UntagResource` | `DELETE /tags/{resourceArn}` | Remove tags from a detector |
 | `ListTagsForResource` | `GET /tags/{resourceArn}` | List detector tags |
@@ -32,6 +37,9 @@ Feature lists and each feature's `additionalConfiguration` list are returned in 
 they were submitted, so Terraform's ordered list blocks re-plan cleanly. A missing detector
 is reported as `BadRequestException` with the exact message the Terraform AWS provider
 matches for not-found detection, mirroring AWS.
+
+Publishing destinations report `PUBLISHING` as soon as they are created: Floci does not
+verify the bucket or key, and no findings are exported to it.
 
 ## Configuration
 

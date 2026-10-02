@@ -34,7 +34,8 @@ class GuardDutyServiceTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final GuardDutyService service =
-            new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+            new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new InMemoryStorage<>());
 
     @Test
     void createDetectorAppliesDefaultsAndGeneratesIdentifiers() throws Exception {
@@ -300,7 +301,7 @@ class GuardDutyServiceTest {
         AccountAwareStorageBackend<MemberAccount> members = AccountAwareStorageBackend.inMemory(adminAccount);
         admins.putForAccount(managementAccount, REGION + "::" + adminAccount,
                 new AdminAccount(adminAccount, "ENABLED"));
-        GuardDutyService partitioned = new GuardDutyService(detectors, admins, members);
+        GuardDutyService partitioned = new GuardDutyService(detectors, admins, members, new InMemoryStorage<>());
         Detector adminDetector = partitioned.createDetector(REGION, adminAccount, request("{\"enable\":true}"));
 
         partitioned.createMembers(REGION, adminDetector.getId(), request(
@@ -378,7 +379,7 @@ class GuardDutyServiceTest {
                 loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
                 }),
                 loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
-                }));
+                }), new InMemoryStorage<>());
         Detector created = firstService.createDetector(REGION, ACCOUNT, request("""
                 {"enable":true,"tags":{"env":"test"},"features":[
                   {"name":"RUNTIME_MONITORING","status":"ENABLED","additionalConfiguration":[
@@ -397,7 +398,7 @@ class GuardDutyServiceTest {
                 loadedStore(adminFile, new TypeReference<Map<String, AdminAccount>>() {
                 }),
                 loadedStore(memberFile, new TypeReference<Map<String, MemberAccount>>() {
-                }));
+                }), new InMemoryStorage<>());
         Detector reloaded = reloadedService.getDetector(REGION, created.getId());
 
         assertEquals(created.getId(), reloaded.getId());
