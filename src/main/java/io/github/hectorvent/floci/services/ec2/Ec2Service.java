@@ -7206,7 +7206,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         CapacityReservation cr = capacityReservations.get(storeKey).orElse(null);
         if (cr != null) { cr.setTags(new ArrayList<>(tagList)); capacityReservations.put(storeKey, cr); return; }
         Host host = hosts.get(storeKey).orElse(null);
-        if (host != null) { host.setTags(new ArrayList<>(tagList)); hosts.put(storeKey, host); return; }
+        if (host != null) {
+            host.setTags(new ArrayList<>(tagList));
+            hosts.put(storeKey, host);
+            return;
+        }
         Subnet subnet = subnets.get(storeKey).orElse(null);
         if (subnet != null) { subnet.setTags(new ArrayList<>(tagList)); subnets.put(storeKey, subnet); return; }
         SecurityGroup sg = securityGroups.get(storeKey).orElse(null);
@@ -9241,7 +9245,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
         if (resource instanceof VpcPeeringConnection pcx) return pcx.getTags();
         if (resource instanceof CapacityReservation cr) return cr.getTags();
-        if (resource instanceof Host host) return host.getTags();
+        if (resource instanceof Host host) {
+            return host.getTags();
+        }
         return Collections.emptyList();
     }
 
