@@ -43,9 +43,9 @@
 # grouping accurate when you add or move a line.
 #
 #   cited          AWS documentation names the alias: elasticfilesystem, kinesisvideo, glue,
-#                  acm.
+#                  acm, ebs, s3, sqs, sns, ses.
 #   corroborated   production code in this repository already names the alias, independently of
-#                  any external source: ebs, ssm, redshift, codeartifact.
+#                  any external source: ssm, redshift, codeartifact.
 #   recollection   not doc-verified. Believed correct, and each was checked against the test
 #                  above (does the service's own encryption selector offer this key in your
 #                  account?), but nobody has read an AWS page that prints the alias. If you are
@@ -71,11 +71,24 @@ keys:
   # output: https://docs.aws.amazon.com/kms/latest/APIReference/API_ListAliases.html
   - alias: "alias/aws/acm"
     description: "Default master key that protects my ACM private keys when no other key is defined"
+  # The ECS guide describes a default AWS managed key with the alias alias/aws/ebs, unique per account per Region.
+  - alias: "alias/aws/ebs"
+    description: "Default master key that protects my EBS volumes when no other key is defined"
+  # The CodeBuild guide shows "encryptionKey": "arn:aws:kms:region-ID:account-ID:alias/aws/s3".
+  - alias: "alias/aws/s3"
+    description: "Default master key that protects my S3 objects when no other key is defined"
+  # The SQS guide names the "AWS managed default key (alias/aws/sqs)".
+  - alias: "alias/aws/sqs"
+    description: "Default master key that protects my SQS queues when no other key is defined"
+  # The SNS guide: "the alias of the AWS managed AWS KMS for Amazon SNS is always alias/aws/sns".
+  - alias: "alias/aws/sns"
+    description: "Default master key that protects my SNS data when no other key is defined"
+  # The SES guide shows the default key as arn:aws:kms:REGION:AWSACCOUNTID:alias/aws/ses.
+  - alias: "alias/aws/ses"
+    description: "Default master key that protects my SES messages when no other key is defined"
 
   # ---- corroborated: named by production code in this repository ----
 
-  - alias: "alias/aws/ebs"
-    description: "Default master key that protects my EBS volumes when no other key is defined"
   - alias: "alias/aws/ssm"
     description: "Default master key that protects my Systems Manager data when no other key is defined"
   - alias: "alias/aws/redshift"
@@ -85,18 +98,12 @@ keys:
 
   # ---- recollection: not doc-verified ----
 
-  - alias: "alias/aws/s3"
-    description: "Default master key that protects my S3 objects when no other key is defined"
   - alias: "alias/aws/rds"
     description: "Default master key that protects my RDS database volumes when no other key is defined"
   - alias: "alias/aws/dynamodb"
     description: "Default master key that protects my DynamoDB table storage when no other key is defined"
   - alias: "alias/aws/lambda"
     description: "Default master key that protects my Lambda functions when no other key is defined"
-  - alias: "alias/aws/sqs"
-    description: "Default master key that protects my SQS queues when no other key is defined"
-  - alias: "alias/aws/sns"
-    description: "Default master key that protects my SNS data when no other key is defined"
   - alias: "alias/aws/secretsmanager"
     description: "Default master key that protects my Secrets Manager secrets when no other key is defined"
   - alias: "alias/aws/es"
@@ -115,7 +122,5 @@ keys:
     description: "Default master key that protects my DMS replication instance storage when no other key is defined"
   - alias: "alias/aws/codecommit"
     description: "Default master key that protects my CodeCommit repositories when no other key is defined"
-  - alias: "alias/aws/ses"
-    description: "Default master key that protects my SES messages when no other key is defined"
   - alias: "alias/aws/workspaces"
     description: "Default master key that protects my WorkSpaces volumes when no other key is defined"
