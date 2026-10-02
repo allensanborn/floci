@@ -159,7 +159,9 @@ class Ec2DedicatedHostIntegrationTest {
         .then()
             .statusCode(200)
             .body("ReleaseHostsResponse.unsuccessful.item.resourceId", equalTo(hostId))
-            .body("ReleaseHostsResponse.unsuccessful.item.error.code", equalTo("Client.InvalidHost.Occupied"));
+            .body("ReleaseHostsResponse.unsuccessful.item.error.code", equalTo("Client.InvalidHost.Occupied"))
+            .body("ReleaseHostsResponse.unsuccessful.item.error.message",
+                    equalTo("Dedicated host '" + hostId + "' cannot be released as it is occupied."));
 
         given()
             .formParam("Action", "TerminateInstances")
