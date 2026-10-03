@@ -20,6 +20,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -67,10 +68,21 @@ class IamSshPublicKeyIntegrationTest {
         return bytes.toByteArray();
     }
 
+    private static String newSshBody() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        return "ssh-rsa " + Base64.getEncoder().encodeToString(
+                sshRsaBlob((RSAPublicKey) generator.generateKeyPair().getPublic()));
+    }
+
     private static ValidatableResponse call(String action, String... params) {
+        return callAs(IAM_CREDENTIAL, action, params);
+    }
+
+    private static ValidatableResponse callAs(String authorization, String action, String... params) {
         RequestSpecification request = given()
                 .formParam("Action", action)
-                .header("Authorization", IAM_CREDENTIAL);
+                .header("Authorization", authorization);
         for (int i = 0; i < params.length; i += 2) {
             request.formParam(params[i], params[i + 1]);
         }
@@ -200,6 +212,118 @@ class IamSshPublicKeyIntegrationTest {
                 .body("GetSSHPublicKeyResponse.GetSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyBody",
                         equalTo(sshBody));
         call("DeleteSSHPublicKey", "UserName", USER, "SSHPublicKeyId", id).statusCode(200);
+        call("DeleteUser", "UserName", USER).statusCode(200);
+    }
+
+    // ---- Error paths, on a second user so the ordered flow above is undisturbed. ----
+
+    private static final String LIMIT_USER = "ssh-key-limit-user";
+    private static final String MEMBERS = "ListSSHPublicKeysResponse.ListSSHPublicKeysResult.SSHPublicKeys.member";
+    private static String limitKeyId;
+
+    private static String getStatus(String user, String id) {
+        return call("GetSSHPublicKey", "UserName", user, "SSHPublicKeyId", id, "Encoding", "SSH")
+                .statusCode(200)
+                .extract().path("GetSSHPublicKeyResponse.GetSSHPublicKeyResult.SSHPublicKey.Status");
+    }
+
+    @Test
+    @Order(11)
+    void sixthKeyIsLimitExceededAndNotStored() throws Exception {
+        call("CreateUser", "UserName", LIMIT_USER).statusCode(200);
+        for (int i = 0; i < 5; i++) {
+            String id = call("UploadSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyBody", newSshBody())
+                    .statusCode(200)
+                    .extract().path("UploadSSHPublicKeyResponse.UploadSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyId");
+            if (i == 0) {
+                limitKeyId = id;
+            }
+        }
+        call("UploadSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyBody", newSshBody())
+                .statusCode(409)
+                .body("ErrorResponse.Error.Code", equalTo("LimitExceeded"));
+        call("ListSSHPublicKeys", "UserName", LIMIT_USER)
+                .statusCode(200)
+                .body(MEMBERS + ".size()", equalTo(5));
+    }
+
+    @Test
+    @Order(12)
+    void unknownEncodingIsUnrecognizedPublicKeyEncoding() {
+        call("GetSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyId", limitKeyId, "Encoding", "DER")
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("UnrecognizedPublicKeyEncoding"));
+    }
+
+    @Test
+    @Order(13)
+    void invalidStatusIsInvalidInputAndLeavesStatusUnchanged() {
+        call("UpdateSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyId", limitKeyId, "Status", "Disabled")
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+        assertEquals("Active", getStatus(LIMIT_USER, limitKeyId));
+    }
+
+    @Test
+    @Order(14)
+    void listWithoutUserNameUsesTheCallersUser() {
+        String accessKeyId = call("CreateAccessKey", "UserName", LIMIT_USER)
+                .statusCode(200)
+                .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
+        String auth = "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/20260227/us-east-1/iam/aws4_request";
+        callAs(auth, "ListSSHPublicKeys")
+                .statusCode(200)
+                .body(MEMBERS + ".size()", equalTo(5))
+                .body(MEMBERS + ".UserName", everyItem(equalTo(LIMIT_USER)));
+        call("DeleteAccessKey", "UserName", LIMIT_USER, "AccessKeyId", accessKeyId).statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void unknownKeyIdIsNoSuchEntityOnUpdateAndDelete() {
+        String unknown = "APKA0000000000000000";
+        call("UpdateSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyId", unknown, "Status", "Inactive")
+                .statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+        call("DeleteSSHPublicKey", "UserName", LIMIT_USER, "SSHPublicKeyId", unknown)
+                .statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchEntity"));
+        call("ListSSHPublicKeys", "UserName", LIMIT_USER)
+                .statusCode(200)
+                .body(MEMBERS + ".size()", equalTo(5))
+                .body(MEMBERS + ".Status", everyItem(equalTo("Active")));
+    }
+
+    @Test
+    @Order(16)
+    void nonRsaBodiesAreInvalidPublicKey() throws Exception {
+        String rsaBlob = sshBody.substring("ssh-rsa ".length());
+        // RSA material under another algorithm's name.
+        String wrongHeader = "ssh-dss " + rsaBlob;
+        // ssh-rsa header over a blob whose embedded type is not ssh-rsa.
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream out = new DataOutputStream(bytes);
+        for (byte[] field : new byte[][]{"ssh-dss".getBytes(), rsaKey.getPublicExponent().toByteArray(),
+                rsaKey.getModulus().toByteArray()}) {
+            out.writeInt(field.length);
+            out.write(field);
+        }
+        String wrongBlobType = "ssh-rsa " + Base64.getEncoder().encodeToString(bytes.toByteArray());
+        KeyPairGenerator ec = KeyPairGenerator.getInstance("EC");
+        ec.initialize(256);
+        String ecPem = "-----BEGIN PUBLIC KEY-----\n"
+                + Base64.getMimeEncoder(64, "\n".getBytes()).encodeToString(ec.generateKeyPair().getPublic().getEncoded())
+                + "\n-----END PUBLIC KEY-----\n";
+        // The user is at its 5-key limit, so use a fresh one: rejection must come from the body.
+        call("CreateUser", "UserName", USER).statusCode(200);
+        for (String body : List.of(wrongHeader, wrongBlobType, ecPem)) {
+            call("UploadSSHPublicKey", "UserName", USER, "SSHPublicKeyBody", body)
+                    .statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidPublicKey"));
+        }
+        String list = call("ListSSHPublicKeys", "UserName", USER).statusCode(200).extract().asString();
+        assertEquals("", new XmlPath(list).getString(
+                "ListSSHPublicKeysResponse.ListSSHPublicKeysResult.SSHPublicKeys"));
         call("DeleteUser", "UserName", USER).statusCode(200);
     }
 }
