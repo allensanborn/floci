@@ -139,9 +139,13 @@ returned.
   `EngineDisplayName`, `ExternalId` or the settings structure AWS derives from top-level
   connection fields, and a task without `ReplicationTaskSettings` reports none rather than
   the AWS defaults. Instances report no private or public IP addresses.
+- **`CdcStartTime` is ignored.** `CreateReplicationTask`, `ModifyReplicationTask` and
+  `StartReplicationTask` accept it, but it is not stored or returned. `CdcStartPosition` and
+  `CdcStopPosition` are stored by create and modify, and ignored by `StartReplicationTask`.
 - **Not implemented:** `TestConnection`, `DescribeConnections`, `MoveReplicationTask`,
-  replication configs (`aws_dms_replication_config`, serverless DMS), event subscriptions,
-  certificates and the `WithoutSettings` flag of `DescribeReplicationTasks`.
+  `DescribeEndpointTypes`, `DescribeOrderableReplicationInstances`, replication configs
+  (`aws_dms_replication_config`, serverless DMS), event subscriptions, certificates and the
+  `WithoutSettings` flag of `DescribeReplicationTasks`.
 - **No `ModifyReplicationSubnetGroup`.** A subnet change has to be a delete and recreate.
 
 See the [AWS DMS API Reference](https://docs.aws.amazon.com/dms/latest/APIReference/Welcome.html).
