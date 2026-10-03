@@ -5,8 +5,6 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.net.URI;
-
 /**
  * Computes the Floci base URL reachable from <em>inside</em> a Docker container that Floci launches.
  *
@@ -43,9 +41,15 @@ public class ContainerReachableEndpoint {
         this.embeddedDnsServer = embeddedDnsServer;
     }
 
-    /** The Floci {@code http://host:port} base URL reachable from inside a launched Docker container. */
+    /**
+     * The Floci {@code http://host:port} base URL reachable from inside a launched Docker container.
+     *
+     * <p>The port is {@code floci.port}, the one Floci listens on, not the port in
+     * {@code floci.base-url}: base-url advertises the host-facing address, which differs under a
+     * port mapping such as {@code -p 4811:4566} and is refused inside the Docker network.
+     */
     public String baseUrl() {
-        int flociPort = URI.create(config.baseUrl()).getPort();
+        int flociPort = config.port();
         String flociHostname = embeddedDnsServer.getServerIp().isPresent()
                 ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
                 : dockerHostResolver.resolve();
