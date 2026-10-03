@@ -14,6 +14,7 @@
 | `DescribeBackupVault` | `GET` | `/backup-vaults/{backupVaultName}` | Describe a backup vault |
 | `DeleteBackupVault` | `DELETE` | `/backup-vaults/{backupVaultName}` | Delete an empty backup vault, locked or not |
 | `ListBackupVaults` | `GET` | `/backup-vaults/` | List all backup vaults |
+| `CreateLogicallyAirGappedBackupVault` | `PUT` | `/logically-air-gapped-backup-vaults/{backupVaultName}` | Create a logically air-gapped vault, `AVAILABLE` at once; `DescribeBackupVault` reports its `VaultType`, `VaultState` and retention |
 
 ### Backup Vault Access Policy
 

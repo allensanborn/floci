@@ -86,6 +86,39 @@ public class BackupService {
     public BackupVault createBackupVault(String vaultName, String encryptionKeyArn,
                                          String creatorRequestId, Map<String, String> tags,
                                          String region) {
+        return createVault(new BackupVault(), vaultName, encryptionKeyArn, creatorRequestId, tags, region);
+    }
+
+    /**
+     * CreateLogicallyAirGappedBackupVault. Both retention values are "Required: Yes" in the
+     * reference, and MinRetentionDays carries "The minimum value accepted is 7 days." The vault
+     * shares the standard vault namespace and ARN shape, so DescribeBackupVault, DeleteBackupVault
+     * and the tag operations reach it unchanged; what distinguishes it is VaultType, which the
+     * Terraform provider checks on every read. Creation is synchronous here, so the vault is
+     * AVAILABLE at once rather than passing through CREATING.
+     */
+    public BackupVault createLogicallyAirGappedBackupVault(String vaultName, String encryptionKeyArn,
+                                                           String creatorRequestId, Map<String, String> tags,
+                                                           Long minRetentionDays, Long maxRetentionDays,
+                                                           String region) {
+        if (minRetentionDays == null) {
+            throw new AwsException("MissingParameterValueException", "MinRetentionDays is required", 400);
+        }
+        if (maxRetentionDays == null) {
+            throw new AwsException("MissingParameterValueException", "MaxRetentionDays is required", 400);
+        }
+        requireDayRange("MinRetentionDays", minRetentionDays, 7, null);
+        requireDayRange("MaxRetentionDays", maxRetentionDays, minRetentionDays, null);
+        BackupVault vault = new BackupVault();
+        vault.setVaultType("LOGICALLY_AIR_GAPPED_BACKUP_VAULT");
+        vault.setVaultState("AVAILABLE");
+        vault.setMinRetentionDays(minRetentionDays);
+        vault.setMaxRetentionDays(maxRetentionDays);
+        return createVault(vault, vaultName, encryptionKeyArn, creatorRequestId, tags, region);
+    }
+
+    private BackupVault createVault(BackupVault vault, String vaultName, String encryptionKeyArn,
+                                    String creatorRequestId, Map<String, String> tags, String region) {
         String key = vaultKey(region, vaultName);
         // Check and write under one monitor. Unsynchronised, two creates of the same name can
         // both find the name free and both write, so AlreadyExistsException never fires and the
@@ -103,7 +136,6 @@ public class BackupService {
             if (vaultStore.get(key).isPresent()) {
                 throw new AwsException("AlreadyExistsException", "Backup vault already exists: " + vaultName, 400);
             }
-            BackupVault vault = new BackupVault();
             vault.setBackupVaultName(vaultName);
             vault.setBackupVaultArn(regionResolver.buildArn("backup", region, "backup-vault:" + vaultName));
             vault.setEncryptionKeyArn(encryptionKeyArn);

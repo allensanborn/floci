@@ -60,6 +60,29 @@ public class BackupController {
         return Response.status(200).entity(out).build();
     }
 
+    @PUT
+    @Path("/logically-air-gapped-backup-vaults/{backupVaultName}")
+    public Response createLogicallyAirGappedBackupVault(@Context HttpHeaders headers,
+                                                         @PathParam("backupVaultName") String vaultName,
+                                                         String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode req = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+        BackupVault vault = service.createLogicallyAirGappedBackupVault(vaultName,
+                textOrNull(req, "EncryptionKeyArn"),
+                textOrNull(req, "CreatorRequestId"),
+                readStringMap(req, "BackupVaultTags"),
+                longOrNull(req, "MinRetentionDays"),
+                longOrNull(req, "MaxRetentionDays"),
+                region);
+
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("BackupVaultName", vault.getBackupVaultName());
+        out.put("BackupVaultArn", vault.getBackupVaultArn());
+        out.put("CreationDate", vault.getCreationDate());
+        out.put("VaultState", vault.getVaultState());
+        return Response.status(200).entity(out).build();
+    }
+
     @GET
     @Path("/backup-vaults/{backupVaultName}")
     public Response describeBackupVault(@Context HttpHeaders headers,
