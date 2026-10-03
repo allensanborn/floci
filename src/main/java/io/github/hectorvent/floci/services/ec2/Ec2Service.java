@@ -70,6 +70,7 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.TransitGateway;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayOptions;
+import io.github.hectorvent.floci.services.ec2.model.TransitGatewayPeeringAttachment;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRoute;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTable;
 import io.github.hectorvent.floci.services.ec2.model.TransitGatewayRouteTablePropagation;
@@ -253,6 +254,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
     private final StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations;
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
+    // Keyed by id alone: one attachment serves both regions of a cross-region peering. Not final,
+    // and in memory unless the StorageFactory constructor replaces it, so the hermetic constructors
+    // below keep their arity.
+    private StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments =
+            new InMemoryStorage<>();
     // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
     private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
     // Standalone (non-primary) ENIs created via CreateNetworkInterface, see #floci-kt9.
@@ -468,6 +474,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         new TypeReference<Map<String, VolumeModification>>() {}),
                 requestContextInstance, iamService, volumeBlockDeviceManager,
                 storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}));
+        this.transitGatewayPeeringAttachments = storageFactory.create("ec2",
+                "ec2-transit-gateway-peering-attachments.json",
+                new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {});
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -2295,6 +2304,115 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             throw new AwsException("InvalidTransitGatewayAttachmentID.Malformed",
                     "Invalid Transit Gateway Attachment id.", 400);
         }
+    }
+
+    // ─── Transit Gateway Peering Attachments ───────────────────────────────────
+
+    /**
+     * Requests a peering between a local transit gateway and a peer one. The peer gateway is not
+     * resolved: it may live in another account this store cannot see, and AWS settles that
+     * asynchronously. AWS passes through {@code initiatingRequest}; nothing is slow locally, so
+     * the attachment is created already waiting for the peer.
+     */
+    public TransitGatewayPeeringAttachment createTransitGatewayPeeringAttachment(
+            String region, String transitGatewayId, String peerTransitGatewayId, String peerAccountId,
+            String peerRegion, String dynamicRouting, List<Tag> attachmentTags) {
+        for (String[] required : new String[][] {{"PeerTransitGatewayId", peerTransitGatewayId},
+                {"PeerAccountId", peerAccountId}, {"PeerRegion", peerRegion}}) {
+            if (!isSet(required[1])) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter " + required[0] + ".", 400);
+            }
+        }
+        TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+        TransitGatewayPeeringAttachment attachment = new TransitGatewayPeeringAttachment();
+        String attachmentId = "tgw-attach-" + randomHex(17);
+        attachment.setTransitGatewayAttachmentId(attachmentId);
+        attachment.setRequesterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
+                transitGatewayId, gateway.getOwnerId(), region));
+        attachment.setAccepterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
+                peerTransitGatewayId, peerAccountId, peerRegion));
+        attachment.setDynamicRouting(isSet(dynamicRouting) ? dynamicRouting : "disable");
+        attachment.setState("pendingAcceptance");
+        attachment.setCreationTime(ISO_FMT.format(Instant.now()));
+        transitGatewayPeeringAttachments.put(attachmentId, attachment);
+        if (attachmentTags != null && !attachmentTags.isEmpty()) {
+            tags.put(attachmentId, new ArrayList<>(attachmentTags));
+        }
+        return withStoredTags(attachment);
+    }
+
+    public List<TransitGatewayPeeringAttachment> describeTransitGatewayPeeringAttachments(
+            String region, List<String> attachmentIds, Map<String, List<String>> filters) {
+        attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
+        List<TransitGatewayPeeringAttachment> visible = transitGatewayPeeringAttachments.scan(k -> true).stream()
+                .filter(attachment -> isPartyTo(attachment, region))
+                .map(this::withStoredTags)
+                .toList();
+        for (String attachmentId : attachmentIds) {
+            if (visible.stream().noneMatch(a -> a.getTransitGatewayAttachmentId().equals(attachmentId))) {
+                throw peeringAttachmentNotFound(attachmentId);
+            }
+        }
+        return visible.stream()
+                .filter(a -> attachmentIds.isEmpty() || attachmentIds.contains(a.getTransitGatewayAttachmentId()))
+                .filter(a -> matchesFilters(a, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    /** Only the accepter's region accepts, and only while the attachment is still pending. */
+    public TransitGatewayPeeringAttachment acceptTransitGatewayPeeringAttachment(String region, String attachmentId) {
+        synchronized (lockFor(attachmentId)) {
+            TransitGatewayPeeringAttachment attachment = getRequiredPeeringAttachment(region, attachmentId);
+            if (!region.equals(attachment.getAccepterTgwInfo().getRegion())) {
+                throw peeringAttachmentNotFound(attachmentId);
+            }
+            if (!"pendingAcceptance".equals(attachment.getState())) {
+                throw new AwsException("IncorrectState", "tgw-attach " + attachmentId
+                        + " is in invalid state " + attachment.getState() + ".", 400);
+            }
+            attachment.setState("available");
+            transitGatewayPeeringAttachments.put(attachmentId, attachment);
+            return withStoredTags(attachment);
+        }
+    }
+
+    /** Either side may delete. AWS reports {@code deleting} first; the settled state is returned. */
+    public TransitGatewayPeeringAttachment deleteTransitGatewayPeeringAttachment(String region, String attachmentId) {
+        synchronized (lockFor(attachmentId)) {
+            TransitGatewayPeeringAttachment attachment =
+                    withStoredTags(getRequiredPeeringAttachment(region, attachmentId));
+            transitGatewayPeeringAttachments.delete(attachmentId);
+            tags.delete(attachmentId);
+            attachment.setState("deleted");
+            return attachment;
+        }
+    }
+
+    private TransitGatewayPeeringAttachment getRequiredPeeringAttachment(String region, String attachmentId) {
+        if (!isSet(attachmentId)) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter TransitGatewayAttachmentId.", 400);
+        }
+        requireWellFormedAttachmentId(attachmentId);
+        return transitGatewayPeeringAttachments.get(attachmentId)
+                .filter(attachment -> isPartyTo(attachment, region))
+                .orElseThrow(() -> peeringAttachmentNotFound(attachmentId));
+    }
+
+    private static boolean isPartyTo(TransitGatewayPeeringAttachment attachment, String region) {
+        return region.equals(attachment.getRequesterTgwInfo().getRegion())
+                || region.equals(attachment.getAccepterTgwInfo().getRegion());
+    }
+
+    private TransitGatewayPeeringAttachment withStoredTags(TransitGatewayPeeringAttachment attachment) {
+        attachment.setTags(new ArrayList<>(tags.get(attachment.getTransitGatewayAttachmentId()).orElse(List.of())));
+        return attachment;
+    }
+
+    private static AwsException peeringAttachmentNotFound(String attachmentId) {
+        return new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
+                "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400);
     }
 
     // ─── Transit Gateway Route Tables, Associations, Propagations and Routes ───
@@ -8965,6 +9083,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 default -> true;
             };
         }
+        if (resource instanceof TransitGatewayPeeringAttachment attachment) {
+            return switch (filterName) {
+                case "transit-gateway-attachment-id" -> matchesValue(values, attachment.getTransitGatewayAttachmentId());
+                // Either side's gateway: the accepter looks its attachment up by its own gateway.
+                case "transit-gateway-id" -> matchesValue(values, attachment.getRequesterTgwInfo().getTransitGatewayId())
+                        || matchesValue(values, attachment.getAccepterTgwInfo().getTransitGatewayId());
+                case "local-owner-id" -> matchesValue(values, attachment.getRequesterTgwInfo().getOwnerId());
+                case "remote-owner-id" -> matchesValue(values, attachment.getAccepterTgwInfo().getOwnerId());
+                case "state" -> matchesValue(values, attachment.getState());
+                default -> true;
+            };
+        }
         if (resource instanceof TransitGatewayVpcAttachment attachment) {
             return switch (filterName) {
                 case "transit-gateway-attachment-id" -> matchesValue(values, attachment.getTransitGatewayAttachmentId());
@@ -9243,6 +9373,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         if (resource instanceof TransitGateway gateway) return gateway.getTags();
         if (resource instanceof TransitGatewayRouteTable routeTable) return routeTable.getTags();
         if (resource instanceof TransitGatewayVpcAttachment attachment) return attachment.getTags();
+        if (resource instanceof TransitGatewayPeeringAttachment attachment) return attachment.getTags();
         if (resource instanceof VpcPeeringConnection pcx) return pcx.getTags();
         if (resource instanceof CapacityReservation cr) return cr.getTags();
         if (resource instanceof Host host) {

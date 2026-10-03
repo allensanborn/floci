@@ -132,6 +132,16 @@ public class Ec2QueryHandler {
                         handleModifyTransitGatewayVpcAttachment(params, region);
                 case "DeleteTransitGatewayVpcAttachment" ->
                         handleDeleteTransitGatewayVpcAttachment(params, region);
+                case "CreateTransitGatewayPeeringAttachment" ->
+                        handleCreateTransitGatewayPeeringAttachment(params, region);
+                case "DescribeTransitGatewayPeeringAttachments" ->
+                        handleDescribeTransitGatewayPeeringAttachments(params, region);
+                case "AcceptTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "AcceptTransitGatewayPeeringAttachmentResponse", service.acceptTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
+                case "DeleteTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
+                        "DeleteTransitGatewayPeeringAttachmentResponse", service.deleteTransitGatewayPeeringAttachment(
+                                region, params.getFirst("TransitGatewayAttachmentId")));
                 // Transit Gateway route tables, associations, propagations and routes
                 case "CreateTransitGatewayRouteTable" -> handleCreateTransitGatewayRouteTable(params, region);
                 case "DescribeTransitGatewayRouteTables" ->
@@ -2488,6 +2498,63 @@ public class Ec2QueryHandler {
                 .end("transitGatewayVpcAttachment")
                 .end("DeleteTransitGatewayVpcAttachmentResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateTransitGatewayPeeringAttachment(MultivaluedMap<String, String> p, String region) {
+        return peeringAttachmentResponse("CreateTransitGatewayPeeringAttachmentResponse",
+                service.createTransitGatewayPeeringAttachment(region,
+                        p.getFirst("TransitGatewayId"),
+                        p.getFirst("PeerTransitGatewayId"),
+                        p.getFirst("PeerAccountId"),
+                        p.getFirst("PeerRegion"),
+                        p.getFirst("Options.DynamicRouting"),
+                        parseTagsForResource(p, "transit-gateway-attachment")));
+    }
+
+    private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
+                                                                   String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachments");
+        for (TransitGatewayPeeringAttachment attachment : service.describeTransitGatewayPeeringAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFilters(p))) {
+            xml.start("item").raw(peeringAttachmentXml(attachment)).end("item");
+        }
+        xml.end("transitGatewayPeeringAttachments").end("DescribeTransitGatewayPeeringAttachmentsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /** Create, accept and delete all answer with the attachment under the same member name. */
+    private Response peeringAttachmentResponse(String responseName, TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(responseName, AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("transitGatewayPeeringAttachment").raw(peeringAttachmentXml(attachment))
+                .end("transitGatewayPeeringAttachment")
+                .end(responseName);
+        return xmlResponse(xml.build());
+    }
+
+    private String peeringAttachmentXml(TransitGatewayPeeringAttachment attachment) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("transitGatewayAttachmentId", attachment.getTransitGatewayAttachmentId());
+        List<Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo>> sides = List.of(
+                Map.entry("requesterTgwInfo", attachment.getRequesterTgwInfo()),
+                Map.entry("accepterTgwInfo", attachment.getAccepterTgwInfo()));
+        for (Map.Entry<String, TransitGatewayPeeringAttachment.TgwInfo> side : sides) {
+            xml.start(side.getKey())
+                    .elem("transitGatewayId", side.getValue().getTransitGatewayId())
+                    .elem("ownerId", side.getValue().getOwnerId())
+                    .elem("region", side.getValue().getRegion())
+                    .end(side.getKey());
+        }
+        return xml.start("options").elem("dynamicRouting", attachment.getDynamicRouting()).end("options")
+                .start("status").elem("code", attachment.getState()).end("status")
+                .elem("state", attachment.getState())
+                .elem("creationTime", attachment.getCreationTime())
+                .raw(tagSetXml(attachment.getTags()))
+                .build();
     }
 
     private TransitGatewayVpcAttachmentOptions parseVpcAttachmentOptions(MultivaluedMap<String, String> p) {
