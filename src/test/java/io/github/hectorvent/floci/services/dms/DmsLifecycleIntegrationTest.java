@@ -351,6 +351,60 @@ class DmsLifecycleIntegrationTest {
     }
 
     @Test
+    void tagsAddAndRemoveOnEndpointInstanceAndTaskArns() {
+        String source = createEndpoint("lc-tag-src", "source", "");
+        String target = createEndpoint("lc-tag-tgt", "target", "");
+        String instance = createInstance("lc-tag-rep");
+        String task = dms("CreateReplicationTask")
+                .body("{\"ReplicationTaskIdentifier\":\"lc-tag-task\",\"SourceEndpointArn\":\"" + source + "\","
+                        + "\"TargetEndpointArn\":\"" + target + "\",\"ReplicationInstanceArn\":\"" + instance + "\","
+                        + "\"MigrationType\":\"full-load\",\"TableMappings\":" + jsonString(mappings("%")) + "}")
+        .when().post("/")
+        .then()
+                .statusCode(200)
+                .extract().path("ReplicationTask.ReplicationTaskArn");
+
+        for (String arn : new String[] {source, instance, task}) {
+            dms("AddTagsToResource")
+                    .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":[{\"Key\":\"keep\",\"Value\":\"" + arn + "\"},"
+                            + "{\"Key\":\"drop\",\"Value\":\"x\"}]}")
+            .when().post("/")
+            .then().statusCode(200);
+            dms("RemoveTagsFromResource")
+                    .body("{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":[\"drop\"]}")
+            .when().post("/")
+            .then().statusCode(200);
+        }
+
+        // Each ARN reads back only its own tags: a mutation routed to the wrong resource kind shows here.
+        for (String arn : new String[] {source, instance, task}) {
+            dms("ListTagsForResource")
+                    .body("{\"ResourceArn\":\"" + arn + "\"}")
+            .when().post("/")
+            .then()
+                    .statusCode(200)
+                    .body("TagList", hasSize(1))
+                    .body("TagList[0].Key", equalTo("keep"))
+                    .body("TagList[0].Value", equalTo(arn));
+        }
+        dms("ListTagsForResource")
+                .body("{\"ResourceArn\":\"" + target + "\"}")
+        .when().post("/")
+        .then()
+                .statusCode(200)
+                .body("TagList", hasSize(0));
+
+        describeEndpoint("lc-tag-src").body("Endpoints[0].EndpointArn", equalTo(source));
+        describeInstance("lc-tag-rep").body("ReplicationInstances[0].ReplicationInstanceArn", equalTo(instance));
+        describeTask("lc-tag-task").body("ReplicationTasks[0].ReplicationTaskArn", equalTo(task));
+
+        delete("DeleteReplicationTask", "ReplicationTaskArn", task);
+        delete("DeleteEndpoint", "EndpointArn", source);
+        delete("DeleteEndpoint", "EndpointArn", target);
+        delete("DeleteReplicationInstance", "ReplicationInstanceArn", instance);
+    }
+
+    @Test
     void replicationTaskNamingUnknownEndpointIsNotFound() {
         dms("CreateReplicationTask")
                 .body("{\"ReplicationTaskIdentifier\":\"lc-task-orphan\","
