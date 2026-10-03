@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationAdditionalConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationConfiguration;
 import io.github.hectorvent.floci.services.guardduty.model.OrganizationFeature;
+import io.github.hectorvent.floci.services.guardduty.model.PublishingDestination;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -76,6 +77,7 @@ public class GuardDutyService {
     private final StorageBackend<String, Detector> detectorStore;
     private final StorageBackend<String, AdminAccount> adminAccountStore;
     private final StorageBackend<String, MemberAccount> memberStore;
+    private final StorageBackend<String, PublishingDestination> destinationStore;
 
     @Inject
     public GuardDutyService(StorageFactory storageFactory) {
@@ -93,16 +95,23 @@ public class GuardDutyService {
                         "guardduty",
                         "guardduty-members.json",
                         new TypeReference<Map<String, MemberAccount>>() {
+                        }),
+                storageFactory.create(
+                        "guardduty",
+                        "guardduty-publishing-destinations.json",
+                        new TypeReference<Map<String, PublishingDestination>>() {
                         }));
     }
 
     GuardDutyService(
             StorageBackend<String, Detector> detectorStore,
             StorageBackend<String, AdminAccount> adminAccountStore,
-            StorageBackend<String, MemberAccount> memberStore) {
+            StorageBackend<String, MemberAccount> memberStore,
+            StorageBackend<String, PublishingDestination> destinationStore) {
         this.detectorStore = detectorStore;
         this.adminAccountStore = adminAccountStore;
         this.memberStore = memberStore;
+        this.destinationStore = destinationStore;
     }
 
     public synchronized Detector createDetector(String region, String accountId, JsonNode request) {
@@ -300,6 +309,84 @@ public class GuardDutyService {
 
     public List<MemberAccount> listMembers(String region, String detectorId) {
         return listMembers(region, detectorId, null, null, null).items();
+    }
+
+    public synchronized PublishingDestination createPublishingDestination(
+            String region, String detectorId, JsonNode request) {
+        getDetector(region, detectorId);
+        if (!"S3".equals(requireText(request, "destinationType"))) {
+            throw badRequest("destinationType must be S3.");
+        }
+        JsonNode properties = request.get("destinationProperties");
+        requireObject(properties, "destinationProperties");
+        PublishingDestination destination = new PublishingDestination(
+                UUID.randomUUID().toString().replace("-", ""),
+                "S3",
+                optionalText(properties, "destinationArn"),
+                optionalText(properties, "kmsKeyArn"),
+                "PUBLISHING");
+        destinationStore.put(destinationKey(region, detectorId, destination.destinationId()), destination);
+        return destination;
+    }
+
+    public PublishingDestination describePublishingDestination(
+            String region, String detectorId, String destinationId) {
+        getDetector(region, detectorId);
+        return destinationStore.get(destinationKey(region, detectorId, destinationId))
+                .orElseThrow(GuardDutyService::destinationNotFound);
+    }
+
+    public synchronized void updatePublishingDestination(
+            String region, String detectorId, String destinationId, JsonNode request) {
+        PublishingDestination current = describePublishingDestination(region, detectorId, destinationId);
+        JsonNode properties = request.get("destinationProperties");
+        if (properties == null) {
+            return;
+        }
+        requireObject(properties, "destinationProperties");
+        destinationStore.put(destinationKey(region, detectorId, destinationId), new PublishingDestination(
+                destinationId,
+                current.destinationType(),
+                properties.has("destinationArn") ? optionalText(properties, "destinationArn") : current.destinationArn(),
+                properties.has("kmsKeyArn") ? optionalText(properties, "kmsKeyArn") : current.kmsKeyArn(),
+                current.status()));
+    }
+
+    public synchronized void deletePublishingDestination(String region, String detectorId, String destinationId) {
+        describePublishingDestination(region, detectorId, destinationId);
+        destinationStore.delete(destinationKey(region, detectorId, destinationId));
+    }
+
+    public Page<PublishingDestination> listPublishingDestinations(
+            String region, String detectorId, String maxResults, String nextToken) {
+        getDetector(region, detectorId);
+        int limit = parseMaxResults(maxResults);
+        String prefix = destinationKey(region, detectorId, "");
+        List<PublishingDestination> destinations = destinationStore.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(PublishingDestination::destinationId)).toList();
+        int offset = decodeOffset(nextToken, destinations.size());
+        int end = Math.min(destinations.size(), offset + limit);
+        return new Page<>(destinations.subList(offset, end), end < destinations.size() ? encodeOffset(end) : null);
+    }
+
+    private static String destinationKey(String region, String detectorId, String destinationId) {
+        return region + "::" + detectorId + "::" + destinationId;
+    }
+
+    private static String optionalText(JsonNode parent, String field) {
+        JsonNode value = parent.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw badRequest(field + " must be a string.");
+        }
+        return value.textValue();
+    }
+
+    /** Matched verbatim by the Terraform AWS provider to detect a deleted publishing destination. */
+    private static AwsException destinationNotFound() {
+        return badRequest("The request is rejected because the one or more input parameters have invalid values.");
     }
 
     private static boolean isAssociatedRelationship(String status) {
