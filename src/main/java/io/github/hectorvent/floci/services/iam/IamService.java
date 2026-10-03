@@ -1698,8 +1698,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSshPublicKey(String userName, String sshPublicKeyId, String status) {
+        // InvalidInput is the error botocore lists for UpdateSSHPublicKey; it has no ValidationError.
         if (!"Active".equals(status) && !"Inactive".equals(status)) {
-            throw new AwsException("ValidationError", "Status must be Active or Inactive.", 400);
+            throw new AwsException("InvalidInput", "Status must be Active or Inactive.", 400);
         }
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
