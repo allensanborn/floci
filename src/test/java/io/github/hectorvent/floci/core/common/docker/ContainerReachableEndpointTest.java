@@ -49,12 +49,13 @@ class ContainerReachableEndpointTest {
     }
 
     @Test
-    void customListenPortIsHonoured() {
-        when(config.port()).thenReturn(4811);
+    void customListenPortAndHostnameAreHonoured() {
+        // Listen port, advertised port and default 4566 all differ, so only floci.port can yield 4900.
+        when(config.port()).thenReturn(4900);
         lenient().when(config.baseUrl()).thenReturn("http://localhost:4811");
         when(config.hostname()).thenReturn(Optional.of("floci"));
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
 
-        assertEquals("http://floci:4811", endpoint.baseUrl());
+        assertEquals("http://floci:4900", endpoint.baseUrl());
     }
 }
