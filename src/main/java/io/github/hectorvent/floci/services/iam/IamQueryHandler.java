@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -227,6 +228,13 @@ public class IamQueryHandler {
             case "ListAccessKeys" -> handleListAccessKeys(params, authorization);
             case "UpdateAccessKey" -> handleUpdateAccessKey(params);
             case "GetAccessKeyLastUsed" -> handleGetAccessKeyLastUsed(params);
+
+            // SSH Public Keys
+            case "UploadSSHPublicKey" -> handleUploadSshPublicKey(params);
+            case "GetSSHPublicKey" -> handleGetSshPublicKey(params);
+            case "ListSSHPublicKeys" -> handleListSshPublicKeys(params, authorization);
+            case "UpdateSSHPublicKey" -> handleUpdateSshPublicKey(params);
+            case "DeleteSSHPublicKey" -> handleDeleteSshPublicKey(params);
 
             case "ListOrganizationsFeatures" -> handleListOrganizationsFeatures(params);
             case "EnableOrganizationsRootCredentialsManagement" -> handleEnableOrganizationsRootCredentialsManagement(params);
@@ -1449,6 +1457,66 @@ public class IamQueryHandler {
         iamService.updateAccessKey(getParam(params, "UserName"),
                 getParam(params, "AccessKeyId"), getParam(params, "Status"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAccessKey", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUploadSshPublicKey(MultivaluedMap<String, String> params) {
+        String userName = requireParam(params, "UserName");
+        SshPublicKey key = iamService.uploadSshPublicKey(userName, requireParam(params, "SSHPublicKeyBody"));
+        String result = new XmlBuilder().start("SSHPublicKey")
+                .raw(sshPublicKeyXml(userName, key, key.getSshPublicKeyBody())).end("SSHPublicKey").build();
+        return Response.ok(AwsQueryResponse.envelope("UploadSSHPublicKey", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleGetSshPublicKey(MultivaluedMap<String, String> params) {
+        String userName = requireParam(params, "UserName");
+        String encoding = requireParam(params, "Encoding");
+        SshPublicKey key = iamService.getSshPublicKey(userName, requireParam(params, "SSHPublicKeyId"));
+        String body = switch (encoding) {
+            case "SSH" -> key.getSshPublicKeyBody();
+            case "PEM" -> IamSshPublicKeys.pemBody(IamSshPublicKeys.parse(key.getSshPublicKeyBody()));
+            default -> throw new AwsException("UnrecognizedPublicKeyEncoding",
+                    "The public key encoding format " + encoding + " is unsupported or unrecognized.", 400);
+        };
+        String result = new XmlBuilder().start("SSHPublicKey")
+                .raw(sshPublicKeyXml(userName, key, body)).end("SSHPublicKey").build();
+        return Response.ok(AwsQueryResponse.envelope("GetSSHPublicKey", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleListSshPublicKeys(MultivaluedMap<String, String> params, String authorization) {
+        String userName = resolveUserName(params, authorization);
+        XmlBuilder xml = new XmlBuilder().start("SSHPublicKeys");
+        for (SshPublicKey key : iamService.listSshPublicKeys(userName)) {
+            xml.start("member")
+                    .elem("UserName", userName)
+                    .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                    .elem("Status", key.getStatus())
+                    .elem("UploadDate", isoDate(key.getUploadDate()))
+                    .end("member");
+        }
+        xml.end("SSHPublicKeys").elem("IsTruncated", false);
+        return Response.ok(AwsQueryResponse.envelope("ListSSHPublicKeys", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.updateSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"), requireParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateSSHPublicKey", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.deleteSshPublicKey(requireParam(params, "UserName"), requireParam(params, "SSHPublicKeyId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSSHPublicKey", AwsNamespaces.IAM)).build();
+    }
+
+    private String sshPublicKeyXml(String userName, SshPublicKey key, String body) {
+        return new XmlBuilder()
+                .elem("UserName", userName)
+                .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                .elem("Fingerprint", key.getFingerprint())
+                .elem("SSHPublicKeyBody", body)
+                .elem("Status", key.getStatus())
+                .elem("UploadDate", isoDate(key.getUploadDate()))
+                .build();
     }
 
     private Response handleGetAccessKeyLastUsed(MultivaluedMap<String, String> params) {

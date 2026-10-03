@@ -24,6 +24,7 @@ public class IamUser {
     private List<String> attachedPolicyArns = new CopyOnWriteArrayList<>();
     private Map<String, String> inlinePolicies = new ConcurrentHashMap<>();
     private String permissionsBoundaryArn;
+    private List<SshPublicKey> sshPublicKeys = new CopyOnWriteArrayList<>();
 
     public IamUser() {}
 
@@ -75,4 +76,9 @@ public class IamUser {
 
     public String getPermissionsBoundaryArn() { return permissionsBoundaryArn; }
     public void setPermissionsBoundaryArn(String permissionsBoundaryArn) { this.permissionsBoundaryArn = permissionsBoundaryArn; }
+
+    public List<SshPublicKey> getSshPublicKeys() { return sshPublicKeys; }
+    public void setSshPublicKeys(List<SshPublicKey> sshPublicKeys) {
+        this.sshPublicKeys = new CopyOnWriteArrayList<>(sshPublicKeys);
+    }
 }

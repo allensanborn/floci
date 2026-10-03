@@ -29,6 +29,7 @@ import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.Startup;
@@ -40,6 +41,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -75,6 +77,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
@@ -522,6 +525,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (!userAccessKeys(userName).isEmpty()) {
             throw new AwsException("DeleteConflict",
                     "Cannot delete entity, must delete access keys first.", 409);
+        }
+        if (!user.getSshPublicKeys().isEmpty()) {
+            throw new AwsException("DeleteConflict",
+                    "Cannot delete entity, must delete SSH public keys first.", 409);
         }
         // Held across the delete, not just the check: EnableMFADevice confirms the user under this
         // same lock, so the two cannot interleave into a device assigned to a deleted user.
@@ -1645,6 +1652,68 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         key.setStatus(status);
         accessKeys.put(accessKeyId, key);
+    }
+
+    // =========================================================================
+    // SSH Public Keys
+    // =========================================================================
+
+    // Held under resourceNameLock, the lock UpdateUser renames under, so a key is never written
+    // back to a user name a concurrent rename has just retired.
+    public SshPublicKey uploadSshPublicKey(String userName, String body) {
+        RSAPublicKey key = IamSshPublicKeys.parse(body);
+        String fingerprint = IamSshPublicKeys.fingerprint(key);
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            if (user.getSshPublicKeys().stream().anyMatch(k -> fingerprint.equals(k.getFingerprint()))) {
+                throw new AwsException("DuplicateSSHPublicKey",
+                        "The SSH public key is already associated with the specified IAM user.", 400);
+            }
+            if (user.getSshPublicKeys().size() >= MAX_SSH_PUBLIC_KEYS_PER_USER) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for SSHPublicKeysPerUser: " + MAX_SSH_PUBLIC_KEYS_PER_USER, 409);
+            }
+            String stored = IamSshPublicKeys.isPem(body) ? IamSshPublicKeys.sshBody(key) : body.trim();
+            SshPublicKey sshKey = new SshPublicKey("APKA" + randomId(16), fingerprint, stored);
+            user.getSshPublicKeys().add(sshKey);
+            users.put(userName, user);
+            return sshKey;
+        }
+    }
+
+    public SshPublicKey getSshPublicKey(String userName, String sshPublicKeyId) {
+        return sshPublicKeyOf(getUser(userName), sshPublicKeyId);
+    }
+
+    private static SshPublicKey sshPublicKeyOf(IamUser user, String sshPublicKeyId) {
+        return user.getSshPublicKeys().stream()
+                .filter(k -> k.getSshPublicKeyId().equals(sshPublicKeyId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Public Key with id " + sshPublicKeyId + " cannot be found.", 404));
+    }
+
+    public List<SshPublicKey> listSshPublicKeys(String userName) {
+        return List.copyOf(getUser(userName).getSshPublicKeys());
+    }
+
+    public void updateSshPublicKey(String userName, String sshPublicKeyId, String status) {
+        if (!"Active".equals(status) && !"Inactive".equals(status)) {
+            throw new AwsException("ValidationError", "Status must be Active or Inactive.", 400);
+        }
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            sshPublicKeyOf(user, sshPublicKeyId).setStatus(status);
+            users.put(userName, user);
+        }
+    }
+
+    public void deleteSshPublicKey(String userName, String sshPublicKeyId) {
+        synchronized (resourceNameLock) {
+            IamUser user = getUser(userName);
+            user.getSshPublicKeys().remove(sshPublicKeyOf(user, sshPublicKeyId));
+            users.put(userName, user);
+        }
     }
 
     // =========================================================================

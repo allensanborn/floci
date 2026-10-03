@@ -96,6 +96,8 @@ public class AwsQueryController {
             "PutRolePolicy", "GetRolePolicy", "DeleteRolePolicy", "ListRolePolicies",
             "PutGroupPolicy", "GetGroupPolicy", "DeleteGroupPolicy", "ListGroupPolicies",
             "CreateAccessKey", "DeleteAccessKey", "ListAccessKeys", "UpdateAccessKey",
+            "UploadSSHPublicKey", "GetSSHPublicKey", "ListSSHPublicKeys", "UpdateSSHPublicKey",
+            "DeleteSSHPublicKey",
             "CreateInstanceProfile", "GetInstanceProfile", "DeleteInstanceProfile",
             "ListInstanceProfiles", "AddRoleToInstanceProfile",
             "RemoveRoleFromInstanceProfile", "ListInstanceProfilesForRole",
