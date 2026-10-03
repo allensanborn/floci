@@ -55,6 +55,7 @@ public class AutoScalingQueryHandler {
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
+                case "DescribeTags"                 -> handleDescribeTags(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
                 case "SetInstanceProtection"        -> handleSetInstanceProtection(p, region);
@@ -480,6 +481,39 @@ public class AutoScalingQueryHandler {
                 .start("CreateOrUpdateTagsResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
                 .end("CreateOrUpdateTagsResponse").build());
+    }
+
+    private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String name = p.getFirst("Filters.member." + i + ".Name");
+            if (name == null) { break; }
+            filters.computeIfAbsent(name, k -> new ArrayList<>())
+                    .addAll(memberList(p, "Filters.member." + i + ".Values"));
+        }
+        AutoScalingService.TagPage page = service.describeTags(region, filters,
+                nullableIntParam(p, "MaxRecords"), p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTagsResponse", NS)
+                  .start("DescribeTagsResult")
+                    .start("Tags");
+        for (AutoScalingService.TagDescription tag : page.tags()) {
+            xml.start("member")
+               .elem("ResourceId", tag.resourceId())
+               .elem("ResourceType", "auto-scaling-group")
+               .elem("Key", tag.key())
+               .elem("Value", tag.value())
+               .elem("PropagateAtLaunch", String.valueOf(tag.propagateAtLaunch()))
+               .end("member");
+        }
+        xml.end("Tags");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        xml.end("DescribeTagsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeTagsResponse");
+        return ok(xml.build());
     }
 
     private Response handleDeleteTags(MultivaluedMap<String, String> p, String region) {
