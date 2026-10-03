@@ -159,6 +159,20 @@ own documented role subset.
 | UpdateAccessKey | Updates an access key's status. |
 | DeleteAccessKey | Deletes an access key from a user. |
 
+### SSH Public Keys
+
+| Action | Description |
+|--------|-------------|
+| UploadSSHPublicKey | Stores an ssh-rsa or PEM RSA public key (2048 bits or more) against a user. |
+| GetSSHPublicKey | Returns a key in `SSH` or `PEM` encoding. |
+| ListSSHPublicKeys | Lists a user's keys. |
+| UpdateSSHPublicKey | Sets a key's status to `Active` or `Inactive`. |
+| DeleteSSHPublicKey | Deletes a key from a user. |
+
+`Fingerprint` is the MD5 of the key's ssh-rsa wire blob in colon-separated hex, the value
+`ssh-keygen -l -E md5` prints. A user holds at most 5 keys, a second upload of the same key is
+`DuplicateSSHPublicKey`, and `DeleteUser` is refused while the user still has one.
+
 ### Account Aliases
 
 | Action | Description |

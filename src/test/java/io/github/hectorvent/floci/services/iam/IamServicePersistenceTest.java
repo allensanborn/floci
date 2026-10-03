@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -16,6 +18,7 @@ import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -23,6 +26,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPublicKey;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +95,49 @@ class IamServicePersistenceTest {
 
         assertEquals("alice", restarted.getUser("alice").getUserName());
         assertEquals("LambdaExec", restarted.getRole("LambdaExec").getRoleName());
+    }
+
+    @Test
+    void sshPublicKeySurvivesRestart(@TempDir Path dir) throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        String body = IamSshPublicKeys.sshBody((RSAPublicKey) generator.generateKeyPair().getPublic());
+        IamService first = newService(dir);
+        first.createUser("ssh-persist", "/");
+        SshPublicKey created = first.uploadSshPublicKey("ssh-persist", body);
+        first.updateSshPublicKey("ssh-persist", created.getSshPublicKeyId(), "Inactive");
+
+        IamService restarted = newService(dir);
+
+        SshPublicKey reloaded = restarted.getSshPublicKey("ssh-persist", created.getSshPublicKeyId());
+        assertEquals(created.getFingerprint(), reloaded.getFingerprint());
+        assertEquals(body, reloaded.getSshPublicKeyBody());
+        assertEquals("Inactive", reloaded.getStatus());
+        assertEquals(created.getUploadDate(), reloaded.getUploadDate());
+        assertEquals(1, restarted.listSshPublicKeys("ssh-persist").size());
+    }
+
+    /** A user persisted before SSH keys existed has no sshPublicKeys field at all. */
+    @Test
+    void legacyUserWithoutSshPublicKeysLoadsWithAnEmptyList(@TempDir Path dir) throws Exception {
+        newService(dir).createUser("legacy-user", "/");
+        Path file = dir.resolve("iam-users.json");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode stored = (ObjectNode) mapper.readTree(file.toFile());
+        stored.forEach(user -> assertNotNull(((ObjectNode) user).remove("sshPublicKeys"),
+                "the fixture must actually strip the field"));
+        mapper.writeValue(file.toFile(), stored);
+
+        IamService restarted = newService(dir);
+
+        assertEquals(List.of(), restarted.listSshPublicKeys("legacy-user"));
+        // And it is a working list, not just a non-null one: an upload lands and DeleteUser still works.
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        SshPublicKey key = restarted.uploadSshPublicKey("legacy-user",
+                IamSshPublicKeys.sshBody((RSAPublicKey) generator.generateKeyPair().getPublic()));
+        restarted.deleteSshPublicKey("legacy-user", key.getSshPublicKeyId());
+        restarted.deleteUser("legacy-user");
     }
 
     @Test
