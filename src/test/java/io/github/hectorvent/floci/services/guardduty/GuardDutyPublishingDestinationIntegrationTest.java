@@ -85,8 +85,13 @@ class GuardDutyPublishingDestinationIntegrationTest {
                 .body("destinations", hasSize(0));
     }
 
+    /**
+     * Another account cannot reach the destination because it cannot reach the owning detector: the
+     * detector lookup rejects first. Destination storage partitioning itself is pinned in
+     * GuardDutyServiceTest#publishingDestinationsArePartitionedByAccountEvenForTheSameDetector.
+     */
     @Test
-    void publishingDestinationIsNotVisibleToAnotherAccount() {
+    void anotherAccountCannotReachDestinationThroughAForeignDetector() {
         String detectorId = createDetector(OTHER_ACCOUNT);
         String path = "/detector/" + detectorId + "/publishingDestination";
         String destinationId = given().contentType("application/json")
@@ -100,7 +105,8 @@ class GuardDutyPublishingDestinationIntegrationTest {
         given().header("Authorization", auth(ACCOUNT))
                 .get(path + "/" + destinationId)
                 .then().statusCode(400)
-                .body("__type", equalTo("BadRequestException"));
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo(GuardDutyService.DETECTOR_NOT_FOUND_MESSAGE));
     }
 
     @Test
