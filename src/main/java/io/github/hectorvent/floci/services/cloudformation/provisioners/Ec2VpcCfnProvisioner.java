@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
@@ -70,8 +71,10 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         if (existing == null) {
             return null;
         }
-        // A changed CidrBlock is a replacement on AWS, so let the caller create a new VPC.
-        if (cidr != null && !cidr.isBlank() && !cidr.equals(existing.getCidrBlock())) {
+        // A changed CidrBlock is a replacement on AWS, so let the caller create a new VPC. The stored
+        // block is canonical (10.0.0.5/16 is kept as 10.0.0.0/16), so compare in that form.
+        if (cidr != null && !cidr.isBlank()
+                && !CidrCanonicalizer.canonicalize(cidr).orElse(cidr).equals(existing.getCidrBlock())) {
             return null;
         }
         return existing;

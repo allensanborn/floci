@@ -4337,8 +4337,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return createVpc(region, cidrBlock, isDefault, false);
     }
 
-    public Vpc createVpc(String region, String cidrBlock, boolean isDefault,
+    public Vpc createVpc(String region, String requestedCidrBlock, boolean isDefault,
                          boolean amazonProvidedIpv6CidrBlock) {
+        // AWS stores the CIDR in canonical form: "100.68.0.18/18" becomes "100.68.0.0/18".
+        String cidrBlock = canonicalizeIpv4Cidr(requestedCidrBlock);
         ensureDefaultResources(region);
         String vpcId = "vpc-" + randomHex(8);
         Vpc vpc = new Vpc();
@@ -5136,8 +5138,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         return createSubnet(region, vpcId, cidrBlock, availabilityZone, availabilityZoneId, null);
     }
 
-    public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone,
+    public Subnet createSubnet(String region, String vpcId, String requestedCidrBlock, String availabilityZone,
                                String availabilityZoneId, String ipv6CidrBlock) {
+        // Canonical form, as AWS stores it; null (an IPv6-only subnet) stays null.
+        String cidrBlock = canonicalizeIpv4Cidr(requestedCidrBlock);
         if (vpcId == null || vpcId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
         }

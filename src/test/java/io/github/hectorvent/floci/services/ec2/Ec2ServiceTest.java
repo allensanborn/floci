@@ -690,6 +690,48 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void createVpcAndCreateSubnetStoreTheCidrBlockInCanonicalForm() {
+        // AWS CreateVpc/CreateSubnet: "We modify the specified CIDR block to its canonical form; for
+        // example, if you specify 100.68.0.18/18, we modify it to 100.68.0.0/18."
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.20.0.5/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.20.1.9/24", "us-east-1a").getSubnetId();
+        String canonicalSubnetId = service.createSubnet("us-east-1", vpcId, "10.20.2.0/24", "us-east-1a").getSubnetId();
+
+        Vpc vpc = service.describeVpcs("us-east-1", List.of(vpcId), Map.of()).get(0);
+        assertEquals("10.20.0.0/16", vpc.getCidrBlock());
+        assertEquals(List.of("10.20.0.0/16"), vpc.getCidrBlockAssociationSet().stream()
+                .map(a -> a.getCidrBlock()).toList());
+        assertEquals("10.20.1.0/24",
+                service.describeSubnets("us-east-1", List.of(subnetId), Map.of()).get(0).getCidrBlock());
+        assertEquals("10.20.2.0/24",
+                service.describeSubnets("us-east-1", List.of(canonicalSubnetId), Map.of()).get(0).getCidrBlock());
+
+        // The conflict check runs on the canonical form, and reports it.
+        AwsException error = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", vpcId, "10.20.1.0/24", "us-east-1a"));
+        assertEquals("InvalidSubnet.Conflict", error.getErrorCode());
+        AwsException hostBits = assertThrows(AwsException.class, () -> service.createSubnet(
+                "us-east-1", vpcId, "10.20.2.77/24", "us-east-1a"));
+        assertEquals("The CIDR '10.20.2.0/24' conflicts with another subnet", hostBits.getMessage());
+    }
+
+    @Test
+    void createVpcKeepsAnAlreadyCanonicalCidrBlockUnchanged() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.30.0.0/16", false).getVpcId();
+
+        assertEquals("10.30.0.0/16",
+                service.describeVpcs("us-east-1", List.of(vpcId), Map.of()).get(0).getCidrBlock());
+    }
+
+    @Test
     void createSubnetRejectsCidrThatPartiallyOverlapsAnExistingSubnet() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
