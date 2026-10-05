@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -31,6 +32,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -137,7 +139,7 @@ class IamServiceTest {
         sessions.put(accessKeyId, restored);
         assertEquals("arn:aws:sts::123456789012:assumed-role/TestRole/my-custom-session-name",
                 service.resolveCallerArn(accessKeyId).orElseThrow());
-        assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId).orElseThrow());
+        assertEquals(restored.getAssumedRoleId(), service.resolveCallerUserId(accessKeyId, restored.getSessionToken()).orElseThrow());
     }
 
     @Test
@@ -1304,6 +1306,120 @@ class IamServiceTest {
         assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
     }
 
+    @Test
+    void findSecretKeyDoesNotResolveAnotherAccountsKey() {
+        // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
+        // not compare the key's account with the cluster's, so another account's key must stay unknown.
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId()).isEmpty());
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountResolvesLongTermKeyFromAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("other-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfTheRequestAccountDoesNotScanOtherAccounts() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey accessKey = new AccessKey("AKIAOWNACCOUNTKEY", "own-secret", "dev");
+        accessKeys.putForAccount("000000000000", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("own-secret", found.secretAccessKey());
+        assertEquals("000000000000", found.accountId());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountNamesTheRequestAccountAsTheOwnerOfItsOwnKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        AccessKey accessKey = new AccessKey("AKIAREQUESTACCOUNT", "request-secret", "dev");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountPrefersTheRequestAccountsKeyOverADuplicateIdElsewhere() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "request-secret", "dev"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "other-secret", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountReportsTheAccountHoldingTheSecretItReturnsAmongDuplicateIds() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-111122223333", "worker"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-444455556666", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        // Either key may be found; the account must be the one whose secret signs the request.
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("secret-of-" + found.accountId(), found.secretAccessKey());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfATemporaryKeyDoesNotScanLongTermKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        service.findSecretKeyInAnyAccount("ASIATEMPORARYKEY1234", "session-token");
+
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountIgnoresInactiveKeyInAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERINACTIVE", "other-secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
     private static final class CountingAccountAwareSessionStorage
             extends AccountAwareStorageBackend<SessionCredential> {
 
@@ -2269,11 +2385,12 @@ class IamServiceTest {
      * changes: otherwise a changed password would still report the original creation time.
      */
     @Test
-    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() throws InterruptedException {
         iamService.createUser("cred-report-changed-user", "/");
         iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
         Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
 
+        Thread.sleep(20);
         iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
         Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
 
@@ -2304,6 +2421,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
@@ -2321,6 +2441,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
@@ -2330,4 +2453,88 @@ class IamServiceTest {
                 generation.description());
         assertDoesNotThrow(withExpiredReport::getCredentialReport);
     }
+
+    @Test
+    void resolveCallerUserIdReturnsUserIdForIamUser() {
+        IamUser user = iamService.createUser("testuser", "/");
+        AccessKey ak = iamService.createAccessKey("testuser");
+        Optional<String> userIdOpt = iamService.resolveCallerUserId(ak.getAccessKeyId());
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(user.getUserId(), userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsAssumedRoleIdForSession() {
+        iamService.registerSession("ASIATESTKEY", "test-secret", "token",
+                "arn:aws:iam::000000000000:role/testrole", Instant.now().plusSeconds(3600), null,
+                "000000000000", "my-session", "AROATESTROLE:my-session");
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIATESTKEY", "token");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals("AROATESTROLE:my-session", userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsEc2AssumedRoleIdForEc2Session() {
+        SessionCredential session = new SessionCredential(
+                "ASIAEC2KEY", "test-secret", "token", "arn:aws:iam::000000000000:role/ec2role",
+                Instant.now().plusSeconds(3600), null, "000000000000");
+        session.setEc2InstanceId("i-1234567890abcdef0");
+        session.setEc2RoleId("AROAEC2ROLE");
+        iamService.registerEc2InstanceSession(session);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAEC2KEY", "token");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals("AROAEC2ROLE:i-1234567890abcdef0", userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdResolvesFromRoleArnWhenAssumedRoleIdNotExplicitlySet() {
+        IamRole role = iamService.createRole("UnsetAssumedRole", "/", "{}", null, 3600, null);
+        iamService.registerSession(
+                "ASIAROLEARNKEY", "test-secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000",
+                "custom-session", null);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIAROLEARNKEY", "token");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(role.getRoleId() + ":custom-session", userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdReturnsAssumedRoleIdForLambdaExecutionRole() {
+        IamRole role = iamService.createRole("LambdaFuncRole", "/", "{}", null, 3600, null);
+        String assumedRoleId = role.getRoleId() + ":my-function";
+        iamService.registerLambdaExecutionRoleSession(
+                "000000000000", "ASIALAMBDAKEY", "secret", "token", role.getArn(),
+                "my-function", assumedRoleId);
+
+        Optional<String> userIdOpt = iamService.resolveCallerUserId("ASIALAMBDAKEY", "token");
+        assertTrue(userIdOpt.isPresent());
+        assertEquals(assumedRoleId, userIdOpt.get());
+    }
+
+    @Test
+    void resolveCallerUserIdRejectsTemporaryCredentialsWhenSessionTokenMismatchesOrMissing() {
+        IamRole role = iamService.createRole("TokenCheckRole", "/", "{}", null, 3600, null);
+        String assumedRoleId = role.getRoleId() + ":token-check-session";
+        iamService.registerSession(
+                "ASIATOKENCHECKKEY", "test-secret", "correct-token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000",
+                "token-check-session", assumedRoleId);
+
+        // Matching token -> resolves
+        Optional<String> validOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", "correct-token");
+        assertTrue(validOpt.isPresent());
+        assertEquals(assumedRoleId, validOpt.get());
+
+        // Wrong token -> empty
+        Optional<String> wrongOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", "wrong-token");
+        assertTrue(wrongOpt.isEmpty());
+
+        // Null token -> empty
+        Optional<String> nullOpt = iamService.resolveCallerUserId("ASIATOKENCHECKKEY", null);
+        assertTrue(nullOpt.isEmpty());
+    }
 }
+

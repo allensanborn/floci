@@ -133,7 +133,8 @@ public class StsQueryHandler {
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
-        String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
+        String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
+        String assumedRoleId = roleId + ":" + sessionName;
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
         // IAM token validation can find the temporary secret key, and account routing can map
@@ -237,9 +238,13 @@ public class StsQueryHandler {
         String accountId = regionResolver.getAccountId();
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
+        if (sessionToken == null && params != null) {
+            sessionToken = getParam(params, "X-Amz-Security-Token");
+        }
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
-        String userId = iamService.resolveCallerUserId(accessKeyId).orElse(accountId);
+        String userId = iamService.resolveCallerUserId(accessKeyId, sessionToken).orElse(accountId);
         String result = new XmlBuilder()
                 .elem("UserId", userId)
                 .elem("Account", accountId)

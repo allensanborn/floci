@@ -357,6 +357,61 @@ public class CognitoService implements ResourceProvider {
         return updatedPool;
     }
 
+    /**
+     * A copy of the settings {@link #updateUserPool} can change, and nothing else (no signing
+     * material), for a caller that puts them back with {@link #restoreUserPoolSettings}: the rollback
+     * of a CloudFormation update that changed the pool in place.
+     */
+    public UserPool userPoolSettings(String userPoolId) {
+        UserPool settings = new UserPool();
+        settings.setId(userPoolId);
+        copyUserPoolSettings(describeUserPool(userPoolId), settings);
+        return MAPPER.convertValue(settings, UserPool.class);
+    }
+
+    /**
+     * Puts back the settings {@link #userPoolSettings} copied, including clearing one the update
+     * added, which {@link #updateUserPool} cannot do since it only applies what a request names.
+     * Everything else on the pool, its users and signing keys among them, stays as it is now.
+     */
+    public UserPool restoreUserPoolSettings(UserPool settings) {
+        UserPool pool = describeUserPool(settings.getId());
+        UserPool restored = MAPPER.convertValue(pool, UserPool.class);
+        copyUserPoolSettings(MAPPER.convertValue(settings, UserPool.class), restored);
+        restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(restored.getId(), restored);
+        LOG.infov("Restored User Pool settings: {0}", restored.getId());
+        return restored;
+    }
+
+    /** The name and every field {@code populateUserPool} sets, which is what an update can change. */
+    private static void copyUserPoolSettings(UserPool from, UserPool to) {
+        to.setName(from.getName());
+        to.setPolicies(from.getPolicies());
+        to.setDeletionProtection(from.getDeletionProtection());
+        to.setLambdaConfig(from.getLambdaConfig());
+        to.setSchemaAttributes(from.getSchemaAttributes());
+        to.setAutoVerifiedAttributes(from.getAutoVerifiedAttributes());
+        to.setAliasAttributes(from.getAliasAttributes());
+        to.setUsernameAttributes(from.getUsernameAttributes());
+        to.setSmsVerificationMessage(from.getSmsVerificationMessage());
+        to.setEmailVerificationMessage(from.getEmailVerificationMessage());
+        to.setEmailVerificationSubject(from.getEmailVerificationSubject());
+        to.setVerificationMessageTemplate(from.getVerificationMessageTemplate());
+        to.setSmsAuthenticationMessage(from.getSmsAuthenticationMessage());
+        to.setMfaConfiguration(from.getMfaConfiguration());
+        to.setDeviceConfiguration(from.getDeviceConfiguration());
+        to.setEmailConfiguration(from.getEmailConfiguration());
+        to.setSmsConfiguration(from.getSmsConfiguration());
+        to.setUserPoolTags(from.getUserPoolTags());
+        to.setAdminCreateUserConfig(from.getAdminCreateUserConfig());
+        to.setUserPoolAddOns(from.getUserPoolAddOns());
+        to.setUsernameConfiguration(from.getUsernameConfiguration());
+        to.setAccountRecoverySetting(from.getAccountRecoverySetting());
+        to.setUserAttributeUpdateSettings(from.getUserAttributeUpdateSettings());
+        to.setUserPoolTier(from.getUserPoolTier());
+    }
+
     public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
         UserPool pool = describeUserPool(userPoolId);
         List<Map<String, Object>> schema = pool.getSchemaAttributes();
@@ -688,7 +743,36 @@ public class CognitoService implements ResourceProvider {
     }
 
     public List<UserPool> listUserPools() {
-        return poolStore.scan(k -> true);
+        String region = regionResolver.getRegion();
+        return poolStore.scan(k -> true).stream()
+                .filter(pool -> {
+                    String poolRegion = poolRegion(pool);
+                    return poolRegion == null || poolRegion.equals(region);
+                })
+                .toList();
+    }
+
+    /**
+     * Refuses a pool from another region as not found, as AWS does: a pool lives in the region its
+     * id names. A pool whose region cannot be told stays reachable, as {@link #listUserPools} lists it.
+     */
+    public void requireUserPoolInRegion(String userPoolId, String region) {
+        poolStore.get(userPoolId).ifPresent(pool -> {
+            String poolRegion = poolRegion(pool);
+            if (poolRegion != null && !poolRegion.equals(region)) {
+                throw userPoolNotFound(userPoolId);
+            }
+        });
+    }
+
+    /** Pools are stored by id for every region; the region comes from the pool ARN, else the id prefix. */
+    private static String poolRegion(UserPool pool) {
+        if (pool.getArn() != null && AwsArnUtils.isArn(pool.getArn())) {
+            return AwsArnUtils.parse(pool.getArn()).region();
+        }
+        String id = pool.getId();
+        int underscore = id == null ? -1 : id.indexOf('_');
+        return underscore > 0 ? id.substring(0, underscore) : null;
     }
 
     @Override
@@ -1186,6 +1270,59 @@ public class CognitoService implements ResourceProvider {
         clientStore.put(clientId, client);
         LOG.infov("Updated User Pool Client: {0} for pool {1}", clientId, userPoolId);
         return client;
+    }
+
+    /**
+     * A copy of the settings {@link #updateUserPoolClient} can change, for a caller that puts them
+     * back with {@link #restoreUserPoolClientSettings}: the rollback of a CloudFormation update that
+     * changed the client in place. A deep copy, since an update mutates the stored client.
+     */
+    public UserPoolClient userPoolClientSettings(String userPoolId, String clientId) {
+        UserPoolClient settings = new UserPoolClient();
+        settings.setUserPoolId(userPoolId);
+        settings.setClientId(clientId);
+        copyUserPoolClientSettings(describeUserPoolClient(userPoolId, clientId), settings);
+        return MAPPER.convertValue(settings, UserPoolClient.class);
+    }
+
+    /**
+     * Puts back the settings {@link #userPoolClientSettings} copied, including clearing one the
+     * update added, which {@link #updateUserPoolClient} cannot do since a null there keeps the
+     * current value. The client's id, secrets and branding stay as they are now.
+     */
+    public UserPoolClient restoreUserPoolClientSettings(UserPoolClient settings) {
+        UserPoolClient client = describeUserPoolClient(settings.getUserPoolId(), settings.getClientId());
+        UserPoolClient restored = MAPPER.convertValue(client, UserPoolClient.class);
+        copyUserPoolClientSettings(MAPPER.convertValue(settings, UserPoolClient.class), restored);
+        restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        clientStore.put(restored.getClientId(), restored);
+        LOG.infov("Restored User Pool Client settings: {0} for pool {1}", restored.getClientId(),
+                restored.getUserPoolId());
+        return restored;
+    }
+
+    /** The name and every field {@link #updateUserPoolClient} sets. */
+    private static void copyUserPoolClientSettings(UserPoolClient from, UserPoolClient to) {
+        to.setClientName(from.getClientName());
+        to.setAllowedOAuthFlowsUserPoolClient(from.isAllowedOAuthFlowsUserPoolClient());
+        to.setAllowedOAuthFlows(from.getAllowedOAuthFlows());
+        to.setAllowedOAuthScopes(from.getAllowedOAuthScopes());
+        to.setAnalyticsConfiguration(from.getAnalyticsConfiguration());
+        to.setCallbackURLs(from.getCallbackURLs());
+        to.setDefaultRedirectURI(from.getDefaultRedirectURI());
+        to.setExplicitAuthFlows(from.getExplicitAuthFlows());
+        to.setAccessTokenValidity(from.getAccessTokenValidity());
+        to.setIdTokenValidity(from.getIdTokenValidity());
+        to.setAuthSessionValidity(from.getAuthSessionValidity());
+        to.setLogoutURLs(from.getLogoutURLs());
+        to.setPreventUserExistenceErrors(from.getPreventUserExistenceErrors());
+        to.setReadAttributes(from.getReadAttributes());
+        to.setRefreshTokenValidity(from.getRefreshTokenValidity());
+        to.setSupportedIdentityProviders(from.getSupportedIdentityProviders());
+        to.setTokenValidityUnits(from.getTokenValidityUnits());
+        to.setWriteAttributes(from.getWriteAttributes());
+        to.setRefreshTokenRotation(from.getRefreshTokenRotation());
+        to.setEnableTokenRevocation(from.getEnableTokenRevocation());
     }
 
     private static void validateAuthSessionValidity(Integer authSessionValidity) {
@@ -2036,6 +2173,34 @@ public class CognitoService implements ResourceProvider {
         revokeAllUserTokens(poolId, user.getUsername());
 
         LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", user.getUsername(), poolId);
+    }
+
+    /**
+     * DeleteUser: the self-service counterpart to AdminDeleteUser, authenticated with the caller's
+     * access token instead of admin credentials. Deletes the user profile and removes them from all
+     * groups, matching AWS behavior.
+     */
+    public void deleteUser(String accessToken) {
+        if (accessToken == null || accessToken.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "1 validation error detected: Value at 'accessToken' failed to satisfy constraint: Member must not be null", 400);
+        }
+
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
+        requireScope(accessToken, USER_ADMIN_SCOPE);
+        String username = token.username();
+        String poolId = token.poolId();
+        try {
+            adminDeleteUser(poolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())
+                    || "ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            }
+            throw e;
+        }
+
+        LOG.infov("DeleteUser: deleted user {0} in pool {1}", username, poolId);
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
@@ -3779,8 +3944,18 @@ public class CognitoService implements ResourceProvider {
         boolean isAccess = "access".equals(tokenType);
         List<String> suppress = isAccess ? override.accessClaimsToSuppress() : override.idClaimsToSuppress();
         Map<String, Object> addOrOverride = isAccess ? override.accessClaimsToAddOrOverride() : override.idClaimsToAddOrOverride();
-        if (suppress != null) suppress.forEach(claims::remove);
-        if (addOrOverride != null) claims.putAll(addOrOverride);
+        if (suppress != null) {
+            suppress.stream()
+                    .filter(claim -> !isTriggerProtectedIdentityClaim(claim, isAccess))
+                    .forEach(claims::remove);
+        }
+        if (addOrOverride != null) {
+            addOrOverride.forEach((claim, value) -> {
+                if (!isTriggerProtectedIdentityClaim(claim, isAccess)) {
+                    claims.put(claim, value);
+                }
+            });
+        }
         if (override.groupsToOverride() != null) {
             claims.put("cognito:groups", override.groupsToOverride());
         }
@@ -3807,6 +3982,15 @@ public class CognitoService implements ResourceProvider {
                 claims.put("scope", String.join(" ", current));
             }
         }
+    }
+
+    /**
+     * AWS lets no pre token generation trigger add, modify or suppress the claims that identify
+     * the user: {@code sub} in either token, {@code username} in the access token and
+     * {@code cognito:username} in the ID token.
+     */
+    private static boolean isTriggerProtectedIdentityClaim(String claim, boolean isAccess) {
+        return "sub".equals(claim) || (isAccess ? "username" : "cognito:username").equals(claim);
     }
 
     private String encodeJwtHeader(UserPool pool) {
@@ -4544,12 +4728,29 @@ public class CognitoService implements ResourceProvider {
                 validateUserNotGloballySignedOut(username, poolId, tokenUse,
                         requiredNumericClaim(claims, "iat"));
             }
+            boolean clientCredentialsToken = "access".equals(tokenUse) && subject.equals(clientId);
+            if (!clientCredentialsToken) {
+                requireTokenUserExists(poolId, username, subject);
+            }
             Map<String, Object> mapped = MAPPER.convertValue(claims, new TypeReference<Map<String, Object>>() {});
             return new VerifiedApiGatewayToken(poolId, tokenUse, Map.copyOf(mapped));
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
             LOG.debug("API Gateway Cognito token verification failed", e);
+            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+        }
+    }
+
+    /**
+     * A deleted user's tokens keep a valid signature until they expire, so the authorizer also
+     * requires the user to still be in the pool. Every user token names its user, since no pre
+     * token generation trigger can remove the username claim, and matching {@code sub} keeps a user
+     * re-created under the same name from inheriting the deleted user's tokens.
+     */
+    private void requireTokenUserExists(String poolId, String username, String subject) {
+        CognitoUser user = username == null ? null : userStore.get(userKey(poolId, username)).orElse(null);
+        if (user == null || !subject.equals(user.getAttributes().getOrDefault("sub", user.getUsername()))) {
             throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
         }
     }

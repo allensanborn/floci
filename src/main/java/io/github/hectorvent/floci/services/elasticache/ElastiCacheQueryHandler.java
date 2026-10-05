@@ -337,7 +337,7 @@ public class ElastiCacheQueryHandler {
 
         try {
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
-                    ? memcachedService.createCacheCluster(clusterId)
+                    ? memcachedService.createCacheCluster(clusterId, region)
                     : service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
                             clusterId,
                             engine,
@@ -1049,8 +1049,20 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                 // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
                 .elem("MinimumEngineVersion", "6.0")
                 .start("UserGroupIds").end("UserGroupIds")
-                .elem("ARN", AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "user:" + u.getUserId()).toString())
+                .elem("ARN", userArn(u))
                 .build();
+    }
+
+    /**
+     * The ARN stored at CreateUser. Users persisted before it was stored keep the default-region ARN
+     * they were always reported with, so their identity stays stable.
+     */
+    private String userArn(ElastiCacheUser u) {
+        if (u.getArn() != null) {
+            return u.getArn();
+        }
+        return AwsArnUtils.Arn.of("elasticache", regionResolver.getDefaultRegion(),
+                regionResolver.getAccountId(), "user:" + u.getUserId()).toString();
     }
 
     private record UserAuthentication(AuthMode mode, List<String> passwords) {}

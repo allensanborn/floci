@@ -541,7 +541,7 @@ public class ApiGatewayService implements ResourceProvider {
         resourceStore.put(resourceKey(region, apiId, resourceId), resource);
     }
 
-    public MethodResponse putMethodResponse(String region, String apiId, String resourceId,
+    public synchronized MethodResponse putMethodResponse(String region, String apiId, String resourceId,
                                             String httpMethod, String statusCode,
                                             Map<String, Object> request) {
         MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
@@ -564,7 +564,41 @@ public class ApiGatewayService implements ResourceProvider {
         return mr;
     }
 
-    public void deleteMethodResponse(String region, String apiId, String resourceId,
+    public synchronized MethodResponse updateMethodResponse(String region, String apiId, String resourceId,
+                                               String httpMethod, String statusCode,
+                                               List<Map<String, String>> patchOperations) {
+        MethodResponse response = getMethodResponse(region, apiId, resourceId, httpMethod, statusCode);
+        Map<String, Boolean> parameters = new HashMap<>(
+                response.responseParameters() != null ? response.responseParameters() : Map.of());
+        if (patchOperations != null) {
+            for (Map<String, String> patch : patchOperations) {
+                String path = patch.get("path");
+                if (path == null || !path.startsWith("/responseParameters/method.response.header.")
+                        || path.length() == "/responseParameters/method.response.header.".length()) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+                String name = unescapeJsonPointer(path.substring("/responseParameters/".length()));
+                String op = patch.get("op");
+                if ("remove".equals(op)) {
+                    parameters.remove(name);
+                } else if ("add".equals(op) || "replace".equals(op)) {
+                    String value = patch.get("value");
+                    if (!"true".equals(value) && !"false".equals(value)) {
+                        throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                    }
+                    parameters.put(name, Boolean.parseBoolean(value));
+                } else {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+            }
+        }
+        MethodResponse updated = new MethodResponse(statusCode, parameters);
+        getMethod(region, apiId, resourceId, httpMethod).getMethodResponses().put(statusCode, updated);
+        resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
+        return updated;
+    }
+
+    public synchronized void deleteMethodResponse(String region, String apiId, String resourceId,
                                      String httpMethod, String statusCode) {
         MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
         if (method.getMethodResponses().remove(statusCode) == null) {
@@ -590,20 +624,17 @@ public class ApiGatewayService implements ResourceProvider {
 
         integration.setContentHandling((String) request.get("contentHandling"));
         integration.setCredentials((String) request.get("credentials"));
-        integration.setCacheNamespace((String) request.get("cacheNamespace"));
+        integration.setCacheNamespace(request.get("cacheNamespace") != null
+                ? (String) request.get("cacheNamespace") : resourceId);
+        integration.setResponseTransferMode(transferMode(request.get("responseTransferMode")));
+        validateTransferMode(integration.getResponseTransferMode(), integration.getType());
         if (request.get("connectionType") != null) {
             integration.setConnectionType((String) request.get("connectionType"));
         }
         integration.setConnectionId((String) request.get("connectionId"));
 
         if (request.get("timeoutInMillis") instanceof Number timeout) {
-            // AWS accepts 50ms upward; the 29s ceiling applies only to edge-optimized APIs, and
-            // Regional/private APIs (Floci's default) may exceed it, so only the floor is enforced.
-            if (timeout.intValue() < 50) {
-                throw new AwsException("BadRequestException",
-                        "Invalid timeout value: " + timeout.intValue(), 400);
-            }
-            integration.setTimeoutInMillis(timeout.intValue());
+            integration.setTimeoutInMillis(parseIntegrationTimeout(timeout));
         }
 
         if (request.get("cacheKeyParameters") instanceof List<?> cacheKeys) {
@@ -993,6 +1024,8 @@ public class ApiGatewayService implements ResourceProvider {
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
+        validateRequestAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
+                authorizer.getAuthorizerResultTtlInSeconds());
         // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
         if (request.get("providerARNs") instanceof List<?> arns) {
             List<String> providerArns = new ArrayList<>();
@@ -1068,12 +1101,29 @@ public class ApiGatewayService implements ResourceProvider {
             }
         }
         }
+        validateRequestAuthorizerIdentitySource(authorizer.getType(), newIdentitySource, newTtl);
         authorizer.setName(newName);
         authorizer.setAuthorizerUri(newAuthorizerUri);
         authorizer.setIdentitySource(newIdentitySource);
         authorizer.setAuthorizerResultTtlInSeconds(newTtl);
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
         return authorizer;
+    }
+
+    private static void validateRequestAuthorizerIdentitySource(String type, String identitySource, String ttl) {
+        if (!"REQUEST".equals(type)) {
+            return;
+        }
+        int ttlSeconds;
+        try {
+            ttlSeconds = Integer.parseInt(ttl);
+        } catch (NumberFormatException exception) {
+            throw new AwsException("BadRequestException", "authorizerResultTtlInSeconds must be an integer", 400);
+        }
+        if (ttlSeconds > 0 && (identitySource == null || identitySource.isBlank())) {
+            throw new AwsException("BadRequestException",
+                    "Identity source is required for a REQUEST authorizer when caching is enabled", 400);
+        }
     }
 
     // ──────────────────────────── API Keys ────────────────────────────
@@ -2680,6 +2730,8 @@ public class ApiGatewayService implements ResourceProvider {
     public Integration updateIntegration(String region, String apiId, String resourceId, String httpMethod, List<Map<String, String>> patchOperations) {
         Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
         if (patchOperations != null) {
+            String nextType = integration.getType();
+            String nextTransferMode = integration.getResponseTransferMode();
             for (Map<String, String> op : patchOperations) {
                 String opType = op.get("op");
                 if (!"add".equals(opType) && !"replace".equals(opType)) {
@@ -2692,14 +2744,23 @@ public class ApiGatewayService implements ResourceProvider {
                 }
                 switch (path) {
                     case "/type":
+                        nextType = value;
+                        break;
                     case "/httpMethod":
                     case "/uri":
                     case "/passthroughBehavior":
+                        break;
+                    case "/timeoutInMillis":
+                        parseIntegrationTimeout(value);
+                        break;
+                    case "/responseTransferMode":
+                        nextTransferMode = transferMode(value);
                         break;
                     default:
                         throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
                 }
             }
+            validateTransferMode(nextTransferMode, nextType);
             for (Map<String, String> op : patchOperations) {
                 String path = op.get("path");
                 String value = op.get("value");
@@ -2716,6 +2777,12 @@ public class ApiGatewayService implements ResourceProvider {
                     case "/passthroughBehavior":
                         integration.setPassthroughBehavior(value);
                         break;
+                    case "/timeoutInMillis":
+                        integration.setTimeoutInMillis(parseIntegrationTimeout(value));
+                        break;
+                    case "/responseTransferMode":
+                        integration.setResponseTransferMode(transferMode(value));
+                        break;
                     default:
                         throw new IllegalStateException("Unreachable: validated above");
                 }
@@ -2723,6 +2790,36 @@ public class ApiGatewayService implements ResourceProvider {
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
         return integration;
+    }
+
+    private int parseIntegrationTimeout(Object value) {
+        try {
+            int timeout = Integer.parseInt(String.valueOf(value));
+            if (timeout >= 50) {
+                return timeout;
+            }
+        } catch (NumberFormatException ignored) {
+            // Return the same AWS-style error for non-numeric and out-of-range values.
+        }
+        throw new AwsException("BadRequestException", "Invalid timeout value: " + value, 400);
+    }
+
+    private String transferMode(Object value) {
+        if (value == null) {
+            return "BUFFERED";
+        }
+        if ("BUFFERED".equals(value) || "STREAM".equals(value)) {
+            return (String) value;
+        }
+        throw new AwsException("BadRequestException", "Invalid response transfer mode: " + value, 400);
+    }
+
+    private void validateTransferMode(String mode, String type) {
+        if ("STREAM".equals(mode) && !"HTTP_PROXY".equalsIgnoreCase(type)
+                && !"AWS_PROXY".equalsIgnoreCase(type)) {
+            throw new AwsException("BadRequestException",
+                    "Response transfer mode STREAM requires HTTP_PROXY or AWS_PROXY integration type", 400);
+        }
     }
 
     // ──────────────────────────── Tags ────────────────────────────
@@ -3632,7 +3729,8 @@ public class ApiGatewayService implements ResourceProvider {
         integrationRequest.put("uri", integrationExt.get("uri"));
         integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
         for (String field : List.of("contentHandling", "timeoutInMillis", "connectionType",
-                "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig")) {
+                "connectionId", "credentials", "cacheNamespace", "cacheKeyParameters", "tlsConfig",
+                "responseTransferMode")) {
             if (integrationExt.get(field) != null) {
                 integrationRequest.put(field, integrationExt.get(field));
             }
