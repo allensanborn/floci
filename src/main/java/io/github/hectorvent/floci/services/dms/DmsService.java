@@ -247,8 +247,27 @@ public class DmsService implements Resettable {
         return removed;
     }
 
+    /**
+     * "default" cannot be created, so it is never stored: it resolves to the region's default-VPC
+     * subnets at read time, which is the group an instance created without one lands in.
+     */
     public Optional<ReplicationSubnetGroup> findReplicationSubnetGroup(String region, String identifier) {
-        return subnetGroups.get(storageKey(region, identifier));
+        if (!"default".equals(identifier)) {
+            return subnetGroups.get(storageKey(region, identifier));
+        }
+        List<String> defaultSubnets = ec2Service.describeSubnets(region, List.of(), Map.of()).stream()
+                .filter(Subnet::isDefaultForAz)
+                .map(Subnet::getSubnetId)
+                .toList();
+        if (defaultSubnets.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(buildSubnetGroup(identifier, "default", defaultSubnets, region));
+        } catch (AwsException e) {
+            // A default VPC trimmed below two AZs: fall back to the bare identifier.
+            return Optional.empty();
+        }
     }
 
     // ---------------------------------------------------------------- replication tasks
@@ -257,10 +276,8 @@ public class DmsService implements Resettable {
     public synchronized DmsResource createReplicationTask(JsonNode request, String region) {
         String identifier = requireResourceIdentifier(tasks, request);
         ObjectNode attributes = JsonNodeFactory.instance.objectNode();
-        attributes.put("SourceEndpointArn",
-                arnOf(endpoints, requireByArn(endpoints, request, "SourceEndpointArn", region).resource()));
-        attributes.put("TargetEndpointArn",
-                arnOf(endpoints, requireByArn(endpoints, request, "TargetEndpointArn", region).resource()));
+        attributes.put("SourceEndpointArn", requireEndpointOfType(request, "SourceEndpointArn", "SOURCE", region));
+        attributes.put("TargetEndpointArn", requireEndpointOfType(request, "TargetEndpointArn", "TARGET", region));
         attributes.put("ReplicationInstanceArn",
                 arnOf(instances, requireByArn(instances, request, "ReplicationInstanceArn", region).resource()));
         if (text(request, "MigrationType") == null) {
@@ -556,6 +573,15 @@ public class DmsService implements Resettable {
                 && !value.contains("--") && !value.endsWith("-");
     }
 
+    private String requireEndpointOfType(JsonNode request, String member, String type, String region) {
+        DmsResource endpoint = requireByArn(endpoints, request, member, region).resource();
+        String arn = arnOf(endpoints, endpoint);
+        if (!type.equals(member(endpoint, "EndpointType"))) {
+            throw invalidParameter(member + " " + arn + " is not a " + type.toLowerCase(Locale.ROOT) + " endpoint.");
+        }
+        return arn;
+    }
+
     /** DMS accepts the lowercase enum value and returns it uppercase. */
     private static String requireEndpointType(JsonNode request) {
         String value = text(request, "EndpointType");
@@ -629,7 +655,11 @@ public class DmsService implements Resettable {
             if (!kerberos.isObject()) {
                 throw serialization("KerberosAuthenticationSettings must be a structure.");
             }
-            attributes.set("KerberosAuthenticationSettings", kerberos.deepCopy());
+            // Only the members DMS models; anything else a caller sends is neither stored nor echoed.
+            ObjectNode stored = attributes.putObject("KerberosAuthenticationSettings");
+            for (String member : List.of("KeyCacheSecretId", "KeyCacheSecretIamArn", "Krb5FileContents")) {
+                putText(stored, kerberos, member);
+            }
         }
     }
 

@@ -10,8 +10,11 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -227,7 +230,31 @@ class DmsLifecycleIntegrationTest {
         String arn = createInstance("lc-rep-default");
         describeInstance("lc-rep-default")
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.ReplicationSubnetGroupIdentifier",
-                        equalTo("default"));
+                        equalTo("default"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-default-us-east-1"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.SubnetGroupStatus", equalTo("Complete"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.Subnets.SubnetIdentifier",
+                        hasItems(SUBNET_A, SUBNET_B));
+        delete("DeleteReplicationInstance", "ReplicationInstanceArn", arn);
+    }
+
+    @Test
+    void replicationInstanceStoresOnlyModeledKerberosMembers() {
+        dms("CreateReplicationInstance")
+                .body("{\"ReplicationInstanceIdentifier\":\"lc-rep-kerberos\","
+                        + "\"ReplicationInstanceClass\":\"dms.t3.micro\","
+                        + "\"KerberosAuthenticationSettings\":{\"KeyCacheSecretId\":\"krb-cache\","
+                        + "\"Krb5FileContents\":\"[libdefaults]\",\"Password\":\"hunter2\"}}")
+        .when().post("/")
+        .then().statusCode(200);
+        describeInstance("lc-rep-kerberos")
+                .body("ReplicationInstances[0].KerberosAuthenticationSettings.KeyCacheSecretId",
+                        equalTo("krb-cache"))
+                .body("ReplicationInstances[0].KerberosAuthenticationSettings.Krb5FileContents",
+                        equalTo("[libdefaults]"))
+                .body("ReplicationInstances[0].KerberosAuthenticationSettings", not(hasKey("Password")));
+        String arn = describeInstance("lc-rep-kerberos").extract()
+                .path("ReplicationInstances[0].ReplicationInstanceArn");
         delete("DeleteReplicationInstance", "ReplicationInstanceArn", arn);
     }
 
@@ -416,6 +443,32 @@ class DmsLifecycleIntegrationTest {
         .then()
                 .statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundFault"));
+    }
+
+    @Test
+    void replicationTaskWithReversedEndpointsIsRejected() {
+        String source = createEndpoint("lc-rev-src", "source", "");
+        String target = createEndpoint("lc-rev-tgt", "target", "");
+        String instance = createInstance("lc-rev-rep");
+        dms("CreateReplicationTask")
+                .body("{\"ReplicationTaskIdentifier\":\"lc-task-reversed\","
+                        + "\"SourceEndpointArn\":\"" + target + "\","
+                        + "\"TargetEndpointArn\":\"" + source + "\","
+                        + "\"ReplicationInstanceArn\":\"" + instance + "\","
+                        + "\"MigrationType\":\"full-load\",\"TableMappings\":" + jsonString(mappings("app")) + "}")
+        .when().post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+        dms("DescribeReplicationTasks")
+                .body("{\"Filters\":[{\"Name\":\"replication-task-id\",\"Values\":[\"lc-task-reversed\"]}]}")
+        .when().post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+        delete("DeleteReplicationInstance", "ReplicationInstanceArn", instance);
+        delete("DeleteEndpoint", "EndpointArn", source);
+        delete("DeleteEndpoint", "EndpointArn", target);
     }
 
     private static String mappings(String schema) {
