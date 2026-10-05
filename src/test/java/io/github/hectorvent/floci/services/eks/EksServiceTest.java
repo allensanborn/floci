@@ -62,6 +62,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -273,6 +274,28 @@ class EksServiceTest {
         String issuer = migrated.getIdentity().getOidc().getIssuer();
         assertTrue(issuer.matches("https://oidc\\.eks\\.us-east-1\\.amazonaws\\.com/id/[A-F0-9]{32}"));
         assertTrue(oidcService.findVerificationKey(issuer).isPresent());
+    }
+
+    @Test
+    void initBackfillsTheOidcIssuerInTheClustersOwnRegion() {
+        StorageBackend<String, Cluster> clusterStore = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> keyStore = new InMemoryStorage<>();
+
+        Cluster legacy = new Cluster();
+        legacy.setName("eu-legacy-cluster");
+        legacy.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/eu-legacy-cluster");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        clusterStore.put("eu-legacy-cluster", legacy);
+
+        EksOidcService oidcService = new EksOidcService(
+                fixedStorageFactory(keyStore), new ObjectMapper());
+        EksService restarted = new EksService(fixedStorageFactory(clusterStore), testConfig(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, oidcService,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+        restarted.init();
+
+        String issuer = clusterStore.get("eu-legacy-cluster").orElseThrow().getIdentity().getOidc().getIssuer();
+        assertTrue(issuer.startsWith("https://oidc.eks.eu-west-1.amazonaws.com/id/"), issuer);
     }
 
     @Test
@@ -519,6 +542,50 @@ class EksServiceTest {
 
         verify(clusterManager).stopCluster(cluster);
         verify(clusterManager, never()).detachCluster(any(Cluster.class));
+    }
+
+    @Test
+    void aDeleteOverlappingOneStillInProgressIsRejectedAndCannotReviveTheCluster() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        AwsException[] overlapping = new AwsException[1];
+        doAnswer(firstDelete -> {
+            overlapping[0] = assertThrows(AwsException.class, () -> service.deleteCluster("running-cluster"));
+            return null;
+        }).when(clusterManager).stopCluster(cluster);
+
+        service.deleteCluster("running-cluster");
+
+        assertEquals("ResourceInUseException", overlapping[0].getErrorCode());
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
+    @Test
+    void aClusterLeftDeletingCanBeDeletedAgainOnceTheEarlierDeleteFinished() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        doThrow(new IllegalStateException("Failed to remove container"))
+                .doNothing()
+                .when(clusterManager).stopCluster(cluster);
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+
+        service.deleteCluster("running-cluster");
+
+        assertThrows(AwsException.class, () -> service.describeCluster("running-cluster"));
+    }
+
+    @Test
+    void aDeleteThatCouldNotRemoveTheClusterContainerLeavesTheClusterActive() {
+        Cluster cluster = activeCluster();
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        EksService service = serviceWithCluster(cluster, clusterManager, false);
+        doThrow(new IllegalStateException("Failed to remove container")).when(clusterManager).stopCluster(cluster);
+
+        assertThrows(IllegalStateException.class, () -> service.deleteCluster("running-cluster"));
+
+        assertEquals(ClusterStatus.ACTIVE, service.describeCluster("running-cluster").getStatus());
     }
 
     private static Cluster activeCluster() {
@@ -989,6 +1056,28 @@ class EksServiceTest {
         assertEquals(NodegroupStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeNodeGroup("my-eks-cluster", "nodegroup-a"));
         assertEquals(List.of("nodegroup-b"), eksService.listNodeGroups("my-eks-cluster"));
+    }
+
+    @Test
+    void createNodeGroupRecordsLabelsAndTaints() {
+        createTestCluster("metadata-cluster");
+        CreateNodeGroupRequest request = nodeGroupRequest("labeled-ng");
+        request.setLabels(Map.of("role", "worker", "tier", "frontend"));
+        request.setTaints(List.of(Map.of("key", "dedicated", "value", "special", "effect", "NO_SCHEDULE")));
+        request.setCapacityType("SPOT");
+
+        Nodegroup nodegroup = eksService.createNodeGroup("metadata-cluster", request);
+        assertEquals("SPOT", nodegroup.getCapacityType());
+        assertEquals("worker", nodegroup.getLabels().get("role"));
+        assertEquals(1, nodegroup.getTaints().size());
+
+        Nodegroup retrieved = eksService.describeNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals("SPOT", retrieved.getCapacityType());
+        assertEquals("worker", retrieved.getLabels().get("role"));
+        assertEquals(1, retrieved.getTaints().size());
+
+        eksService.deleteNodeGroup("metadata-cluster", "labeled-ng");
+        assertEquals(List.of(), eksService.listNodeGroups("metadata-cluster"));
     }
 
     @Test

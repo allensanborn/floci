@@ -120,7 +120,7 @@ public class ElastiCacheMemcachedService {
         // A cache cluster record is metadata: its id and endpoint are derived from configuration,
         // so the cluster is created and reaches 'available' even when no Docker daemon is
         // reachable. Only connecting to the cache needs the container.
-        ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image);
+        ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, request.region());
 
         String endpointHost = resolveEndpointHost(handle);
         int endpointPort = handle != null ? handle.getPort() : BACKEND_PORT;
@@ -151,6 +151,7 @@ public class ElastiCacheMemcachedService {
                     + "is reachable. Metadata operations work; connections to the cache do not "
                     + "until a daemon appears.", clusterId);
         }
+        cluster.setRegion(request.region());
 
         clusters.put(clusterId, cluster);
         LOG.infov("Memcached cluster {0} created, endpoint={1}:{2}", clusterId, endpointHost, endpointPort);
@@ -202,7 +203,9 @@ public class ElastiCacheMemcachedService {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultMemcachedImage();
         try {
-            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image);
+            // The region the cluster was created in; a record from before it was kept has none and logs
+            // to the default region.
+            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, cluster.getRegion());
             synchronized (lockFor(clusterId)) {
                 if (restoreTargetLost(clusterId)) {
                     abandonRestoredContainer(clusterId, handle);

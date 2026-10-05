@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.core.DefaultDockerClientConfig;
+import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -253,6 +255,34 @@ class DockerClientProducerTest {
                 "tcp://custom-daemon:2376", null, true, null);
         assertEquals("tcp://custom-daemon:2376", result,
                 "An explicitly-configured docker-host should take priority over the Windows named-pipe fallback");
+    }
+
+    // Control-plane calls (create/start/stop/remove/copyArchive) and long-lived streaming
+    // calls (log-follow, exec output streams) must not share one connection pool: a
+    // container's whole-lifetime streams would otherwise occupy pool slots that
+    // short-lived control-plane calls need, starving them into
+    // ConnectionRequestTimeoutException. The @Default and @StreamingDocker beans must
+    // therefore be genuinely separate DockerClient instances (and thus separate pools),
+    // not the same instance handed out under two qualifiers.
+    @Test
+    void dockerClientAndStreamingDockerClient_areDistinctInstances() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+        when(docker.maxConnections()).thenReturn(100);
+        when(docker.streamingMaxConnections()).thenReturn(512);
+
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        DockerClient controlPlaneClient = producer.dockerClient();
+        DockerClient streamingClient = producer.streamingDockerClient();
+
+        assertNotNull(controlPlaneClient);
+        assertNotNull(streamingClient);
+        assertNotSame(controlPlaneClient, streamingClient,
+                "Control-plane and streaming DockerClient beans must use separate connection pools");
     }
 
     private static void writeContextFixture(Path dockerConfigDir, String contextName, String host)
@@ -693,6 +723,39 @@ class DockerClientProducerTest {
                     socket.close();
                 }
             }
+        }
+    }
+
+    @Test
+    void newHttpClient_tlsVerifyConfig_loadsTheConfiguredCertificates(@TempDir Path certDir) throws IOException {
+        // Catches: TLS material resolved onto the client config but never handed to the HTTP transport
+        Files.writeString(certDir.resolve("ca.pem"), "not a certificate");
+        Files.writeString(certDir.resolve("cert.pem"), "not a certificate");
+        Files.writeString(certDir.resolve("key.pem"), "not a key");
+        DefaultDockerClientConfig tlsConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
+                        .withDockerHost("tcp://127.0.0.1:2376")
+                        .withDockerTlsVerify(true)
+                        .withDockerCertPath(certDir.toString())
+                        .build();
+
+        // An HTTP client that actually uses the SSL config must read the certificates, so
+        // unreadable ones fail the build; one that ignores the config builds silently.
+        assertThrows(RuntimeException.class, () -> DockerClientProducer.newHttpClient(tlsConfig, 10));
+    }
+
+    @Test
+    void newHttpClient_plainTcpConfig_buildsWithoutTls() throws IOException {
+        // Catches: passing the SSL config breaking hosts that have no TLS material
+        DefaultDockerClientConfig plainConfig =
+                DefaultDockerClientConfig.createDefaultConfigBuilder()
+                        .withDockerHost("tcp://127.0.0.1:2375")
+                        .withDockerTlsVerify(false)
+                        .build();
+
+        try (ApacheDockerHttpClient client = DockerClientProducer.newHttpClient(plainConfig, 10)) {
+            assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
+            assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }
     }
 }

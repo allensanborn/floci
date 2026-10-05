@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -1304,6 +1305,120 @@ class IamServiceTest {
         assertTrue(service.resolveAccountId(accessKey.getAccessKeyId()).isEmpty());
     }
 
+    @Test
+    void findSecretKeyDoesNotResolveAnotherAccountsKey() {
+        // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
+        // not compare the key's account with the cluster's, so another account's key must stay unknown.
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId()).isEmpty());
+        assertTrue(service.findSecretKey(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountResolvesLongTermKeyFromAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERACCOUNTKEY", "other-secret", "worker");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("other-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfTheRequestAccountDoesNotScanOtherAccounts() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey accessKey = new AccessKey("AKIAOWNACCOUNTKEY", "own-secret", "dev");
+        accessKeys.putForAccount("000000000000", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("own-secret", found.secretAccessKey());
+        assertEquals("000000000000", found.accountId());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountNamesTheRequestAccountAsTheOwnerOfItsOwnKey() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        AccessKey accessKey = new AccessKey("AKIAREQUESTACCOUNT", "request-secret", "dev");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountPrefersTheRequestAccountsKeyOverADuplicateIdElsewhere() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "111122223333");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "request-secret", "dev"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "other-secret", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("request-secret", found.secretAccessKey());
+        assertEquals("111122223333", found.accountId());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountReportsTheAccountHoldingTheSecretItReturnsAmongDuplicateIds() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        accessKeys.putForAccount("111122223333", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-111122223333", "worker"));
+        accessKeys.putForAccount("444455556666", "AKIADUPLICATEKEYID",
+                new AccessKey("AKIADUPLICATEKEYID", "secret-of-444455556666", "worker"));
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        // Either key may be found; the account must be the one whose secret signs the request.
+        IamService.OwnedSecretKey found = service.findSecretKeyInAnyAccount("AKIADUPLICATEKEYID", null).orElseThrow();
+        assertEquals("secret-of-" + found.accountId(), found.secretAccessKey());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountOfATemporaryKeyDoesNotScanLongTermKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        service.findSecretKeyInAnyAccount("ASIATEMPORARYKEY1234", "session-token");
+
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
+    void findSecretKeyInAnyAccountIgnoresInactiveKeyInAnotherAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        AccessKey accessKey = new AccessKey("AKIAOTHERINACTIVE", "other-secret", "worker");
+        accessKey.setStatus("Inactive");
+        accessKeys.putForAccount("111122223333", accessKey.getAccessKeyId(), accessKey);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertTrue(service.findSecretKeyInAnyAccount(accessKey.getAccessKeyId(), null).isEmpty());
+    }
+
     private static final class CountingAccountAwareSessionStorage
             extends AccountAwareStorageBackend<SessionCredential> {
 
@@ -2304,6 +2419,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
@@ -2321,6 +2439,9 @@ class IamServiceTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), false, null);
 
         IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();

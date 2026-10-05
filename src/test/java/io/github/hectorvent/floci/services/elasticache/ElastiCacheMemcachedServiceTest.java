@@ -54,7 +54,7 @@ class ElastiCacheMemcachedServiceTest {
         when(config.hostname()).thenReturn(Optional.of("localhost"));
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.tryStart(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "localhost", 11211));
 
         service = new ElastiCacheMemcachedService(containerManager, storageFactory, config, provisioningIds,
@@ -106,7 +106,7 @@ class ElastiCacheMemcachedServiceTest {
                         0, null, null, null, null, null, null, null, null, null, null, null, null,
                         null, "us-east-1", null)));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
-        verify(containerManager, never()).tryStart(eq("empty"), anyString());
+        verify(containerManager, never()).tryStart(eq("empty"), anyString(), any());
     }
 
     @Test
@@ -126,7 +126,7 @@ class ElastiCacheMemcachedServiceTest {
                         null, "us-east-1", null)));
         assertEquals("NodeQuotaForClusterExceeded", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
-        verify(containerManager, never()).tryStart(eq("too-many"), anyString());
+        verify(containerManager, never()).tryStart(eq("too-many"), anyString(), any());
         assertThrows(AwsException.class, () -> service.getCacheCluster("too-many"));
     }
 
@@ -149,7 +149,7 @@ class ElastiCacheMemcachedServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createCacheCluster(request("racing-cluster")));
         assertEquals("CacheClusterAlreadyExists", ex.getErrorCode());
-        verify(containerManager, never()).tryStart(eq("racing-cluster"), anyString());
+        verify(containerManager, never()).tryStart(eq("racing-cluster"), anyString(), any());
 
         // The refusal must not have released the claim the other create still holds.
         assertFalse(provisioningIds.claim("racing-cluster"));
@@ -208,7 +208,7 @@ class ElastiCacheMemcachedServiceTest {
         when(config.hostname()).thenReturn(Optional.empty());
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.tryStart(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "172.20.0.10", 11211));
 
         ElastiCacheMemcachedService containerModeService =
@@ -225,7 +225,7 @@ class ElastiCacheMemcachedServiceTest {
         // tryStart() returns null when no Docker daemon is reachable. The cache cluster record is
         // metadata, so the create still succeeds and the cluster reaches 'available' on the first
         // describe (what SDK/Terraform waiters poll), on Memcached's well-known port.
-        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+        when(containerManager.tryStart(anyString(), anyString(), any())).thenReturn(null);
 
         CacheCluster cluster = service.createCacheCluster(request("no-docker-cluster"));
 
@@ -241,21 +241,38 @@ class ElastiCacheMemcachedServiceTest {
     }
 
     @Test
+    void restorePersistedRuntimeRestartsTheContainerInTheClustersRegion() {
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
+        when(beforeRestart.tryStart(anyString(), anyString(), any()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "eu-cluster", "localhost", 32770));
+        serviceWith(storageFactory, beforeRestart).createCacheCluster(request("eu-cluster", "eu-west-1"));
+        verify(beforeRestart).tryStart(eq("eu-cluster"), anyString(), eq("eu-west-1"));
+
+        ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
+        when(restarted.tryStart(anyString(), anyString(), any()))
+                .thenReturn(new ElastiCacheContainerHandle("cid2", "eu-cluster", "localhost", 32771));
+        serviceWith(storageFactory, restarted).restorePersistedRuntime().join();
+
+        verify(restarted).tryStart(eq("eu-cluster"), anyString(), eq("eu-west-1"));
+    }
+
+    @Test
     void restorePersistedRuntimeRestartsTheContainerAndRepointsTheEndpoint() {
         StorageFactory storageFactory = sharedStorageFactory();
         ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
-        when(beforeRestart.tryStart(anyString(), anyString()))
+        when(beforeRestart.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 32770));
         serviceWith(storageFactory, beforeRestart).createCacheCluster(request("my-cluster"));
 
         ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
-        when(restarted.tryStart(anyString(), anyString()))
+        when(restarted.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid2", "my-cluster", "localhost", 32771));
         ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
 
         restartedService.restorePersistedRuntime().join();
 
-        verify(restarted).tryStart(eq("my-cluster"), anyString());
+        verify(restarted).tryStart(eq("my-cluster"), anyString(), any());
         CacheCluster cluster = restartedService.getCacheCluster("my-cluster");
         assertEquals(CacheClusterStatus.AVAILABLE, cluster.getCacheClusterStatus());
         assertEquals(32771, cluster.getConfigurationEndpoint().port(),
@@ -266,12 +283,12 @@ class ElastiCacheMemcachedServiceTest {
     void memcachedRestoreFailureReportsRestoreFailed() {
         StorageFactory storageFactory = sharedStorageFactory();
         ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
-        when(beforeRestart.tryStart(anyString(), anyString()))
+        when(beforeRestart.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 11211));
         serviceWith(storageFactory, beforeRestart).createCacheCluster(request("my-cluster"));
 
         ElastiCacheMemcachedContainerManager restarted = mock(ElastiCacheMemcachedContainerManager.class);
-        when(restarted.tryStart(anyString(), anyString()))
+        when(restarted.tryStart(anyString(), anyString(), any()))
                 .thenThrow(new RuntimeException("container failed"));
         ElastiCacheMemcachedService restartedService = serviceWith(storageFactory, restarted);
 
@@ -287,7 +304,7 @@ class ElastiCacheMemcachedServiceTest {
     void restoreDoesNotResurrectAClusterDeletedWhileItWasRestoring() {
         StorageFactory storageFactory = sharedStorageFactory();
         ElastiCacheMemcachedContainerManager beforeRestart = mock(ElastiCacheMemcachedContainerManager.class);
-        when(beforeRestart.tryStart(anyString(), anyString()))
+        when(beforeRestart.tryStart(anyString(), anyString(), any()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "my-cluster", "localhost", 32770));
         serviceWith(storageFactory, beforeRestart).createCacheCluster(request("my-cluster"));
 
@@ -297,7 +314,7 @@ class ElastiCacheMemcachedServiceTest {
                 new ElastiCacheContainerHandle("cid2", "my-cluster", "localhost", 32771);
         // The delete lands in the window the cluster's monitor closes: the container is up, the
         // record has not been written back yet.
-        when(restarted.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+        when(restarted.tryStart(anyString(), anyString(), any())).thenAnswer(inv -> {
             restartedService.deleteCacheCluster("my-cluster");
             return restoredHandle;
         });
@@ -333,8 +350,12 @@ class ElastiCacheMemcachedServiceTest {
 
     /** A CreateCacheCluster for a Memcached cluster that sets nothing but its id. */
     static ElastiCacheService.CreateCacheClusterRequest request(String clusterId) {
+        return request(clusterId, "us-east-1");
+    }
+
+    static ElastiCacheService.CreateCacheClusterRequest request(String clusterId, String region) {
         return new ElastiCacheService.CreateCacheClusterRequest(clusterId, "memcached", null, null,
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                "us-east-1", null);
+                region, null);
     }
 }
