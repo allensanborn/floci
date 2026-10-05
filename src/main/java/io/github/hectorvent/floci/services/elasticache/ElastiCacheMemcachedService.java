@@ -34,6 +34,7 @@ public class ElastiCacheMemcachedService {
     private static final int BACKEND_PORT = 11211;
     /** The node type a create that names none is reported with, the same as for redis. */
     private static final String DEFAULT_CACHE_NODE_TYPE = "cache.t4g.micro";
+    private static final int MAX_CACHE_NODES = 40;
 
     private final StorageBackend<String, CacheCluster> clusters;
     /**
@@ -78,6 +79,13 @@ public class ElastiCacheMemcachedService {
         if (request.numCacheNodes() != null && request.numCacheNodes() < 1) {
             throw new AwsException("InvalidParameterValue",
                     "NumCacheNodes must be at least 1.", 400);
+        }
+        // AWS caps a Memcached cluster at 40 nodes; without the cap a describe with
+        // ShowCacheNodeInfo would list however many nodes the create asked for.
+        if (request.numCacheNodes() != null && request.numCacheNodes() > MAX_CACHE_NODES) {
+            throw new AwsException("NodeQuotaForClusterExceeded",
+                    "The request cannot be processed because it would exceed the allowed number "
+                            + "of cache nodes in a single cluster.", 400);
         }
         // Claimed before the store checks rather than after, because no create here or in
         // ElastiCacheService persists its record until its container has started: a store check

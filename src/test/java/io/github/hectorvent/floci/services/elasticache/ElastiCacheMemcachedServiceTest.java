@@ -110,6 +110,27 @@ class ElastiCacheMemcachedServiceTest {
     }
 
     @Test
+    void createClusterAcceptsFortyNodes() {
+        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest("forty", "memcached",
+                null, null, 40, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, "us-east-1", null));
+
+        assertEquals(40, service.getCacheCluster("forty").getNumCacheNodes());
+    }
+
+    @Test
+    void createClusterRefusesMoreThanFortyNodes() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster(
+                new ElastiCacheService.CreateCacheClusterRequest("too-many", "memcached", null, null,
+                        41, null, null, null, null, null, null, null, null, null, null, null, null,
+                        null, "us-east-1", null)));
+        assertEquals("NodeQuotaForClusterExceeded", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        verify(containerManager, never()).tryStart(eq("too-many"), anyString());
+        assertThrows(AwsException.class, () -> service.getCacheCluster("too-many"));
+    }
+
+    @Test
     void createDuplicateClusterThrows() {
         service.createCacheCluster(request("my-cluster"));
 
