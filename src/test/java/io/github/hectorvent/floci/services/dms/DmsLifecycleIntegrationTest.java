@@ -471,6 +471,31 @@ class DmsLifecycleIntegrationTest {
         delete("DeleteEndpoint", "EndpointArn", target);
     }
 
+    @Test
+    void replicationTaskWithSourceEndpointAsTargetIsRejected() {
+        String source = createEndpoint("lc-src-as-tgt", "source", "");
+        String instance = createInstance("lc-src-as-tgt-rep");
+        dms("CreateReplicationTask")
+                .body("{\"ReplicationTaskIdentifier\":\"lc-task-src-as-tgt\","
+                        + "\"SourceEndpointArn\":\"" + source + "\","
+                        + "\"TargetEndpointArn\":\"" + source + "\","
+                        + "\"ReplicationInstanceArn\":\"" + instance + "\","
+                        + "\"MigrationType\":\"full-load\",\"TableMappings\":" + jsonString(mappings("app")) + "}")
+        .when().post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"))
+                .body("message", containsString("TargetEndpointArn"));
+        dms("DescribeReplicationTasks")
+                .body("{\"Filters\":[{\"Name\":\"replication-task-id\",\"Values\":[\"lc-task-src-as-tgt\"]}]}")
+        .when().post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundFault"));
+        delete("DeleteReplicationInstance", "ReplicationInstanceArn", instance);
+        delete("DeleteEndpoint", "EndpointArn", source);
+    }
+
     private static String mappings(String schema) {
         return "{\"rules\":[{\"rule-type\":\"selection\",\"rule-id\":\"1\",\"rule-name\":\"1\","
                 + "\"object-locator\":{\"schema-name\":\"" + schema + "\",\"table-name\":\"%\"},"

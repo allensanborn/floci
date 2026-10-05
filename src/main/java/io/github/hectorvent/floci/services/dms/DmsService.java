@@ -264,8 +264,11 @@ public class DmsService implements Resettable {
         }
         try {
             return Optional.of(buildSubnetGroup(identifier, "default", defaultSubnets, region));
-        } catch (AwsException e) {
-            // A default VPC trimmed below two AZs: fall back to the bare identifier.
+        } catch (AwsException ignored) {
+            // Safe to swallow: buildSubnetGroup only rejects the default subnets when they cannot
+            // form a valid group (a default VPC trimmed below two AZs, or a subnet with no AZ).
+            // There is then no usable default group, so this answers exactly as when the region
+            // has no default subnets and the caller falls back to the bare identifier.
             return Optional.empty();
         }
     }
