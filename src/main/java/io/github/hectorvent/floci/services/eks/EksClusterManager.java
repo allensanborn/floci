@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -7,10 +8,15 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource;
 import io.github.hectorvent.floci.core.common.dns.DnsClientVpcSource.ClientVpc;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRule;
+import io.github.hectorvent.floci.core.common.dns.DnsForwardingRuleSource;
+import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExec;
@@ -21,7 +27,11 @@ import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
@@ -31,6 +41,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.VpcRouteTableListener;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -40,6 +51,8 @@ import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterIdentity;
 import io.github.hectorvent.floci.services.eks.model.ClusterOidcKey;
 import io.github.hectorvent.floci.services.eks.model.LogSetup;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import io.github.hectorvent.floci.services.eks.model.OidcIdentity;
 import io.github.hectorvent.floci.services.eks.model.ResourcesVpcConfig;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -67,15 +80,18 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -85,12 +101,14 @@ import java.util.stream.Collectors;
  */
 @ApplicationScoped
 public class EksClusterManager
-        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource {
+        implements ClusterNodeInstanceProvider, VpcRouteTableListener, DnsClientVpcSource,
+        DnsRecordSource, DnsForwardingRuleSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
+    private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
 
     private static final String WEBHOOK_CONFIG_DIR = "/etc";
     private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
@@ -103,6 +121,9 @@ public class EksClusterManager
     // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
     // volume; the Docker copy resolves through the container's mounts, so the file lands there.
     static final String K3S_DATA_DIR = "/var/lib/rancher/k3s";
+    static final String CONTAINERD_CERTS_DIR = "agent/etc/containerd/certs.d";
+    static final String CONTAINERD_CERTS_TARGET = K3S_DATA_DIR + "/" + CONTAINERD_CERTS_DIR;
+    static final String CONTAINERD_CERTS_LINK = "etc/containerd/certs.d";
     static final String POD_IDENTITY_MANIFEST_FILE = "floci-eks-pod-identity.yaml";
     static final String POD_IDENTITY_MANIFEST_TAR_ENTRY = "server/manifests/" + POD_IDENTITY_MANIFEST_FILE;
     private static final String ENDPOINT_MODE_NETWORK = "network";
@@ -155,6 +176,7 @@ public class EksClusterManager
     @Inject
     jakarta.enterprise.inject.Instance<Ec2Service> ec2ServiceInstance;
     private Ec2Service ec2Service;
+    private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
 
@@ -200,6 +222,51 @@ public class EksClusterManager
         }
         return Optional.ofNullable(clusterNodeVpcs.get(clientAddress.trim()))
                 .map(ClusterNodeVpc::clientVpc);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveIpv4(String queryName) {
+        if (queryName == null || queryName.isBlank()) {
+            return Optional.empty();
+        }
+        String name = queryName.toLowerCase(Locale.ROOT);
+        if (name.endsWith(".")) {
+            name = name.substring(0, name.length() - 1);
+        }
+        for (ClusterNodeRecord record : clusterNodeInstances.values()) {
+            Instance inst = record.instance();
+            if (inst != null && inst.getPrivateDnsName() != null && inst.getPrivateIpAddress() != null
+                    && !inst.getPrivateIpAddress().isBlank()) {
+                String nodeDnsName = inst.getPrivateDnsName().toLowerCase(Locale.ROOT);
+                if (name.equals(nodeDnsName)) {
+                    return Optional.of(DnsAnswer.records(List.of(inst.getPrivateIpAddress()), DnsAnswer.DEFAULT_TTL_SECONDS));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    @Override
+    public List<DnsForwardingRule> rulesFor(String accountId, String region, String vpcId) {
+        if (vpcId == null || vpcId.isBlank()) {
+            return List.of();
+        }
+        List<DnsForwardingRule> rules = new ArrayList<>();
+        for (ClusterNodeRecord record : clusterNodeInstances.values()) {
+            if (accountId != null && !accountId.isBlank() && !accountId.equals(record.accountId())) {
+                continue;
+            }
+            if (region != null && !region.isBlank() && !region.equals(record.region())) {
+                continue;
+            }
+            Instance inst = record.instance();
+            if (inst != null && inst.getPrivateDnsName() != null && !inst.getPrivateDnsName().isBlank()) {
+                if (vpcId.equals(inst.getVpcId())) {
+                    rules.add(DnsForwardingRule.system(inst.getPrivateDnsName()));
+                }
+            }
+        }
+        return List.copyOf(rules);
     }
 
     private void registerClusterNodeVpc(Cluster cluster, String accountId, String region,
@@ -308,7 +375,6 @@ public class EksClusterManager
                 null, logStreamer);
     }
 
-    @Inject
     public EksClusterManager(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
                              ContainerDetector containerDetector,
@@ -321,6 +387,24 @@ public class EksClusterManager
                              EksOidcService oidcService,
                              FlociCertificateAuthority certificateAuthority,
                              ContainerLogStreamer logStreamer) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer, (StorageBackend<String, Nodegroup>) null);
+    }
+
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer,
+                             StorageBackend<String, Nodegroup> nodeGroupStorage) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -333,6 +417,30 @@ public class EksClusterManager
         this.oidcService = oidcService;
         this.certificateAuthority = certificateAuthority;
         this.logStreamer = logStreamer;
+        this.nodeGroupStorage = nodeGroupStorage;
+    }
+
+    @Inject
+    public EksClusterManager(ContainerBuilder containerBuilder,
+                             ContainerLifecycleManager lifecycleManager,
+                             ContainerDetector containerDetector,
+                             PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
+                             EcrRegistryManager ecrRegistryManager,
+                             EmulatorConfig config,
+                             RegionResolver regionResolver,
+                             Ec2MetadataServer metadataServer,
+                             EksOidcService oidcService,
+                             FlociCertificateAuthority certificateAuthority,
+                             ContainerLogStreamer logStreamer,
+                             StorageFactory storageFactory) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer,
+                storageFactory != null
+                        ? storageFactory.create("eks", "eks-nodegroups.json",
+                                new TypeReference<Map<String, Nodegroup>>() {})
+                        : null);
     }
 
     /**
@@ -399,7 +507,19 @@ public class EksClusterManager
                 config.services().eks().apiServerMaxPort());
 
         cluster.setHostPort(hostPort);
+        try {
+            launchCluster(cluster, image, containerName, hostPort);
+        } catch (RuntimeException e) {
+            // A retained port still belongs to the surviving container the caller restores.
+            if (retainedPort == null) {
+                portAllocator.release(hostPort);
+                cluster.setHostPort(0);
+            }
+            throw e;
+        }
+    }
 
+    private void launchCluster(Cluster cluster, String image, String containerName, int hostPort) {
         // Remove any stale container
         ContainerStorageHelper.removeStaleContainer(config, lifecycleManager, containerName);
 
@@ -422,11 +542,31 @@ public class EksClusterManager
                 ? cluster.getPodCidr()
                 : DEFAULT_POD_CIDR;
 
-        List<String> serverArgs = buildServerArgs(config.services().eks().disableCni(), serviceCidr, clusterCidr);
+        boolean defaultStorageClass = cluster != null && cluster.getDefaultStorageClass() != null
+                ? cluster.getDefaultStorageClass()
+                : config.services().eks().defaultStorageClass();
+        if (cluster != null) {
+            cluster.setDefaultStorageClass(defaultStorageClass);
+        }
+
+        List<String> serverArgs = buildServerArgs(
+                config.services().eks().disableCni(),
+                defaultStorageClass,
+                serviceCidr,
+                clusterCidr);
 
         EksNodeCapacity.Limits nodeLimits = resolveNodeCapacity(cluster);
         if (nodeLimits != null) {
             nodeLimits.addKubeletArgs(serverArgs);
+        }
+
+        try {
+            String nodeName = deriveClusterNodePrivateDnsName(cluster);
+            serverArgs.add("--node-name=" + nodeName);
+        } catch (Exception e) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            LOG.warnv("EKS node name injection disabled for cluster {0}: could not derive node name: {1}",
+                    clusterName, e.getMessage());
         }
 
         try {
@@ -441,8 +581,15 @@ public class EksClusterManager
         try {
             String region = clusterRegion(cluster);
             String az = deriveClusterNodeAvailabilityZone(cluster, region);
-            serverArgs.add("--kubelet-arg=node-labels=topology.kubernetes.io/zone=" + az
-                    + ",topology.kubernetes.io/region=" + region);
+            Nodegroup nodegroup = selectFirstNodegroup(cluster);
+            String nodeLabels = buildNodeLabels(cluster, nodegroup, az, region);
+            if (nodeLabels != null && !nodeLabels.isBlank()) {
+                serverArgs.add("--kubelet-arg=node-labels=" + nodeLabels);
+            }
+            String taints = buildRegisterWithTaints(nodegroup);
+            if (taints != null && !taints.isBlank()) {
+                serverArgs.add("--kubelet-arg=register-with-taints=" + taints);
+            }
         } catch (Exception e) {
             String clusterName = cluster != null ? cluster.getName() : "unknown";
             LOG.warnv("EKS node topology labels injection disabled for cluster {0}: could not derive topology labels: {1}",
@@ -455,6 +602,7 @@ public class EksClusterManager
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
+        labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
@@ -528,6 +676,11 @@ public class EksClusterManager
             }
         }
 
+        List<String> callerArgs = resolveCallerArgs(cluster);
+        if (!callerArgs.isEmpty()) {
+            serverArgs.addAll(callerArgs);
+        }
+
         if (config.services().eks().disableCni()) {
             // A container's /sys mount defaults to private propagation, which breaks
             // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
@@ -553,6 +706,7 @@ public class EksClusterManager
             copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster.getName());
+        linkContainerdCertsDir(containerId, cluster.getName());
         registerPodIdentityWebhook(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
@@ -595,6 +749,13 @@ public class EksClusterManager
         if (existing.isEmpty()) {
             LOG.infov("No surviving k3s container for EKS cluster {0}; recreating it "
                     + "(a surviving data volume is reused)", cluster.getName());
+            if (cluster.getDefaultStorageClass() == null) {
+                boolean targetSetting = config.services().eks().defaultStorageClass();
+                LOG.infov("Recreating EKS cluster {0} with defaultStorageClass={1} "
+                        + "(set floci.services.eks.default-storage-class: true to retain bundled local-path)",
+                        cluster.getName(), String.valueOf(targetSetting));
+                cluster.setDefaultStorageClass(targetSetting);
+            }
             startCluster(cluster);
             return;
         }
@@ -603,6 +764,14 @@ public class EksClusterManager
         Map<String, String> existingLabels = existing.get().getLabels();
         boolean capacityChanged = existingLabels == null
                 || !desiredCapacity.equals(existingLabels.get(NODE_CAPACITY_LABEL));
+        if (existingLabels != null && existingLabels.containsKey(DEFAULT_STORAGE_CLASS_LABEL)) {
+            cluster.setDefaultStorageClass(Boolean.parseBoolean(existingLabels.get(DEFAULT_STORAGE_CLASS_LABEL)));
+        } else if (cluster.getDefaultStorageClass() == null) {
+            // Surviving container was created before defaultStorageClass was configurable:
+            // preserve prior behavior with local-storage enabled.
+            cluster.setDefaultStorageClass(true);
+            LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
+        }
         if (!adoptSurvivingCluster(cluster, existing.get().getId())) {
             startCluster(cluster);
             return;
@@ -792,10 +961,37 @@ public class EksClusterManager
                 cluster.setCertificateAuthority(new CertificateAuthority(caData.trim()));
             }
 
+            pruneLegacyClusterNodes(cluster, containerId);
+
             LOG.infov("Finalized EKS cluster {0} with CA data extracted", cluster.getName());
         } catch (Exception e) {
             LOG.warnv("Could not extract kubeconfig for cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
+        }
+    }
+
+    private void pruneLegacyClusterNodes(Cluster cluster, String containerId) {
+        try {
+            String expectedNodeName = deriveClusterNodePrivateDnsName(cluster);
+            ContainerExec.Result nodeResult = execInContainerForResult(containerId,
+                    new String[]{"kubectl", "get", "nodes", "-o",
+                            "jsonpath={range .items[*]}{.metadata.name}{\" \"}{range .status.conditions[?(@.type==\"Ready\")]}{.status}{end}{\"\\n\"}{end}"}, 10);
+            if (nodeResult.exitCode() == 0 && nodeResult.stdout() != null && !nodeResult.stdout().isBlank()) {
+                for (String line : nodeResult.stdout().split("\\r?\\n")) {
+                    String[] parts = line.trim().split("\\s+");
+                    if (parts.length >= 1 && !parts[0].isBlank()) {
+                        String node = parts[0];
+                        String readyStatus = parts.length > 1 ? parts[1] : "";
+                        if (!node.equals(expectedNodeName) && !"True".equalsIgnoreCase(readyStatus)) {
+                            execInContainerForResult(containerId,
+                                    new String[]{"kubectl", "delete", "node", node}, 10);
+                            LOG.infov("Removed stale legacy node {0} from EKS cluster {1}", node, cluster.getName());
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not prune legacy nodes for cluster {0}: {1}", cluster.getName(), e.getMessage());
         }
     }
 
@@ -806,13 +1002,32 @@ public class EksClusterManager
      * cluster's workloads survive a Floci restart and are re-latched by {@link #restoreCluster}.
      */
     public void stopCluster(Cluster cluster) {
-        unregisterMetadataEndpoint(cluster);
-        Closeable logStream = clusterLogHandles.remove(clusterResourceName(cluster));
+        String resourceName = clusterResourceName(cluster);
         if (cluster.getContainerId() == null) {
-            closeQuietly(logStream);
+            unregisterMetadataEndpoint(cluster);
+            closeQuietly(clusterLogHandles.remove(resourceName));
             return;
         }
-        lifecycleManager.stopAndRemove(cluster.getContainerId(), logStream);
+        Closeable logStream = clusterLogHandles.get(resourceName);
+        // Strict: a container Docker could not remove may still be running and publishing the
+        // port, so the delete fails and keeps the cluster record, its metadata endpoint, log
+        // handle and port reservation; a retried delete releases them once the container is gone.
+        lifecycleManager.stopAndRemoveStrict(cluster.getContainerId(), logStream);
+        unregisterMetadataEndpoint(cluster);
+        // Removed by value so an overlapping delete cannot drop a handle it does not own.
+        if (logStream != null) {
+            clusterLogHandles.remove(resourceName, logStream);
+        }
+        int hostPort;
+        // Read and cleared together so overlapping deletes, or a delete retried after a failed
+        // backup cleanup, cannot release a port that has since been reused.
+        synchronized (cluster) {
+            hostPort = cluster.getHostPort();
+            cluster.setHostPort(0);
+        }
+        if (hostPort > 0) {
+            portAllocator.release(hostPort);
+        }
         if (cluster.getDockerName() != null) {
             // A failed backup cleanup must not leave the live node running. Keep the cluster
             // record so explicit deletion can be retried once Docker accepts the removal.
@@ -969,9 +1184,10 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        if (clusterLogHandles.containsKey(resourceName)) {
-            return;
-        }
+        // Logs are attached only for a container that was just started or adopted, so a handle
+        // still registered under this name follows an earlier container: close it rather than
+        // leave the new cluster without control-plane logs.
+        closeQuietly(clusterLogHandles.remove(resourceName));
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);
@@ -1009,13 +1225,13 @@ public class EksClusterManager
         }
 
         if (handles.size() == 1) {
-            clusterLogHandles.put(resourceName, handles.getFirst());
+            closeQuietly(clusterLogHandles.put(resourceName, handles.getFirst()));
         } else if (handles.size() > 1) {
-            clusterLogHandles.put(resourceName, () -> {
+            closeQuietly(clusterLogHandles.put(resourceName, () -> {
                 for (Closeable h : handles) {
                     closeQuietly(h);
                 }
-            });
+            }));
         }
     }
 
@@ -1189,14 +1405,20 @@ public class EksClusterManager
     }
 
     /**
-     * Builds the k3s {@code server} command-line args. When {@code disableCni} is true, flannel,
-     * k3s's default network policy controller, and kube-proxy are all disabled up front: see the
-     * {@code disableCni} config javadoc for why this must happen at startup, not after the fact.
+     * Builds the k3s {@code server} command-line args. When {@code defaultStorageClass} is false,
+     * k3s's bundled local-path provisioner is disabled so clusters match AWS EKS by starting with
+     * no default StorageClass. When {@code disableCni} is true, flannel, k3s's default network
+     * policy controller, and kube-proxy are all disabled up front: see the {@code disableCni}
+     * config javadoc for why this must happen at startup, not after the fact.
      */
-    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+    static List<String> buildServerArgs(boolean disableCni, boolean defaultStorageClass,
+            String serviceCidr, String clusterCidr) {
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
                 "--tls-san=localhost"));
+        if (!defaultStorageClass) {
+            serverArgs.add("--disable=local-storage");
+        }
         if (disableCni) {
             serverArgs.add("--flannel-backend=none");
             serverArgs.add("--disable-network-policy");
@@ -1211,8 +1433,12 @@ public class EksClusterManager
         return serverArgs;
     }
 
+    static List<String> buildServerArgs(boolean disableCni, String serviceCidr, String clusterCidr) {
+        return buildServerArgs(disableCni, false, serviceCidr, clusterCidr);
+    }
+
     static List<String> buildServerArgs(boolean disableCni) {
-        return buildServerArgs(disableCni, null, null);
+        return buildServerArgs(disableCni, false, null, null);
     }
 
     /**
@@ -1237,6 +1463,29 @@ public class EksClusterManager
         wrappedCmd.add("floci-k3s");
         wrappedCmd.addAll(serverArgs);
         return wrappedCmd;
+    }
+
+    /**
+     * Resolves caller-supplied k3s arguments configured on the cluster or in its creation tags.
+     */
+    List<String> resolveCallerArgs(Cluster cluster) {
+        if (cluster == null) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        if (cluster.getClusterArgs() != null && !cluster.getClusterArgs().isEmpty()) {
+            EksClusterArgs.validateClusterArgs(cluster.getClusterArgs());
+            result.addAll(cluster.getClusterArgs());
+        }
+        if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
+            List<String> fromTags = EksClusterArgs.parseAndValidateClusterArgs(cluster.getTags(), cluster.getName());
+            for (String arg : fromTags) {
+                if (!result.contains(arg)) {
+                    result.add(arg);
+                }
+            }
+        }
+        return result;
     }
 
     /**
@@ -1265,7 +1514,7 @@ public class EksClusterManager
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
-                    + config.port() + webhookPath(cluster)));
+                    + config.port() + webhookPath(cluster, clusterRegion(cluster))));
         } catch (IOException e) {
             LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
                     clusterName, e.getMessage());
@@ -1282,11 +1531,8 @@ public class EksClusterManager
      */
     private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withHostResource(localFile)
-                    .withRemotePath(WEBHOOK_CONFIG_DIR)
-                    .exec();
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), containerId,
+                    WEBHOOK_CONFIG_DIR, localFile);
         } catch (Exception e) {
             LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
@@ -1714,15 +1960,59 @@ public class EksClusterManager
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
                 "registries.yaml"), content, clusterName);
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(REGISTRIES_TAR_ENTRY, content)))
-                    .withRemotePath("/etc")
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                    REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644);
             LOG.infov("Injected ECR registry mirror ({0}) into k3s cluster {1}", endpoint, clusterName);
         } catch (Exception e) {
             LOG.warnv("EKS cluster {0} gets no ECR registry mirror: could not copy registries.yaml "
                     + "into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /**
+     * Symlinks {@code /etc/containerd/certs.d} to k3s containerd's certs directory
+     * ({@code /var/lib/rancher/k3s/agent/etc/containerd/certs.d}) inside the container before start.
+     * EKS node group launch template user data writes registry host configurations (including
+     * pull-through caches and custom headers) to {@code /etc/containerd/certs.d}; the symlink
+     * routes those writes directly into k3s containerd's certs directory and preserves them across
+     * cluster container restarts in the cluster's named data volume.
+     */
+    void linkContainerdCertsDir(String containerId, String clusterName) {
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withTarInputStream(new ByteArrayInputStream(buildContainerdCertsLinkTar()))
+                    .withRemotePath("/")
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("EKS cluster {0}: could not link containerd certs.d directory: {1}",
+                    clusterName, e.getMessage());
+        }
+    }
+
+    static byte[] buildContainerdCertsLinkTar() {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
+                TarArchiveEntry targetDir = new TarArchiveEntry(CONTAINERD_CERTS_TARGET.substring(1) + "/");
+                targetDir.setMode(0755);
+                tar.putArchiveEntry(targetDir);
+                tar.closeArchiveEntry();
+
+                TarArchiveEntry containerdDir = new TarArchiveEntry("etc/containerd/");
+                containerdDir.setMode(0755);
+                tar.putArchiveEntry(containerdDir);
+                tar.closeArchiveEntry();
+
+                TarArchiveEntry symlink = new TarArchiveEntry(CONTAINERD_CERTS_LINK, TarArchiveEntry.LF_SYMLINK);
+                symlink.setLinkName(CONTAINERD_CERTS_TARGET);
+                symlink.setMode(0777);
+                tar.putArchiveEntry(symlink);
+                tar.closeArchiveEntry();
+            }
+            return out.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not build in-memory tar for containerd certs.d link", e);
         }
     }
 
@@ -1885,18 +2175,13 @@ public class EksClusterManager
         return "http://" + dockerHostResolver.resolve() + ":" + config.port() + webhookPath(clusterName);
     }
 
-    static String webhookPath(Cluster cluster) {
+    /** The cluster's ARN names its region; {@code defaultRegion} answers for a cluster without one. */
+    static String webhookPath(Cluster cluster, String defaultRegion) {
         // client-go replaces a server URL query when constructing its TokenReview request.
         String accountId = cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
                 ? cluster.getAccountId()
                 : (cluster.getArn() != null && cluster.getArn().split(":", 6).length > 4 ? cluster.getArn().split(":", 6)[4] : "000000000000");
-        String region = "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
-        if (cluster.getArn() != null) {
-            String[] parts = cluster.getArn().split(":", 6);
-            if (parts.length > 3 && !parts[3].isBlank()) {
-                region = parts[3];
-            }
-        }
+        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), defaultRegion);
         Instant createdAt = cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.EPOCH;
         return webhookPath(cluster.getName()) + "/scope/" + accountId
                 + "/" + region + "/" + createdAt;
@@ -2088,7 +2373,7 @@ public class EksClusterManager
                         vpcId, vpcConfig.getSubnetIds(), vpcRouteTables);
                 List<EksVpcRouteProgramming.VpcRouteEntry> entries = applicable.isEmpty()
                         ? List.of()
-                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, applicable, ec2);
+                        : EksVpcRouteProgramming.resolveProgrammableRoutes(cluster, region, applicable, ec2);
 
                 Set<String> desiredDests = entries.stream()
                         .map(EksVpcRouteProgramming.VpcRouteEntry::destinationCidrBlock)
@@ -2203,7 +2488,204 @@ public class EksClusterManager
         if (config != null && config.defaultRegion() != null && !config.defaultRegion().isBlank()) {
             return config.defaultRegion();
         }
-        return "us-east-1"; // partition-literal: fallback only when the record carries no region; no resolver in scope (follow-up)
+        // Reached only by a test constructor that wires neither the resolver nor the config.
+        return "us-east-1"; // partition-literal: unreachable under CDI, where the resolver or config answers
+    }
+
+    List<Nodegroup> listActiveNodegroups(Cluster cluster) {
+        if (nodeGroupStorage == null || cluster == null || cluster.getName() == null) {
+            return List.of();
+        }
+        String prefix = cluster.getName() + "/";
+        String accountId = resolveClusterAccountId(cluster);
+        List<Nodegroup> groups;
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            groups = aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId == null || accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .toList();
+        } else {
+            groups = nodeGroupStorage.scan(key -> key.startsWith(prefix));
+        }
+        return groups.stream()
+                .filter(g -> g.getStatus() == null || g.getStatus() == NodegroupStatus.ACTIVE)
+                .sorted(Comparator.comparing(Nodegroup::getCreatedAt,
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(Nodegroup::getNodegroupName,
+                                Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+    }
+
+    Nodegroup selectFirstNodegroup(Cluster cluster) {
+        List<Nodegroup> active = listActiveNodegroups(cluster);
+        if (active.isEmpty()) {
+            return null;
+        }
+        Nodegroup first = active.getFirst();
+        if (active.size() > 1) {
+            String clusterName = cluster != null ? cluster.getName() : "unknown";
+            for (int i = 1; i < active.size(); i++) {
+                Nodegroup later = active.get(i);
+                LOG.warnv(
+                        "EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) is not applied to the node (already represented by nodegroup {2})",
+                        clusterName, later.getNodegroupName(), first.getNodegroupName());
+            }
+        }
+        return first;
+    }
+
+    String buildNodeLabels(Cluster cluster, Nodegroup nodegroup, String az, String region) {
+        Map<String, String> labels = new LinkedHashMap<>();
+        if (az != null && !az.isBlank()) {
+            labels.put("topology.kubernetes.io/zone", az);
+        }
+        if (region != null && !region.isBlank()) {
+            labels.put("topology.kubernetes.io/region", region);
+        }
+
+        if (nodegroup != null) {
+            String capacityType = nodegroup.getCapacityType() != null && !nodegroup.getCapacityType().isBlank()
+                    ? nodegroup.getCapacityType() : "ON_DEMAND";
+            labels.put("eks.amazonaws.com/capacityType", capacityType); // partition-literal: Kubernetes node label key is partition-invariant
+
+            if (nodegroup.getNodegroupName() != null && !nodegroup.getNodegroupName().isBlank()) {
+                labels.put("eks.amazonaws.com/nodegroup", nodegroup.getNodegroupName()); // partition-literal: Kubernetes node label key is partition-invariant
+            }
+
+            String imageId = resolveNodegroupImageId(nodegroup);
+            if (imageId != null && !imageId.isBlank()) {
+                labels.put("eks.amazonaws.com/nodegroup-image", imageId); // partition-literal: Kubernetes node label key is partition-invariant
+            }
+
+            String instanceType = resolveNodegroupInstanceType(cluster, nodegroup);
+            if (instanceType != null && !instanceType.isBlank()) {
+                labels.put("node.kubernetes.io/instance-type", instanceType);
+            }
+
+            if (nodegroup.getLabels() != null) {
+                for (Map.Entry<String, String> entry : nodegroup.getLabels().entrySet()) {
+                    String k = entry.getKey();
+                    String v = entry.getValue();
+                    if (k != null && !k.isBlank() && v != null && !isReservedNodeLabelKey(k)) {
+                        labels.put(k, v);
+                    }
+                }
+            }
+        }
+
+        if (labels.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : labels.entrySet()) {
+            if (!sb.isEmpty()) {
+                sb.append(",");
+            }
+            sb.append(entry.getKey()).append("=").append(entry.getValue());
+        }
+        return sb.toString();
+    }
+
+    private static boolean isReservedNodeLabelKey(String key) {
+        return key.startsWith("topology.kubernetes.io/")
+                || key.startsWith("eks.amazonaws.com/") // partition-literal: Kubernetes label prefix is partition-invariant
+                || "node.kubernetes.io/instance-type".equals(key);
+    }
+
+    private String resolveNodegroupInstanceType(Cluster cluster, Nodegroup nodegroup) {
+        if (nodegroup != null && nodegroup.getInstanceTypes() != null && !nodegroup.getInstanceTypes().isEmpty()) {
+            String first = nodegroup.getInstanceTypes().getFirst();
+            if (first != null && !first.isBlank()) {
+                return selectNodeInstanceType(first.trim());
+            }
+        }
+        return nodeInstanceType(cluster);
+    }
+
+    private String resolveNodegroupImageId(Nodegroup nodegroup) {
+        if (nodegroup != null) {
+            if (nodegroup.getReleaseVersion() != null && !nodegroup.getReleaseVersion().isBlank()) {
+                return nodegroup.getReleaseVersion().trim();
+            }
+            if (nodegroup.getLaunchTemplate() instanceof Map<?, ?> map) {
+                Object directImage = map.get("imageId");
+                if (directImage != null && !directImage.toString().isBlank()) {
+                    return directImage.toString().trim();
+                }
+                Ec2Service ec2 = ec2Service();
+                if (ec2 != null) {
+                    String id = map.get("id") != null ? map.get("id").toString().trim() : null;
+                    String name = map.get("name") != null ? map.get("name").toString().trim() : null;
+                    String version = map.get("version") != null ? map.get("version").toString().trim() : null;
+                    if ((id != null && !id.isBlank()) || (name != null && !name.isBlank())) {
+                        try {
+                            LaunchTemplateData data = ec2.resolveLaunchTemplateData(null, id, name, version);
+                            if (data != null && data.getImageId() != null && !data.getImageId().isBlank()) {
+                                return data.getImageId().trim();
+                            }
+                        } catch (Exception ignored) {
+                            // Swallowing is safe because falling back to default image id is standard
+                        }
+                    }
+                }
+            }
+        }
+        return "ami-eks-k3s";
+    }
+
+    String buildRegisterWithTaints(Nodegroup nodegroup) {
+        if (nodegroup == null || nodegroup.getTaints() == null || nodegroup.getTaints().isEmpty()) {
+            return null;
+        }
+        List<String> taints = new ArrayList<>();
+        for (Object taintObj : nodegroup.getTaints()) {
+            String formatted = formatTaint(taintObj);
+            if (formatted != null && !formatted.isBlank()) {
+                taints.add(formatted);
+            }
+        }
+        if (taints.isEmpty()) {
+            return null;
+        }
+        return String.join(",", taints);
+    }
+
+    static String formatTaint(Object taintObj) {
+        if (taintObj == null) {
+            return null;
+        }
+        if (taintObj instanceof Map<?, ?> map) {
+            Object k = map.get("key");
+            if (k == null || k.toString().isBlank()) {
+                return null;
+            }
+            String key = k.toString().trim();
+            Object v = map.get("value");
+            String val = (v != null) ? v.toString().trim() : null;
+            Object eff = map.get("effect");
+            String effect = mapTaintEffect(eff != null ? eff.toString() : null);
+            if (val != null && !val.isEmpty()) {
+                return key + "=" + val + ":" + effect;
+            } else {
+                return key + ":" + effect;
+            }
+        } else if (taintObj instanceof String str && !str.isBlank()) {
+            return str.trim();
+        }
+        return null;
+    }
+
+    static String mapTaintEffect(String awsEffect) {
+        if (awsEffect == null || awsEffect.isBlank()) {
+            return "NoSchedule";
+        }
+        String normalized = awsEffect.trim().toUpperCase(Locale.ROOT);
+        return switch (normalized) {
+            case "NO_SCHEDULE", "NOSCHEDULE" -> "NoSchedule";
+            case "NO_EXECUTE", "NOEXECUTE" -> "NoExecute";
+            case "PREFER_NO_SCHEDULE", "PREFERNOSCHEDULE" -> "PreferNoSchedule";
+            default -> awsEffect.trim();
+        };
     }
 
     String deriveClusterNodeAvailabilityZone(Cluster cluster, String region) {
@@ -2231,6 +2713,12 @@ public class EksClusterManager
         return "i-" + (hex.length() >= 17 ? hex.substring(0, 17) : (hex + "00000000000000000").substring(0, 17));
     }
 
+    String deriveClusterNodeInstanceId(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return deriveClusterNodeInstanceId(cluster, region, accountId);
+    }
+
     String deriveClusterNodeProviderId(Cluster cluster, String region, String accountId) {
         String az = deriveClusterNodeAvailabilityZone(cluster, region);
         String instanceId = deriveClusterNodeInstanceId(cluster, region, accountId);
@@ -2241,6 +2729,24 @@ public class EksClusterManager
         String accountId = resolveClusterAccountId(cluster);
         String region = clusterRegion(cluster);
         return deriveClusterNodeProviderId(cluster, region, accountId);
+    }
+
+    String deriveClusterNodePrivateDnsDomain(String region) {
+        return AwsRegions.ec2PrivateDnsDomain(region);
+    }
+
+    String deriveClusterNodePrivateDnsName(Cluster cluster, String region, String accountId) {
+        String safeRegion = (region != null && !region.isBlank())
+                ? region
+                : clusterRegion(cluster);
+        String instanceId = deriveClusterNodeInstanceId(cluster, safeRegion, accountId);
+        return instanceId + "." + deriveClusterNodePrivateDnsDomain(safeRegion);
+    }
+
+    String deriveClusterNodePrivateDnsName(Cluster cluster) {
+        String accountId = resolveClusterAccountId(cluster);
+        String region = clusterRegion(cluster);
+        return deriveClusterNodePrivateDnsName(cluster, region, accountId);
     }
 
     Instance synthesizeClusterNodeInstance(Cluster cluster, String containerIp, String region, String accountId) {
@@ -2257,6 +2763,7 @@ public class EksClusterManager
 
         String instanceId = deriveClusterNodeInstanceId(cluster, safeRegion, safeAccountId);
         String az = deriveClusterNodeAvailabilityZone(cluster, safeRegion);
+        String privateDnsName = deriveClusterNodePrivateDnsName(cluster, safeRegion, safeAccountId);
 
         inst.setInstanceId(instanceId);
         inst.setImageId("ami-eks-k3s");
@@ -2267,7 +2774,7 @@ public class EksClusterManager
 
         String ip = (containerIp != null && !containerIp.isBlank()) ? containerIp : "10.0.0.1";
         inst.setPrivateIpAddress(ip);
-        inst.setPrivateDnsName("ip-" + ip.replace('.', '-') + "." + safeRegion + ".compute.internal");
+        inst.setPrivateDnsName(privateDnsName);
 
         // AWS EKS nodes receive credentials from a node IAM role through an EC2 instance profile,
         // never from the cluster control-plane role (cluster.getRoleArn()). Synthesize a distinct

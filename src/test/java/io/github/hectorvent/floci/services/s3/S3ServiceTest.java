@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
@@ -32,8 +34,11 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class S3ServiceTest {
 
@@ -46,6 +51,46 @@ class S3ServiceTest {
     void setUp() {
         Path dataRoot = tempDir.resolve("s3");
         s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
+    }
+
+    @Test
+    void deletingTheLatestVersionPromotesThePreviousVersionsFile() throws IOException {
+        s3Service.createBucket("promotion-bucket", "us-east-1");
+        s3Service.putBucketVersioning("promotion-bucket", "Enabled");
+        S3Object first = s3Service.putObject("promotion-bucket", "key",
+                "first".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        S3Object second = s3Service.putObject("promotion-bucket", "key",
+                "second".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+
+        s3Service.deleteObject("promotion-bucket", "key", second.getVersionId());
+
+        S3Object current = s3Service.getObject("promotion-bucket", "key");
+        assertEquals(first.getVersionId(), current.getVersionId());
+        assertArrayEquals("first".getBytes(StandardCharsets.UTF_8), current.getData());
+        List<Path> objectFiles;
+        try (Stream<Path> files = Files.walk(tempDir.resolve("s3"))) {
+            objectFiles = files.filter(path -> path.getFileName().toString().endsWith(".s3data")).toList();
+        }
+        assertEquals(2, objectFiles.size(), "the promoted version's file and the current file: " + objectFiles);
+        // Without hard links the promotion copies the file instead, which is still correct.
+        if (hardLinksSupported(tempDir)) {
+            assertTrue(Files.isSameFile(objectFiles.get(0), objectFiles.get(1)),
+                    "the current file should be the promoted version's file, linked rather than read and copied");
+        }
+    }
+
+    private static boolean hardLinksSupported(Path dir) throws IOException {
+        Path probe = Files.createTempFile(dir, "link-probe", null);
+        Path link = probe.resolveSibling(probe.getFileName() + ".link");
+        try {
+            Files.createLink(link, probe);
+            return true;
+        } catch (UnsupportedOperationException | IOException unsupported) {
+            return false;
+        } finally {
+            Files.deleteIfExists(link);
+            Files.deleteIfExists(probe);
+        }
     }
 
     @Test
@@ -138,6 +183,34 @@ class S3ServiceTest {
 
         List<Bucket> buckets = s3Service.listBuckets();
         assertEquals(2, buckets.size());
+    }
+
+    @Test
+    void listBucketsHidesSpectrumScratchBucketButKeepsOtherInternalPrefixBuckets() {
+        s3Service.createBucket("bucket-a", "us-east-1");
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+        s3Service.putBucketTagging(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+        String userBucket = S3Service.INTERNAL_BUCKET_PREFIX + "customer-data";
+        s3Service.createBucket(userBucket, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(2, buckets.size());
+        assertTrue(buckets.stream().anyMatch(bucket -> "bucket-a".equals(bucket.getName())));
+        assertTrue(buckets.stream().anyMatch(bucket -> userBucket.equals(bucket.getName())));
+        assertFalse(buckets.stream().anyMatch(bucket ->
+                S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())));
+    }
+
+    @Test
+    void listBucketsKeepsAUserBucketThatOnlySharesTheScratchBucketName() {
+        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
+
+        List<Bucket> buckets = s3Service.listBuckets();
+
+        assertEquals(1, buckets.size());
+        assertEquals(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, buckets.get(0).getName());
     }
 
     @Test
@@ -594,7 +667,7 @@ class S3ServiceTest {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3"),
                 false, lambdaInvoker, regionResolver);
         service.createBucket("test-bucket", "ap-northeast-1");
-        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"), true);
 
         service.putObject("test-bucket", "uploads/test.json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8),
                 "application/json", null);
@@ -613,7 +686,7 @@ class S3ServiceTest {
         S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3-no-match"),
                 false, lambdaInvoker, regionResolver);
         service.createBucket("test-bucket", "ap-northeast-1");
-        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"), true);
 
         service.putObject("test-bucket", "incoming/test.txt", "ignored".getBytes(StandardCharsets.UTF_8),
                 "text/plain", null);
@@ -635,11 +708,88 @@ class S3ServiceTest {
                 "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test:PROD",
                 List.of("s3:ObjectCreated:Put"),
                 List.of()));
-        service.putBucketNotificationConfiguration("test-bucket", config);
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
 
         service.putObject("test-bucket", "a.json", "{}".getBytes(StandardCharsets.UTF_8), "application/json", null);
 
         assertEquals("s3-notif-test:PROD", lambdaInvoker.functionName);
+    }
+
+    @Test
+    void foreignLambdaArnDoesNotResolveToSameNamedLocalFunction() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        String localArn = "arn:aws:lambda:us-east-1:000000000000:function:shared-name";
+        String foreignArn = "arn:aws:lambda:us-east-1:111111111111:function:shared-name";
+        LambdaFunction localFunction = new LambdaFunction();
+        localFunction.setFunctionArn(localArn);
+        when(lambdaService.getFunction("us-east-1", localArn, null)).thenReturn(localFunction);
+        when(lambdaService.getFunction("us-east-1", foreignArn, null)).thenReturn(localFunction);
+
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("lambda-account-validation"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration local = new NotificationConfiguration();
+        local.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "local", localArn, List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", local);
+
+        NotificationConfiguration foreign = new NotificationConfiguration();
+        foreign.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "foreign", foreignArn, List.of("s3:ObjectCreated:*"), List.of()));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket", foreign));
+        assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(foreignArn + ", null", error.getExtendedData().get("ArgumentName1"));
+        assertEquals(localArn, service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().getFirst().functionArn());
+    }
+
+    @Test
+    void notificationValidationCannotRestoreADeletedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-deleted-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertEquals("NoSuchBucket", assertThrows(AwsException.class,
+                () -> service.getBucketNotificationConfiguration("test-bucket")).getErrorCode());
+    }
+
+    @Test
+    void notificationValidationCannotOverwriteARecreatedBucket() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        RegionResolver regionResolver = new RegionResolver("ap-northeast-1", "000000000000");
+        String arn = "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test";
+        LambdaFunction function = new LambdaFunction();
+        function.setFunctionArn(arn);
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("notification-recreated-bucket"), false, lambdaService, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        when(lambdaService.getFunction("ap-northeast-1", arn, null)).thenAnswer(ignored -> {
+            service.deleteBucket("test-bucket");
+            service.createBucket("test-bucket", "ap-northeast-1");
+            return function;
+        });
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putBucketNotificationConfiguration("test-bucket",
+                        lambdaNotificationConfig("", "")));
+        assertEquals("NoSuchBucket", error.getErrorCode());
+        assertTrue(service.getBucketNotificationConfiguration("test-bucket")
+                .getLambdaFunctionConfigurations().isEmpty());
     }
 
     @Test
@@ -694,7 +844,7 @@ class S3ServiceTest {
                 "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
                 List.of("s3:ObjectRemoved:*"),
                 List.of()));
-        service.putBucketNotificationConfiguration("test-bucket", config);
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
         return service;
     }
 

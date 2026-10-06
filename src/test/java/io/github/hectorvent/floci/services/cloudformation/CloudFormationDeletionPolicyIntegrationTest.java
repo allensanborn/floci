@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -461,6 +462,58 @@ class CloudFormationDeletionPolicyIntegrationTest {
                     .when().get("/2015-03-31/functions/" + functionName)
                     .then().statusCode(200)
                     .body("Configuration.Timeout", equalTo(9));
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void updateParentStackWithUnchangedNestedStackSucceedsEvenIfTemplateUrlUnavailable() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-nested-keep-func-" + suffix;
+        String bucketName = "nested-stack-templates-" + suffix;
+        String templateUrl = bucketName + "/child-lambda-keep.json";
+        String initialParentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              }
+            }
+        """.formatted(templateUrl);
+        String updatedParentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/%s" }
+                }
+              },
+              "Outputs": {
+                "ParentOut": { "Value": "static" }
+              }
+            }
+        """.formatted(templateUrl);
+        String stackName = "parent-nested-keep-" + suffix;
+
+        given().header("Authorization", CUSTOM_AUTH).contentType("application/xml").body(EU_WEST_1_BUCKET)
+                .when().put("/" + bucketName).then().statusCode(200);
+        given().header("Authorization", CUSTOM_AUTH)
+                .contentType("application/json").body(nestedLambdaTemplate(functionName, 3))
+                .when().put("/" + templateUrl).then().statusCode(200);
+        String parentStackId = createStack(stackName, initialParentTemplate, CUSTOM_AUTH);
+        try {
+            awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
+
+            // Delete the template object from S3 so TemplateURL is no longer reachable
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().delete("/" + templateUrl).then().statusCode(204);
+
+            // Parent update modifying only Outputs: unchanged nested stack is skipped, so missing TemplateURL doesn't fail update
+            updateStack(stackName, updatedParentTemplate, CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
         } finally {
             deleteStack(stackName);
         }
@@ -1303,7 +1356,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     private static String createStack(String stackName, String template, String auth) {
-        var req = given().contentType("application/x-www-form-urlencoded");
+        RequestSpecification req = given().contentType("application/x-www-form-urlencoded");
         if (auth != null) {
             req.header("Authorization", auth);
         }
@@ -1337,7 +1390,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     private static void updateStack(String stackName, String template, String auth) {
-        var req = given().contentType("application/x-www-form-urlencoded");
+        RequestSpecification req = given().contentType("application/x-www-form-urlencoded");
         if (auth != null) {
             req.header("Authorization", auth);
         }
@@ -1385,7 +1438,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     private static Response cfnQuery(String action, String stackId, String auth) {
-        var req = given().contentType("application/x-www-form-urlencoded");
+        RequestSpecification req = given().contentType("application/x-www-form-urlencoded");
         if (auth != null) {
             req.header("Authorization", auth);
         }

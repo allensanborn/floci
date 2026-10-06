@@ -46,6 +46,8 @@ public class Message {
     // on ReceiveMessage when requested.
     private String awsTraceHeader;
 
+    private String senderId;
+
     // The retention period starts over when a message is moved to a FIFO DLQ or by a message
     // move task. A standard DLQ keeps the original enqueue time.
     private Instant retentionStartTimestamp;
@@ -86,6 +88,7 @@ public class Message {
         copy.sequenceNumber = sequenceNumber;
         copy.originalSourceQueueUrl = originalSourceQueueUrl;
         copy.awsTraceHeader = awsTraceHeader;
+        copy.senderId = this.senderId;
         copy.retentionStartTimestamp = Instant.now();
         // receiveCount 0, firstReceiveTimestamp / receiptHandle / visibleAt null: a fresh life.
         return copy;
@@ -136,6 +139,9 @@ public class Message {
     public String getAwsTraceHeader() { return awsTraceHeader; }
     public void setAwsTraceHeader(String awsTraceHeader) { this.awsTraceHeader = awsTraceHeader; }
 
+    public String getSenderId() { return senderId; }
+    public void setSenderId(String senderId) { this.senderId = senderId; }
+
     public Instant getRetentionStartTimestamp() { return retentionStartTimestamp; }
     public void setRetentionStartTimestamp(Instant retentionStartTimestamp) { this.retentionStartTimestamp = retentionStartTimestamp; }
 
@@ -151,9 +157,12 @@ public class Message {
     }
 
     public void updateMd5OfMessageAttributes() {
+        this.md5OfMessageAttributes = computeMessageAttributesMd5(messageAttributes);
+    }
+
+    public static String computeMessageAttributesMd5(Map<String, MessageAttributeValue> messageAttributes) {
         if (messageAttributes == null || messageAttributes.isEmpty()) {
-            this.md5OfMessageAttributes = null;
-            return;
+            return null;
         }
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
@@ -190,10 +199,10 @@ public class Message {
             for (byte b : digest) {
                 sb.append(String.format("%02x", b));
             }
-            this.md5OfMessageAttributes = sb.toString();
+            return sb.toString();
         } catch (Exception ignored) {
             // Attribute serialization failure falls back to null MD5
-            this.md5OfMessageAttributes = null;
+            return null;
         }
     }
 
