@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -21,6 +27,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.iam.model.AccountPasswordPolicy;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.CredentialReport;
 import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
@@ -31,13 +38,12 @@ import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.OrganizationRootFeatures;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
-import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
 import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -53,24 +59,27 @@ import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -90,8 +99,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
+    private static final String FEDERATED_USER_PREFIX = "federated-user/";
+    private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
     private static final String SCOPED_IDENTITY_SESSION_BASE_POLICY =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";
+    /**
+     * GetFederationToken credentials cannot call any IAM operation, nor any STS operation except
+     * GetCallerIdentity, whatever their policies allow. The enforcement filter answers
+     * GetCallerIdentity before reading any policy, so denying all of {@code sts:*} leaves it callable.
+     */
+    private static final String FEDERATED_USER_SESSION_LIMITS =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -154,6 +172,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final int MAX_SERVER_CERTIFICATES = 20;
     /** IAM User Guide quota table, and GetAccountSummary's SigningCertificatesPerUserQuota. */
     private static final int MAX_SIGNING_CERTIFICATES_PER_USER = 2;
+    /**
+     * IAM User Guide: "a maximum of two sets of service-specific credentials for each supported
+     * service per IAM user". Per service, so a user may hold two for each of them.
+     */
+    private static final int MAX_SERVICE_CREDENTIALS_PER_SERVICE = 2;
+    /** The unique-ID prefix table gives ACCA for a context-specific credential. */
+    private static final int SERVICE_CREDENTIAL_ID_SUFFIX_LENGTH = 16;
+    /**
+     * The services whose credential is a long-term API key, an alias and a secret rather than a
+     * user name and a password. CredentialAgeDays, and so an expiry, is only valid for these.
+     *
+     * <p>Sourced from the User Guide's worked {@code create-service-specific-credential} block,
+     * which creates exactly these four with {@code --credential-age-days}; the API Reference
+     * corroborates two of them by naming "Bedrock API keys and CloudWatch Logs API keys" on
+     * ServiceCredentialAlias, ServiceCredentialSecret and ExpirationDate.
+     */
+    private static final Set<String> LONG_TERM_API_KEY_SERVICES = Set.of(
+            ServicePrincipals.of("bedrock"),
+            ServicePrincipals.of("aws-external-anthropic"),
+            ServicePrincipals.of("cloudwatch"),
+            ServicePrincipals.of("logs"));
+    /**
+     * The services that support service-specific credentials. Anything else is {@code NoSuchEntity}
+     * with status 404, which is not what the model would suggest: it declares
+     * {@code ServiceNotSupportedException} (wire code {@code NotSupportedService}) on both Create
+     * and List, and AWS does not raise it. LocalStack's AWS-validated IAM snapshots record
+     * {@code NoSuchEntity} for a nonexistent service, a malformed name and an existing but
+     * unsupported service alike, all with the message this throws.
+     *
+     * <p>This is the sourced subset, not a claim of completeness. The User Guide's own
+     * enumeration ("AWS currently supports service-specific credentials for the following
+     * services:") falls on a page boundary and renders as nothing in the published PDF, so these
+     * come from two other passages: CodeCommit and Keyspaces from the
+     * {@code iam:ServiceSpecificCredentialServiceName}
+     * condition-key list, which gives them "with their exact value formatting", and the four
+     * long-term API key services from the CLI block above.
+     */
+    private static final Set<String> SERVICE_CREDENTIAL_SERVICES = Stream.concat(
+                    LONG_TERM_API_KEY_SERVICES.stream(),
+                    Stream.of(ServicePrincipals.of("codecommit"), ServicePrincipals.of("cassandra")))
+            .collect(Collectors.toUnmodifiableSet());
+    /** credentialAgeDays is 1 to 36600, in the model and in the User Guide's own prose. */
+    private static final int MIN_CREDENTIAL_AGE_DAYS = 1;
+    private static final int MAX_CREDENTIAL_AGE_DAYS = 36600;
+    /** The creation half of a long-term API key's alias. */
+    private static final DateTimeFormatter CREDENTIAL_ALIAS_DATE =
+            DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
     /** AWS General Reference, IAM service quotas: "SSH Public keys per user", not adjustable. */
     private static final int MAX_SSH_PUBLIC_KEYS_PER_USER = 5;
     /** publicKeyIdType is 20 to 128 of [\w]+, and AWS's own examples use the APKA prefix. */
@@ -165,13 +230,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** certificateIdType is 24 to 128 of [\w]+, so a 32-character id sits inside that. */
     private static final int SIGNING_CERTIFICATE_ID_LENGTH = 32;
     private static final String CREDENTIAL_STATUS_ACTIVE = "Active";
+    private static final String CREDENTIAL_STATUS_EXPIRED = "Expired";
     /**
      * statusType's values, shared by signing certificates and SSH public keys: Active, Inactive
      * and Expired. Each operation's prose explains only the first two, so the third is easy to
      * reject by mistake, while the API Reference lists all three as valid.
      */
     private static final Set<String> CREDENTIAL_STATUSES =
-            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", "Expired");
+            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", CREDENTIAL_STATUS_EXPIRED);
     /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
     private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
     /** {@code certificateChainType} is far larger, at 1 to 2097152. */
@@ -248,6 +314,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final StorageBackend<String, ServerCertificate> serverCertificates;
     private final StorageBackend<String, SigningCertificate> signingCertificates;
     private final StorageBackend<String, SshPublicKey> sshPublicKeys;
+    private final StorageBackend<String, ServiceSpecificCredential> serviceCredentials;
     /**
      * Guards the check-then-write on a server certificate. Upload checks the name is free before
      * storing, and UpdateServerCertificate checks a new name is free before moving to it, so two
@@ -256,6 +323,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Object serverCertificateLock = new Object();
     private final Object signingCertificateLock = new Object();
     private final Object sshPublicKeyLock = new Object();
+    private final Object serviceCredentialLock = new Object();
     /**
      * Guards every check-then-write on an MFA device. Assignment is the reason it has to exist:
      * EnableMFADevice reads the device to confirm it is unassigned and reads the user's device
@@ -299,6 +367,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-server-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-signing-certificates.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-ssh-public-keys.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-service-specific-credentials.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null)
@@ -331,6 +400,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
     }
 
@@ -355,6 +425,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 serviceLinkedRoleDeletions, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, seededAccountAlias);
     }
 
@@ -375,6 +446,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 new InMemoryStorage<>(), passwordPolicies, new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), orgRootFeatures,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 regionResolver, seedDeployerPrincipal, null);
@@ -398,6 +470,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, ServerCertificate> serverCertificates,
                StorageBackend<String, SigningCertificate> signingCertificates,
                StorageBackend<String, SshPublicKey> sshPublicKeys,
+               StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
                String seededAccountAlias) {
@@ -419,6 +492,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.serverCertificates = serverCertificates;
         this.signingCertificates = signingCertificates;
         this.sshPublicKeys = sshPublicKeys;
+        this.serviceCredentials = serviceCredentials;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
@@ -597,22 +671,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         // UploadSigningCertificate and EnableMFADevice confirm the user under their own lock, so
         // none of them can interleave into a credential owned by a deleted user. Taken in this
         // order here and in UpdateUser, and nowhere else in more than one, so it cannot deadlock.
-        synchronized (sshPublicKeyLock) {
-            if (!userSshPublicKeys(userName).isEmpty()) {
+        synchronized (serviceCredentialLock) {
+            // AWS lists these among the items to remove first, under their CodeCommit
+            // name: "Git credentials (DeleteServiceSpecificCredential)".
+            if (!userServiceCredentials(userName).isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must delete SSH public keys first.", 409);
+                        "Cannot delete entity, must delete service-specific credentials "
+                                + "first.", 409);
             }
-            synchronized (signingCertificateLock) {
-                if (!userSigningCertificates(userName).isEmpty()) {
+            synchronized (sshPublicKeyLock) {
+                if (!userSshPublicKeys(userName).isEmpty()) {
                     throw new AwsException("DeleteConflict",
-                            "Cannot delete entity, must delete signing certificates first.", 409);
+                            "Cannot delete entity, must delete SSH public keys first.", 409);
                 }
-                synchronized (mfaDeviceLock) {
-                    if (!mfaDevicesForUser(userName).isEmpty()) {
+                synchronized (signingCertificateLock) {
+                    if (!userSigningCertificates(userName).isEmpty()) {
                         throw new AwsException("DeleteConflict",
-                                "Cannot delete entity, must deactivate MFA device first.", 409);
+                                "Cannot delete entity, must delete signing certificates first.", 409);
                     }
-                    users.delete(userName);
+                    synchronized (mfaDeviceLock) {
+                        if (!mfaDevicesForUser(userName).isEmpty()) {
+                            throw new AwsException("DeleteConflict",
+                                    "Cannot delete entity, must deactivate MFA device first.", 409);
+                        }
+                        users.delete(userName);
+                    }
                 }
             }
         }
@@ -659,31 +742,40 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 // published but before the credential follows, see none, and delete a user whose
                 // credential is about to be reassigned to it. The two locks are taken in the same
                 // order DeleteUser takes them, so the nesting cannot deadlock.
-                synchronized (sshPublicKeyLock) {
-                    List<SshPublicKey> sshKeysToMove = userSshPublicKeys(userName);
-                    synchronized (signingCertificateLock) {
-                        List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
-                        synchronized (mfaDeviceLock) {
-                            users.delete(userName);
-                            user.setUserName(newUserName);
-                            if (newPath != null) {
-                                user.setPath(normalizePath(newPath));
+                synchronized (serviceCredentialLock) {
+                    List<ServiceSpecificCredential> credentialsToMove =
+                            userServiceCredentials(userName);
+                    synchronized (sshPublicKeyLock) {
+                        List<SshPublicKey> sshKeysToMove = userSshPublicKeys(userName);
+                        synchronized (signingCertificateLock) {
+                            List<SigningCertificate> certificatesToMove = userSigningCertificates(userName);
+                            synchronized (mfaDeviceLock) {
+                                users.delete(userName);
+                                user.setUserName(newUserName);
+                                if (newPath != null) {
+                                    user.setPath(normalizePath(newPath));
+                                }
+                                user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
+                                users.put(newUserName, user);
+                                for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
+                                    device.setUserName(newUserName);
+                                    virtualMfaDevices.put(device.getSerialNumber(), device);
+                                }
                             }
-                            user.setArn(iamArnBeside(user.getArn(), "user", user.getPath(), newUserName));
-                            users.put(newUserName, user);
-                            for (VirtualMfaDevice device : mfaDevicesForUser(userName)) {
-                                device.setUserName(newUserName);
-                                virtualMfaDevices.put(device.getSerialNumber(), device);
+                            for (SigningCertificate certificate : certificatesToMove) {
+                                certificate.setUserName(newUserName);
+                                signingCertificates.put(certificate.getCertificateId(), certificate);
                             }
                         }
-                        for (SigningCertificate certificate : certificatesToMove) {
-                            certificate.setUserName(newUserName);
-                            signingCertificates.put(certificate.getCertificateId(), certificate);
+                        for (SshPublicKey key : sshKeysToMove) {
+                            key.setUserName(newUserName);
+                            sshPublicKeys.put(key.getSshPublicKeyId(), key);
                         }
                     }
-                    for (SshPublicKey key : sshKeysToMove) {
-                        key.setUserName(newUserName);
-                        sshPublicKeys.put(key.getSshPublicKeyId(), key);
+                    for (ServiceSpecificCredential credential : credentialsToMove) {
+                        credential.setUserName(newUserName);
+                        serviceCredentials.put(
+                                credential.getServiceSpecificCredentialId(), credential);
                     }
                 }
                 loginProfiles.get(userName).ifPresent(profile -> {
@@ -2715,6 +2807,261 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .toList();
     }
 
+    // Service-specific credentials
+    // =========================================================================
+
+    /**
+     * Creates a credential scoped to one service. The shape depends on the service: a long-term
+     * API key service gets an alias and a secret, everything else a user name and a password.
+     *
+     * <p>The secret half is returned here and by the reset, and nowhere else: there is no get
+     * operation, and the list is defined without it.
+     */
+    public ServiceSpecificCredential createServiceSpecificCredential(
+            String userName, String requestedServiceName, Integer credentialAgeDays) {
+        String serviceName = supportedServiceName(requestedServiceName);
+        boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
+        if (credentialAgeDays != null) {
+            if (!longTermKey) {
+                throw new AwsException("ValidationError",
+                        "CredentialAgeDays is only valid for services that support long-term API "
+                                + "keys.", 400);
+            }
+            if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
+                    || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
+                throw new AwsException("ValidationError",
+                        "Value '" + credentialAgeDays + "' at 'credentialAgeDays' failed to "
+                                + "satisfy constraint: Member must be between "
+                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS,
+                        400);
+            }
+        }
+        synchronized (serviceCredentialLock) {
+            // Confirmed under the lock, as the other per-user credentials are: DeleteUser checks
+            // for these holding the same lock.
+            getUser(userName);
+            // One scan serves both checks: the quota counts this user's credentials for this
+            // service, the name search needs every name in the account, and no write can land
+            // between them while this holds the lock.
+            List<ServiceSpecificCredential> all = serviceCredentials.scan(key -> true);
+            List<ServiceSpecificCredential> existing = all.stream()
+                    .filter(c -> userName.equals(c.getUserName()))
+                    .filter(c -> serviceName.equals(c.getServiceName()))
+                    .toList();
+            if (existing.size() >= MAX_SERVICE_CREDENTIALS_PER_SERVICE) {
+                throw new AwsException("LimitExceeded",
+                        "Cannot exceed quota for ServiceSpecificCredentialsPerUser: "
+                                + MAX_SERVICE_CREDENTIALS_PER_SERVICE, 409);
+            }
+            ServiceSpecificCredential credential = new ServiceSpecificCredential();
+            credential.setUserName(userName);
+            credential.setServiceName(serviceName);
+            credential.setServiceSpecificCredentialId(
+                    "ACCA" + randomId(SERVICE_CREDENTIAL_ID_SUFFIX_LENGTH));
+            credential.setStatus(CREDENTIAL_STATUS_ACTIVE);
+            credential.setCreateDate(Instant.now());
+            int version = freeCredentialVersion(
+                    all, userName, longTermKey, credential.getCreateDate());
+            if (longTermKey) {
+                credential.setServiceCredentialAlias(
+                        credentialAliasFor(userName, version, credential.getCreateDate()));
+                credential.setServiceCredentialSecret(randomSecret(40));
+                if (credentialAgeDays != null) {
+                    credential.setExpirationDate(
+                            credential.getCreateDate().plus(Duration.ofDays(credentialAgeDays)));
+                }
+            } else {
+                credential.setServiceUserName(serviceUserNameFor(userName, version));
+                credential.setServicePassword(randomSecret(40));
+            }
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+            LOG.infov("Created a {0} service-specific credential for user {1}",
+                    serviceName, userName);
+            return credential;
+        }
+    }
+
+    /**
+     * The service as the allowlist holds it, or {@code NoSuchEntity}. A legacy per-partition form
+     * folds to the universal one first, so a China-partition caller naming
+     * {@code bedrock.amazonaws.com.cn} is not refused for a service that is supported; a bare
+     * {@code codecommit} still is, because AWS documents these values with their exact formatting.
+     */
+    private String supportedServiceName(String requestedServiceName) {
+        String canonical = ServicePrincipals.canonical(requestedServiceName);
+        if (canonical == null || !SERVICE_CREDENTIAL_SERVICES.contains(canonical)) {
+            // The name as asked for, not the canonical form: AWS echoes what the caller sent.
+            throw new AwsException("NoSuchEntity",
+                    "No such service " + requestedServiceName
+                            + " is supported for Service Specific Credentials", 404);
+        }
+        return canonical;
+    }
+
+    /**
+     * The lowest version whose name is not already in use anywhere in the account, which is what
+     * keeps two live credentials from sharing the name or alias the caller authenticates with.
+     *
+     * <p>The comparison has to span the whole store rather than the user's credentials for this
+     * service, because three different routes reach the same name otherwise. Taking a count
+     * collides as soon as one is deleted out of order: holding only {@code anika+1}, a count of one
+     * mints {@code anika+1} again. Scoping to one service lets two services collide, since an alias
+     * carries no service and two created on the same day would both be {@code anika+v1-<date>}.
+     * Scoping to one user lets a rename collide, because a credential keeps the name it was minted
+     * with, so a new user taking the freed IAM name would mint it a second time.
+     *
+     * <p>Bounded by the names in use, so one of the first {@code taken + 1} candidates is always
+     * free. The caller passes the account's credentials rather than this reading them itself,
+     * because the quota check needs the same snapshot and one scan under the lock serves both.
+     */
+    private int freeCredentialVersion(List<ServiceSpecificCredential> accountCredentials,
+                                      String userName,
+                                      boolean longTermKey,
+                                      Instant createDate) {
+        Set<String> taken = accountCredentials.stream()
+                .map(longTermKey
+                        ? ServiceSpecificCredential::getServiceCredentialAlias
+                        : ServiceSpecificCredential::getServiceUserName)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        for (int version = 0; version <= taken.size(); version++) {
+            String candidate = longTermKey
+                    ? credentialAliasFor(userName, version, createDate)
+                    : serviceUserNameFor(userName, version);
+            if (!taken.contains(candidate)) {
+                return version;
+            }
+        }
+        throw new IllegalStateException("no free service-credential version for " + userName);
+    }
+
+    /**
+     * The service user name AWS derives for a credential: the IAM user name, the account, and a
+     * {@code +n} before the account for the second one, which is how two credentials for the same
+     * service tell themselves apart. The API Reference's examples show {@code anika-at-<account>}
+     * and {@code anika+1-at-<account>}.
+     */
+    private String serviceUserNameFor(String userName, int version) {
+        String suffix = version == 0 ? "" : "+" + version;
+        return userName + suffix + "-at-" + regionResolver.getAccountId();
+    }
+
+    /**
+     * The public half of a long-term API key, which the API Reference describes as including "the
+     * IAM user name and a suffix containing version and creation information". The exact format
+     * AWS produces is not published, so this is ours: the user name, the version that tells two
+     * credentials for one service apart, and the creation date.
+     */
+    private String credentialAliasFor(String userName, int version, Instant createDate) {
+        return userName + "+v" + (version + 1) + "-"
+                + CREDENTIAL_ALIAS_DATE.format(createDate);
+    }
+
+    /**
+     * The status to report for a credential: {@code Expired} once its {@code ExpirationDate} has
+     * passed, and the stored status otherwise.
+     *
+     * <p>Derived on read rather than written back, so the status a caller set is never overwritten
+     * and an {@code UpdateServiceSpecificCredential} to {@code Active} cannot make an expired key
+     * look usable. Expiry wins over {@code Inactive} too: a key past its expiry is finished either
+     * way, and {@code Expired} is the more specific answer.
+     *
+     * <p>AWS does not document this transition. {@code Expired} is in {@code statusType}, but that
+     * enum is shared with access keys, SSH public keys and signing certificates, most of which
+     * have no expiry, and the API Reference's prose describes only the other two values. Reporting
+     * an expired key as {@code Active} is the worse of the two guesses: it tells a caller a key
+     * works when the same response carries the date saying it does not.
+     */
+    public String reportedStatus(ServiceSpecificCredential credential) {
+        Instant expiry = credential.getExpirationDate();
+        if (expiry != null && !expiry.isAfter(Instant.now())) {
+            return CREDENTIAL_STATUS_EXPIRED;
+        }
+        return credential.getStatus();
+    }
+
+    /** Every credential of a user, or of every user when the caller asked for all of them. */
+    public List<ServiceSpecificCredential> listServiceSpecificCredentials(
+            String userName, String requestedServiceName, boolean allUsers) {
+        String serviceName = requestedServiceName == null
+                ? null : supportedServiceName(requestedServiceName);
+        List<ServiceSpecificCredential> found;
+        if (allUsers) {
+            found = serviceCredentials.scan(key -> true);
+        } else {
+            getUser(userName); // validates existence
+            found = userServiceCredentials(userName);
+        }
+        return found.stream()
+                .filter(c -> serviceName == null || serviceName.equals(c.getServiceName()))
+                .sorted(Comparator.comparing(
+                        ServiceSpecificCredential::getServiceSpecificCredentialId))
+                .toList();
+    }
+
+    public void updateServiceSpecificCredential(String userName, String credentialId,
+                                                String status) {
+        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + status + "' at 'status' failed to satisfy constraint: Member must "
+                            + "satisfy enum value set: [" + String.join(", ",
+                            CREDENTIAL_STATUSES) + "]", 400);
+        }
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            credential.setStatus(status);
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+        }
+    }
+
+    /**
+     * Replaces the secret half and returns the new one. The credential keeps its id, its service
+     * and its service user name or alias: only what authenticates with it changes.
+     */
+    public ServiceSpecificCredential resetServiceSpecificCredential(String userName,
+                                                                    String credentialId) {
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            if (LONG_TERM_API_KEY_SERVICES.contains(credential.getServiceName())) {
+                credential.setServiceCredentialSecret(randomSecret(40));
+            } else {
+                credential.setServicePassword(randomSecret(40));
+            }
+            serviceCredentials.put(credential.getServiceSpecificCredentialId(), credential);
+            return credential;
+        }
+    }
+
+    public void deleteServiceSpecificCredential(String userName, String credentialId) {
+        synchronized (serviceCredentialLock) {
+            ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
+            serviceCredentials.delete(credential.getServiceSpecificCredentialId());
+        }
+    }
+
+    /** A credential of that id belonging to that user, reported missing when it belongs elsewhere. */
+    private ServiceSpecificCredential userServiceCredential(String userName, String credentialId) {
+        getUser(userName); // validates existence
+        ServiceSpecificCredential credential = serviceCredentials.get(credentialId)
+                .orElseThrow(() -> new AwsException("NoSuchEntity",
+                        "The Service Specific Credential with id " + credentialId
+                                + " cannot be found.", 404));
+        if (!userName.equals(credential.getUserName())) {
+            throw new AwsException("NoSuchEntity",
+                    "The Service Specific Credential with id " + credentialId
+                            + " cannot be found.", 404);
+        }
+        return credential;
+    }
+
+    private List<ServiceSpecificCredential> userServiceCredentials(String userName) {
+        return serviceCredentials.scan(key -> true).stream()
+                .filter(c -> userName.equals(c.getUserName()))
+                .sorted(Comparator.comparing(
+                        ServiceSpecificCredential::getServiceSpecificCredentialId))
+                .toList();
+    }
+
     // Virtual MFA devices
     // =========================================================================
 
@@ -3358,6 +3705,36 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         sessions.put(sessionAccessKeyId, session);
     }
 
+    /**
+     * Stores a session GetSessionToken or GetFederationToken minted, with the identity whose
+     * long-term key minted it. An active access key of a user in this account names that user. A
+     * key IAM holds nowhere, the legacy {@code test} key or the account id among them, names the
+     * account root, which is how Floci treats such a key itself. Any other key IAM holds, such as
+     * another session's (both operations take long-term credentials only) or an inactive or
+     * foreign access key, leaves the issuer unset, and {@link #resolveCallerContext} then grants
+     * the session nothing.
+     *
+     * @param federatedUserArn the federated user's ARN for GetFederationToken, null for
+     *                         GetSessionToken
+     */
+    public void registerIssuedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                      String federatedUserArn, Instant expiration, String sessionPolicyDocument,
+                                      String originAccountId, String issuingAccessKeyId) {
+        SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
+                federatedUserArn, expiration, sessionPolicyDocument, originAccountId);
+        Optional<IamUser> issuingUser = issuingAccessKeyId == null ? Optional.empty()
+                : accessKeys.get(issuingAccessKeyId)
+                        .filter(accessKey -> "Active".equals(accessKey.getStatus()))
+                        .flatMap(accessKey -> users.get(accessKey.getUserName()));
+        if (issuingUser.isPresent()) {
+            session.setIssuerArn(issuingUser.get().getArn());
+            session.setIssuerUserId(issuingUser.get().getUserId());
+        } else if (issuingAccessKeyId == null || !holdsKey(issuingAccessKeyId)) {
+            session.setIssuerArn(regionResolver.buildGlobalArn("iam", originAccountId, "root"));
+        }
+        sessions.put(sessionAccessKeyId, session);
+    }
+
     /** Stores a temporary session in an explicit account namespace. */
     public void registerSessionForAccount(String accountId, String sessionAccessKeyId, String secretAccessKey,
                                           String roleArn, Instant expiration,
@@ -3424,12 +3801,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Stores a non-expiring Lambda execution-role session with its session token. */
     public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
                                                    String secretAccessKey, String sessionToken, String roleArn) {
+        registerLambdaExecutionRoleSession(accountId, sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                null, null);
+    }
+
+    /** Stores a non-expiring Lambda execution-role session with its session token and assumed role ID. */
+    public void registerLambdaExecutionRoleSession(String accountId, String sessionAccessKeyId,
+                                                   String secretAccessKey, String sessionToken, String roleArn,
+                                                   String roleSessionName, String assumedRoleId) {
         if (accountId == null || accountId.isBlank()) {
             throw new IllegalArgumentException("Lambda function account ID must not be blank");
         }
         SessionCredential session = new SessionCredential(
                 sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, null, null, accountId);
         session.setLambdaExecutionRole(true);
+        session.setRoleSessionName(roleSessionName);
+        session.setAssumedRoleId(assumedRoleId);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
         } else {
@@ -3576,6 +3963,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * lookup spans all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        return storedSessionAnyAccount(accessKeyId).filter(session -> !isOrphanedIssuedSession(session));
+    }
+
+    /** The stored session with this key in any account, including an orphaned issued session. */
+    private Optional<SessionCredential> storedSessionAnyAccount(String accessKeyId) {
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
@@ -3583,6 +3975,130 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return aware.findAnyAccount(accessKeyId);
         }
         return sessions.get(accessKeyId);
+    }
+
+    /** Whether IAM holds this key at all: any account's access key, or any stored session. */
+    private boolean holdsKey(String accessKeyId) {
+        return isKnownAccessKey(accessKeyId) || sessions.get(accessKeyId).isPresent()
+                || storedSessionAnyAccount(accessKeyId).isPresent();
+    }
+
+    /**
+     * A GetSessionToken or GetFederationToken session whose issuer is gone: none was recorded (it was
+     * minted with another session's key, an inactive or another account's key, or stored before the
+     * issuer was recorded), or its user has since been deleted or recreated under the same name.
+     * Such a session is no credential at all, so that neither a resource policy nor a fallback to the
+     * account root can act on its behalf.
+     */
+    private boolean isOrphanedIssuedSession(SessionCredential session) {
+        boolean issued = isFederatedUserSession(session)
+                || (session.getRoleArn() == null && session.getPresignedAction() == null);
+        return issued && !issuedByRoot(session) && issuingUser(session).isEmpty();
+    }
+
+    /** A session GetFederationToken minted: its role ARN slot holds the federated user's ARN. */
+    private static boolean isFederatedUserSession(SessionCredential session) {
+        String arn = session.getRoleArn();
+        return AwsArnUtils.isArnFor(arn, "sts") && AwsArnUtils.parse(arn).resource().startsWith(FEDERATED_USER_PREFIX);
+    }
+
+    private static boolean issuedByRoot(SessionCredential session) {
+        String issuerArn = session.getIssuerArn();
+        return issuerArn != null && "root".equals(AwsArnUtils.parse(issuerArn).resource());
+    }
+
+    /** The IAM user whose key minted the session, while it is still that user rather than a same-named one. */
+    private Optional<IamUser> issuingUser(SessionCredential session) {
+        String issuerArn = session.getIssuerArn();
+        String issuerUserId = session.getIssuerUserId();
+        if (issuerArn == null || issuerUserId == null) {
+            return Optional.empty();
+        }
+        String userName = issuerArn.substring(issuerArn.lastIndexOf('/') + 1);
+        Optional<IamUser> user = users instanceof AccountAwareStorageBackend<IamUser> aware
+                ? aware.getForAccount(AwsArnUtils.parse(issuerArn).accountId(), userName)
+                : users.get(userName);
+        return user.filter(candidate -> issuerUserId.equals(candidate.getUserId()));
+    }
+
+    /**
+     * GetSessionToken credentials have the permissions of the identity that minted them: an IAM
+     * user's own policies and boundary, or the account root's, which the enforcement filter still
+     * bounds by the account's service control policies.
+     */
+    private CallerContext sessionTokenContext(SessionCredential session) {
+        if (issuedByRoot(session)) {
+            return CallerContext.of(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY));
+        }
+        return issuingUser(session)
+                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), null,
+                        resolveUserBoundaryDocument(user.getUserName())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /**
+     * GetFederationToken credentials grant nothing without a session policy. With one, they grant
+     * the intersection of that policy and the permissions of the identity that minted them, never
+     * those of a role.
+     *
+     * <p>Without one, the session still answers to its issuer's explicit denies. A resource policy
+     * that names the federated user grants to the session directly, past any implicit deny in an
+     * identity policy, boundary or session policy, but not past an explicit one (IAM User Guide,
+     * "Resource-based policies for AWS STS federated user principal sessions"). So the session
+     * carries only the Deny statements of its user's policies and boundary.
+     */
+    private CallerContext federatedUserContext(SessionCredential session) {
+        String sessionPolicy = session.getSessionPolicyDocument();
+        if (sessionPolicy == null || sessionPolicy.isBlank()) {
+            return issuingUser(session)
+                    .map(user -> CallerContext.of(List.of(denyStatementsOf(user.getUserName()))))
+                    .orElse(CallerContext.of(List.of()));
+        }
+        if (issuedByRoot(session)) {
+            return new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY), sessionPolicy, null);
+        }
+        return issuingUser(session)
+                .map(user -> new CallerContext(collectUserPolicies(user.getUserName()), sessionPolicy,
+                        resolveUserBoundaryDocument(user.getUserName())))
+                .orElse(CallerContext.of(List.of()));
+    }
+
+    /** Adds the IAM and STS limits that bind a federated session on top of whatever it is granted. */
+    private static CallerContext withFederatedUserLimits(CallerContext context) {
+        List<String> identityPolicies = context.identityPolicies() == null
+                ? new ArrayList<>() : new ArrayList<>(context.identityPolicies());
+        identityPolicies.add(FEDERATED_USER_SESSION_LIMITS);
+        return new CallerContext(identityPolicies, context.sessionPolicyDocument(), context.boundaryPolicyDocument());
+    }
+
+    /** One policy document holding only the Deny statements of a user's policies and boundary. */
+    private String denyStatementsOf(String userName) {
+        List<String> documents = new ArrayList<>();
+        List<String> userPolicies = collectUserPolicies(userName);
+        if (userPolicies != null) {
+            documents.addAll(userPolicies);
+        }
+        String boundary = resolveUserBoundaryDocument(userName);
+        if (boundary != null) {
+            documents.add(boundary);
+        }
+        ArrayNode denies = POLICY_MAPPER.createArrayNode();
+        for (String document : documents) {
+            try {
+                JsonNode statements = POLICY_MAPPER.readTree(document).path("Statement");
+                for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
+                    if ("Deny".equalsIgnoreCase(statement.path("Effect").asText())) {
+                        denies.add(statement);
+                    }
+                }
+            } catch (JsonProcessingException e) {
+                LOG.warnv("Skipping an unparseable policy of user {0}: {1}", userName, e.getMessage());
+            }
+        }
+        ObjectNode policy = POLICY_MAPPER.createObjectNode();
+        policy.put("Version", "2012-10-17");
+        policy.set("Statement", denies);
+        return policy.toString();
     }
 
     /**
@@ -3611,12 +4127,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return null; // expired — unknown key → bypass
             }
 
+            if (isFederatedUserSession(session)) {
+                return withFederatedUserLimits(federatedUserContext(session));
+            }
             if (session.getRoleArn() == null) {
-                // A locally minted identity session can carry a restrictive session policy.
-                // Unscoped GetSessionToken credentials retain the historical bypass.
-                return session.getPresignedAction() == null || session.getSessionPolicyDocument() == null ? null
-                        : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
-                                session.getSessionPolicyDocument(), null);
+                if (session.getPresignedAction() != null) {
+                    // A locally minted identity session can carry a restrictive session policy.
+                    return session.getSessionPolicyDocument() == null ? null
+                            : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
+                                    session.getSessionPolicyDocument(), null);
+                }
+                return sessionTokenContext(session);
             }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
@@ -3657,7 +4178,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         Optional<SessionCredential> session = sessions.get(accessKeyId);
         if (session.isPresent()) {
-            return session;
+            return session.filter(stored -> !isOrphanedIssuedSession(stored));
         }
         if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
@@ -3715,9 +4236,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
+            if (isFederatedUserSession(session)) {
+                return Optional.of(new CallerArns(session.getRoleArn(), session.getRoleArn()));
+            }
             String roleArn = session.getRoleArn();
             if (roleArn == null) {
-                return Optional.empty();
+                // GetSessionToken credentials act as the identity that minted them.
+                if (issuedByRoot(session)) {
+                    return Optional.of(new CallerArns(session.getIssuerArn(), session.getIssuerArn()));
+                }
+                return issuingUser(session).map(user -> new CallerArns(user.getArn(), user.getArn()));
             }
             String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
             String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
@@ -3750,16 +4278,72 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
+        return resolveCallerUserId(accessKeyId, null);
+    }
+
+    public Optional<String> resolveCallerUserId(String accessKeyId, String sessionToken) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            return users.get(userName).map(IamUser::getUserId);
+        }
+
         Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
-        if (sessionOpt.isEmpty()) {
-            return Optional.empty();
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
+                deleteSession(accessKeyId, session);
+                return Optional.empty();
+            }
+            if (isTemporaryAccessKey(accessKeyId) && session.getSessionToken() != null
+                    && !hasMatchingSessionToken(session, sessionToken)) {
+                return Optional.empty();
+            }
+            if (isFederatedUserSession(session)) {
+                // account:caller-specified-name, the aws:userid of a federated user.
+                AwsArnUtils.Arn federatedUser = AwsArnUtils.parse(session.getRoleArn());
+                return Optional.of(federatedUser.accountId() + ":"
+                        + federatedUser.resource().substring(FEDERATED_USER_PREFIX.length()));
+            }
+            if (session.getRoleArn() == null) {
+                Optional<IamUser> issuingUser = issuingUser(session);
+                if (issuingUser.isPresent()) {
+                    return Optional.of(issuingUser.get().getUserId());
+                }
+            }
+            if (session.getAssumedRoleId() != null) {
+                return Optional.of(session.getAssumedRoleId());
+            } else if (session.getEc2RoleId() != null && session.getEc2InstanceId() != null) {
+                return Optional.of(session.getEc2RoleId() + ":" + session.getEc2InstanceId());
+            } else if (session.getRoleArn() != null) {
+                String roleArn = session.getRoleArn();
+                String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+                String accountId = AwsArnUtils.accountOrDefault(roleArn,
+                        session.getOriginAccountId() != null ? session.getOriginAccountId() : regionResolver.getAccountId());
+                Optional<IamRole> roleOpt = findRole(accountId, roleName);
+                String roleId = roleOpt.map(IamRole::getRoleId).filter(id -> !id.isBlank()).orElse(null);
+                if (roleId != null) {
+                    String sessionName = session.getRoleSessionName();
+                    if (sessionName == null || sessionName.isBlank()) {
+                        if (session.getEc2InstanceId() != null) {
+                            sessionName = session.getEc2InstanceId();
+                        } else if (session.getEcsTaskArn() != null) {
+                            String taskArn = session.getEcsTaskArn();
+                            sessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
+                        } else {
+                            sessionName = "floci-session";
+                        }
+                    }
+                    return Optional.of(roleId + ":" + sessionName);
+                }
+            }
         }
-        SessionCredential session = sessionOpt.get();
-        if (session.getExpiration() != null && session.getExpiration().isBefore(Instant.now())) {
-            deleteSession(accessKeyId, session);
-            return Optional.empty();
-        }
-        return Optional.ofNullable(session.getAssumedRoleId());
+
+        return Optional.empty();
     }
 
     /** Temporary credentials are the ones STS mints, distinguished by the {@code ASIA} prefix. */
