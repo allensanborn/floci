@@ -10,19 +10,18 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.mwaa.model.Environment;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -267,7 +266,7 @@ public class MwaaEnvironmentManager {
                 return false;
             }
             String body;
-            try (var in = conn.getInputStream()) {
+            try (InputStream in = conn.getInputStream()) {
                 body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
             return body.contains("\"metadatabase\"") && body.contains("\"scheduler\"")
@@ -693,32 +692,12 @@ public class MwaaEnvironmentManager {
             return false;
         }
         try {
-            lifecycleManager.getDockerClient()
-                    .copyArchiveToContainerCmd(containerId)
-                    .withTarInputStream(new ByteArrayInputStream(tarSingleFile(relativePath, content)))
-                    .withRemotePath(remoteDir)
-                    .exec();
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, remoteDir,
+                    relativePath, content, 0644);
             return true;
         } catch (Exception e) {
             LOG.warnv("Could not copy {0} into MWAA container {1}: {2}", relativePath, containerId, e.getMessage());
             return false;
-        }
-    }
-
-    private static byte[] tarSingleFile(String entryName, byte[] content) {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(out)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(content.length);
-                entry.setMode(0644);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
     }
 

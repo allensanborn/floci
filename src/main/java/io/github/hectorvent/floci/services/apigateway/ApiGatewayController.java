@@ -73,16 +73,29 @@ public class ApiGatewayController {
     private final ApiGatewayV2OpenApiImporter v2OpenApiImporter;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final RestLambdaAuthorizer restLambdaAuthorizer;
 
     @Inject
     public ApiGatewayController(ApiGatewayService service, ApiGatewayV2Service v2Service,
                                 ApiGatewayV2OpenApiImporter v2OpenApiImporter,
-                                RegionResolver regionResolver, ObjectMapper objectMapper) {
+                                RegionResolver regionResolver, ObjectMapper objectMapper,
+                                RestLambdaAuthorizer restLambdaAuthorizer) {
         this.service = service;
         this.v2Service = v2Service;
         this.v2OpenApiImporter = v2OpenApiImporter;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.restLambdaAuthorizer = restLambdaAuthorizer;
+    }
+
+    @DELETE
+    @Path("restapis/{apiId}/stages/{stageName}/cache/authorizers")
+    public Response flushStageAuthorizersCache(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                               @PathParam("stageName") String stageName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.getStage(region, apiId, stageName);
+        restLambdaAuthorizer.flush(new RestLambdaAuthorizer.Scope(regionResolver.getAccountId(), region, apiId, stageName));
+        return Response.accepted().build();
     }
 
     private static final TypeReference<List<Map<String, String>>> PATCH_OPERATIONS =
@@ -158,6 +171,22 @@ public class ApiGatewayController {
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    @PATCH
+    @Path("/restapis/{apiId}/resources/{resourceId}/methods/{httpMethod}/responses/{statusCode}")
+    public Response updateMethodResponse(@Context HttpHeaders headers,
+                                         @PathParam("apiId") String apiId,
+                                         @PathParam("resourceId") String resourceId,
+                                         @PathParam("httpMethod") String httpMethod,
+                                         @PathParam("statusCode") String statusCode,
+                                         String body) {
+        String region = regionResolver.resolveRegion(headers);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        MethodResponse response = service.updateMethodResponse(
+                region, apiId, resourceId, httpMethod, statusCode, patchOperations);
+        return Response.status(201).entity(toMethodResponseNode(response).toString())
+                .type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -390,12 +419,14 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/resources")
-    public Response getResources(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getResources(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                 @QueryParam("embed") List<String> embed) {
         String region = regionResolver.resolveRegion(headers);
         List<ApiGatewayResource> resources = service.getResources(region, apiId);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        resources.forEach(r -> items.add(toResourceNode(r)));
+        boolean embedMethods = embed != null && embed.contains("methods");
+        resources.forEach(r -> items.add(toResourceNode(r, embedMethods)));
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -403,9 +434,11 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/resources/{resourceId}")
     public Response getResource(@Context HttpHeaders headers,
                                 @PathParam("apiId") String apiId,
-                                @PathParam("resourceId") String resourceId) {
+                                @PathParam("resourceId") String resourceId,
+                                @QueryParam("embed") List<String> embed) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toResourceNode(service.getResource(region, apiId, resourceId))).build();
+        boolean embedMethods = embed != null && embed.contains("methods");
+        return Response.ok(toResourceNode(service.getResource(region, apiId, resourceId), embedMethods)).build();
     }
 
     @PATCH
@@ -461,7 +494,7 @@ public class ApiGatewayController {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             MethodConfig method = service.putMethod(region, apiId, resourceId, httpMethod, request);
-            return Response.status(201).entity(toMethodNode(method).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toMethodNode(method, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
@@ -474,7 +507,7 @@ public class ApiGatewayController {
                               @PathParam("resourceId") String resourceId,
                               @PathParam("httpMethod") String httpMethod) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toMethodNode(service.getMethod(region, apiId, resourceId, httpMethod)).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toMethodNode(service.getMethod(region, apiId, resourceId, httpMethod), resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @PATCH
@@ -487,7 +520,7 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         MethodConfig method = service.updateMethod(region, apiId, resourceId, httpMethod, patchOperations);
-        return Response.ok(toMethodNode(method).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toMethodNode(method, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -515,7 +548,7 @@ public class ApiGatewayController {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
             io.github.hectorvent.floci.services.apigateway.model.Integration integration = service.putIntegration(region, apiId, resourceId, httpMethod, request);
-            return Response.status(201).entity(toIntegrationNode(integration).toString()).type(MediaType.APPLICATION_JSON).build();
+            return Response.status(201).entity(toIntegrationNode(integration, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
@@ -528,7 +561,7 @@ public class ApiGatewayController {
                                    @PathParam("resourceId") String resourceId,
                                    @PathParam("httpMethod") String httpMethod) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(toIntegrationNode(service.getIntegration(region, apiId, resourceId, httpMethod)).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toIntegrationNode(service.getIntegration(region, apiId, resourceId, httpMethod), resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @PATCH
@@ -541,7 +574,7 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         List<Map<String, String>> patchOperations = parsePatchOperations(body);
         io.github.hectorvent.floci.services.apigateway.model.Integration integration = service.updateIntegration(region, apiId, resourceId, httpMethod, patchOperations);
-        return Response.ok(toIntegrationNode(integration).toString()).type(MediaType.APPLICATION_JSON).build();
+        return Response.ok(toIntegrationNode(integration, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @DELETE
@@ -1546,6 +1579,22 @@ public class ApiGatewayController {
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
+    @PATCH
+    @Path("/v2/vpclinks/{vpcLinkId}")
+    public Response updateVpcLink(@Context HttpHeaders headers,
+                                  @PathParam("vpcLinkId") String vpcLinkId,
+                                  String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            VpcLink link = v2Service.updateVpcLink(region, vpcLinkId, request);
+            return Response.ok(toV2VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
     @DELETE
     @Path("/v2/vpclinks/{vpcLinkId}")
     public Response deleteVpcLink(@Context HttpHeaders headers, @PathParam("vpcLinkId") String vpcLinkId) {
@@ -2170,15 +2219,24 @@ public class ApiGatewayController {
     }
 
     private ObjectNode toResourceNode(ApiGatewayResource r) {
+        return toResourceNode(r, false);
+    }
+
+    private ObjectNode toResourceNode(ApiGatewayResource r, boolean embedMethods) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("id", r.getId());
         if (r.getParentId() != null) node.put("parentId", r.getParentId());
         if (r.getPathPart() != null) node.put("pathPart", r.getPathPart());
         node.put("path", r.getPath());
+        if (!r.getResourceMethods().isEmpty()) {
+            ObjectNode methods = node.putObject("resourceMethods");
+            r.getResourceMethods().forEach((httpMethod, method) -> methods.set(httpMethod,
+                    embedMethods ? toMethodNode(method, r.getId()) : objectMapper.createObjectNode()));
+        }
         return node;
     }
 
-    private ObjectNode toMethodNode(MethodConfig m) {
+    private ObjectNode toMethodNode(MethodConfig m, String resourceId) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
@@ -2198,7 +2256,11 @@ public class ApiGatewayController {
             node.set("requestModels", models);
         }
         if (m.getMethodIntegration() != null) {
-            node.set("methodIntegration", toIntegrationNode(m.getMethodIntegration()));
+            node.set("methodIntegration", toIntegrationNode(m.getMethodIntegration(), resourceId));
+        }
+        if (!m.getMethodResponses().isEmpty()) {
+            ObjectNode responses = node.putObject("methodResponses");
+            m.getMethodResponses().forEach((status, response) -> responses.set(status, toMethodResponseNode(response)));
         }
         return node;
     }
@@ -2206,25 +2268,29 @@ public class ApiGatewayController {
     private ObjectNode toMethodResponseNode(MethodResponse r) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("statusCode", r.statusCode());
+        if (r.responseParameters() != null && !r.responseParameters().isEmpty()) {
+            ObjectNode parameters = node.putObject("responseParameters");
+            r.responseParameters().forEach(parameters::put);
+        }
         return node;
     }
 
-    private ObjectNode toIntegrationNode(io.github.hectorvent.floci.services.apigateway.model.Integration i) {
+    private ObjectNode toIntegrationNode(io.github.hectorvent.floci.services.apigateway.model.Integration i,
+                                         String resourceId) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", i.getType());
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
         node.put("passthroughBehavior", i.getPassthroughBehavior());
         if (i.getContentHandling() != null) node.put("contentHandling", i.getContentHandling());
-        if (i.getTimeoutInMillis() != null) node.put("timeoutInMillis", i.getTimeoutInMillis());
+        node.put("timeoutInMillis", i.getTimeoutInMillis() != null ? i.getTimeoutInMillis() : 29000);
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
         if (i.getCredentials() != null) node.put("credentials", i.getCredentials());
-        if (i.getCacheNamespace() != null) node.put("cacheNamespace", i.getCacheNamespace());
-        if (!i.getCacheKeyParameters().isEmpty()) {
-            ArrayNode keys = node.putArray("cacheKeyParameters");
-            i.getCacheKeyParameters().forEach(keys::add);
-        }
+        node.put("cacheNamespace", i.getCacheNamespace() != null ? i.getCacheNamespace() : resourceId);
+        ArrayNode keys = node.putArray("cacheKeyParameters");
+        i.getCacheKeyParameters().forEach(keys::add);
+        node.put("responseTransferMode", i.getResponseTransferMode());
         if (i.getTlsConfig() != null) {
             node.putObject("tlsConfig")
                     .put("insecureSkipVerification", i.getTlsConfig().isInsecureSkipVerification());
