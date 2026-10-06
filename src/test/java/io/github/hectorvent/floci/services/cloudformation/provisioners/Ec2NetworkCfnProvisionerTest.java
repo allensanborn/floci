@@ -312,6 +312,23 @@ class Ec2NetworkCfnProvisionerTest {
     }
 
     @Test
+    void aSubnetSavedWithHostBitsBeforeCanonicalizationIsKept() {
+        // State persisted by an older build can still hold the template's spelling, host bits and all.
+        Subnet current = subnet();
+        current.setCidrBlock("10.0.1.9/24");
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+        ObjectNode props = mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.9/24")
+                .put("MapPublicIpOnLaunch", true);
+
+        provisioner.provision(r, props, ctx(SUBNET_ID));
+
+        verify(ec2, never()).createSubnet(any(), any(), any(), any());
+        assertEquals(SUBNET_ID, r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
     void aSubnetWithAChangedCidrIsReplacedAndThePriorOneIsOwedToCleanup() {
         Subnet current = subnet();
         current.setCidrBlock("10.0.1.0/24");

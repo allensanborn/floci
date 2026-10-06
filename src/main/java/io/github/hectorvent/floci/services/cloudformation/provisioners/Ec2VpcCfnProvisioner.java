@@ -71,10 +71,12 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         if (existing == null) {
             return null;
         }
-        // A changed CidrBlock is a replacement on AWS, so let the caller create a new VPC. The stored
-        // block is canonical (10.0.0.5/16 is kept as 10.0.0.0/16), so compare in that form.
-        if (cidr != null && !cidr.isBlank()
-                && !CidrCanonicalizer.canonicalize(cidr).orElse(cidr).equals(existing.getCidrBlock())) {
+        // A changed CidrBlock is a replacement on AWS, so let the caller create a new VPC. Compare both
+        // sides canonically (10.0.0.5/16 is 10.0.0.0/16): a VPC saved before canonicalization may
+        // still hold host bits.
+        String saved = existing.getCidrBlock();
+        if (cidr != null && !cidr.isBlank() && !CidrCanonicalizer.canonicalize(cidr).orElse(cidr)
+                .equals(CidrCanonicalizer.canonicalize(saved).orElse(saved))) {
             return null;
         }
         return existing;
