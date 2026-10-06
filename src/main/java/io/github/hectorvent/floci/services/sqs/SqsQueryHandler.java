@@ -250,7 +250,8 @@ public class SqsQueryHandler {
         }
 
         Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
-                messageDeduplicationId, messageAttributes, awsTraceHeader, region);
+                messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
 
         XmlBuilder xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())
@@ -273,23 +274,28 @@ public class SqsQueryHandler {
         Set<String> requestedAttrs = new LinkedHashSet<>();
         requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
         requestedAttrs.addAll(collectIndexed(params, "MessageSystemAttributeName."));
+        Set<String> requestedMessageAttrs = new LinkedHashSet<>(collectIndexed(params, "MessageAttributeName."));
 
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
-        String senderId = sqsService.senderIdFor(queueUrl);
+        String defaultSenderId = sqsService.senderIdFor(queueUrl);
 
         XmlBuilder xml = new XmlBuilder();
         for (Message msg : messages) {
+            Map<String, MessageAttributeValue> selectedMessageAttrs = SqsMessageAttributeSelector.select(
+                    msg.getMessageAttributes(), requestedMessageAttrs);
             xml.start("Message")
                .elem("MessageId", msg.getMessageId())
                .elem("ReceiptHandle", msg.getReceiptHandle())
                .elem("MD5OfBody", msg.getMd5OfBody());
-            if (msg.getMd5OfMessageAttributes() != null) {
-                xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+            String messageAttrsMd5 = Message.computeMessageAttributesMd5(selectedMessageAttrs);
+            if (messageAttrsMd5 != null) {
+                xml.elem("MD5OfMessageAttributes", messageAttrsMd5);
             }
             xml.elem("Body", msg.getBody());
+            String senderId = msg.getSenderId() != null ? msg.getSenderId() : defaultSenderId;
             writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
-            if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
-                for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
+            if (!selectedMessageAttrs.isEmpty()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : selectedMessageAttrs.entrySet()) {
                     xml.start("MessageAttribute")
                        .elem("Name", entry.getKey())
                        .start("Value")
@@ -332,7 +338,7 @@ public class SqsQueryHandler {
             if (id == null) break;
             String receiptHandle = getParam(params, "DeleteMessageBatchRequestEntry." + i + ".ReceiptHandle");
             try {
-                sqsService.deleteMessage(queueUrl, receiptHandle, region);
+                sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
                 xml.start("DeleteMessageBatchResultEntry").elem("Id", id).end("DeleteMessageBatchResultEntry");
             } catch (AwsException e) {
                 xml.start("BatchResultErrorEntry")
@@ -399,12 +405,13 @@ public class SqsQueryHandler {
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
 
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
-                        parsed.awsTraceHeader(), region);
+                        parsed.awsTraceHeader(), senderId, region);
                 xml.start("SendMessageBatchResultEntry")
                    .elem("Id", id)
                    .elem("MessageId", msg.getMessageId())

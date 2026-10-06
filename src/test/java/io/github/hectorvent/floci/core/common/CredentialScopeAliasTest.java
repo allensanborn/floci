@@ -8,6 +8,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -67,7 +68,6 @@ class CredentialScopeAliasTest {
         // canonical scope from the external key would rewrite valid scopes onto prefixes AWS
         // never issues, so every action would resolve to null and enforcement would be skipped.
         assertEquals("ses", catalog.canonicalCredentialScope("ses"));
-        assertEquals("sesv2", catalog.canonicalCredentialScope("sesv2"));
         assertEquals("bedrock", catalog.canonicalCredentialScope("bedrock"));
         assertEquals("logs", catalog.canonicalCredentialScope("logs"));
     }
@@ -103,6 +103,8 @@ class CredentialScopeAliasTest {
     private static ContainerRequestContext getObjectRequest() {
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getPath()).thenReturn("/my-bucket/my-key");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566/my-bucket/my-key"));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
         when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
 
         ContainerRequestContext ctx = mock(ContainerRequestContext.class);

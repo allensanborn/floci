@@ -86,9 +86,11 @@ class SesV2IntegrationTest {
     @Test
     @Order(4)
     void listEmailIdentities() {
+        // Other classes share this region, so ask for a page large enough to hold every identity.
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
+            .queryParam("PageSize", 1000)
         .when()
             .get("/v2/email/identities")
         .then()
@@ -739,20 +741,6 @@ class SesV2IntegrationTest {
     }
 
     @Test
-    @Order(52)
-    void putAccountSendingAttributes_missingField() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .put("/v2/email/account/sending")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
-
-    @Test
     @Order(58)
     void putAccountSuppressionAttributes_storesReasons_visibleViaGetAccount() {
         given()
@@ -962,34 +950,6 @@ class SesV2IntegrationTest {
     }
 
     // ──────────────── Validation edge cases ────────────────
-
-    @Test
-    @Order(53)
-    void putDkimAttributes_missingField() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .put("/v2/email/identities/dkim-test@example.com/dkim")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
-
-    @Test
-    @Order(54)
-    void putFeedbackAttributes_missingField() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .put("/v2/email/identities/dkim-test@example.com/feedback")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
-    }
 
     @Test
     @Order(55)

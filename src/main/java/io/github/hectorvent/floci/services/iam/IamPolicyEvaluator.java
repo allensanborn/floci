@@ -4,13 +4,22 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.PolicyStatement;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.YearMonth;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,6 +27,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -84,6 +94,9 @@ public class IamPolicyEvaluator {
     // Parsing is a pure function of the document text, so entries never go stale. The bound
     // only guards against growth from many distinct session policies.
     static final int MAX_CACHED_DOCUMENTS = 2048;
+
+    private static final Pattern EPOCH_SECONDS = Pattern.compile("-?\\d+");
+    private static final Pattern YEAR_MONTH = Pattern.compile("\\d{4}-\\d{2}");
 
     // Matches an IAM policy variable such as ${aws:username} inside a Resource pattern or a
     // Condition value. Stops at the first ',' or '}' so a default value (${key, 'default'}),
@@ -173,8 +186,9 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * Evaluates a resource-based policy standalone for a given caller principal, action,
-     * and resource.
+     * Evaluates a resource-based policy standalone for an IAM caller identified by its ARN. With no
+     * ARN, the request's {@code aws:PrincipalArn} stands in for it, which is IAM-only too: the key
+     * names IAM users, roles, federated users and the account root, never a service.
      */
     public ResourcePolicyDecision evaluateResourcePolicy(
             List<String> resourcePolicies,
@@ -182,28 +196,64 @@ public class IamPolicyEvaluator {
             String action,
             String resource,
             Map<String, List<String>> conditionCtx) {
+        String callerArn = principalArn;
+        if (callerArn == null) {
+            List<String> principalArns = normalizeConditionContext(conditionCtx).get("aws:principalarn");
+            if (principalArns != null && !principalArns.isEmpty()) {
+                callerArn = principalArns.getFirst();
+            }
+        }
+        RequestPrincipal principal = callerArn == null
+                ? RequestPrincipal.anonymous()
+                : RequestPrincipal.iam(callerArn);
+        return evaluateResourcePolicyFor(resourcePolicies, principal, action, resource, conditionCtx);
+    }
+
+    /**
+     * Evaluates a resource-based policy standalone for a typed caller. Each principal type in the
+     * policy matches only the callers it can name: {@code AWS} an IAM identity, {@code Service} a
+     * service by its exact name, {@code "*"} anyone. Named apart from the String form so a call
+     * passing a literal null caller to that one stays unambiguous.
+     */
+    public ResourcePolicyDecision evaluateResourcePolicyFor(
+            List<String> resourcePolicies,
+            RequestPrincipal principal,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
         if (resourcePolicies == null || resourcePolicies.isEmpty()) {
             return ResourcePolicyDecision.NEUTRAL;
         }
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        if (principalArn == null && ctx.containsKey("aws:principalarn")) {
-            List<String> principalArns = ctx.get("aws:principalarn");
-            if (principalArns != null && !principalArns.isEmpty()) {
-                principalArn = principalArns.getFirst();
-            }
-        }
         String loweredAction = lowercase(action);
         List<PolicyStatement> stmts = parseAll(resourcePolicies);
-        if (anyResourceExplicitDeny(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceExplicitDeny(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.EXPLICIT_DENY;
         }
-        if (anyResourceDirectIamUserAllow(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceDirectIamUserAllow(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
         }
-        if (anyResourceExplicitAllow(stmts, principalArn, loweredAction, resource, ctx)) {
+        if (anyResourceExplicitAllow(stmts, principal, loweredAction, resource, ctx)) {
             return ResourcePolicyDecision.ALLOW;
         }
         return ResourcePolicyDecision.NEUTRAL;
+    }
+
+    /**
+     * Decides a call an AWS service makes on its own behalf, such as SNS delivering to a queue. The
+     * resource policy decides alone: a service principal carries no identity, session or boundary
+     * policy, and SCPs apply only to the IAM users and roles of an organization's accounts. An
+     * explicit Deny denies, an Allow allows, and a policy that says nothing denies.
+     */
+    public Decision evaluateServicePrincipal(
+            List<String> resourcePolicies,
+            String servicePrincipal,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
+        ResourcePolicyDecision decision = evaluateResourcePolicyFor(
+                resourcePolicies, RequestPrincipal.service(servicePrincipal), action, resource, conditionCtx);
+        return decision == ResourcePolicyDecision.ALLOW ? Decision.ALLOW : Decision.DENY;
     }
 
     private Decision evaluateParsed(
@@ -570,41 +620,43 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
                                             String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isDeny() && matchesResourceStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isDeny() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean anyResourceExplicitAllow(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceExplicitAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
                                              String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesResourceStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isAllow() && matchesResourceStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean anyResourceDirectIamUserAllow(List<PolicyStatement> stmts, String principalArn,
+    private boolean anyResourceDirectIamUserAllow(List<PolicyStatement> stmts, RequestPrincipal principal,
                                                  String action, String resource, Map<String, List<String>> ctx) {
         for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesDirectIamUserStatement(stmt, principalArn, action, resource, ctx)) {
+            if (stmt.isAllow() && matchesDirectIamUserStatement(stmt, principal, action, resource, ctx)) {
                 return true;
             }
         }
         return false;
     }
 
-    private boolean matchesDirectIamUserStatement(PolicyStatement stmt, String principalArn,
+    private boolean matchesDirectIamUserStatement(PolicyStatement stmt, RequestPrincipal principal,
                                                   String action, String resource, Map<String, List<String>> ctx) {
-        if (principalArn == null || !principalArn.contains(":user/")) {
+        if (principal.type() != RequestPrincipal.Type.IAM
+                || principal.arn() == null || !principal.arn().contains(":user/")) {
             return false;
         }
+        String principalArn = principal.arn();
         if (stmt.getPrincipals() == null) {
             return false;
         }
@@ -662,13 +714,13 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    private boolean matchesResourceStatement(PolicyStatement stmt, String principalArn,
+    private boolean matchesResourceStatement(PolicyStatement stmt, RequestPrincipal principal,
                                              String action, String resource, Map<String, List<String>> ctx) {
         // A resource-policy statement with no Principal matches nothing (per AWS specification)
         if (stmt.getPrincipals() == null && stmt.getNotPrincipals() == null) {
             return false;
         }
-        if (!matchesPrincipal(stmt, principalArn)) {
+        if (!matchesPrincipal(stmt, principal)) {
             return false;
         }
         return matchesAction(stmt, action)
@@ -676,17 +728,30 @@ public class IamPolicyEvaluator {
                 && matchesConditions(stmt.getConditions(), ctx);
     }
 
-    private boolean matchesPrincipal(PolicyStatement stmt, String principalArn) {
+    private boolean matchesPrincipal(PolicyStatement stmt, RequestPrincipal principal) {
         if (stmt.getPrincipals() != null) {
-            return matchesAnyPrincipal(stmt.getPrincipals(), principalArn);
+            return matchesAnyPrincipal(stmt.getPrincipals(), principal);
         }
         if (stmt.getNotPrincipals() != null) {
-            return !matchesAnyPrincipal(stmt.getNotPrincipals(), principalArn);
+            return !matchesAnyPrincipal(stmt.getNotPrincipals(), principal);
         }
         return false;
     }
 
-    private boolean matchesAnyPrincipal(Map<String, List<String>> principals, String principalArn) {
+    /**
+     * Matches a statement's {@code Principal} (or {@code NotPrincipal}) map against a typed caller.
+     * {@code "*"} matches anyone. {@code {"AWS": "*"}} matches IAM identities and services alike,
+     * which policies AWS writes itself rely on (an FIS Deny pausing DynamoDB replication names the
+     * replication service that way). Any other {@code AWS} entry names IAM identities only, and a
+     * role session matches the role it assumed through that role's own ARN, path included.
+     * {@code Service} names one service exactly; {@code {"Service": "*"}} is not a form AWS accepts
+     * and matches nothing. {@code CanonicalUser}, which S3 bucket policies accept, names an account
+     * by its S3 canonical user ID, and matches the IAM identities of that account as an account
+     * principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report
+     * it. {@code Federated} and any other type name callers this evaluator never sees, and so match
+     * nothing, rather than being compared with an IAM ARN.
+     */
+    private boolean matchesAnyPrincipal(Map<String, List<String>> principals, RequestPrincipal principal) {
         for (Map.Entry<String, List<String>> entry : principals.entrySet()) {
             String type = entry.getKey();
             List<String> patterns = entry.getValue();
@@ -698,44 +763,63 @@ public class IamPolicyEvaluator {
                     if ("*".equals(pattern)) {
                         return true;
                     }
-                    if (principalArn != null && globMatches(pattern, principalArn)) {
+                    if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
+                            && globMatches(pattern, principal.arn())) {
                         return true;
                     }
                 }
             } else if ("AWS".equalsIgnoreCase(type)) {
-                if (principalArn == null) {
-                    continue;
+                if (patterns.contains("*") && principal.type() != RequestPrincipal.Type.ANONYMOUS) {
+                    return true;
                 }
-                String accountId = extractAccountId(principalArn);
-                String roleArn = extractRoleArnFromAssumedRole(principalArn);
-                for (String pattern : patterns) {
-                    if ("*".equals(pattern)) {
-                        return true;
-                    }
-                    if (pattern.matches("\\d{12}")) {
-                        if (pattern.equals(accountId)) {
+                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null
+                        && matchesAwsPrincipal(patterns, principal)) {
+                    return true;
+                }
+            } else if ("Service".equalsIgnoreCase(type)) {
+                if (principal.type() == RequestPrincipal.Type.SERVICE && principal.servicePrincipal() != null) {
+                    String wanted = ServicePrincipals.canonical(principal.servicePrincipal());
+                    for (String pattern : patterns) {
+                        if (!"*".equals(pattern) && ServicePrincipals.canonical(pattern).equals(wanted)) {
                             return true;
                         }
-                    } else if (ROOT_PRINCIPAL_ARN.matcher(pattern).matches()) {
-                        // An account id is scoped to its partition: arn:aws-cn:iam::123:root names
-                        // the China account 123, which is not the commercial account 123.
-                        AwsArnUtils.Arn root = AwsArnUtils.parse(pattern);
-                        if (root.accountId().equals(accountId)
-                                && root.partition().equals(AwsArnUtils.parse(principalArn).partition())) {
-                            return true;
-                        }
-                    } else if (globMatches(pattern, principalArn)) {
-                        return true;
-                    } else if (roleArn != null && globMatches(pattern, roleArn)) {
+                    }
+                }
+            } else if ("CanonicalUser".equalsIgnoreCase(type)) {
+                if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null) {
+                    String accountId = extractAccountId(principal.arn());
+                    if (accountId != null && patterns.contains(accountId)) {
                         return true;
                     }
                 }
-            } else if (principalArn != null) {
-                for (String pattern : patterns) {
-                    if ("*".equals(pattern) || globMatches(pattern, principalArn)) {
-                        return true;
-                    }
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesAwsPrincipal(List<String> patterns, RequestPrincipal principal) {
+        String principalArn = principal.arn();
+        String accountId = extractAccountId(principalArn);
+        String roleArn = principal.roleArn() != null
+                ? principal.roleArn()
+                : extractRoleArnFromAssumedRole(principalArn);
+        for (String pattern : patterns) {
+            if (pattern.matches("\\d{12}")) {
+                if (pattern.equals(accountId)) {
+                    return true;
                 }
+            } else if (ROOT_PRINCIPAL_ARN.matcher(pattern).matches()) {
+                // An account id is scoped to its partition: arn:aws-cn:iam::123:root names
+                // the China account 123, which is not the commercial account 123.
+                AwsArnUtils.Arn root = AwsArnUtils.parse(pattern);
+                if (root.accountId().equals(accountId)
+                        && root.partition().equals(AwsArnUtils.parse(principalArn).partition())) {
+                    return true;
+                }
+            } else if (globMatches(pattern, principalArn)) {
+                return true;
+            } else if (roleArn != null && globMatches(pattern, roleArn)) {
+                return true;
             }
         }
         return false;
@@ -855,6 +939,14 @@ public class IamPolicyEvaluator {
      */
     private enum SetQuantifier { NONE, FOR_ALL_VALUES, FOR_ANY_VALUE }
 
+    private static final Set<String> SUPPORTED_CONDITION_OPERATORS = Set.of(
+            "StringEquals", "StringNotEquals", "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase",
+            "StringLike", "StringNotLike", "ArnEquals", "ArnLike", "ArnNotEquals", "ArnNotLike", "Bool",
+            "NumericEquals", "NumericNotEquals", "NumericLessThan", "NumericLessThanEquals",
+            "NumericGreaterThan", "NumericGreaterThanEquals", "DateEquals", "DateNotEquals",
+            "DateLessThan", "DateLessThanEquals", "DateGreaterThan", "DateGreaterThanEquals",
+            "IpAddress", "NotIpAddress");
+
     private record ParsedOperator(SetQuantifier quantifier, String baseOp, boolean ifExists) {}
 
     /**
@@ -877,6 +969,20 @@ public class IamPolicyEvaluator {
         boolean ifExists = rest.endsWith("IfExists");
         String baseOp = ifExists ? rest.substring(0, rest.length() - "IfExists".length()) : rest;
         return new ParsedOperator(quantifier, baseOp, ifExists);
+    }
+
+    /**
+     * Returns whether {@link #evaluate} understands a condition operator, including its
+     * {@code ForAllValues:}/{@code ForAnyValue:} prefix and {@code IfExists} suffix. An unknown
+     * operator never matches, which silently disables a Deny, so callers that must fail closed
+     * on a malformed policy check this first.
+     */
+    public static boolean isSupportedConditionOperator(String operator) {
+        ParsedOperator parsed = parseOperator(operator);
+        if ("Null".equals(parsed.baseOp())) {
+            return !parsed.ifExists() && parsed.quantifier() == SetQuantifier.NONE;
+        }
+        return SUPPORTED_CONDITION_OPERATORS.contains(parsed.baseOp());
     }
 
     /**
@@ -990,18 +1096,18 @@ public class IamPolicyEvaluator {
             case "ArnEquals", "ArnLike"      -> matchesArnCondition(condValue, ctxValue);
             case "ArnNotEquals", "ArnNotLike"-> !matchesArnCondition(condValue, ctxValue);
             case "Bool"                      -> Boolean.parseBoolean(condValue) == Boolean.parseBoolean(ctxValue);
-            case "NumericEquals"             -> compareNumeric(ctxValue, condValue) == 0;
-            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue) != 0;
-            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue) < 0;
-            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue) <= 0;
-            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue) > 0;
-            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue) >= 0;
-            case "DateEquals"                -> compareDates(ctxValue, condValue) == 0;
-            case "DateNotEquals"             -> compareDates(ctxValue, condValue) != 0;
-            case "DateLessThan"              -> compareDates(ctxValue, condValue) < 0;
-            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue) <= 0;
-            case "DateGreaterThan"           -> compareDates(ctxValue, condValue) > 0;
-            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue) >= 0;
+            case "NumericEquals"             -> compareNumeric(ctxValue, condValue, order -> order == 0);
+            case "NumericNotEquals"          -> compareNumeric(ctxValue, condValue, order -> order != 0);
+            case "NumericLessThan"           -> compareNumeric(ctxValue, condValue, order -> order < 0);
+            case "NumericLessThanEquals"     -> compareNumeric(ctxValue, condValue, order -> order <= 0);
+            case "NumericGreaterThan"        -> compareNumeric(ctxValue, condValue, order -> order > 0);
+            case "NumericGreaterThanEquals"  -> compareNumeric(ctxValue, condValue, order -> order >= 0);
+            case "DateEquals"                -> compareDates(ctxValue, condValue, order -> order == 0);
+            case "DateNotEquals"             -> compareDates(ctxValue, condValue, order -> order != 0);
+            case "DateLessThan"              -> compareDates(ctxValue, condValue, order -> order < 0);
+            case "DateLessThanEquals"        -> compareDates(ctxValue, condValue, order -> order <= 0);
+            case "DateGreaterThan"           -> compareDates(ctxValue, condValue, order -> order > 0);
+            case "DateGreaterThanEquals"     -> compareDates(ctxValue, condValue, order -> order >= 0);
             case "IpAddress"                 -> matchesIpAddress(condValue, ctxValue);
             case "NotIpAddress"              -> !matchesIpAddress(condValue, ctxValue);
             default -> {
@@ -1011,49 +1117,59 @@ public class IamPolicyEvaluator {
         };
     }
 
-    private int compareNumeric(String ctxValue, String condValue) {
+    /**
+     * Compares exactly, so integers beyond a double's precision stay distinct. A value that
+     * does not parse never satisfies the operator, so it cannot pass as equal.
+     */
+    private static boolean compareNumeric(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
+        }
         try {
-            return Double.compare(Double.parseDouble(ctxValue), Double.parseDouble(condValue));
+            return test.test(new BigDecimal(ctxValue.trim()).compareTo(new BigDecimal(condValue.trim())));
         } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private int compareDates(String ctxValue, String condValue) {
-        try {
-            return Instant.parse(ctxValue).compareTo(Instant.parse(condValue));
-        } catch (Exception e) {
-            return 0;
-        }
-    }
-
-    private boolean matchesIpAddress(String condValue, String ctxValue) {
-        if (condValue.contains("/")) {
-            return matchesCidr(condValue, ctxValue);
-        }
-        return condValue.equals(ctxValue);
-    }
-
-    private boolean matchesCidr(String cidr, String ip) {
-        try {
-            String[] parts = cidr.split("/");
-            int prefix = Integer.parseInt(parts[1]);
-            long cidrAddr = ipToLong(parts[0]);
-            long ipAddr = ipToLong(ip);
-            long mask = prefix == 0 ? 0L : (0xFFFFFFFFL << (32 - prefix)) & 0xFFFFFFFFL;
-            return (cidrAddr & mask) == (ipAddr & mask);
-        } catch (Exception e) {
+            LOG.debugv("Numeric condition on non-numeric value {0} vs {1}: no match", ctxValue, condValue);
             return false;
         }
     }
 
-    private long ipToLong(String ip) {
-        String[] octets = ip.split("\\.");
-        long result = 0;
-        for (String octet : octets) {
-            result = (result << 8) | Integer.parseInt(octet);
+    /** A value that does not parse as a date never satisfies the operator. */
+    private static boolean compareDates(String ctxValue, String condValue, IntPredicate test) {
+        if (ctxValue == null || condValue == null) {
+            return false;
         }
-        return result;
+        try {
+            return test.test(parseConditionDate(ctxValue).compareTo(parseConditionDate(condValue)));
+        } catch (DateTimeException | ArithmeticException | NumberFormatException e) {
+            LOG.debugv("Date condition on non-date value {0} vs {1}: no match", ctxValue, condValue);
+            return false;
+        }
+    }
+
+    /**
+     * Reads epoch seconds or a W3C ISO 8601 profile date: {@code YYYY-MM}, {@code YYYY-MM-DD},
+     * or a date-time with or without seconds and fraction. A bare {@code YYYY} is read as epoch
+     * seconds, as the two forms cannot be told apart. Dates without a time start at midnight UTC.
+     */
+    private static Instant parseConditionDate(String value) {
+        String trimmed = value.trim();
+        if (EPOCH_SECONDS.matcher(trimmed).matches()) {
+            return Instant.ofEpochSecond(Long.parseLong(trimmed));
+        }
+        if (trimmed.indexOf('T') >= 0 || trimmed.indexOf('t') >= 0) {
+            return OffsetDateTime.parse(trimmed, DateTimeFormatter.ISO_OFFSET_DATE_TIME).toInstant();
+        }
+        if (YEAR_MONTH.matcher(trimmed).matches()) {
+            return YearMonth.parse(trimmed).atDay(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        }
+        return LocalDate.parse(trimmed).atStartOfDay(ZoneOffset.UTC).toInstant();
+    }
+
+    private boolean matchesIpAddress(String condValue, String ctxValue) {
+        if (condValue.contains("/")) {
+            return CidrCanonicalizer.contains(condValue, ctxValue);
+        }
+        return condValue.equals(ctxValue);
     }
 
     // -----------------------------------------------------------------------
@@ -1245,10 +1361,9 @@ public class IamPolicyEvaluator {
         Map<String, Map<String, List<String>>> result = new LinkedHashMap<>();
         condNode.fields().forEachRemaining(opEntry -> {
             Map<String, List<String>> kvMap = new LinkedHashMap<>();
-            boolean boolOperator = "Bool".equals(parseOperator(opEntry.getKey()).baseOp());
             opEntry.getValue().fields().forEachRemaining(kvEntry -> {
                 JsonNode value = kvEntry.getValue();
-                kvMap.put(kvEntry.getKey(), boolOperator && value.isBoolean()
+                kvMap.put(kvEntry.getKey(), value.isBoolean() || value.isNumber()
                         ? List.of(value.asText()) : nodeToList(value));
             });
             result.put(opEntry.getKey(), kvMap);

@@ -3,10 +3,12 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
@@ -199,7 +201,7 @@ public class KinesisEventSourcePoller implements Resettable {
 
     private String buildKinesisEvent(List<KinesisRecord> records, EventSourceMapping esm, String shardId) {
         try {
-            var recordsArray = objectMapper.createArrayNode();
+            ArrayNode recordsArray = objectMapper.createArrayNode();
             for (KinesisRecord rec : records) {
                 ObjectNode kinesisNode = objectMapper.createObjectNode();
                 kinesisNode.put("kinesisSchemaVersion", "1.0");
@@ -214,7 +216,8 @@ public class KinesisEventSourcePoller implements Resettable {
                 record.put("eventVersion", "1.0");
                 record.put("eventID", shardId + ":" + rec.getSequenceNumber());
                 record.put("eventName", "aws:kinesis:record");
-                record.put("invokeIdentityArn", AwsArnUtils.Arn.of("iam", "", esm.getAccountId(), "role/lambda-role").toString());
+                record.put("invokeIdentityArn", AwsArnUtils.Arn.global(AwsRegions.partitionFor(esm.getRegion()), "iam",
+                        esm.getAccountId(), "role/lambda-role").toString());
                 record.put("awsRegion", esm.getRegion());
                 record.put("eventSourceARN", esm.getEventSourceArn());
                 recordsArray.add(record);

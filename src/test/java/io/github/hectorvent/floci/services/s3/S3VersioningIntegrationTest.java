@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -384,7 +386,7 @@ class S3VersioningIntegrationTest {
             .statusCode(200);
 
         // Verify exactly 1 version exists
-        var versions = given()
+        List<Object> versions = given()
         .when()
             .get("/" + resBucket + "?versions&prefix=" + key)
         .then()
@@ -433,6 +435,28 @@ class S3VersioningIntegrationTest {
                 """)
             .when()
                 .put("/" + notifBucket)
+            .then()
+                .statusCode(200);
+
+            String validationReceipt = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                    containsString("\"Event\":\"s3:TestEvent\""))
+                .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.ReceiptHandle");
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("ReceiptHandle", validationReceipt)
+            .when()
+                .post("/")
             .then()
                 .statusCode(200);
 

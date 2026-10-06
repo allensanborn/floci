@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -236,7 +237,7 @@ public class EcrService implements ResourceProvider {
             String defaultAccount = regionResolver.getAccountId();
             String defaultRegion = regionResolver.getDefaultRegion();
             String legacyKey = key(defaultRegion, defaultAccount, registryRepositoryName);
-            var legacyRepository = repoStore.get(legacyKey);
+            Optional<Repository> legacyRepository = repoStore.get(legacyKey);
             if (legacyRepository.isPresent()) {
                 Repository repo = legacyRepository.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(
@@ -252,7 +253,7 @@ public class EcrService implements ResourceProvider {
             String region = namespaced ? parts[1] : defaultRegion;
             String repoName = namespaced ? parts[2] : registryRepositoryName;
             String key = key(region, account, repoName);
-            var existing = repoStore.get(key);
+            Optional<Repository> existing = repoStore.get(key);
             if (existing.isPresent()) {
                 Repository repo = existing.get();
                 repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repoName));
@@ -428,7 +429,9 @@ public class EcrService implements ResourceProvider {
     // ============================================================
 
     public AuthorizationData getAuthorizationToken() {
-        requireRegistry();
+        // Deliberately not gated on the backing registry: AWS answers this call from the
+        // control plane, and both values here are computed without Docker. Gating it made
+        // every SDK client retry a 500 before its first repository call.
         String token = Base64.getEncoder()
                 .encodeToString("AWS:floci".getBytes(StandardCharsets.UTF_8));
         Instant expires = Instant.now().plusSeconds(12 * 60 * 60);
@@ -613,6 +616,14 @@ public class EcrService implements ResourceProvider {
     // ============================================================
     // Tag mutability + resource tags + policies (metadata round-trip)
     // ============================================================
+
+    public Repository putImageScanningConfiguration(String repositoryName, String registryId,
+                                                    boolean scanOnPush, String region) {
+        Repository repo = requireRepo(repositoryName, registryId, region);
+        repo.setScanOnPush(scanOnPush);
+        repoStore.put(key(region, repo.getRegistryId(), repositoryName), repo);
+        return repo;
+    }
 
     public Repository putImageTagMutability(String repositoryName, String registryId,
                                             String mutability, String region) {

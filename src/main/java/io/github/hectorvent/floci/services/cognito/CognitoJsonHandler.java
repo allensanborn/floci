@@ -41,6 +41,21 @@ public class CognitoJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) {
+        // Every operation naming a UserPoolId is signed for the caller's region, except the unsigned
+        // UpdateAuthEventFeedback, whose region Floci cannot know.
+        if (region != null && request.hasNonNull("UserPoolId") && !"UpdateAuthEventFeedback".equals(action)) {
+            service.requireUserPoolInRegion(request.path("UserPoolId").asText(), region);
+        }
+        // The tag operations name the pool by ARN, and a domain is looked up by its name.
+        if (region != null) {
+            switch (action) {
+                case "TagResource", "UntagResource", "ListTagsForResource" ->
+                        service.requireUserPoolArnInRegion(request.path("ResourceArn").asText(), region);
+                case "DescribeUserPoolDomain" ->
+                        service.requireUserPoolDomainInRegion(request.path("Domain").asText(), region);
+                default -> { }
+            }
+        }
         return switch (action) {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);
@@ -105,11 +120,13 @@ public class CognitoJsonHandler {
             case "ForgotPassword" -> handleForgotPassword(request);
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
+            case "GetUserAuthFactors" -> handleGetUserAuthFactors(request);
             case "GetUserAttributeVerificationCode" -> handleGetUserAttributeVerificationCode(request);
             case "VerifyUserAttribute" -> handleVerifyUserAttribute(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "GlobalSignOut" -> handleGlobalSignOut(request);
+            case "DeleteUser" -> handleDeleteUser(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -594,6 +611,10 @@ public class CognitoJsonHandler {
                 : request.path("TemporaryPassword").asText(null);
         String messageAction = request.path("MessageAction").isMissingNode() ? null
                 : request.path("MessageAction").asText(null);
+        Map<String, String> validationData = new HashMap<>();
+        request.path("ValidationData").forEach(a -> validationData.put(a.path("Name").asText(), a.path("Value").asText()));
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
 
         CognitoUser user = service.adminCreateUser(
                 request.path("UserPoolId").asText(),
@@ -601,7 +622,9 @@ public class CognitoJsonHandler {
                 attrs,
                 tempPassword,
                 messageAction,
-                request.path("ForceAliasCreation").asBoolean(false)
+                request.path("ForceAliasCreation").asBoolean(false),
+                validationData,
+                clientMetadata
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userToNode(user));
@@ -1023,6 +1046,11 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
+    private Response handleGetUserAuthFactors(JsonNode request) {
+        Map<String, Object> result = service.getUserAuthFactors(request.path("AccessToken").asText());
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
     private Response handleGetUserAttributeVerificationCode(JsonNode request) {
         Map<String, Object> deliveryDetails = service.getUserAttributeVerificationCode(
                 request.path("AccessToken").asText(),
@@ -1063,7 +1091,12 @@ public class CognitoJsonHandler {
     }
 
     private Response handleGlobalSignOut(JsonNode request) {
-        service.globalSignOut(request.path("AccessToken").asText());
+        service.globalSignOut(request.path("AccessToken").asText(null));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteUser(JsonNode request) {
+        service.deleteUser(request.path("AccessToken").asText(null));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

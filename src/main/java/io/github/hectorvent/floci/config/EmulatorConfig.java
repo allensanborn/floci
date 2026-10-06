@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.net.URI;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -73,6 +74,15 @@ public interface EmulatorConfig {
      */
     interface PartitionsConfig {
         Optional<String> id();
+
+        /**
+         * Refuse requests signed for a service AWS does not publish in the request's partition
+         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * an API because its endpoint does not resolve; Floci serves every enabled service in
+         * every partition unless this is set.
+         */
+        @WithDefault("false")
+        boolean strict();
 
         /**
          * Accept a request whose SigV4 credential scope names a region that no partition
@@ -867,6 +877,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("verdaccio/verdaccio:6.10.4")
         String npmImage();
+
+        /**
+         * Image used for the per-repository pypiserver container backing the {@code pypi} format.
+         * Same reasoning as {@link #npmImage()}: pypiserver has no native concept of multiple
+         * named indexes inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("pypiserver/pypiserver:v2.4.2")
+        String pypiImage();
     }
 
     interface ConnectServiceConfig {
@@ -1300,6 +1319,9 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean clearFifoDeduplicationCacheOnPurge();
+
+        @WithDefault("local-emulator-secret")
+        String receiptHandleSecret();
     }
 
     interface S3ServiceConfig {
@@ -1580,6 +1602,9 @@ public interface EmulatorConfig {
         int proxyBackendConnectTimeoutMillis();
         @WithDefault("100")
         int proxyMaxConnections();
+
+        @WithDefault("1000000")
+        long spectrumMaxRows();
     }
 
     interface RdsServiceConfig {
@@ -2100,7 +2125,7 @@ public interface EmulatorConfig {
 
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
-         * of <em>this same</em> Floci left on the daemon (matched by the {@code floci_owner_port}
+         * of <em>this same</em> Floci left on the daemon (matched by the {@code io.floci.owner}
          * label), task-role credentials proxies included, before the service scheduler starts
          * replacement tasks. Turn it off when two Floci instances share a daemon with the same
          * port and no resource namespace, so one does not remove the other's containers.
@@ -2110,7 +2135,30 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean reconcileContainersOnStartup();
 
+        /**
+         * How a task's container images are pulled when the task starts, with the values and
+         * semantics of the ECS agent's {@code ECS_IMAGE_PULL_BEHAVIOR}. The default pulls on every
+         * launch, so a tag moved in its registry (a rebuilt {@code :latest}) is what the next task
+         * runs.
+         */
+        @WithDefault("default")
+        ImagePullBehavior imagePullBehavior();
+
         EcsTaskRoleCredentialsConfig taskRoleCredentials();
+
+        enum ImagePullBehavior {
+            /** Pull on every launch; when the pull fails, run the cached image if there is one. */
+            DEFAULT,
+            /** Pull on every launch; when the pull fails, the task fails. */
+            ALWAYS,
+            /**
+             * Pull when Floci has not pulled the image since it started or the cached image is
+             * gone; otherwise run the cached image.
+             */
+            ONCE,
+            /** Pull only when there is no cached image. */
+            PREFER_CACHED
+        }
     }
 
     interface EcsTaskRoleCredentialsConfig {
@@ -2655,11 +2703,25 @@ public interface EmulatorConfig {
         @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
 
+        /** Full image references for individual runtimes, keyed by Lambda runtime identifier. */
+        Map<String, String> runtimeImages();
+
         @WithDefault("128")
         int defaultMemoryMb();
 
         @WithDefault("3")
         int defaultTimeoutSeconds();
+
+        /**
+         * Run the background sweep that fires durable execution timers. These are waits, step
+         * retries, execution timeouts and retention expiry. When off, timers are recorded but never fire.
+         */
+        @WithDefault("true")
+        boolean durableSweepEnabled();
+
+        /** How often the durable sweep runs. Waits are whole seconds, so 1s bounds their lateness. */
+        @WithDefault("1")
+        long durableSweepIntervalSeconds();
 
         Optional<String> dockerHostOverride();
 
@@ -2698,6 +2760,13 @@ public interface EmulatorConfig {
         @WithDefault("1000")
         long pollIntervalMs();
 
+        /**
+         * Seconds before the first retry of a failed asynchronous invocation. Retry n waits n times
+         * this, so the default of 60 matches AWS: one minute, then two. Zero retries back to back.
+         */
+        @WithDefault("60")
+        int asyncRetryDelaySeconds();
+
         @WithDefault("false")
         boolean ephemeral();
 
@@ -2713,6 +2782,32 @@ public interface EmulatorConfig {
 
         @WithDefault("300")
         int containerIdleTimeoutSeconds();
+
+        /**
+         * Maximum idle (warm) containers kept per function. A container released when the
+         * function already holds this many idle ones is stopped instead of pooled.
+         *
+         * <p>Unset derives {@code max(4, availableProcessors())}. Values below 1 are ignored
+         * with a warning.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION
+         */
+        Optional<Integer> warmPoolMaxPerFunction();
+
+        /**
+         * Maximum idle (warm) containers kept across all functions. When a release would push
+         * the total past this, the least-recently-used idle container of any function is
+         * stopped first, so the container that just ran (the most likely to run again) stays
+         * warm. {@code 0} disables the bound; a negative value is ignored with a warning and
+         * also leaves it unbounded. This bounds idle containers only, emulator-wide. Busy
+         * containers are not counted: their ceiling is {@code region-concurrency-limit}, which
+         * applies independently in each region, so peak container count is this cap plus the
+         * in-flight invocations across every active region.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL
+         */
+        @WithDefault("0")
+        int warmPoolMaxTotal();
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
@@ -2923,7 +3018,7 @@ public interface EmulatorConfig {
         /**
          * When true, Floci removes on startup any EC2 instance container left on the Docker
          * daemon by a previous run of <em>this same</em> Floci (matched by the
-         * {@code floci_owner_port} label) whose instance record did not survive the restart, or
+         * {@code io.floci.owner} label) whose instance record did not survive the restart, or
          * came back already terminated. Stopped instances are never swept — their containers are
          * exactly what StartInstances revives.
          *
@@ -3022,8 +3117,8 @@ public interface EmulatorConfig {
 
         /**
          * When true, VPC networks left behind by a previous run of this same Floci instance are
-         * removed at startup. Scoped by the emulator's API port, so instances sharing a Docker
-         * daemon never reconcile each other's networks.
+         * removed at startup. Scoped by the emulator's resource namespace and API port, so
+         * instances sharing a Docker daemon never reconcile each other's networks.
          */
         @WithDefault("true")
         boolean reconcileOnStartup();
@@ -3192,12 +3287,24 @@ public interface EmulatorConfig {
          * --disable-kube-proxy} instead of its bundled networking stack. k3s's default flannel CNI
          * and kube-proxy run embedded in the k3s server process itself (not separate, killable
          * DaemonSets), so a real CNI (e.g. Cilium) can only cleanly take over if k3s never starts
-         * its own in the first place — there is no way to evict them after the fact. CoreDNS,
+         * its own in the first place: there is no way to evict them after the fact. CoreDNS,
          * local-path-provisioner, and metrics-server are unaffected; they don't depend on which CNI
          * is in place.
          */
         @WithDefault("false")
         boolean disableCni();
+
+        /**
+         * When false (default), starts k3s with {@code --disable=local-storage} so clusters match
+         * AWS EKS by starting with no default StorageClass and no host-path provisioner. When true,
+         * retains k3s's bundled local-path provisioner and default StorageClass for local workloads
+         * that rely on automatic volume binding without installing a CSI driver.
+         *
+         * <p>Like {@link #disableCni()}, k3s's local-path-provisioner runs embedded in the k3s server
+         * process itself, so this flag must be set at startup rather than applied afterwards.
+         */
+        @WithDefault("false")
+        boolean defaultStorageClass();
 
         /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
@@ -3385,10 +3492,10 @@ public interface EmulatorConfig {
         /**
          * Size of the connection pool behind the shared Docker client. Every Docker call leases a
          * connection from it, and some hold one for as long as a container runs: a Lambda
-         * container holds two (its followed log stream and its exit watcher) plus one per
-         * extension, and other container-backed services hold one for their log stream. Once
-         * those fill the pool, create, start, stop and remove wait for a free connection,
-         * including the calls that would release one, so the emulator stalls.
+         * container holds one (its exit watcher) plus one per extension. Log-follow streams
+         * live in the separate streaming pool. Once the long-lived connections fill this pool,
+         * create, start, stop and remove wait for a free connection, including the calls that
+         * would release one, so the emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
          * about 50: a tenth of the 500 that the runtime API port range
@@ -3397,6 +3504,17 @@ public interface EmulatorConfig {
          */
         @WithDefault("1024")
         int maxConnections();
+
+        /**
+         * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
+         * long-lived container log-follow streams that occupy a slot for a container's entire
+         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
+         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
+         * per-function), so this pool is sized generously rather than tied to any single
+         * function's warm-pool cap.
+         */
+        @WithDefault("512")
+        int streamingMaxConnections();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.
