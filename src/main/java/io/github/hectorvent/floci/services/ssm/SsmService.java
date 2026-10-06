@@ -212,6 +212,10 @@ public class SsmService implements ResourceProvider {
                     400);
         }
 
+        // Terraform sends an empty AllowedPattern for every parameter; AWS treats it as no pattern.
+        if (allowedPattern != null && allowedPattern.isEmpty()) {
+            allowedPattern = null;
+        }
         if (allowedPattern != null) {
             Pattern pattern;
             try {

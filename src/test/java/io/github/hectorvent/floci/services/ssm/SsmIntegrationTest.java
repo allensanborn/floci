@@ -1726,6 +1726,16 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void putParameterTreatsAnEmptyAllowedPatternAsNoPattern() {
+        putFilterFixture("/attr/empty-pattern", "String", ", \"AllowedPattern\": \"\"");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/empty-pattern"] }] }
+                """)
+            .body("Parameters[0].Version", equalTo(1))
+            .body("Parameters[0]", not(hasKey("AllowedPattern")));
+    }
+
+    @Test
     void putParameterOverwriteKeepsPoliciesUntilNewOrEmptyPoliciesAreSent() {
         putFilterFixture("/pol/keep", "String", ", \"Tier\": \"Advanced\", \"Policies\":"
                 + " \"[{\\\"Type\\\":\\\"NoChangeNotification\\\",\\\"Version\\\":\\\"1.0\\\","
