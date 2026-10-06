@@ -73,6 +73,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1056,6 +1057,44 @@ class Ec2ServiceTest {
                 "us-east-1", List.of(), List.of("canonical"), Map.of());
         assertTrue(unsupportedAlias.isEmpty(),
                 "catalog imageOwnerAlias values must not turn arbitrary owner strings into Owners selectors");
+    }
+
+    @Test
+    void describeImagesFiltersCatalogImagesByBlockDeviceMappingVolumeType() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        assertTrue(service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("bogus"))).isEmpty());
+        assertEquals(List.of("ami-0abcdef1234567890"), service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp2"))).stream().map(Image::getImageId).toList());
+        assertEquals(Set.of("ami-ubuntu2404-arm64", "ami-ubuntu2404-amd64", "ami-ubuntu2404-cloud-arm64"),
+                service.describeImages("us-east-1", List.of(), List.of(),
+                        Map.of("block-device-mapping.volume-type", List.of("gp3"))).stream()
+                        .map(Image::getImageId).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void describeImagesFiltersRegisteredImagesByBlockDeviceMappingVolumeType() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setVolumeType("io2");
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName("/dev/sda1");
+        mapping.setEbs(ebs);
+        Image io2 = service.registerImage("us-east-1", "io2-image", null, null, null, List.of(mapping));
+        service.registerImage("us-east-1", "no-ebs-image", null, null, null, List.of());
+
+        assertEquals(List.of(io2.getImageId()), service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("io2"))).stream().map(Image::getImageId).toList());
+        assertTrue(service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp3"))).isEmpty());
     }
 
     @Test

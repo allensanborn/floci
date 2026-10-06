@@ -203,6 +203,8 @@ public class Ec2ImageCatalog {
         public String architecture;
         public String rootDeviceType;
         public String rootDeviceName;
+        /** Root EBS volume type, set only where the AMI name states it; answers block-device-mapping.volume-type. */
+        public String rootVolumeType;
         public String virtualizationType;
         public String hypervisor;
         public String platform;

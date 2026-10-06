@@ -6929,6 +6929,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
         }
         return switch (name) {
             case "architecture" -> matchesFilterValue(values, image.getArchitecture());
+            case "block-device-mapping.volume-type" -> matchesFilterValue(values, catalogImage.rootVolumeType);
             case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
             case "image-id" -> catalogImage.idsAndAliases().stream().anyMatch(id -> matchesFilterValue(values, id));
             case "image-type" -> matchesFilterValue(values, "machine");
@@ -7005,6 +7006,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                     .filter(Objects::nonNull)
                     .map(EbsBlockDevice::getSnapshotId)
                     .anyMatch(snapshotId -> matchesFilterValue(values, snapshotId));
+            case "block-device-mapping.volume-type" -> image.getBlockDeviceMappings().stream()
+                    .map(BlockDeviceMapping::getEbs)
+                    .filter(Objects::nonNull)
+                    .map(EbsBlockDevice::getVolumeType)
+                    .anyMatch(volumeType -> matchesFilterValue(values, volumeType));
             case "description" -> matchesFilterValue(values, image.getDescription());
             case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
             case "image-id" -> matchesFilterValue(values, image.getImageId());
