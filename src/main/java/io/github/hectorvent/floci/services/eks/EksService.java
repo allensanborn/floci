@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -105,6 +106,8 @@ public class EksService implements TagHandler, ResourceProvider {
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
     private final Map<String, Object> nodeGroupCapacityLocks = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<Boolean>> pendingFirstNodeGroups = new ConcurrentHashMap<>();
+    // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
+    private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -256,6 +259,16 @@ public class EksService implements TagHandler, ResourceProvider {
                 .thenComparing(Nodegroup::getNodegroupName));
     }
 
+    List<Nodegroup> listNodeGroupsForCluster(String clusterName, String accountId) {
+        String prefix = clusterName + "/";
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            return aware.scanAllAccountEntries(key -> key.startsWith(prefix)).stream()
+                    .filter(entry -> accountId == null || accountId.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value).toList();
+        }
+        return nodeGroupStorage.scan(key -> key.startsWith(prefix));
+    }
+
     /**
      * Gives clusters persisted before IRSA support an OIDC issuer and signing key. Without this,
      * a cluster restored from {@code eks-clusters.json} would report no
@@ -280,7 +293,9 @@ public class EksService implements TagHandler, ResourceProvider {
                         cluster.getIdentity().getOidc().getIssuer());
                 continue;
             }
-            String issuer = oidcService.newIssuerUrl(config.defaultRegion());
+            // The cluster's own region, from its ARN: the issuer must match the one create mints there.
+            String issuer = oidcService.newIssuerUrl(
+                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
             putClusterForAccount(accountId, cluster);
@@ -539,6 +554,18 @@ public class EksService implements TagHandler, ResourceProvider {
         }
 
         cluster.setRoleArn(request.getRoleArn());
+
+        List<String> clusterArgs;
+        try {
+            clusterArgs = EksClusterArgs.parseAndValidateClusterArgs(request.getTags(), name);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterException", e.getMessage(), 400);
+        }
+        if (!clusterArgs.isEmpty()) {
+            cluster.setClusterArgs(clusterArgs);
+        }
+        cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
+
         ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
@@ -560,7 +587,6 @@ public class EksService implements TagHandler, ResourceProvider {
         cluster.setLogging(buildLogging(request.getLogging()));
         cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
         cluster.setStatus(ClusterStatus.CREATING);
-        cluster.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
@@ -638,22 +664,39 @@ public class EksService implements TagHandler, ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
 
-        cluster.setStatus(ClusterStatus.DELETING);
-        if (!config.services().eks().mock()) {
-            clusterManager.stopCluster(cluster);
+        // One delete at a time per cluster, so a delete that fails cannot restore the status or
+        // state of a cluster another delete is tearing down.
+        if (!clustersBeingDeleted.add(cluster)) {
+            throw new AwsException("ResourceInUseException",
+                    "Cluster is already being deleted: " + name, 409);
         }
-        deleteClusterSecurityGroup(cluster);
-        accessEntries.deleteClusterEntries(cluster);
-        if (podIdentityAssociations != null) {
-            podIdentityAssociations.deleteClusterAssociations(cluster);
+        try {
+            ClusterStatus previousStatus = cluster.getStatus();
+            cluster.setStatus(ClusterStatus.DELETING);
+            if (!config.services().eks().mock()) {
+                try {
+                    clusterManager.stopCluster(cluster);
+                } catch (RuntimeException e) {
+                    // The cluster record is kept for a retry, so it must not stay stuck in DELETING.
+                    cluster.setStatus(previousStatus);
+                    throw e;
+                }
+            }
+            deleteClusterSecurityGroup(cluster);
+            accessEntries.deleteClusterEntries(cluster);
+            if (podIdentityAssociations != null) {
+                podIdentityAssociations.deleteClusterAssociations(cluster);
+            }
+            if (addons != null) {
+                addons.deleteClusterAddons(cluster);
+            }
+            storage.delete(name);
+            clearAppliedClusterUserData(cluster, name);
+            oidcService.deleteKey(name);
+            return cluster;
+        } finally {
+            clustersBeingDeleted.remove(cluster);
         }
-        if (addons != null) {
-            addons.deleteClusterAddons(cluster);
-        }
-        storage.delete(name);
-        clearAppliedClusterUserData(cluster, name);
-        oidcService.deleteKey(name);
-        return cluster;
     }
 
     public Nodegroup createNodeGroup(String clusterName, CreateNodeGroupRequest request) {
@@ -759,6 +802,10 @@ public class EksService implements TagHandler, ResourceProvider {
             boolean firstGroup = firstNodeGroup(clusterName, accountId).isEmpty() && pendingFirst == null;
             if (firstGroup && !config.services().eks().mock() && clusterManager != null) {
                 applyFirstNodeGroupCapacity(clusterName, nodegroupName, currentCluster, nodeGroup);
+                if (currentCluster.getContainerId() != null && currentCluster.getStatus() == ClusterStatus.ACTIVE) {
+                    LOG.infov("EKS cluster {0} is already running; nodegroup {1} node labels and taints are not applied to the running node",
+                            clusterName, nodegroupName);
+                }
             } else if (!firstGroup && pendingFirst == null
                     && !config.services().eks().mock() && clusterManager != null) {
                 if (currentCluster.getNodeInstanceType() == null) {
@@ -771,6 +818,13 @@ public class EksService implements TagHandler, ResourceProvider {
                     LOG.warnv("EKS cluster {0} has one shared node; nodegroup {1} cannot change its capacity from {2}",
                             clusterName, nodegroupName, currentCluster.getNodeInstanceType());
                 }
+                firstNodeGroup(clusterName, accountId).ifPresent(first -> {
+                    if (!nodegroupName.equals(first.getNodegroupName())) {
+                        LOG.warnv(
+                                "EKS cluster {0} has one shared node; nodegroup {1} metadata (labels/taints) is not applied to the node (already represented by nodegroup {2})",
+                                clusterName, nodegroupName, first.getNodegroupName());
+                    }
+                });
             }
 
             if (nodeGroup.getStatus() == NodegroupStatus.ACTIVE && (hasUserData || pendingFirst != null)) {
@@ -930,7 +984,7 @@ public class EksService implements TagHandler, ResourceProvider {
     }
 
     public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
-        describeCluster(clusterName);
+        Cluster cluster = describeCluster(clusterName);
 
         String fargateProfileName = request.getFargateProfileName();
         if (fargateProfileName == null || fargateProfileName.isBlank()) {
@@ -946,7 +1000,7 @@ public class EksService implements TagHandler, ResourceProvider {
                     "Fargate profile already exists: " + fargateProfileName, 409);
         }
 
-        String region = config.defaultRegion();
+        String region = resolveClusterRegion(cluster);
         String accountId = regionResolver.getAccountId();
         String id = UUID.randomUUID().toString();
         String arn = AwsArnUtils.Arn.of("eks", region, accountId,
@@ -998,6 +1052,7 @@ public class EksService implements TagHandler, ResourceProvider {
 
     @Override
     public void tagResource(String region, String resourceArn, Map<String, String> tags) {
+        ReservedTags.rejectReservedTagsOnUpdate(tags);
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",

@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
@@ -71,8 +72,11 @@ class EcsContainerManagerFirelensTest {
         when(builder.build()).thenReturn(new ContainerSpec("image"));
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+                .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("app-id", Map.of()));
         when(lifecycleManager.create(any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any())).thenReturn(new ContainerInfo("router-id", Map.of()));
@@ -110,6 +114,8 @@ class EcsContainerManagerFirelensTest {
         router.setName("log_router");
         router.setImage("amazon/aws-for-fluent-bit:stable");
         router.setFirelensConfiguration(new FirelensConfiguration("fluentbit", Map.of()));
+        router.setLogConfiguration(new LogConfiguration("awslogs",
+                Map.of("awslogs-group", "/ecs/firelens-family", "awslogs-stream-prefix", "firelens"), null));
 
         ContainerDefinition app = new ContainerDefinition();
         app.setName("app");
@@ -144,8 +150,11 @@ class EcsContainerManagerFirelensTest {
         assertTrue(logConfig.getValue().getConfig().get("fluentd-async-connect") == null,
                 "fluentd-async-connect was removed by Docker 28");
 
-        verify(logStreamer).attach(eq("router-id"), anyString(), anyString(), anyString(), anyString());
-        verify(logStreamer, never()).attach(eq("app-id"), anyString(), anyString(), anyString(), anyString());
+        verify(logStreamer).attachForAccount(eq("000000000000"), eq("router-id"), anyString(), anyString(), anyString(),
+                anyString());
+        verify(logStreamer, never()).attachForAccount(anyString(), eq("app-id"), anyString(), anyString(), anyString(),
+                anyString());
+        verify(logStreamer, never()).attachConsoleOnly(eq("app-id"), anyString());
         assertTrue(handle.getFirelensVolumeName().contains("firelens"));
 
         verify(copyCmd).withRemotePath("/fluent-bit/etc");

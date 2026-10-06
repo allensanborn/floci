@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
@@ -11,6 +12,7 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EventBridgeDestination;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
+import io.github.hectorvent.floci.services.ses.model.MessageSecurityOptions;
 import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -24,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -128,14 +131,42 @@ public class SesConfigurationSetService {
                         "Configuration set <" + name + "> does not exist.", 400));
     }
 
+    public PaginatedResult<ConfigurationSet> list(String region, SesListPaging paging, Integer pageSize,
+                                                  String nextToken) {
+        return paging.page(region, list(region), ConfigurationSet::getName, pageSize, nextToken);
+    }
+
+    /** By name, as SES lists them; the paged lists resume on the same order. */
     public List<ConfigurationSet> list(String region) {
         String prefix = "configSet::" + region + "::";
-        List<ConfigurationSet> all = new ArrayList<>(configSetStore.scan(k -> k.startsWith(prefix)));
-        all.sort(Comparator.comparing(ConfigurationSet::getCreatedTimestamp,
-                        Comparator.nullsLast(Comparator.naturalOrder()))
-                .thenComparing(ConfigurationSet::getName,
-                        Comparator.nullsLast(Comparator.naturalOrder())));
-        return all;
+        return configSetStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(ConfigurationSet::getName))
+                .toList();
+    }
+
+    /**
+     * ListConfigurationSets with a name filter, probed 2026-10-03: SES checks the page size, the
+     * name, then the token. The name is not trimmed and is found anywhere in a set's name without
+     * regard to case, and a token is bound to it. A null name lists every set.
+     */
+    public PaginatedResult<ConfigurationSet> listV2(String region, String nameContains, Integer pageSize,
+                                                    String nextToken) {
+        SesListPaging paging = SesListPaging.V2_LIST_CONFIGURATION_SETS;
+        if (nameContains == null) {
+            return list(region, paging, pageSize, nextToken);
+        }
+        // Validated here as well as in page() so the size error wins over the name's length.
+        paging.checkRequest(pageSize, nextToken);
+        int length = nameContains.codePointCount(0, nameContains.length());
+        if (length < 3 || length > 64) {
+            throw new AwsException("BadRequestException",
+                    "CONFIGURATION_SET_NAME_CONTAINS must be between 3 and 64 characters", 400);
+        }
+        String name = nameContains.toLowerCase(Locale.ROOT);
+        List<ConfigurationSet> matching = list(region).stream()
+                .filter(cs -> cs.getName().toLowerCase(Locale.ROOT).contains(name))
+                .toList();
+        return paging.page(region, name, matching, ConfigurationSet::getName, pageSize, nextToken);
     }
 
     /** The raw removal; existence and the tenant delete-guard are the facade's orchestration. */
@@ -390,6 +421,22 @@ public class SesConfigurationSetService {
         cs.setArchivingOptions(options);
         configSetStore.put(configSetKey(region, configSetName), cs);
         LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    /**
+     * UpdateConfigurationSet: a partial update, so a null {@code options} keeps the stored value
+     * while the set must still exist.
+     */
+    public void updateMessageSecurityOptions(String configSetName, MessageSecurityOptions options,
+                                             String region) {
+        ConfigurationSet cs = get(configSetName, region);
+        if (options == null) {
+            return;
+        }
+        cs.setMessageSecurityOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated MessageSecurityOptions on configuration set {0} in region {1}",
+                configSetName, region);
     }
 
     public void setVdmOptions(String configSetName, VdmOptions options, String region) {

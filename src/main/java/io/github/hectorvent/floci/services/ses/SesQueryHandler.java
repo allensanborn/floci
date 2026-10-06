@@ -127,7 +127,7 @@ public class SesQueryHandler {
                 case "GetCustomVerificationEmailTemplate" ->
                         handleGetCustomVerificationEmailTemplate(params, region);
                 case "ListCustomVerificationEmailTemplates" ->
-                        handleListCustomVerificationEmailTemplates(region);
+                        handleListCustomVerificationEmailTemplates(params, region);
                 case "UpdateCustomVerificationEmailTemplate" ->
                         handleUpdateCustomVerificationEmailTemplate(params, region);
                 case "DeleteCustomVerificationEmailTemplate" ->
@@ -136,7 +136,7 @@ public class SesQueryHandler {
                         handleSendCustomVerificationEmail(params, region);
                 case "CreateConfigurationSet" -> handleCreateConfigurationSet(params, region);
                 case "DescribeConfigurationSet" -> handleDescribeConfigurationSet(params, region);
-                case "ListConfigurationSets" -> handleListConfigurationSets(region);
+                case "ListConfigurationSets" -> handleListConfigurationSets(params, region);
                 case "DeleteConfigurationSet" -> handleDeleteConfigurationSet(params, region);
                 case "CreateConfigurationSetEventDestination" ->
                         handleCreateConfigurationSetEventDestination(params, region);
@@ -158,7 +158,7 @@ public class SesQueryHandler {
                         handlePutConfigurationSetDeliveryOptions(params, region);
                 case "CreateReceiptRuleSet" -> handleCreateReceiptRuleSet(params, region);
                 case "DescribeReceiptRuleSet" -> handleDescribeReceiptRuleSet(params, region);
-                case "ListReceiptRuleSets" -> handleListReceiptRuleSets(region);
+                case "ListReceiptRuleSets" -> handleListReceiptRuleSets(params, region);
                 case "DeleteReceiptRuleSet" -> handleDeleteReceiptRuleSet(params, region);
                 case "SetActiveReceiptRuleSet" -> handleSetActiveReceiptRuleSet(params, region);
                 case "DescribeActiveReceiptRuleSet" -> handleDescribeActiveReceiptRuleSet(region);
@@ -207,20 +207,24 @@ public class SesQueryHandler {
 
     private Response handleListIdentities(MultivaluedMap<String, String> params, String region) {
         String identityType = getParam(params, "IdentityType");
-        List<Identity> identities = identityService.listIdentities(identityType, region);
+        PaginatedResult<Identity> page = identityService.listIdentities(identityType, region,
+                SesListPaging.V1_LIST_IDENTITIES,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
+                getParam(params, "NextToken"));
 
-        var xml = new XmlBuilder().start("Identities");
-        for (Identity id : identities) {
+        XmlBuilder xml = new XmlBuilder().start("Identities");
+        for (Identity id : page.items()) {
             xml.elem("member", id.getIdentity());
         }
         xml.end("Identities");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope("ListIdentities", AwsNamespaces.SES, xml.build())).build();
     }
 
     private Response handleGetIdentityVerificationAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("VerificationAttributes");
+        XmlBuilder xml = new XmlBuilder().start("VerificationAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityVerificationAttributes(identityValue, region);
@@ -302,7 +306,7 @@ public class SesQueryHandler {
     }
 
     private Response handleGetSendQuota(String region) {
-        var xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .elem("Max24HourSend", "200.0")
                 .elem("MaxSendRate", "1.0")
                 .elem("SentLast24Hours",
@@ -312,7 +316,7 @@ public class SesQueryHandler {
 
     private Response handleGetSendStatistics(String region) {
         long sentCount = sentEmailService.countInRegion(region);
-        var xml = new XmlBuilder().start("SendDataPoints");
+        XmlBuilder xml = new XmlBuilder().start("SendDataPoints");
         if (sentCount > 0) {
             xml.start("member")
                .elem("DeliveryAttempts", String.valueOf(sentCount))
@@ -340,7 +344,7 @@ public class SesQueryHandler {
 
     private Response handleListVerifiedEmailAddresses(String region) {
         List<String> emails = identityService.getVerifiedEmailAddresses(region);
-        var xml = new XmlBuilder().start("VerifiedEmailAddresses");
+        XmlBuilder xml = new XmlBuilder().start("VerifiedEmailAddresses");
         for (String email : emails) {
             xml.elem("member", email);
         }
@@ -366,7 +370,7 @@ public class SesQueryHandler {
     private Response handleGetIdentityNotificationAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("NotificationAttributes");
+        XmlBuilder xml = new XmlBuilder().start("NotificationAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityNotificationAttributes(identityValue, region);
@@ -396,7 +400,7 @@ public class SesQueryHandler {
     private Response handleGetIdentityDkimAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
 
-        var xml = new XmlBuilder().start("DkimAttributes");
+        XmlBuilder xml = new XmlBuilder().start("DkimAttributes");
         for (String identityValue : identities) {
             Identity identity =
                     identityService.getIdentityVerificationAttributes(identityValue, region);
@@ -438,7 +442,7 @@ public class SesQueryHandler {
     private Response handleVerifyDomainDkim(MultivaluedMap<String, String> params, String region) {
         String domain = getParam(params, "Domain");
         List<String> tokens = identityService.verifyDomainDkim(domain, region);
-        var xml = new XmlBuilder().start("DkimTokens");
+        XmlBuilder xml = new XmlBuilder().start("DkimTokens");
         for (String token : tokens) {
             xml.elem("member", token);
         }
@@ -492,7 +496,7 @@ public class SesQueryHandler {
 
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
         List<String> identities = extractMembers(params, "Identities");
-        var xml = new XmlBuilder().start("MailFromDomainAttributes");
+        XmlBuilder xml = new XmlBuilder().start("MailFromDomainAttributes");
         for (String identityValue : identities) {
             Identity identity = identityService.getMailFromAttributes(identityValue, region);
             xml.start("entry");
@@ -525,7 +529,7 @@ public class SesQueryHandler {
         String identity = requireParam(params, "Identity");
         List<String> names = extractMembers(params, "PolicyNames");
         Map<String, String> policies = policyService.getIdentityPolicies(identity, names, region);
-        var xml = new XmlBuilder().start("Policies");
+        XmlBuilder xml = new XmlBuilder().start("Policies");
         policies.forEach((name, doc) -> xml.start("entry").elem("key", name).elem("value", doc).end("entry"));
         xml.end("Policies");
         return Response.ok(AwsQueryResponse.envelope("GetIdentityPolicies", AwsNamespaces.SES, xml.build())).build();
@@ -533,7 +537,7 @@ public class SesQueryHandler {
 
     private Response handleListIdentityPolicies(MultivaluedMap<String, String> params, String region) {
         String identity = requireParam(params, "Identity");
-        var xml = new XmlBuilder().start("PolicyNames");
+        XmlBuilder xml = new XmlBuilder().start("PolicyNames");
         for (String name : policyService.listIdentityPolicyNames(identity, region)) {
             xml.elem("member", name);
         }
@@ -565,7 +569,7 @@ public class SesQueryHandler {
     private Response handleGetTemplate(MultivaluedMap<String, String> params, String region) {
         String templateName = getParam(params, "TemplateName");
         EmailTemplate template = templateService.getTemplate(templateName, region);
-        var xml = new XmlBuilder().start("Template")
+        XmlBuilder xml = new XmlBuilder().start("Template")
                 .elem("TemplateName", template.getTemplateName());
         if (template.getSubject() != null) {
             xml.elem("SubjectPart", template.getSubject());
@@ -587,8 +591,8 @@ public class SesQueryHandler {
     }
 
     private Response handleListTemplates(MultivaluedMap<String, String> params, String region) {
-        PaginatedResult<EmailTemplate> page = SesListPaging.V1_LIST_TEMPLATES.page(
-                templateService.listTemplates(region), SesListPaging::templateCursor,
+        PaginatedResult<EmailTemplate> page = templateService.listTemplates(region,
+                SesListPaging.V1_LIST_TEMPLATES,
                 SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
                 getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("TemplatesMetadata");
@@ -691,11 +695,14 @@ public class SesQueryHandler {
                 "GetCustomVerificationEmailTemplate", AwsNamespaces.SES, xml)).build();
     }
 
-    private Response handleListCustomVerificationEmailTemplates(String region) {
+    private Response handleListCustomVerificationEmailTemplates(MultivaluedMap<String, String> params,
+                                                                String region) {
+        PaginatedResult<CustomVerificationEmailTemplate> page = cvetService.listCustomVerificationEmailTemplates(
+                region, SesListPaging.V1_LIST_CUSTOM_VERIFICATION_EMAIL_TEMPLATES,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxResults")),
+                getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("CustomVerificationEmailTemplates");
-        List<CustomVerificationEmailTemplate> templates =
-                cvetService.listCustomVerificationEmailTemplates(region);
-        for (CustomVerificationEmailTemplate t : templates) {
+        for (CustomVerificationEmailTemplate t : page.items()) {
             xml.start("member")
                     .elem("TemplateName", t.getTemplateName())
                     .elem("FromEmailAddress", t.getFromEmailAddress())
@@ -705,6 +712,7 @@ public class SesQueryHandler {
                     .end("member");
         }
         xml.end("CustomVerificationEmailTemplates");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope(
                 "ListCustomVerificationEmailTemplates", AwsNamespaces.SES, xml.build())).build();
     }
@@ -928,13 +936,17 @@ public class SesQueryHandler {
         }
     }
 
-    private Response handleListConfigurationSets(String region) {
-        List<ConfigurationSet> all = configSetService.list(region);
+    private Response handleListConfigurationSets(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<ConfigurationSet> page = configSetService.list(region,
+                SesListPaging.V1_LIST_CONFIGURATION_SETS,
+                SesListPaging.parseQueryProtocolPageSize(getParam(params, "MaxItems")),
+                getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("ConfigurationSets");
-        for (ConfigurationSet cs : all) {
+        for (ConfigurationSet cs : page.items()) {
             xml.start("member").elem("Name", cs.getName()).end("member");
         }
         xml.end("ConfigurationSets");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope("ListConfigurationSets", AwsNamespaces.SES, xml.build())).build();
     }
 
@@ -1075,14 +1087,17 @@ public class SesQueryHandler {
                 "DescribeReceiptRuleSet", AwsNamespaces.SES, xml.build())).build();
     }
 
-    private Response handleListReceiptRuleSets(String region) {
+    private Response handleListReceiptRuleSets(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<ReceiptRuleSet> page = receiptRuleService.listReceiptRuleSets(region,
+                SesListPaging.V1_LIST_RECEIPT_RULE_SETS, getParam(params, "NextToken"));
         XmlBuilder xml = new XmlBuilder().start("RuleSets");
-        for (ReceiptRuleSet rs : receiptRuleService.listReceiptRuleSets(region)) {
+        for (ReceiptRuleSet rs : page.items()) {
             xml.start("member");
             writeReceiptRuleSetMetadataFields(xml, rs);
             xml.end("member");
         }
         xml.end("RuleSets");
+        xml.elem("NextToken", page.nextToken());
         return Response.ok(AwsQueryResponse.envelope(
                 "ListReceiptRuleSets", AwsNamespaces.SES, xml.build())).build();
     }
@@ -1433,7 +1448,7 @@ public class SesQueryHandler {
     private static final java.util.Map<String, String> INTERNAL_EVENT_TYPE_TO_V1;
     static {
         java.util.Map<String, String> reverse = new java.util.HashMap<>();
-        for (var e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
+        for (Map.Entry<String, String> e : V1_EVENT_TYPE_TO_INTERNAL.entrySet()) {
             reverse.put(e.getValue(), e.getKey());
         }
         INTERNAL_EVENT_TYPE_TO_V1 = java.util.Map.copyOf(reverse);

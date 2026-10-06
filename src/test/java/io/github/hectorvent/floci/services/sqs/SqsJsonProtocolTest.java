@@ -360,6 +360,78 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void receiveMessage_messageAttributeNamesFiltersOutput() {
+        String filterQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-message-attribute-filter-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                        + "\"MessageBody\":\"filter-test\","
+                        + "\"MessageAttributes\":{"
+                        + "\"color.primary\":{\"DataType\":\"String\",\"StringValue\":\"red\"},"
+                        + "\"color\":{\"DataType\":\"String\",\"StringValue\":\"blue\"},"
+                        + "\"colorful\":{\"DataType\":\"String\",\"StringValue\":\"bright\"},"
+                        + "\"secret\":{\"DataType\":\"String\",\"StringValue\":\"private\"}}}")
+            .when().post("/").then().statusCode(200);
+
+            String receiveBody = "{\"QueueUrl\":\"" + filterQueueUrl + "\",\"VisibilityTimeout\":0";
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body(receiveBody + "}")
+            .when().post("/").then().statusCode(200)
+                .body("Messages", hasSize(1))
+                .body("Messages[0]", not(hasKey("MessageAttributes")))
+                .body("Messages[0]", not(hasKey("MD5OfMessageAttributes")));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body(receiveBody + ",\"MessageAttributeNames\":[\"color.primary\"]}")
+            .when().post("/").then().statusCode(200)
+                .body("Messages[0].MessageAttributes", hasKey("color.primary"))
+                .body("Messages[0].MessageAttributes", not(hasKey("color")))
+                .body("Messages[0].MessageAttributes", not(hasKey("colorful")))
+                .body("Messages[0].MessageAttributes", not(hasKey("secret")))
+                .body("Messages[0].MD5OfMessageAttributes", equalTo("d1cf84dfbac1cbe5c78ed09a1768b0d9"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body(receiveBody + ",\"MessageAttributeNames\":[\"color.*\"]}")
+            .when().post("/").then().statusCode(200)
+                .body("Messages[0].MessageAttributes", hasKey("color.primary"))
+                .body("Messages[0].MessageAttributes", hasKey("color"))
+                .body("Messages[0].MessageAttributes", hasKey("colorful"))
+                .body("Messages[0].MessageAttributes", not(hasKey("secret")))
+                .body("Messages[0].MD5OfMessageAttributes", equalTo("46db9885b8f221ea04082f03e3a63d14"));
+
+            for (String allSelector : new String[]{"All", ".*"}) {
+                given()
+                    .contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                    .body(receiveBody + ",\"MessageAttributeNames\":[\"" + allSelector + "\"]}")
+                .when().post("/").then().statusCode(200)
+                    .body("Messages[0].MessageAttributes", hasKey("color.primary"))
+                    .body("Messages[0].MessageAttributes.secret.StringValue", equalTo("private"));
+            }
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + filterQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
     @Order(9)
     void sendMessageToStandardQueueRetainsMessageGroupId() {
         String groupQueueName = QUEUE_NAME + "-group";
@@ -472,6 +544,33 @@ class SqsJsonProtocolTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterValue"))
             .body("message", equalTo("the parameter 'value' may not be null"));
+    }
+
+    @Test
+    @Order(7)
+    void malformedReceiptHandleIsRejected() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteMessage")
+            .body("{\"QueueUrl\":\"" + queueUrl + "\",\"ReceiptHandle\":\"abc\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ReceiptHandleIsInvalid"))
+            .body("message", equalTo("The input receipt handle is invalid."));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteMessageBatch")
+            .body("{\"QueueUrl\":\"" + queueUrl + "\",\"Entries\":[{\"Id\":\"e\",\"ReceiptHandle\":\"\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Failed[0].Id", equalTo("e"))
+            .body("Failed[0].Code", equalTo("ReceiptHandleIsInvalid"))
+            .body("Failed[0].Message", equalTo("The request must contain the parameter ReceiptHandle."));
     }
 
     @Test
@@ -611,6 +710,54 @@ class SqsJsonProtocolTest {
                 .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
                 .body("{\"QueueUrl\":\"" + rangeQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void receiveMessageReturnsPerMessageSenderId() {
+        String testQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-sender-id-per-message-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            String auth1 = "AWS4-HMAC-SHA256 Credential=111122223333/20260215/us-east-1/sqs/aws4_request, "
+                    + "SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=abc";
+            String auth2 = "AWS4-HMAC-SHA256 Credential=444455556666/20260215/us-east-1/sqs/aws4_request, "
+                    + "SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=abc";
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .header("Authorization", auth1)
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\",\"MessageBody\":\"msg-sender-1\"}")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .header("Authorization", auth2)
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\",\"MessageBody\":\"msg-sender-2\"}")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\","
+                        + "\"MaxNumberOfMessages\":10,"
+                        + "\"VisibilityTimeout\":0,"
+                        + "\"MessageSystemAttributeNames\":[\"SenderId\"]}")
+            .when().post("/").then().statusCode(200)
+                .body("Messages", hasSize(2))
+                .body("Messages.Attributes.SenderId", hasItems("111122223333", "444455556666"));
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + testQueueUrl + "\"}")
             .when().post("/");
         }
     }

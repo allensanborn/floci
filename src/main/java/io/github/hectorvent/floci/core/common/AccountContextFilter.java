@@ -70,30 +70,54 @@ public class AccountContextFilter implements ContainerRequestFilter {
         Object pinnedAccount = ctx.getProperty(PINNED_ACCOUNT_PROPERTY);
         if (pinnedAccount != null) {
             requestContext.setAccountId(pinnedAccount.toString());
+            requestContext.setAccessKeyId(null);
+            requestContext.setSessionToken(null);
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
+        String sessionToken = extractSessionToken(ctx);
         String auth = ctx.getHeaderString("Authorization");
-        if (auth != null && !auth.isEmpty()) {
-            String akid = accountResolver.extractAccessKeyId(auth);
+        String akid = auth != null && !auth.isEmpty() ? accountResolver.extractAccessKeyId(auth) : null;
+        if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
+            requestContext.setAccessKeyId(akid);
+            requestContext.setSessionToken(sessionToken);
             String region = regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
             rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
+            rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
         } else {
             String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()) {
-                String akid = accountResolver.extractPresignedAccessKeyId(credential);
+                String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
-                        resolveAccount(akid, accountResolver.resolveFromPresignedCredential(credential)));
+                        resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
+                requestContext.setAccessKeyId(presignedAkid);
+                requestContext.setSessionToken(sessionToken);
                 String region = regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
+                rejectPartitionAbsentService(ctx,
+                        SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
+                requestContext.setAccessKeyId(null);
+                requestContext.setSessionToken(null);
                 applyRegion(regionResolver.resolveRegionFromAuth(null));
             }
         }
+    }
+
+    private String extractSessionToken(ContainerRequestContext ctx) {
+        String token = ctx.getHeaderString("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+        if (token != null && !token.isBlank()) {
+            return token.trim();
+        }
+        return null;
     }
 
     /**
@@ -141,6 +165,38 @@ public class AccountContextFilter implements ContainerRequestFilter {
         return mediaType != null
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
+    }
+
+    /**
+     * Strict partition mode. AWS publishes no endpoint for a service outside the partitions it
+     * exists in (CloudFront in GovCloud, IAM in {@code aws-eusc}); a client there never reaches
+     * an API because the host does not resolve, which the SDKs surface as an
+     * {@code UnknownHostException}. Floci cannot fail DNS, so it answers the request with the
+     * same 404 shape the unknown-service-scope guard uses. Only a service the published data
+     * lists in some other partition is refused: {@code endpoints.json} omits the newer services
+     * entirely, and silence there is not absence. Off by default: Floci serves every enabled
+     * service in every partition.
+     */
+    private void rejectPartitionAbsentService(ContainerRequestContext ctx, String signingName) {
+        if (signingName == null || !configProvider.get().partitions().strict()) {
+            return;
+        }
+        Optional<AwsPartition> partition = AwsPartitions.find(requestContext.getPartition());
+        if (partition.isEmpty() || !AwsPartitions.publishesSomewhere(signingName)
+                || partition.get().offersSigningName(signingName)) {
+            return;
+        }
+        String partitionId = partition.get().id();
+        LOG.infov("Rejecting request signed for {0} in partition {1}, which publishes no endpoint for it: {2} {3}",
+                signingName, partitionId, ctx.getMethod(), ctx.getUriInfo().getPath());
+        String message = "Service " + signingName + " has no endpoint in partition " + partitionId
+                + ": on AWS the host does not resolve there (the SDKs report an UnknownHostException). "
+                + "Floci is running with floci.partitions.strict=true.";
+        if (isFormEncoded(ctx.getMediaType())) {
+            ctx.abortWith(AwsQueryResponse.error("UnknownOperationException", message, null, 404));
+            return;
+        }
+        ctx.abortWith(AwsProtocolClaimFilter.unknownOperationResponse(404, message));
     }
 
     /**

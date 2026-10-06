@@ -54,8 +54,8 @@ class DocDbServiceTest {
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(true);
@@ -84,7 +84,7 @@ class DocDbServiceTest {
         assertEquals(27017, cluster.getPort());
         assertTrue(cluster.getDbClusterArn().contains("mock-cluster"));
 
-        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString());
+        verify(containerManager, never()).start(anyString(), anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -157,8 +157,8 @@ class DocDbServiceTest {
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(false);
@@ -166,7 +166,7 @@ class DocDbServiceTest {
         when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
 
         DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
-        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString()))
+        when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any()))
                 .thenReturn(null);
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         DocDbService noDaemonService = new DocDbService(config, regionResolver, noDaemonContainerManager, storageFactory,
@@ -227,8 +227,8 @@ class DocDbServiceTest {
                 "docdb-clusters.json".equals(inv.getArgument(1)) ? clusterStore : instanceStore);
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(true);
@@ -321,8 +321,8 @@ class DocDbServiceTest {
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
                 "docdb-clusters.json".equals(inv.getArgument(1)) ? clusterStore : instanceStore);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
-        var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
-        var docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
+        EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.DocDbServiceConfig docdbConfig = Mockito.mock(EmulatorConfig.DocDbServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(true);
@@ -520,7 +520,7 @@ class DocDbServiceTest {
         e = refused(new DocDbClusterSettings(null, null, null, null, null, null, "02:00-02:30", "tue:02:15-tue:02:45", null));
         assertEquals("The backup window and maintenance window must not overlap.", e.getMessage());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("c1"));
-        verify(containerManager, never()).tryStart(any(), any(), any(), any());
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any());
 
         // a window given alone is paired with a default clear of it
         docDbService.createDbCluster("alone", "5.0.0", "u", "pw", false,
