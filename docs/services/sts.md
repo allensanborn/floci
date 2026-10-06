@@ -1,6 +1,6 @@
 # STS
 
-**Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
+**Protocol:** Query (XML), `POST http://localhost:4566/` with `Action=` parameter
 
 ## Supported Actions
 
@@ -20,15 +20,34 @@
 |---|---|---|
 | `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
 
+## Session Token and Federation Token Permissions
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSessionToken` and `GetFederationToken`
+are evaluated as the identity whose long-term key signed the call, as on AWS:
+
+- `GetSessionToken` credentials have the permissions of that IAM user, or of the account root when its key minted them,
+  still bounded by the account's service control policies.
+- `GetFederationToken` credentials have no permissions without a session policy (`Policy`). With one, they have the
+  intersection of that policy and the permissions of the IAM user that minted them, never those of a role that shares
+  the federated user's name. A resource policy naming the federated user's ARN can grant access on its own, but not
+  past an explicit `Deny` in the user's policies or permissions boundary. Whatever their policies allow, they cannot
+  call any IAM operation, nor any STS operation except `GetCallerIdentity`.
+  Managed session policies (`PolicyArns`) are not supported yet.
+
+A session minted with another session's temporary credentials, which AWS does not accept here, with an inactive access
+key or one that belongs to another account, or by an IAM user since deleted and recreated under the same name, is not
+a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
+as the account root, as the key itself does.
+
 ## Trust Policy Enforcement
 
-By default `AssumeRole` succeeds for any caller. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`,
-`AssumeRole` evaluates the target role's trust policy (`AssumeRolePolicyDocument`) against the caller
-and returns `AccessDenied` if it is not permitted. AWS principal forms are matched — `"*"`, an
-account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs — and an
-explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching
-`sts:AssumeRole`. Roles that Floci has no record of stay permissive, so this only affects roles
-created through IAM with a real trust policy.
+`AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
+if it does not.
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates the target role's trust policy
+(`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
+forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
+and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
@@ -62,11 +81,11 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 - `iss` matches that issuer exactly
 - `aud` contains `sts.amazonaws.com`
 - `exp` / `nbf`, with 60s of clock-skew tolerance
-- the role's trust policy — `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub` and `<oidcProvider>:aud` with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
+- the role's trust policy: `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub` and `<oidcProvider>:aud` with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
 
-The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a trust policy that does not permit the subject returns `AccessDenied` (403).
+The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 
-By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
 
 ## Examples
 
@@ -89,5 +108,7 @@ aws sts get-session-token --endpoint-url $AWS_ENDPOINT_URL
 `GetCallerIdentity` is commonly used in CI pipelines and integration tests as a quick connectivity check before running more complex tests.
 For temporary credentials returned by an assumed-role action, its `Arn` and `UserId` match
 the `AssumedRoleUser.Arn` and `AssumedRoleUser.AssumedRoleId` returned when the session was created.
+For `GetSessionToken` credentials they are those of the IAM user that minted them, and for `GetFederationToken`
+credentials the `FederatedUser.Arn` and `FederatedUser.FederatedUserId` (`<account>:<name>`).
 
 When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
