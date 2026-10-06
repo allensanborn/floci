@@ -304,13 +304,14 @@ also checked against that policy's length and character-class requirements, with
 echoed back by any of these actions, matching AWS.
 
 `DeleteUser` returns `DeleteConflict`, as on AWS, while the user still has a login profile, access
-keys, inline policies, attached managed policies, group memberships, or an
-[enabled MFA device](#multi-factor-authentication): remove those first. Floci has no actions that
-create signing certificates, SSH public keys, or Git credentials, so there is nothing of those
-kinds to block on. Renaming a user with `UpdateUser` carries its login
-profile, access keys, and group membership to the new name. Unlike AWS, Floci does not rewrite
-policy documents that name the user's ARN, so a resource or trust policy that referred to the old
-name still refers to it after a rename.
+keys, inline policies, attached managed policies, group memberships, an
+[enabled MFA device](#multi-factor-authentication), a
+[signing certificate](#signing-certificates), an [SSH public key](#ssh-public-keys) or a
+[service-specific credential](#service-specific-credentials): remove those first. That is every
+item on AWS's own list of what to delete before deleting a user programmatically. Renaming a user
+with `UpdateUser` carries all of them to the new name, along with its login profile, access keys and
+group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
+resource or trust policy that referred to the old name still refers to it after a rename.
 
 ### Policy Simulation
 
@@ -499,7 +500,7 @@ authorization means touching the request context and STS session shape, which is
 
 | Action | Description |
 |--------|-------------|
-| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles, MFA devices) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (server certificates) are reported as zero rather than omitted. |
+| GetAccountSummary | Returns entity counts (users, groups, roles, customer-managed policies, instance profiles, MFA devices) and IAM quota values. `Providers` counts OIDC providers only; SAML providers are not included. Resources Floci does not track (the account password) are reported as zero rather than omitted. |
 | GetAccountAuthorizationDetails | Returns every user, group and role in the account, and the policies relevant to them: every local (customer-managed) policy, and every AWS-managed policy actually attached to or used as a permissions boundary by something in the account. |
 | GenerateCredentialReport | Generates (or, within 4 hours of the last one, reuses) the account's credential report. |
 | GetCredentialReport | Returns the most recently generated credential report as Base64-encoded CSV. |
@@ -544,13 +545,245 @@ Only the set of enabled features is stored, and enabling a feature twice is idem
 model root credentials or root sessions themselves, so the flags change what `ListOrganizationsFeatures`
 returns and nothing else.
 
-### Unmodeled Lists
+### Server Certificates
 
 | Action | Description |
 |--------|-------------|
-| ListServerCertificates | Always returns an empty list. |
+| UploadServerCertificate | Stores a PEM certificate, its private key and an optional chain under a name unique to the account. |
+| GetServerCertificate | Returns a stored certificate and its chain, never the private key. |
+| UpdateServerCertificate | Renames a certificate and/or changes its path; the ARN moves with it. |
+| DeleteServerCertificate | Deletes a stored certificate. |
+| ListServerCertificates | Lists certificate metadata, filtered by `PathPrefix`. |
+| TagServerCertificate | Adds tags to a server certificate. |
+| UntagServerCertificate | Removes tags from a server certificate. |
+| ListServerCertificateTags | Lists tags stored for a server certificate. |
 
-Server certificates are not stored, and no action creates them.
+The uploaded material is really parsed, because two of this operation's modeled errors cannot be
+answered otherwise. `CertificateBody` (and `CertificateChain`, when given) must be readable PEM or
+the upload is `MalformedCertificate`, and the private key must actually match the certificate's
+public key or it is `KeyPairMismatch`. The match is a sign-then-verify check, so it holds for RSA
+and EC alike. `Expiration` is read from the certificate's own `notAfter` rather than stored
+separately, so it cannot drift from the certificate it describes.
+
+The private key is stored and never returned. AWS marks `privateKeyType` sensitive and models it
+only on the upload, so neither `GetServerCertificate` nor `ListServerCertificates` echoes it back.
+`ListServerCertificates` returns metadata only, as AWS documents: it "does not return the
+certificate body, certificate chain, or private key".
+
+`ServerCertificateId` uses AWS's `ASCA` prefix for certificates. `GetAccountSummary`'s
+`ServerCertificates` count is backed by this store rather than reporting zero.
+
+`DeleteServerCertificate` returns `DeleteConflict` while the certificate is in use, as AWS does.
+Services that reference a certificate (ELB Classic listeners, ELBv2 listeners, CloudFront
+distributions) report it through `ServerCertificateReferenceProvider`, which IAM consults without
+depending on them. In the other direction, ELB Classic rejects a listener whose `SSLCertificateId`
+names no certificate with `CertificateNotFound`, and CloudFront rejects an unknown
+`ViewerCertificate.IAMCertificateId` with `InvalidViewerCertificate`.
+
+### SSH Public Keys
+
+| Action | Description |
+|--------|-------------|
+| UploadSSHPublicKey | Stores an SSH public key against an IAM user and returns its generated `SSHPublicKeyId`. |
+| GetSSHPublicKey | Returns a key in the encoding `Encoding` asks for, `SSH` or `PEM`. |
+| ListSSHPublicKeys | Lists a user's keys as metadata, with `Marker` and `MaxItems` paging. |
+| UpdateSSHPublicKey | Sets a key's status to `Active`, `Inactive` or `Expired`. |
+| DeleteSSHPublicKey | Deletes one of a user's SSH public keys. |
+
+AWS accepts the body "encoded in ssh-rsa format or PEM format", so both are read, and the body is
+kept exactly as it arrived: a caller that uploaded PEM gets that PEM back rather than a re-encoding
+of it. `GetSSHPublicKey` converts, because `Encoding` is required and decides the form of the
+response, so a key uploaded as `ssh-rsa` comes back as PEM when PEM is asked for.
+
+`Fingerprint` is the MD5 of the OpenSSH blob, which is what AWS reports here. It is deliberately not
+the digest EC2 reports for the same key, which is taken over the DER: both are sixteen bytes of
+colon-delimited hex, so the wrong one would look entirely plausible. The value is checked against
+the worked example in the IAM API Reference rather than assumed.
+
+Five keys per user, which the IAM service quotas give as "SSH Public keys per user" and mark as not
+adjustable. A sixth upload is `LimitExceeded`, counted inside the same lock as the write so
+concurrent uploads cannot both see room for the last slot. The minimum bit-length is 2048, as the
+model documents.
+
+The two rejection errors are kept apart the way the model separates them. A body in neither accepted
+encoding is `UnrecognizedPublicKeyEncoding`; a body in a recognised encoding that will not parse, or
+that carries a key type other than `ssh-rsa`, is `InvalidPublicKey`. An OpenSSH line is recognised by
+its key-type token rather than by whether part of it happens to base64-decode, since short words
+often do.
+
+`DuplicateSSHPublicKey` is per user, not account-wide: AWS describes it as a key "already associated
+with the specified IAM user", so two users may hold the same key. The comparison is on the
+fingerprint, so the same key uploaded in the other encoding still counts as a duplicate.
+
+`ListSSHPublicKeys` returns metadata only. AWS documents `SSHPublicKeyMetadata` as describing a key
+"without the key's body or fingerprint", so neither appears in the list even though both are stored.
+
+An SSH public key blocks `DeleteUser` until it is removed, which is one of the items AWS lists as a
+prerequisite for deleting a user programmatically, and it follows the user across an `UpdateUser`
+rename: left behind, a key would be stranded on a name that no longer exists, invisible to its owner
+because listing goes through the user.
+
+`UserName` is required on every one of these operations except `ListSSHPublicKeys`, where the model
+marks it optional and it resolves from the access key that signed the request. That is the opposite
+of the signing-certificate operations, where it is optional throughout.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, along with every other IAM action except the server-certificate operations, which
+is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979).
+
+### Signing Certificates
+
+| Action | Description |
+|--------|-------------|
+| UploadSigningCertificate | Stores an X.509 signing certificate against an IAM user and returns its generated `CertificateId`. |
+| ListSigningCertificates | Lists a user's signing certificates, with `Marker` and `MaxItems` paging. |
+| UpdateSigningCertificate | Sets a certificate's status to `Active`, `Inactive` or `Expired`. |
+| DeleteSigningCertificate | Deletes one of a user's signing certificates. |
+
+A signing certificate is not a server certificate: it belongs to a user rather than the account, it
+carries no private key, no name and no path, and the generated `CertificateId` is the only handle
+to it. The body is parsed on upload, because `MalformedCertificate` cannot be answered without
+reading the material, and the status starts as `Active`.
+
+`UserName` is optional on all four operations. Left out, it resolves to the user owning the access
+key that signed the request, which is what the model documents.
+
+Two certificates per user, which the User Guide states directly: "Users can have up to two X.509
+signing certificates, to make certificate rotation easier". A third upload is `LimitExceeded`. The
+count is taken inside the same lock as the write, so concurrent uploads cannot both see room for
+the last slot.
+
+`DuplicateCertificate` is account-wide rather than per user: AWS describes it as "the same
+certificate is associated with an IAM user in the account", so a second user cannot upload material
+the first already holds. The comparison is made on the encoded certificate rather than the PEM
+text, so the same certificate re-wrapped or re-indented still counts as the same one.
+
+`UpdateSigningCertificate` accepts `Expired` as well as `Active` and `Inactive`. The parameter's
+prose explains only the first two, but the API Reference gives all three as valid values.
+
+A signing certificate blocks `DeleteUser` until it is removed, which is one of the items AWS lists
+as a prerequisite for deleting a user programmatically. It also follows the user across an
+`UpdateUser` rename: left behind, a certificate would be stranded on a name that no longer exists,
+invisible to its owner because listing goes through the user.
+
+The credential report's `cert_1_active` and `cert_2_active` columns are backed by this store
+instead of always reporting `FALSE`. The matching `cert_*_last_rotated` columns report the upload
+date, and `N/A` when the certificate is not `Active`, which is how the User Guide defines them.
+`GetAccountSummary`'s `AccountSigningCertificatesPresent` is unaffected: it reports the account root
+user's certificates, and Floci does not model root credentials.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, along with every other IAM action except the server-certificate operations. That
+is the general gap tracked in [#4979](https://github.com/floci-io/floci/issues/4979), not something
+specific to signing certificates.
+
+### Service-Specific Credentials
+
+| Action | Description |
+|--------|-------------|
+| CreateServiceSpecificCredential | Generates a credential for one service against an IAM user and returns its generated `ServiceSpecificCredentialId`. |
+| ListServiceSpecificCredentials | Lists a user's credentials, or every user's with `AllUsers`, optionally filtered by `ServiceName`. |
+| UpdateServiceSpecificCredential | Sets a credential's status to `Active`, `Inactive` or `Expired`. |
+| ResetServiceSpecificCredential | Replaces the secret half of a credential and returns the new one. |
+| DeleteServiceSpecificCredential | Deletes one of a user's service-specific credentials. |
+
+These are what AWS calls Git credentials when they are used with CodeCommit. A service that does not
+support them is `NoSuchEntity` with status 404 and the message "No such service `<name>` is
+supported for Service Specific Credentials".
+
+That is not what the wire model would suggest. The model declares `ServiceNotSupportedException`,
+code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
+`ListServiceSpecificCredentials`, and AWS never raises it: recordings validated against AWS answer
+`NoSuchEntity` for a nonexistent service, for a name that is not a service principal at all, and for
+a real service that simply does not support these credentials. A client written against the model,
+catching the modelled exception, would catch nothing.
+
+**A credential has one of two shapes, decided by the service:**
+
+| Service | Shape |
+|---------|-------|
+| `codecommit.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `cassandra.amazonaws.com` | `ServiceUserName` + `ServicePassword` |
+| `bedrock.amazonaws.com` | long-term API key: `ServiceCredentialAlias` + `ServiceCredentialSecret` |
+| `aws-external-anthropic.amazonaws.com` | long-term API key |
+| `cloudwatch.amazonaws.com` | long-term API key |
+| `logs.amazonaws.com` | long-term API key |
+
+That list is the subset AWS's documentation actually names. The User Guide's own enumeration falls
+on a page boundary and is absent from the published PDF, so these come from two other passages: the
+`iam:ServiceSpecificCredentialServiceName` condition-key section, which gives CodeCommit,
+Keyspaces and Bedrock "with their
+exact value formatting", and the worked `create-service-specific-credential` CLI block, which
+creates the four long-term API key services. A service AWS supports that neither passage names would
+be refused here. A legacy per-partition form of a supported principal is accepted and folded to the
+universal one, so `bedrock.amazonaws.com.cn` works and comes back as `bedrock.amazonaws.com`; a bare
+`codecommit` does not, because AWS documents these with their exact formatting.
+
+Only the long-term API key services accept `CredentialAgeDays`, which the model restricts to
+"services that support long-term API keys" and which sets the `ExpirationDate`. It is 1 to 36600
+days. Without it the credential does not expire and no expiry is reported. A present but
+unparseable value is a validation error rather than a silent absence, since answering it with a
+credential that never expires is the opposite of what was asked for.
+
+**A key past its `ExpirationDate` reports `Expired`.** The status is derived when it is read rather
+than written back, so the value a caller set is left alone and an `UpdateServiceSpecificCredential`
+to `Active` cannot make an expired key report as usable. Expiry outranks `Inactive` as well, since a
+key past its expiry is finished either way and `Expired` says more.
+
+This one is a judgement call rather than a sourced behaviour, and worth knowing about. AWS does not
+document the transition: `Expired` is in the `statusType` enum, but that enum is shared with access
+keys, SSH public keys and signing certificates, most of which have no expiry at all, and the API
+Reference's prose describes only `Active` and `Inactive`. Of the two available guesses, reporting an
+expired key as `Active` is the worse one, because it tells a caller the key works while the same
+response carries the date saying it does not. Nothing authenticates with these credentials in Floci
+either way, so the status is the only place the expiry can show.
+
+The secret half, whichever shape it takes, is disclosed by `CreateServiceSpecificCredential` and
+`ResetServiceSpecificCredential` and never again: `ListServiceSpecificCredentials` returns
+`ServiceSpecificCredentialMetadata`, which the model defines without either secret. A reset keeps
+the id, the service and the service user name or alias: only what authenticates with the credential
+changes. Note that the User Guide calls the long-term key's secret `ServiceApiKeyValue` in prose;
+that is not a wire name, and both the API Reference and the model call it
+`ServiceCredentialSecret`.
+
+`ServiceUserName` is derived the way AWS derives it, as the IAM user name, the account, and a `+n`
+between them for the second credential: `anika-at-123456789012` and then
+`anika+1-at-123456789012`, which are the API Reference's own examples. `ServiceCredentialAlias`
+plays the same role for a long-term key, and AWS documents it only as including "the IAM user name
+and a suffix containing version and creation information" without publishing a format, so the one
+here is Floci's: `anika+v1-20261004`.
+
+In both cases the version is the lowest one not currently in use rather than a count of what
+exists, because a count repeats a name as soon as a credential is deleted out of order. Holding
+only `anika+1`, a count of one would mint `anika+1` again and two live credentials would share the
+name the caller authenticates with. It is taken inside the same lock as the write, so two
+concurrent creates cannot both claim the same version.
+
+**The quota is two per service, not two per user**: the User Guide gives "a maximum of two sets of
+service-specific credentials for each supported service per IAM user", so a user may hold two for
+each of the six while a third for any one of them is `LimitExceeded`. Unlike the SSH public key
+limit, this one has no row in the IAM service quotas table, matching the User Guide's framing of it
+as a fixed design limit rather than an adjustable quota.
+
+`AllUsers` cannot be given together with `UserName`, which the model says in as many words, so
+naming both is a validation error rather than one quietly winning.
+
+`UserName` is required on `CreateServiceSpecificCredential` and optional on the other four, where it
+resolves from the access key that signed the request. That is a third pattern again: the
+signing-certificate operations take it optionally throughout, and the SSH key operations require it
+everywhere but the list.
+
+A service-specific credential blocks `DeleteUser` until it is removed, the last of the items AWS
+lists as a prerequisite for deleting a user programmatically, and it follows the user across an
+`UpdateUser` rename: left behind, a credential would be stranded on a name that no longer exists,
+invisible to its owner because listing goes through the user. The `ServiceUserName` is left as it
+was minted rather than re-derived from the new name, because it is what the caller authenticates
+with and rewriting it would break a working credential; AWS does not document which way it goes, so
+this is a choice rather than a sourced behaviour.
+
+Under [enforcement](#iam-enforcement-mode) these actions are evaluated against `*` rather than the
+owning user's ARN, as the general gap in
+[#4979](https://github.com/floci-io/floci/issues/4979) describes.
 
 ## AWS Managed Policies
 
@@ -700,6 +933,31 @@ These identities always bypass enforcement (backward-compatible defaults):
 | Credential the filter cannot map to policies, such as a session carrying no role ARN | Allowed: it is a real credential, so rejecting it would refuse an authenticated caller |
 | No `Authorization` header | Allowed — unauthenticated path (e.g. health checks) |
 | Unresolvable IAM action for the request | Allowed — unknown mappings are permissive |
+
+**IAM's own resources are mostly not named.** When enforcement evaluates a request, the target
+resource comes from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB,
+Kinesis, Secrets Manager, SSM, KMS, and, within IAM, only the server-certificate operations. Every
+other IAM action is evaluated against `*`, so a statement naming a specific user, role, policy,
+instance profile, MFA device or identity provider does not constrain it: a `Deny` on
+`arn:aws:iam::123456789012:user/bob` does not stop `DeleteUser` from running, and an `Allow`
+scoped to one role does not limit `DeleteRole` to it. Action-level matching works normally, so
+denying `iam:DeleteUser` outright does take effect; it is only the resource half that is missing.
+
+This is the behaviour IAM has always had here rather than a recent change, and it errs toward
+permissive, which is the direction worth knowing about. Closing it means mapping the resource of
+every dispatched IAM action, which is tracked in
+[#4979](https://github.com/floci-io/floci/issues/4979) rather than bundled into the
+server-certificate work that mapped the first few.
+
+**A certificate rename names two resources.** `UpdateServerCertificate` is evaluated against both
+the certificate's current ARN and the ARN that `NewServerCertificateName` or `NewPath` would
+produce, because AWS requires the principal to hold permission on the old name and the new one: a
+principal allowed to update `ProductionCert` but not `ProdCert` cannot rename the first into the
+second. A request naming several resources is authorized once per resource, so a `Deny` on either
+name refuses the rename, and the certificate keeps its original name and path. An update that
+changes neither the name nor the path names a single resource. The destination ARN is built beside
+the stored one, keeping the certificate's own partition and account, since a rename moves a
+certificate within an account rather than between partitions.
 
 **Exception:** a bare 12-digit account-id key that equals its own account and sits under
 an effective SCP ceiling is **not** treated as an unknown key — it is evaluated against
