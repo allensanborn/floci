@@ -240,13 +240,14 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
         .then().statusCode(200);
     }
 
-    /** Either end of a live peering holds its gateway, the same way a VPC attachment does. */
+    /** Either end of an accepted peering holds its gateway, the same way a VPC attachment does. */
     @Test
     @Order(8)
     void aPeeredGatewayCannotBeDeletedFromEitherEnd() {
         String requester = createTransitGateway(EAST);
         String accepter = createTransitGateway(EAST);
         String id = createPeering(EAST, requester, accepter, "000000000000");
+        accept(EAST, id);
 
         for (String gateway : new String[] {requester, accepter}) {
             given()
@@ -368,6 +369,47 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
+    }
+
+    /**
+     * Anyone can name any gateway as their peer, so a pending peering must not stop the named
+     * gateway's owner deleting it. Deleting it declines the peering instead.
+     */
+    @Test
+    @Order(10)
+    void aPendingPeeringDoesNotPinTheAccepterGateway() {
+        String peerTgw = createTransitGateway(PEER_ACCOUNT);
+        String id = createPeering(EAST, requesterTgw, peerTgw, "000000000002");
+
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", peerTgw)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".state", equalTo("rejected"));
+
+        given()
+            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200);
     }
 
     /**
