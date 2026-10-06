@@ -647,7 +647,7 @@ class IamIntegrationTest {
     }
 
     @Test
-    @Order(51)
+    @Order(49)
     void getAccessKeyLastUsedReturnsOwningUserName() {
         // Terraform's aws_iam_access_key import resolves the owner from this field.
         createUser("last-used-owner");
