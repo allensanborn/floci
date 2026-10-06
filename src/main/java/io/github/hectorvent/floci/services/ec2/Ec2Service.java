@@ -2376,7 +2376,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * Only the accepter accepts — its account in its region — and only while the attachment is
+     * Only the accepter accepts (its account, in its region), and only while the attachment is
      * still pending. A requester whose peer is another account cannot accept on the peer's behalf.
      */
     public TransitGatewayPeeringAttachment acceptTransitGatewayPeeringAttachment(String region, String attachmentId) {
@@ -2421,7 +2421,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
 
     /**
      * Stored under the requester's account, but the accepter may be another account, so lookups
-     * search every account's partition and then admit only the two parties — the same pattern
+     * search every account's partition and then admit only the two parties, the same pattern
      * {@link #allVpcPeeringConnections} uses.
      */
     private OwnedPeeringAttachment getRequiredPeeringAttachment(String region, String attachmentId) {
