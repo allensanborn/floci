@@ -254,11 +254,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     private final StorageBackend<String, TransitGatewayVpcAttachment> transitGatewayVpcAttachments;
     private final StorageBackend<String, TransitGatewayRouteTablePropagation> transitGatewayPropagations;
     private final StorageBackend<String, TransitGatewayRoute> transitGatewayRoutes;
-    // Keyed by id alone: one attachment serves both regions of a cross-region peering. Not final,
-    // and in memory unless the StorageFactory constructor replaces it, so the hermetic constructors
-    // below keep their arity.
-    private StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments =
-            new InMemoryStorage<>();
+    // Keyed by id alone: one attachment serves both regions of a cross-region peering.
+    private final StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments;
     // Keyed by id alone, not region::id — see VpcPeeringConnection's class Javadoc.
     private final StorageBackend<String, VpcPeeringConnection> vpcPeeringConnections;
     // Standalone (non-primary) ENIs created via CreateNetworkInterface, see #floci-kt9.
@@ -473,10 +470,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 storageFactory.create("ec2", "ec2-volume-modifications.json",
                         new TypeReference<Map<String, VolumeModification>>() {}),
                 requestContextInstance, iamService, volumeBlockDeviceManager,
-                storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}));
-        this.transitGatewayPeeringAttachments = storageFactory.create("ec2",
-                "ec2-transit-gateway-peering-attachments.json",
-                new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {});
+                storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}),
+                storageFactory.create("ec2", "ec2-transit-gateway-peering-attachments.json",
+                        new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -683,11 +679,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 transitGateways, transitGatewayRouteTables, transitGatewayVpcAttachments,
                 transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
                 networkInterfaces, capacityReservations, volumeModifications,
-                requestContextInstance, iamService, volumeBlockDeviceManager, new InMemoryStorage<>());
+                requestContextInstance, iamService, volumeBlockDeviceManager, new InMemoryStorage<>(),
+                new InMemoryStorage<>());
     }
 
-    // The terminal constructor. Dedicated Hosts ride on their own parameter so the shorter
-    // overloads above keep their arity for existing fixtures.
+    // The terminal constructor. Dedicated Hosts and transit gateway peering attachments ride on
+    // their own parameters so the shorter overloads above keep their arity for existing fixtures.
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
@@ -723,8 +720,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                jakarta.enterprise.inject.Instance<RequestContext> requestContextInstance,
                IamService iamService,
                Ec2VolumeBlockDeviceManager volumeBlockDeviceManager,
-               StorageBackend<String, Host> hosts) {
+               StorageBackend<String, Host> hosts,
+               StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments) {
         this.hosts = hosts;
+        this.transitGatewayPeeringAttachments = transitGatewayPeeringAttachments;
         this.iamService = iamService;
         this.volumeBlockDeviceManager = volumeBlockDeviceManager;
         this.defaultAccountId = config.defaultAccountId();
