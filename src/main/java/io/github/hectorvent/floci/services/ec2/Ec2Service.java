@@ -2409,7 +2409,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
             } else {
                 transitGatewayPeeringAttachments.delete(attachmentId);
             }
-            tags.delete(attachmentId);
+            // Tags are per account, so each side keeps its own; both go with the attachment.
+            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount) {
+                tagsByAccount.deleteForAccount(attachment.getRequesterTgwInfo().getOwnerId(), attachmentId);
+                tagsByAccount.deleteForAccount(attachment.getAccepterTgwInfo().getOwnerId(), attachmentId);
+            } else {
+                tags.delete(attachmentId);
+            }
             attachment.setState("deleted");
             return attachment;
         }

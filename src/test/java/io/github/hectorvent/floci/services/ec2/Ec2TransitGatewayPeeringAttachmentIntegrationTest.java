@@ -370,6 +370,84 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
     }
 
+    /**
+     * Tags belong to the account that set them: each side of a cross-account peering sees its own,
+     * and deleting from either side removes both.
+     */
+    @Test
+    @Order(11)
+    void crossAccountTagsArePerSideAndGoWithTheAttachment() {
+        String peerTgw = createTransitGateway(PEER_ACCOUNT);
+        String id = given()
+            .formParam("Action", "CreateTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayId", requesterTgw)
+            .formParam("PeerTransitGatewayId", peerTgw)
+            .formParam("PeerAccountId", "000000000002")
+            .formParam("PeerRegion", "us-east-1")
+            .formParam("TagSpecification.1.ResourceType", "transit-gateway-attachment")
+            .formParam("TagSpecification.1.Tag.1.Key", "side")
+            .formParam("TagSpecification.1.Tag.1.Value", "requester")
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateTransitGatewayPeeringAttachmentResponse.transitGatewayPeeringAttachment"
+                    + ".transitGatewayAttachmentId");
+        accept(PEER_ACCOUNT, id);
+
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", id)
+            .formParam("Tag.1.Key", "side")
+            .formParam("Tag.1.Value", "accepter")
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+
+        for (String[] viewer : new String[][] {{EAST, "requester"}, {PEER_ACCOUNT, "accepter"}}) {
+            given()
+                .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+                .formParam("TransitGatewayAttachmentIds.1", id)
+                .header("Authorization", viewer[0])
+            .when().post("/")
+            .then().statusCode(200)
+                .body(ITEM + ".tagSet.item.value", equalTo(viewer[1]));
+        }
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+
+        for (String viewer : new String[] {EAST, PEER_ACCOUNT}) {
+            given()
+                .formParam("Action", "DescribeTags")
+                .formParam("Filter.1.Name", "resource-id")
+                .formParam("Filter.1.Value.1", id)
+                .header("Authorization", viewer)
+            .when().post("/")
+            .then().statusCode(200)
+                .body("DescribeTagsResponse.tagSet", equalTo(""));
+        }
+
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", peerTgw)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    private static void accept(String auth, String attachmentId) {
+        given()
+            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", attachmentId)
+            .header("Authorization", auth)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
     private static String createPeering(String auth, String tgw, String peerTgw, String peerAccount) {
         return given()
             .formParam("Action", "CreateTransitGatewayPeeringAttachment")
