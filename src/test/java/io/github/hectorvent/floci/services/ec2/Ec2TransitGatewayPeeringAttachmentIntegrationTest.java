@@ -25,6 +25,9 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
     private static final String WEST =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/ec2/aws4_request";
+    /** A second account, in the same region as {@link #EAST}. */
+    private static final String PEER_ACCOUNT =
+            "AWS4-HMAC-SHA256 Credential=000000000002/20260205/us-east-1/ec2/aws4_request";
     private static final String ITEM =
             "DescribeTransitGatewayPeeringAttachmentsResponse.transitGatewayPeeringAttachments.item";
 
@@ -235,5 +238,149 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             .header("Authorization", WEST)
         .when().post("/")
         .then().statusCode(200);
+    }
+
+    /** Either end of a live peering holds its gateway, the same way a VPC attachment does. */
+    @Test
+    @Order(8)
+    void aPeeredGatewayCannotBeDeletedFromEitherEnd() {
+        String requester = createTransitGateway(EAST);
+        String accepter = createTransitGateway(EAST);
+        String id = createPeering(EAST, requester, accepter, "000000000000");
+
+        for (String gateway : new String[] {requester, accepter}) {
+            given()
+                .formParam("Action", "DeleteTransitGateway")
+                .formParam("TransitGatewayId", gateway)
+                .header("Authorization", EAST)
+            .when().post("/")
+            .then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
+
+            given()
+                .formParam("Action", "DescribeTransitGateways")
+                .formParam("TransitGatewayIds.1", gateway)
+                .header("Authorization", EAST)
+            .when().post("/")
+            .then().statusCode(200)
+                .body("DescribeTransitGatewaysResponse.transitGatewaySet.item.state", equalTo("available"));
+        }
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", requester)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    /**
+     * Cross-account: the requester cannot accept on the peer's behalf, the peer account sees and
+     * accepts the attachment, and each side's owner filters are relative to itself.
+     */
+    @Test
+    @Order(9)
+    void crossAccountIsAcceptedOnlyByThePeerAccount() {
+        String peerTgw = createTransitGateway(PEER_ACCOUNT);
+        String id = createPeering(EAST, requesterTgw, peerTgw, "000000000002");
+
+        given()
+            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".state", equalTo("pendingAcceptance"));
+
+        // The peer sees itself as local and the requester as remote.
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("Filter.1.Name", "local-owner-id")
+            .formParam("Filter.1.Value.1", "000000000002")
+            .formParam("Filter.2.Name", "remote-owner-id")
+            .formParam("Filter.2.Value.1", "000000000000")
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".transitGatewayAttachmentId", equalTo(id));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("Filter.1.Name", "local-owner-id")
+            .formParam("Filter.1.Value.1", "000000000000")
+            .formParam("Filter.2.Name", "remote-owner-id")
+            .formParam("Filter.2.Value.1", "000000000002")
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".transitGatewayAttachmentId", equalTo(id));
+
+        given()
+            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".state", equalTo("available"));
+
+        // The peer's gateway is held by the requester's peering too.
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", peerTgw)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
+    }
+
+    private static String createPeering(String auth, String tgw, String peerTgw, String peerAccount) {
+        return given()
+            .formParam("Action", "CreateTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayId", tgw)
+            .formParam("PeerTransitGatewayId", peerTgw)
+            .formParam("PeerAccountId", peerAccount)
+            .formParam("PeerRegion", "us-east-1")
+            .header("Authorization", auth)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateTransitGatewayPeeringAttachmentResponse.transitGatewayPeeringAttachment"
+                    + ".transitGatewayAttachmentId");
     }
 }

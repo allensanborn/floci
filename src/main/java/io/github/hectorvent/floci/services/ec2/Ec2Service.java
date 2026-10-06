@@ -2019,6 +2019,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("IncorrectState", transitGatewayId
                         + " has non-deleted VPC Attachments: " + String.join(", ", attached) + ".", 400);
             }
+            // A peering holds the gateway from either end, and the other end may be another account.
+            List<String> peered = allPeeringAttachments().stream()
+                    .filter(attachment -> !Set.of("deleted", "rejected").contains(attachment.getState()))
+                    .filter(attachment -> isGateway(attachment.getRequesterTgwInfo(), region, transitGatewayId)
+                            || isGateway(attachment.getAccepterTgwInfo(), region, transitGatewayId))
+                    .map(TransitGatewayPeeringAttachment::getTransitGatewayAttachmentId)
+                    .toList();
+            if (!peered.isEmpty()) {
+                throw new AwsException("IncorrectState", transitGatewayId
+                        + " has non-deleted Peering Attachments: " + String.join(", ", peered) + ".", 400);
+            }
             transitGatewayRouteTables.scan(k -> true).stream()
                     .filter(routeTable -> region.equals(routeTable.getRegion()))
                     .filter(routeTable -> transitGatewayId.equals(routeTable.getTransitGatewayId()))
@@ -2324,29 +2335,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         "The request must contain the parameter " + required[0] + ".", 400);
             }
         }
-        TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
-        TransitGatewayPeeringAttachment attachment = new TransitGatewayPeeringAttachment();
-        String attachmentId = "tgw-attach-" + randomHex(17);
-        attachment.setTransitGatewayAttachmentId(attachmentId);
-        attachment.setRequesterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
-                transitGatewayId, gateway.getOwnerId(), region));
-        attachment.setAccepterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
-                peerTransitGatewayId, peerAccountId, peerRegion));
-        attachment.setDynamicRouting(isSet(dynamicRouting) ? dynamicRouting : "disable");
-        attachment.setState("pendingAcceptance");
-        attachment.setCreationTime(ISO_FMT.format(Instant.now()));
-        transitGatewayPeeringAttachments.put(attachmentId, attachment);
-        if (attachmentTags != null && !attachmentTags.isEmpty()) {
-            tags.put(attachmentId, new ArrayList<>(attachmentTags));
+        // Under the lock DeleteTransitGateway checks peerings under, so neither lands in between.
+        synchronized (attachmentTopologyLock(region)) {
+            TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            TransitGatewayPeeringAttachment attachment = new TransitGatewayPeeringAttachment();
+            String attachmentId = "tgw-attach-" + randomHex(17);
+            attachment.setTransitGatewayAttachmentId(attachmentId);
+            attachment.setRequesterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
+                    transitGatewayId, gateway.getOwnerId(), region));
+            attachment.setAccepterTgwInfo(new TransitGatewayPeeringAttachment.TgwInfo(
+                    peerTransitGatewayId, peerAccountId, peerRegion));
+            attachment.setDynamicRouting(isSet(dynamicRouting) ? dynamicRouting : "disable");
+            attachment.setState("pendingAcceptance");
+            attachment.setCreationTime(ISO_FMT.format(Instant.now()));
+            transitGatewayPeeringAttachments.put(attachmentId, attachment);
+            if (attachmentTags != null && !attachmentTags.isEmpty()) {
+                tags.put(attachmentId, new ArrayList<>(attachmentTags));
+            }
+            return withStoredTags(attachment);
         }
-        return withStoredTags(attachment);
     }
 
     public List<TransitGatewayPeeringAttachment> describeTransitGatewayPeeringAttachments(
             String region, List<String> attachmentIds, Map<String, List<String>> filters) {
         attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
-        List<TransitGatewayPeeringAttachment> visible = transitGatewayPeeringAttachments.scan(k -> true).stream()
-                .filter(attachment -> isPartyTo(attachment, region))
+        String account = callerAccountId();
+        List<TransitGatewayPeeringAttachment> visible = allPeeringAttachments().stream()
+                .filter(attachment -> isPartyTo(attachment, account, region))
                 .map(this::withStoredTags)
                 .toList();
         for (String attachmentId : attachmentIds) {
@@ -2360,11 +2375,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 .collect(Collectors.toList());
     }
 
-    /** Only the accepter's region accepts, and only while the attachment is still pending. */
+    /**
+     * Only the accepter accepts — its account in its region — and only while the attachment is
+     * still pending. A requester whose peer is another account cannot accept on the peer's behalf.
+     */
     public TransitGatewayPeeringAttachment acceptTransitGatewayPeeringAttachment(String region, String attachmentId) {
         synchronized (lockFor(attachmentId)) {
-            TransitGatewayPeeringAttachment attachment = getRequiredPeeringAttachment(region, attachmentId);
-            if (!region.equals(attachment.getAccepterTgwInfo().getRegion())) {
+            OwnedPeeringAttachment owned = getRequiredPeeringAttachment(region, attachmentId);
+            TransitGatewayPeeringAttachment attachment = owned.attachment();
+            if (!isGatewayOf(attachment.getAccepterTgwInfo(), callerAccountId(), region)) {
                 throw peeringAttachmentNotFound(attachmentId);
             }
             if (!"pendingAcceptance".equals(attachment.getState())) {
@@ -2372,7 +2391,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                         + " is in invalid state " + attachment.getState() + ".", 400);
             }
             attachment.setState("available");
-            transitGatewayPeeringAttachments.put(attachmentId, attachment);
+            if (owned.storageAccountId() != null) {
+                peeringAttachmentsByAccount().putForAccount(owned.storageAccountId(), attachmentId, attachment);
+            } else {
+                transitGatewayPeeringAttachments.put(attachmentId, attachment);
+            }
             return withStoredTags(attachment);
         }
     }
@@ -2380,29 +2403,81 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     /** Either side may delete. AWS reports {@code deleting} first; the settled state is returned. */
     public TransitGatewayPeeringAttachment deleteTransitGatewayPeeringAttachment(String region, String attachmentId) {
         synchronized (lockFor(attachmentId)) {
-            TransitGatewayPeeringAttachment attachment =
-                    withStoredTags(getRequiredPeeringAttachment(region, attachmentId));
-            transitGatewayPeeringAttachments.delete(attachmentId);
+            OwnedPeeringAttachment owned = getRequiredPeeringAttachment(region, attachmentId);
+            TransitGatewayPeeringAttachment attachment = withStoredTags(owned.attachment());
+            if (owned.storageAccountId() != null) {
+                peeringAttachmentsByAccount().deleteForAccount(owned.storageAccountId(), attachmentId);
+            } else {
+                transitGatewayPeeringAttachments.delete(attachmentId);
+            }
             tags.delete(attachmentId);
             attachment.setState("deleted");
             return attachment;
         }
     }
 
-    private TransitGatewayPeeringAttachment getRequiredPeeringAttachment(String region, String attachmentId) {
+    /** A peering attachment together with the account partition its storage entry lives under. */
+    private record OwnedPeeringAttachment(String storageAccountId, TransitGatewayPeeringAttachment attachment) {}
+
+    /**
+     * Stored under the requester's account, but the accepter may be another account, so lookups
+     * search every account's partition and then admit only the two parties — the same pattern
+     * {@link #allVpcPeeringConnections} uses.
+     */
+    private OwnedPeeringAttachment getRequiredPeeringAttachment(String region, String attachmentId) {
         if (!isSet(attachmentId)) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter TransitGatewayAttachmentId.", 400);
         }
         requireWellFormedAttachmentId(attachmentId);
-        return transitGatewayPeeringAttachments.get(attachmentId)
-                .filter(attachment -> isPartyTo(attachment, region))
-                .orElseThrow(() -> peeringAttachmentNotFound(attachmentId));
+        AccountAwareStorageBackend<TransitGatewayPeeringAttachment> byAccount = peeringAttachmentsByAccount();
+        OwnedPeeringAttachment owned = byAccount != null
+                ? byAccount.findAnyAccountEntry(attachmentId)
+                        .map(entry -> new OwnedPeeringAttachment(entry.account(), entry.value())).orElse(null)
+                : transitGatewayPeeringAttachments.get(attachmentId)
+                        .map(attachment -> new OwnedPeeringAttachment(null, attachment)).orElse(null);
+        if (owned == null || !isPartyTo(owned.attachment(), callerAccountId(), region)) {
+            throw peeringAttachmentNotFound(attachmentId);
+        }
+        return owned;
     }
 
-    private static boolean isPartyTo(TransitGatewayPeeringAttachment attachment, String region) {
-        return region.equals(attachment.getRequesterTgwInfo().getRegion())
-                || region.equals(attachment.getAccepterTgwInfo().getRegion());
+    private List<TransitGatewayPeeringAttachment> allPeeringAttachments() {
+        AccountAwareStorageBackend<TransitGatewayPeeringAttachment> byAccount = peeringAttachmentsByAccount();
+        return byAccount != null ? byAccount.scanAllAccounts() : transitGatewayPeeringAttachments.scan(k -> true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private AccountAwareStorageBackend<TransitGatewayPeeringAttachment> peeringAttachmentsByAccount() {
+        return transitGatewayPeeringAttachments instanceof AccountAwareStorageBackend<?> byAccount
+                ? (AccountAwareStorageBackend<TransitGatewayPeeringAttachment>) byAccount : null;
+    }
+
+    private static boolean isPartyTo(TransitGatewayPeeringAttachment attachment, String account, String region) {
+        return isGatewayOf(attachment.getRequesterTgwInfo(), account, region)
+                || isGatewayOf(attachment.getAccepterTgwInfo(), account, region);
+    }
+
+    /** Whether this end of a peering is the caller's: its account, seen from its region. */
+    private static boolean isGatewayOf(TransitGatewayPeeringAttachment.TgwInfo side, String account, String region) {
+        return account.equals(side.getOwnerId()) && region.equals(side.getRegion());
+    }
+
+    private static boolean isGateway(TransitGatewayPeeringAttachment.TgwInfo side, String region, String gatewayId) {
+        return region.equals(side.getRegion()) && gatewayId.equals(side.getTransitGatewayId());
+    }
+
+    /** The end the caller sees as local: the accepter's, when the caller is the accepter and not also the requester. */
+    private TransitGatewayPeeringAttachment.TgwInfo localSide(TransitGatewayPeeringAttachment attachment, String region) {
+        String account = callerAccountId();
+        return !isGatewayOf(attachment.getRequesterTgwInfo(), account, region)
+                && isGatewayOf(attachment.getAccepterTgwInfo(), account, region)
+                ? attachment.getAccepterTgwInfo() : attachment.getRequesterTgwInfo();
+    }
+
+    private TransitGatewayPeeringAttachment.TgwInfo remoteSide(TransitGatewayPeeringAttachment attachment, String region) {
+        return localSide(attachment, region) == attachment.getRequesterTgwInfo()
+                ? attachment.getAccepterTgwInfo() : attachment.getRequesterTgwInfo();
     }
 
     private TransitGatewayPeeringAttachment withStoredTags(TransitGatewayPeeringAttachment attachment) {
@@ -9089,8 +9164,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 // Either side's gateway: the accepter looks its attachment up by its own gateway.
                 case "transit-gateway-id" -> matchesValue(values, attachment.getRequesterTgwInfo().getTransitGatewayId())
                         || matchesValue(values, attachment.getAccepterTgwInfo().getTransitGatewayId());
-                case "local-owner-id" -> matchesValue(values, attachment.getRequesterTgwInfo().getOwnerId());
-                case "remote-owner-id" -> matchesValue(values, attachment.getAccepterTgwInfo().getOwnerId());
+                // Local and remote are the viewer's: the accepter sees itself as local.
+                case "local-owner-id" -> matchesValue(values, localSide(attachment, region).getOwnerId());
+                case "remote-owner-id" -> matchesValue(values, remoteSide(attachment, region).getOwnerId());
                 case "state" -> matchesValue(values, attachment.getState());
                 default -> true;
             };
