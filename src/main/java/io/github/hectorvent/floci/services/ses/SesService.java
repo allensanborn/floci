@@ -120,6 +120,9 @@ public class SesService {
     // the tenant record; the facade keeps the associations, the delete cascade, the send-time tenant
     // gate and the tenant-scoped suppression routing.
     private final SesTenantService tenantService;
+    // S/MIME certificate associations live in SesIdentityCertificateService, which the v2 controller
+    // calls directly; the facade only reaches it for the identity delete-guard.
+    private final SesIdentityCertificateService certificateService;
     private final SmtpRelay smtpRelay;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
@@ -136,7 +139,7 @@ public class SesService {
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SesTenantService tenantService, SesConfigurationSetService configSetService,
-                       SmtpRelay smtpRelay,
+                       SesIdentityCertificateService certificateService, SmtpRelay smtpRelay,
                        SesEventPublisher eventPublisher, EmulatorConfig config,
                        RegionResolver regionResolver) {
         this.identityService = identityService;
@@ -149,6 +152,7 @@ public class SesService {
         this.policyService = policyService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
+        this.certificateService = certificateService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
@@ -166,6 +170,7 @@ public class SesService {
                SesPolicyService policyService,
                SesCvetService cvetService,
                SesTenantService tenantService,
+               SesIdentityCertificateService certificateService,
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -177,6 +182,7 @@ public class SesService {
         this.policyService = policyService;
         this.cvetService = cvetService;
         this.tenantService = tenantService;
+        this.certificateService = certificateService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
@@ -201,8 +207,10 @@ public class SesService {
         if (identityValue == null || identityValue.isBlank()) {
             return;
         }
+        String accountId = regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
         tenantService.deleteBackingResource(SesTenantService.RESOURCE_TYPE_IDENTITY, identityValue,
-                region, () -> doDeleteIdentity(identityValue, region));
+                region, () -> certificateService.deleteIdentityGuarded(identityValue, accountId, region,
+                        () -> doDeleteIdentity(identityValue, region)));
     }
 
     private void doDeleteIdentity(String identityValue, String region) {
@@ -891,8 +899,9 @@ public class SesService {
 
     // ──────────────────────── Tenants (multi-tenancy) ────────────────────────
     // Tenants live in SesTenantService, which the v2 controller calls directly for the tenant
-    // record and its suppression attributes; the facade keeps the resource associations (they
-    // check the identity, configuration set or template exists) and the delete cascade.
+    // record, its suppression attributes and the tenant's resource list; the facade keeps the
+    // association operations that check the identity, configuration set or template exists, and
+    // the delete cascade.
 
     public void deleteTenant(String tenantName, String region) {
         // The tenant-scoped suppression entries live in the suppression domain; the callback runs
@@ -925,18 +934,8 @@ public class SesService {
         tenantService.disassociate(tenant, ref, region);
     }
 
-    // Probe-confirmed order on both lists: the tenant or resource is resolved first and the filter is
-    // checked next, so a bad page on a missing tenant is the 404; the page size and token come last.
-    public PaginatedResult<TenantResourceAssociation> listTenantResources(String tenantName,
-                                                                          String resourceTypeFilter,
-                                                                          SesListPaging paging,
-                                                                          Integer pageSize, String nextToken,
-                                                                          String region) {
-        Tenant tenant = tenantService.tenantForAssociation(tenantName, region);
-        SesTenantService.validateResourceTypeFilter(resourceTypeFilter);
-        return tenantService.listTenantResources(tenant, resourceTypeFilter, region, paging, pageSize, nextToken);
-    }
-
+    // Probe-confirmed order: the resource is resolved first, so a bad page on a missing resource is
+    // the 404; the page size and token come last.
     public PaginatedResult<TenantResourceAssociation> listResourceTenants(String resourceArn, SesListPaging paging,
                                                                           Integer pageSize, String nextToken,
                                                                           String accountId, String region) {
@@ -1239,7 +1238,7 @@ public class SesService {
     // TenantName sends the operation to that tenant's own list, which is fully separate from the
     // account list on AWS, and the reason and address validation still runs first, matching the
     // probed precedence where request validation precedes tenant existence. The send filters
-    // (collectSuppressedReasons, resolveSuppressionReason) read entries back through the service.
+    // (collectSuppressedReasons) read entries back through the service.
 
     public void putSuppressedDestination(String region, String emailAddress, String reason,
                                          String tenantName) {
@@ -1428,42 +1427,6 @@ public class SesService {
             }
         }
         return kept;
-    }
-
-    /**
-     * Resolve the suppression reason that applies to a given recipient in the given region
-     * for sends using {@code configurationSetName}, or {@code null} if the recipient is not
-     * suppressed. The recipient is suppressed only when it appears in the address-level
-     * suppression list AND its stored reason intersects the effective {@code suppressedReasons}
-     * — the configuration set's {@code SuppressionOptions} override if present, else the
-     * account-level reasons. {@code configurationSetName} may be {@code null} or blank to
-     * scope the check to account-level reasons only.
-     *
-     * <p>The returned value is one of {@code "BOUNCE"} / {@code "COMPLAINT"}, allowing
-     * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
-     * event without consulting the store again. Both the per-address suppression entries
-     * and the account-level / per-CS {@code suppressedReasons} go through reason validation
-     * (in {@link SesSuppressionService} and {@link SesConfigurationSetService} respectively),
-     * which enforces exact case-sensitive equality with the two canonical values, so
-     * {@code entry.getReason()} is guaranteed to be canonical and downstream
-     * {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")} checks are safe.
-     */
-    String resolveSuppressionReason(String emailAddress, String configurationSetName, String region) {
-        if (emailAddress == null || emailAddress.isBlank()) {
-            return null;
-        }
-        // Read through the suppression service so this shares its normalization and legacy-key
-        // fallback with GET/DELETE (lookups can't drift apart from inserts).
-        SuppressedDestination entry = suppressionService.findSuppressedDestination(region, emailAddress)
-                .orElse(null);
-        if (entry == null || entry.getReason() == null) {
-            return null;
-        }
-        List<String> effective = getEffectiveSuppressedReasons(configurationSetName, region);
-        if (effective == null || effective.isEmpty()) {
-            return null;
-        }
-        return effective.contains(entry.getReason()) ? entry.getReason() : null;
     }
 
     /**

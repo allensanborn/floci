@@ -14,10 +14,15 @@ import io.github.hectorvent.floci.services.iam.model.LoginProfile;
 import io.github.hectorvent.floci.services.iam.model.OpenIDConnectProvider;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import io.github.hectorvent.floci.services.iam.model.SAMLProvider;
+import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
+import io.github.hectorvent.floci.services.iam.model.ServiceSpecificCredential;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedJob;
+import io.github.hectorvent.floci.services.iam.model.SigningCertificate;
+import io.github.hectorvent.floci.services.iam.model.SshPublicKey;
 import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -65,18 +70,21 @@ public class IamQueryHandler {
     private final SAMLProviderService samlProviderService;
     private final ServiceLastAccessedService serviceLastAccessedService;
     private final RegionResolver regionResolver;
+    private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
                            AccountResolver accountResolver, SAMLProviderService samlProviderService,
                            ServiceLastAccessedService serviceLastAccessedService,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
         this.accountResolver = accountResolver;
         this.samlProviderService = samlProviderService;
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.regionResolver = regionResolver;
+        this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorization) {
@@ -90,6 +98,20 @@ public class IamQueryHandler {
             case "DeleteUser" -> handleDeleteUser(params);
             case "ListUsers" -> handleListUsers(params);
             case "UpdateUser" -> handleUpdateUser(params);
+            case "CreateServiceSpecificCredential" -> handleCreateServiceSpecificCredential(params);
+            case "ListServiceSpecificCredentials" -> handleListServiceSpecificCredentials(params, authorization);
+            case "UpdateServiceSpecificCredential" -> handleUpdateServiceSpecificCredential(params, authorization);
+            case "ResetServiceSpecificCredential" -> handleResetServiceSpecificCredential(params, authorization);
+            case "DeleteServiceSpecificCredential" -> handleDeleteServiceSpecificCredential(params, authorization);
+            case "UploadSSHPublicKey" -> handleUploadSshPublicKey(params);
+            case "GetSSHPublicKey" -> handleGetSshPublicKey(params);
+            case "ListSSHPublicKeys" -> handleListSshPublicKeys(params, authorization);
+            case "UpdateSSHPublicKey" -> handleUpdateSshPublicKey(params);
+            case "DeleteSSHPublicKey" -> handleDeleteSshPublicKey(params);
+            case "UploadSigningCertificate" -> handleUploadSigningCertificate(params, authorization);
+            case "ListSigningCertificates" -> handleListSigningCertificates(params, authorization);
+            case "UpdateSigningCertificate" -> handleUpdateSigningCertificate(params, authorization);
+            case "DeleteSigningCertificate" -> handleDeleteSigningCertificate(params, authorization);
             case "TagUser" -> handleTagUser(params);
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
@@ -130,7 +152,14 @@ public class IamQueryHandler {
             case "TagOpenIDConnectProvider" -> handleTagOpenIDConnectProvider(params);
             case "UntagOpenIDConnectProvider" -> handleUntagOpenIDConnectProvider(params);
             case "ListOpenIDConnectProviderTags" -> handleListOpenIDConnectProviderTags(params);
+            case "UploadServerCertificate" -> handleUploadServerCertificate(params);
+            case "GetServerCertificate" -> handleGetServerCertificate(params);
+            case "UpdateServerCertificate" -> handleUpdateServerCertificate(params);
+            case "DeleteServerCertificate" -> handleDeleteServerCertificate(params);
             case "ListServerCertificates" -> handleListServerCertificates(params);
+            case "TagServerCertificate" -> handleTagServerCertificate(params);
+            case "UntagServerCertificate" -> handleUntagServerCertificate(params);
+            case "ListServerCertificateTags" -> handleListServerCertificateTags(params);
 
             // Account Aliases
             case "ListAccountAliases" -> handleListAccountAliases(params);
@@ -683,13 +712,356 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("ListOpenIDConnectProviderTags", AwsNamespaces.IAM, result)).build();
     }
 
-    private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
-        // Server certificates are not modeled; return an empty paginated list.
+    private Response handleUploadServerCertificate(MultivaluedMap<String, String> params) {
+        ServerCertificate certificate = iamService.uploadServerCertificate(
+                getParam(params, "ServerCertificateName"), getParam(params, "Path"),
+                getParam(params, "CertificateBody"), getParam(params, "PrivateKey"),
+                getParam(params, "CertificateChain"), extractTags(params, false));
         String result = new XmlBuilder()
-                .start("ServerCertificateMetadataList").end("ServerCertificateMetadataList")
-                .elem("IsTruncated", false)
+                .start("ServerCertificateMetadata").raw(serverCertificateMetadataXml(certificate))
+                .end("ServerCertificateMetadata")
+                .raw(tagsElement(new TreeMap<>(certificate.getTags())))
                 .build();
-        return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, result)).build();
+        return Response.ok(AwsQueryResponse.envelope("UploadServerCertificate", AwsNamespaces.IAM, result)).build();
+    }
+
+    /**
+     * Returns the stored certificate and its chain, but never the private key: AWS marks
+     * {@code privateKeyType} sensitive and models it only on the upload, so no reader returns it.
+     */
+    private Response handleGetServerCertificate(MultivaluedMap<String, String> params) {
+        ServerCertificate certificate = iamService.getServerCertificate(
+                getParam(params, "ServerCertificateName"));
+        XmlBuilder xml = new XmlBuilder().start("ServerCertificate")
+                .start("ServerCertificateMetadata").raw(serverCertificateMetadataXml(certificate))
+                .end("ServerCertificateMetadata")
+                .elem("CertificateBody", certificate.getCertificateBody());
+        if (certificate.getCertificateChain() != null) {
+            xml.elem("CertificateChain", certificate.getCertificateChain());
+        }
+        xml.raw(tagsElement(new TreeMap<>(certificate.getTags()))).end("ServerCertificate");
+        return Response.ok(AwsQueryResponse.envelope("GetServerCertificate", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateServerCertificate(MultivaluedMap<String, String> params) {
+        iamService.updateServerCertificate(getParam(params, "ServerCertificateName"),
+                getParam(params, "NewServerCertificateName"), getParam(params, "NewPath"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateServerCertificate", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteServerCertificate(MultivaluedMap<String, String> params) {
+        iamService.deleteServerCertificate(getParam(params, "ServerCertificateName"),
+                serverCertificateReferenceProviders.stream().toList());
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServerCertificate", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The metadata list only, as AWS documents: "this operation does not return the certificate
+     * body, certificate chain, or private key".
+     */
+    private Response handleListServerCertificates(MultivaluedMap<String, String> params) {
+        Page<ServerCertificate> page = paginate(
+                iamService.listServerCertificates(getParam(params, "PathPrefix")), params);
+        XmlBuilder xml = new XmlBuilder().start("ServerCertificateMetadataList");
+        for (ServerCertificate certificate : page.items()) {
+            xml.start("member").raw(serverCertificateMetadataXml(certificate)).end("member");
+        }
+        xml.end("ServerCertificateMetadataList").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListServerCertificates", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * UserName is required here and optional on the other four, which is a third pattern again:
+     * the signing-certificate operations take it optionally throughout and the SSH ones require it
+     * everywhere but the list.
+     */
+    private Response handleCreateServiceSpecificCredential(
+            MultivaluedMap<String, String> params) {
+        ServiceSpecificCredential credential = iamService.createServiceSpecificCredential(
+                requireParam(params, "UserName"), requireParam(params, "ServiceName"),
+                optionalInt(params, "CredentialAgeDays"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("CreateServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The metadata list, which the model defines without either secret. {@code AllUsers} cannot be
+     * given together with {@code UserName}, so naming both is a validation error rather than one
+     * quietly winning.
+     */
+    private Response handleListServiceSpecificCredentials(
+            MultivaluedMap<String, String> params, String authorization) {
+        boolean allUsers = "true".equalsIgnoreCase(getParam(params, "AllUsers"));
+        if (allUsers && getParam(params, "UserName") != null) {
+            throw new AwsException("ValidationError",
+                    "AllUsers cannot be specified together with UserName.", 400);
+        }
+        String userName = allUsers ? null : resolveUserName(params, authorization);
+        Page<ServiceSpecificCredential> page = paginate(
+                iamService.listServiceSpecificCredentials(
+                        userName, getParam(params, "ServiceName"), allUsers), params);
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredentials");
+        for (ServiceSpecificCredential credential : page.items()) {
+            xml.start("member").raw(serviceCredentialXml(credential, false)).end("member");
+        }
+        xml.end("ServiceSpecificCredentials").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListServiceSpecificCredentials",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.updateServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The reset is the only operation besides the create that returns the secret half. */
+    private Response handleResetServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        ServiceSpecificCredential credential = iamService.resetServiceSpecificCredential(
+                resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        XmlBuilder xml = new XmlBuilder().start("ServiceSpecificCredential")
+                .raw(serviceCredentialXml(credential, true)).end("ServiceSpecificCredential");
+        return Response.ok(AwsQueryResponse.envelope("ResetServiceSpecificCredential",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleDeleteServiceSpecificCredential(
+            MultivaluedMap<String, String> params, String authorization) {
+        iamService.deleteServiceSpecificCredential(resolveUserName(params, authorization),
+                requireParam(params, "ServiceSpecificCredentialId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteServiceSpecificCredential",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * A credential, with the secret half only when the operation is one that discloses it. The
+     * metadata shape the list uses is defined without {@code ServicePassword} or
+     * {@code ServiceCredentialSecret}, so omitting them is the shape rather than a precaution.
+     */
+    private String serviceCredentialXml(ServiceSpecificCredential credential, boolean withSecret) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("UserName", credential.getUserName())
+                .elem("ServiceName", credential.getServiceName())
+                .elem("ServiceSpecificCredentialId", credential.getServiceSpecificCredentialId())
+                .elem("Status", iamService.reportedStatus(credential))
+                .elem("CreateDate", isoDate(credential.getCreateDate()));
+        if (credential.getServiceUserName() != null) {
+            xml.elem("ServiceUserName", credential.getServiceUserName());
+        }
+        if (credential.getServiceCredentialAlias() != null) {
+            xml.elem("ServiceCredentialAlias", credential.getServiceCredentialAlias());
+        }
+        if (credential.getExpirationDate() != null) {
+            xml.elem("ExpirationDate", isoDate(credential.getExpirationDate()));
+        }
+        if (withSecret) {
+            if (credential.getServicePassword() != null) {
+                xml.elem("ServicePassword", credential.getServicePassword());
+            }
+            if (credential.getServiceCredentialSecret() != null) {
+                xml.elem("ServiceCredentialSecret", credential.getServiceCredentialSecret());
+            }
+        }
+        return xml.build();
+    }
+
+    /** An optional integer parameter that AWS documents as having to be positive. */
+    /**
+     * An optional integer parameter. Absent means absent, but present and unparseable is a
+     * validation error rather than a silent absence: {@code CredentialAgeDays=} would otherwise
+     * create a credential that never expires, which is the opposite of what the caller asked for.
+     */
+    private Integer optionalInt(MultivaluedMap<String, String> params, String name) {
+        String raw = getParam(params, name);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError",
+                    "Value '" + raw + "' at '" + Character.toLowerCase(name.charAt(0))
+                            + name.substring(1) + "' failed to satisfy constraint: Member must be "
+                            + "an integer", 400);
+        }
+    }
+
+    /**
+     * UserName is required on every SSH public key operation but the list, which is the opposite
+     * of the signing-certificate operations: there the model marks it optional throughout.
+     */
+    private Response handleUploadSshPublicKey(MultivaluedMap<String, String> params) {
+        SshPublicKey key = iamService.uploadSshPublicKey(requireParam(params, "UserName"),
+                getParam(params, "SSHPublicKeyBody"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SSHPublicKey").raw(sshPublicKeyXml(key)).end("SSHPublicKey");
+        return Response.ok(AwsQueryResponse.envelope("UploadSSHPublicKey",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleGetSshPublicKey(MultivaluedMap<String, String> params) {
+        SshPublicKey key = iamService.getSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"), getParam(params, "Encoding"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("SSHPublicKey").raw(sshPublicKeyXml(key)).end("SSHPublicKey");
+        return Response.ok(AwsQueryResponse.envelope("GetSSHPublicKey",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    /**
+     * The metadata list only. AWS documents SSHPublicKeyMetadata as carrying the key "without the
+     * key's body or fingerprint", so neither appears here even though both are stored.
+     */
+    private Response handleListSshPublicKeys(MultivaluedMap<String, String> params,
+                                             String authorization) {
+        Page<SshPublicKey> page = paginate(
+                iamService.listSshPublicKeys(resolveUserName(params, authorization)), params);
+        XmlBuilder xml = new XmlBuilder().start("SSHPublicKeys");
+        for (SshPublicKey key : page.items()) {
+            xml.start("member")
+                    .elem("UserName", key.getUserName())
+                    .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                    .elem("Status", key.getStatus())
+                    .elem("UploadDate", isoDate(key.getUploadDate()))
+                    .end("member");
+        }
+        xml.end("SSHPublicKeys").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListSSHPublicKeys",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.updateSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateSSHPublicKey",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteSshPublicKey(MultivaluedMap<String, String> params) {
+        iamService.deleteSshPublicKey(requireParam(params, "UserName"),
+                requireParam(params, "SSHPublicKeyId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSSHPublicKey",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The five members the model marks required on SSHPublicKey, plus UploadDate. */
+    private String sshPublicKeyXml(SshPublicKey key) {
+        return new XmlBuilder()
+                .elem("UserName", key.getUserName())
+                .elem("SSHPublicKeyId", key.getSshPublicKeyId())
+                .elem("Fingerprint", key.getFingerprint())
+                .elem("SSHPublicKeyBody", key.getSshPublicKeyBody())
+                .elem("Status", key.getStatus())
+                .elem("UploadDate", isoDate(key.getUploadDate()))
+                .build();
+    }
+
+    /**
+     * UserName is optional on every signing-certificate operation: the model says it is determined
+     * implicitly from the access key that signed the request.
+     */
+    private Response handleUploadSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        SigningCertificate certificate = iamService.uploadSigningCertificate(
+                resolveUserName(params, authorization), getParam(params, "CertificateBody"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("Certificate").raw(signingCertificateXml(certificate)).end("Certificate");
+        return Response.ok(AwsQueryResponse.envelope("UploadSigningCertificate",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleListSigningCertificates(MultivaluedMap<String, String> params,
+                                                   String authorization) {
+        Page<SigningCertificate> page = paginate(
+                iamService.listSigningCertificates(resolveUserName(params, authorization)), params);
+        XmlBuilder xml = new XmlBuilder().start("Certificates");
+        for (SigningCertificate certificate : page.items()) {
+            xml.start("member").raw(signingCertificateXml(certificate)).end("member");
+        }
+        xml.end("Certificates").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListSigningCertificates",
+                AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private Response handleUpdateSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        iamService.updateSigningCertificate(resolveUserName(params, authorization),
+                requireParam(params, "CertificateId"), getParam(params, "Status"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateSigningCertificate",
+                AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleDeleteSigningCertificate(MultivaluedMap<String, String> params,
+                                                    String authorization) {
+        iamService.deleteSigningCertificate(resolveUserName(params, authorization),
+                requireParam(params, "CertificateId"));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteSigningCertificate",
+                AwsNamespaces.IAM)).build();
+    }
+
+    /** The four members the model marks required, plus UploadDate. */
+    private String signingCertificateXml(SigningCertificate certificate) {
+        return new XmlBuilder()
+                .elem("UserName", certificate.getUserName())
+                .elem("CertificateId", certificate.getCertificateId())
+                .elem("CertificateBody", certificate.getCertificateBody())
+                .elem("Status", certificate.getStatus())
+                .elem("UploadDate", isoDate(certificate.getUploadDate()))
+                .build();
+    }
+
+    private Response handleTagServerCertificate(MultivaluedMap<String, String> params) {
+        iamService.tagServerCertificate(getParam(params, "ServerCertificateName"), extractTags(params, false));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagServerCertificate", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleUntagServerCertificate(MultivaluedMap<String, String> params) {
+        iamService.untagServerCertificate(getParam(params, "ServerCertificateName"), extractTagKeys(params));
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagServerCertificate", AwsNamespaces.IAM)).build();
+    }
+
+    private Response handleListServerCertificateTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new TreeMap<>(iamService.listServerCertificateTags(
+                getParam(params, "ServerCertificateName")));
+        Page<Map.Entry<String, String>> page = paginate(List.copyOf(tags.entrySet()), params);
+        XmlBuilder xml = new XmlBuilder().start("Tags");
+        for (Map.Entry<String, String> tag : page.items()) {
+            xml.start("member").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("member");
+        }
+        xml.end("Tags").elem("IsTruncated", page.truncated());
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListServerCertificateTags", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    private String serverCertificateMetadataXml(ServerCertificate certificate) {
+        return new XmlBuilder()
+                .elem("Path", certificate.getPath())
+                .elem("ServerCertificateName", certificate.getServerCertificateName())
+                .elem("ServerCertificateId", certificate.getServerCertificateId())
+                .elem("Arn", certificate.getArn())
+                .elem("UploadDate", isoDate(certificate.getUploadDate()))
+                .elem("Expiration", isoDate(certificate.getExpiration()))
+                .build();
     }
 
     // =========================================================================
