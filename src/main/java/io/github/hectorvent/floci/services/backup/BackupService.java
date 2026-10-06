@@ -120,7 +120,7 @@ public class BackupService {
 
     public BackupVault describeBackupVault(String vaultName, String region) {
         return vaultStore.get(vaultKey(region, vaultName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup vault not found: " + vaultName, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup vault not found: " + vaultName, 400));
     }
 
     public void deleteBackupVault(String vaultName, String region) {
@@ -506,7 +506,7 @@ public class BackupService {
 
     public BackupPlan getBackupPlan(String planId) {
         return planStore.get(planId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 400));
     }
 
     public BackupPlan updateBackupPlan(String planId, String planName, List<BackupRule> rules) {
@@ -559,9 +559,9 @@ public class BackupService {
 
     public BackupSelection getBackupSelection(String planId, String selectionId) {
         BackupSelection sel = selectionStore.get(selectionId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup selection not found: " + selectionId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup selection not found: " + selectionId, 400));
         if (!planId.equals(sel.getBackupPlanId())) {
-            throw new AwsException("ResourceNotFoundException", "Backup selection not found in plan: " + planId, 404);
+            throw new AwsException("ResourceNotFoundException", "Backup selection not found in plan: " + planId, 400);
         }
         return sel;
     }
@@ -615,7 +615,7 @@ public class BackupService {
 
     public BackupJob describeBackupJob(String jobId) {
         return jobStore.get(jobId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup job not found: " + jobId, 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup job not found: " + jobId, 400));
     }
 
     public void stopBackupJob(String jobId) {
@@ -649,7 +649,7 @@ public class BackupService {
         return recoveryStore.get(recoveryPointArn)
                 .filter(rp -> vaultName.equals(rp.getBackupVaultName()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Recovery point not found: " + recoveryPointArn, 404));
+                        "Recovery point not found: " + recoveryPointArn, 400));
     }
 
     public List<RecoveryPoint> listRecoveryPointsByBackupVault(String vaultName, String region) {
@@ -799,7 +799,7 @@ public class BackupService {
         if (plan.isPresent()) {
             return new HashMap<>();
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private void applyTags(String arn, Map<String, String> newTags) {
@@ -812,7 +812,7 @@ public class BackupService {
             vaultStore.put(vaultKey(vault), vault);
             return;
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private void removeTags(String arn, List<String> tagKeys) {
@@ -825,7 +825,7 @@ public class BackupService {
             vaultStore.put(vaultKey(vault), vault);
             return;
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 404);
+        throw new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400);
     }
 
     private static void assignRuleIds(List<BackupRule> rules) {
