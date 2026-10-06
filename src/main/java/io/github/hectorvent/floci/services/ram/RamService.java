@@ -3,12 +3,14 @@ package io.github.hectorvent.floci.services.ram;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ram.model.PrincipalAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
+import io.github.hectorvent.floci.services.ram.model.SharePermission;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
@@ -52,6 +54,14 @@ public class RamService {
     /** The modeled ResourceShareStatus enum. */
     private static final List<String> SHARE_STATUSES =
             List.of("PENDING", "ACTIVE", "FAILED", "DELETING", "DELETED");
+    /** The owner segment of an AWS managed permission ARN. */
+    private static final String MANAGED_PERMISSION_OWNER = "aws";
+    /**
+     * Creation and update time reported for every AWS managed permission. It is fixed so the same
+     * permission reports the same times in every share and does not move when a share changes.
+     */
+    private static final Instant MANAGED_PERMISSION_TIME = Instant.parse("2018-11-14T00:00:00Z");
+    private static final String RESOURCE_SHARE_PREFIX = "resource-share/";
     /** An AWS account id, as opposed to an organization/OU principal ARN. */
     private static final Pattern ACCOUNT_ID_PRINCIPAL = Pattern.compile("\\d{12}");
 
@@ -118,9 +128,9 @@ public class RamService {
         return stored;
     }
 
-    /** The unfiltered read: every share visible to the caller under {@code resourceOwner}. */
-    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner) {
-        return getResourceShares(callerAccountId, resourceOwner, null, List.of(), null);
+    /** The unfiltered read: every share in {@code region} visible to the caller under {@code resourceOwner}. */
+    public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner, String region) {
+        return getResourceShares(callerAccountId, resourceOwner, null, List.of(), null, region);
     }
 
     /**
@@ -129,14 +139,15 @@ public class RamService {
      * @param name exact share name to match, or null for any
      * @param resourceShareArns share ARNs to restrict the result to, or empty for any
      * @param resourceShareStatus one {@code ResourceShareStatus} value to match, or null for any
+     * @param region the request's region: a resource share is a regional resource
      */
     public List<ResourceShare> getResourceShares(String callerAccountId, String resourceOwner,
                                                  String name, List<String> resourceShareArns,
-                                                 String resourceShareStatus) {
+                                                 String resourceShareStatus, String region) {
         requireResourceOwner(resourceOwner);
         requireResourceShareStatus(resourceShareStatus);
         List<ResourceShare> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -160,7 +171,8 @@ public class RamService {
      */
     public List<ResourceShareInvitation> getResourceShareInvitations(String callerAccountId,
                                                                       List<String> resourceShareArns,
-                                                                      List<String> resourceShareInvitationArns) {
+                                                                      List<String> resourceShareInvitationArns,
+                                                                      String region) {
         requireValidArns(resourceShareArns);
         requireValidArns(resourceShareInvitationArns);
         List<ResourceShareInvitation> result = new ArrayList<>();
@@ -168,7 +180,8 @@ public class RamService {
             // "Retrieves details about invitations that you have received": receiver only,
             // not the sender (verified against the API reference; unlike GetResourceShares,
             // there is no SELF/OTHER-ACCOUNTS style toggle here).
-            if (!callerAccountId.equals(invitation.receiverAccountId())) {
+            if (!callerAccountId.equals(invitation.receiverAccountId())
+                    || !region.equals(extractRegion(invitation.resourceShareArn()))) {
                 continue;
             }
             if (!resourceShareArns.isEmpty() && !resourceShareArns.contains(invitation.resourceShareArn())) {
@@ -203,17 +216,17 @@ public class RamService {
     }
 
     public ResourceShareInvitation acceptResourceShareInvitation(String resourceShareInvitationArn,
-                                                                  String callerAccountId) {
-        return resolveInvitation(resourceShareInvitationArn, callerAccountId, "ACCEPTED");
+                                                                  String callerAccountId, String region) {
+        return resolveInvitation(resourceShareInvitationArn, callerAccountId, region, "ACCEPTED");
     }
 
     public ResourceShareInvitation rejectResourceShareInvitation(String resourceShareInvitationArn,
-                                                                  String callerAccountId) {
-        return resolveInvitation(resourceShareInvitationArn, callerAccountId, "REJECTED");
+                                                                  String callerAccountId, String region) {
+        return resolveInvitation(resourceShareInvitationArn, callerAccountId, region, "REJECTED");
     }
 
     private ResourceShareInvitation resolveInvitation(String resourceShareInvitationArn,
-                                                       String callerAccountId, String newStatus) {
+                                                       String callerAccountId, String region, String newStatus) {
         if (!isValidArn(resourceShareInvitationArn)) {
             throw new AwsException("MalformedArnException",
                     "The specified Amazon Resource Name (ARN) has a format that isn't valid: "
@@ -222,8 +235,10 @@ public class RamService {
         // Serializes the status check against the write: two concurrent Accept calls on the
         // same invitation must not both observe PENDING and both succeed.
         synchronized (this) {
+            // An invitation, like its share, is answered in its own region only.
             ResourceShareInvitation invitation = allInvitations().stream()
                     .filter(i -> i.resourceShareInvitationArn().equals(resourceShareInvitationArn))
+                    .filter(i -> region.equals(extractRegion(i.resourceShareArn())))
                     .findFirst()
                     .orElseThrow(() -> new AwsException("ResourceShareInvitationArnNotFoundException",
                             "ResourceShareInvitation " + resourceShareInvitationArn + " does not exist.", 400));
@@ -306,10 +321,10 @@ public class RamService {
     }
 
     public List<SharedResource> listResources(String callerAccountId, String resourceOwner,
-                                              List<String> resourceShareArns) {
+                                              List<String> resourceShareArns, String region) {
         requireResourceOwner(resourceOwner);
         List<SharedResource> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -329,14 +344,15 @@ public class RamService {
         return result;
     }
 
-    public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId) {
+    public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId, String region) {
         return putForOwner(
-                requireOwnedShare(resourceShareArn, callerAccountId).withStatus("DELETED"));
+                requireOwnedShare(resourceShareArn, callerAccountId, region).withStatus("DELETED"));
     }
 
     public ResourceShare updateResourceShare(String resourceShareArn, String name,
-                                             Boolean allowExternalPrincipals, String callerAccountId) {
-        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+                                             Boolean allowExternalPrincipals, String callerAccountId,
+                                             String region) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         if (name != null) {
             share = share.withName(name);
         }
@@ -347,13 +363,13 @@ public class RamService {
     }
 
     public ResourceShare associateResourceShare(String resourceShareArn, List<String> resourceArns,
-                                                List<String> principals, String callerAccountId) {
+                                                List<String> principals, String callerAccountId, String region) {
         // The read, the merged write, and the resulting invitation creation must all happen as
         // one operation: two concurrent associates for different principals on the same share
         // must not each read the pre-update share and overwrite each other's addition, which
         // would also leave an invitation on record for a principal the stored share lost.
         synchronized (this) {
-            ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+            ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
             ResourceShare updated = share.withPrincipalsAndResources(
                     mergeDistinct(share.getPrincipals(), principals),
                     mergeDistinct(share.getResourceArns(), resourceArns));
@@ -366,8 +382,9 @@ public class RamService {
     }
 
     public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
-                                                    List<String> principals, String callerAccountId) {
-        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+                                                    List<String> principals, String callerAccountId,
+                                                    String region) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         ResourceShare updated = share.withPrincipalsAndResources(
                 withoutAll(share.getPrincipals(), principals),
                 withoutAll(share.getResourceArns(), resourceArns));
@@ -379,10 +396,10 @@ public class RamService {
      *                      {@link #getResourceShares}
      */
     public List<PrincipalAssociation> listPrincipals(String callerAccountId, String resourceOwner,
-                                                      List<String> resourceShareArns) {
+                                                      List<String> resourceShareArns, String region) {
         requireResourceOwner(resourceOwner);
         List<PrincipalAssociation> result = new ArrayList<>();
-        for (ResourceShare share : allShares()) {
+        for (ResourceShare share : sharesIn(region)) {
             if (!isVisible(share, callerAccountId, resourceOwner)) {
                 continue;
             }
@@ -402,34 +419,87 @@ public class RamService {
         return result;
     }
 
-    public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId) {
-        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+    /**
+     * Floci has no explicit permission model: every resource type in a share is governed by RAM's
+     * default AWS managed permission for that type, so one summary is returned per distinct type.
+     * Readable by the owner and by an account the share is visible to, like the other reads.
+     */
+    public List<SharePermission> listResourceSharePermissions(String resourceShareArn,
+                                                              String callerAccountId, String region) {
+        if (resourceShareArn == null || resourceShareArn.isBlank()) {
+            throw new AwsException("InvalidParameterException", "resourceShareArn is required.", 400);
+        }
+        if (!isResourceShareArn(resourceShareArn)) {
+            throw new AwsException("MalformedArnException",
+                    "The specified Amazon Resource Name (ARN) has a format that isn't valid: "
+                            + resourceShareArn, 400);
+        }
+        ResourceShare share = sharesIn(region).stream()
+                .filter(candidate -> candidate.getResourceShareArn().equals(resourceShareArn))
+                .filter(candidate -> !"DELETED".equals(candidate.getStatus()))
+                .filter(candidate -> candidate.getOwningAccountId().equals(callerAccountId)
+                        || isVisible(candidate, callerAccountId, "OTHER-ACCOUNTS"))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("UnknownResourceException",
+                        "ResourceShare " + resourceShareArn + " does not exist.", 400));
+        String partition = AwsArnUtils.parse(resourceShareArn).partition();
+        Map<String, SharePermission> byType = new LinkedHashMap<>();
+        for (String resourceArn : share.getResourceArns()) {
+            String type = ramResourceType(resourceArn);
+            if (type.isEmpty() || byType.containsKey(type)) {
+                continue;
+            }
+            String name = "AWSRAMDefaultPermission" + type.substring(type.indexOf(':') + 1);
+            byType.put(type, new SharePermission(
+                    AwsArnUtils.Arn.global(partition, "ram", MANAGED_PERMISSION_OWNER,
+                            "permission/" + name).toString(),
+                    name, type, MANAGED_PERMISSION_TIME, MANAGED_PERMISSION_TIME));
+        }
+        return List.copyOf(byType.values());
+    }
+
+    private static boolean isResourceShareArn(String arn) {
+        if (!isValidArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "ram".equals(parsed.service())
+                && parsed.resource().startsWith(RESOURCE_SHARE_PREFIX)
+                && parsed.resource().length() > RESOURCE_SHARE_PREFIX.length();
+    }
+
+    public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId,
+                            String region) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> merged = new LinkedHashMap<>(share.getTags());
         merged.putAll(newTags);
         putForOwner(share.withTags(merged));
     }
 
-    public void untagResource(String resourceShareArn, List<String> tagKeys, String callerAccountId) {
-        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId);
+    public void untagResource(String resourceShareArn, List<String> tagKeys, String callerAccountId,
+                              String region) {
+        ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> remaining = new LinkedHashMap<>(share.getTags());
         tagKeys.forEach(remaining::remove);
         putForOwner(share.withTags(remaining));
     }
 
     /**
-     * Resolves a share the caller may mutate. A share owned by another account gets the same
-     * UnknownResourceException as one that was never created: AWS resolves a share ARN within
-     * the caller's own account, so a non-owner must not learn that the ARN exists, let alone
-     * be able to rename, retag, or delete it.
+     * Resolves a share the caller may mutate. A share owned by another account, or in another
+     * region than the request's, gets the same UnknownResourceException as one that was never
+     * created: AWS resolves a share ARN within the caller's own account and region, so a
+     * non-owner must not learn that the ARN exists, let alone be able to rename, retag, or delete
+     * it, and a request in one region does not reach a share the listings there do not show.
      */
-    private ResourceShare requireOwnedShare(String resourceShareArn, String callerAccountId) {
-        return findOwnedShare(resourceShareArn, callerAccountId)
+    private ResourceShare requireOwnedShare(String resourceShareArn, String callerAccountId, String region) {
+        return findOwnedShare(resourceShareArn, callerAccountId, region)
                 .orElseThrow(() -> new AwsException("UnknownResourceException",
                         "ResourceShare " + resourceShareArn + " does not exist.", 400));
     }
 
-    private Optional<ResourceShare> findOwnedShare(String resourceShareArn, String callerAccountId) {
-        return allShares().stream()
+    private Optional<ResourceShare> findOwnedShare(String resourceShareArn, String callerAccountId,
+                                                   String region) {
+        return sharesIn(region).stream()
                 .filter(share -> share.getResourceShareArn().equals(resourceShareArn))
                 .filter(share -> share.getOwningAccountId().equals(callerAccountId))
                 // DELETED is terminal: the share stays readable via GetResourceShares for the
@@ -464,6 +534,16 @@ public class RamService {
         }
         shares.put(stamped.getResourceShareArn(), stamped);
         return stamped;
+    }
+
+    /**
+     * The shares of one region. A resource share is a regional resource, so the listing operations
+     * answer for the request's region only, which also keeps a share out of another partition.
+     */
+    private List<ResourceShare> sharesIn(String region) {
+        return allShares().stream()
+                .filter(share -> region.equals(extractRegion(share.getResourceShareArn())))
+                .toList();
     }
 
     private List<ResourceShare> allShares() {
@@ -543,7 +623,8 @@ public class RamService {
             return false;
         }
         String[] arn = principal.split(":", 6);
-        if (arn.length != 6 || !"aws".equals(arn[1]) || !"organizations".equals(arn[2])) {
+        // Any published partition: the organization id below is what ties the ARN to the caller's.
+        if (arn.length != 6 || AwsPartitions.find(arn[1]).isEmpty() || !"organizations".equals(arn[2])) {
             return false;
         }
         String[] resource = arn[5].split("/");
@@ -597,8 +678,8 @@ public class RamService {
         }
         String service = parts[2];
         String resource = parts[5];
-        int slash = resource.indexOf('/');
-        String typeSegment = slash >= 0 ? resource.substring(0, slash) : resource;
+        int separator = indexOfTypeSeparator(resource);
+        String typeSegment = separator >= 0 ? resource.substring(0, separator) : resource;
         StringBuilder camel = new StringBuilder();
         for (String word : typeSegment.split("-")) {
             if (!word.isEmpty()) {
@@ -606,5 +687,15 @@ public class RamService {
             }
         }
         return service + ":" + camel;
+    }
+
+    /** ARN resources name their type before either a slash ({@code subnet/x}) or a colon ({@code cluster:x}). */
+    private static int indexOfTypeSeparator(String resource) {
+        int slash = resource.indexOf('/');
+        int colon = resource.indexOf(':');
+        if (slash < 0) {
+            return colon;
+        }
+        return colon < 0 ? slash : Math.min(slash, colon);
     }
 }
