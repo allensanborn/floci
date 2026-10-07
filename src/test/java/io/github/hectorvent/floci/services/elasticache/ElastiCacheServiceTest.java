@@ -33,6 +33,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -715,6 +716,44 @@ class ElastiCacheServiceTest {
                 restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
         assertEquals(16381, next.getProxyPort(),
                 "Both restored records' ports (16379, 16380) must be reserved again");
+    }
+
+    @Test
+    void restoreMigratesUnprefixedLegacyRecordsInsteadOfRestoringThemEveryBoot() {
+        InMemoryStorage<String, Object> rawGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, Object> rawClusters = new InMemoryStorage<>();
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        Map<String, Object> backends = new ConcurrentHashMap<>();
+        backends.put("elasticache-groups.json", new AccountAwareStorageBackend<>(rawGroups, null, "000000000000"));
+        backends.put("elasticache-redis-clusters.json",
+                new AccountAwareStorageBackend<>(rawClusters, null, "000000000000"));
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                backends.computeIfAbsent(inv.getArgument(1, String.class),
+                        key -> AccountAwareStorageBackend.inMemory("000000000000")));
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+        before.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        before.createCacheCluster(cacheClusterRequest("cc", "redis", 1));
+        // Rewrite both records under the unprefixed key data from before account prefixing used.
+        rawGroups.put("grp", rawGroups.get("000000000000/grp").orElseThrow());
+        rawGroups.delete("000000000000/grp");
+        rawClusters.put("cc", rawClusters.get("000000000000/cc").orElseThrow());
+        rawClusters.delete("000000000000/cc");
+
+        for (int boot = 1; boot <= 2; boot++) {
+            ElastiCacheContainerManager containers = mock(ElastiCacheContainerManager.class);
+            stubSingleNodeContainer(containers);
+            serviceWith(storageFactory, containers, mock(ElastiCacheProxyManager.class),
+                    mock(ValkeyClusterFormation.class)).restorePersistedRuntime().join();
+            verify(containers, times(1)).tryStart(eq("grp"), anyString(), any());
+            verify(containers, times(1)).tryStart(eq("cc"), anyString(), any());
+        }
+        assertEquals(Set.of("000000000000/grp"), rawGroups.keys(),
+                "The legacy key must be migrated, not left beside the restored copy");
+        assertEquals(Set.of("000000000000/cc"), rawClusters.keys(),
+                "The legacy key must be migrated, not left beside the restored copy");
     }
 
     @Test

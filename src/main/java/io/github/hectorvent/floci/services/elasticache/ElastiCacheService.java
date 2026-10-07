@@ -580,6 +580,14 @@ public class ElastiCacheService implements ResourceProvider {
         // Every account's records, each written back under the account that owns it: there is no
         // request context at boot, so the plain scan and put see and write the default account only,
         // leaving other accounts' groups without a data plane and their ports free for the next create.
+        // Records stored before account prefixing are moved under the default account first, as
+        // get() would on first read. Restored in place, they would come back on every boot and
+        // outlive a delete, which only removes the prefixed key.
+        String defaultAccountId = regionResolver.getDefaultAccountId();
+        groups.migrateLegacyEntries(defaultAccountId, key -> !key.contains("/"),
+                ReplicationGroup::getReplicationGroupId, group -> true);
+        cacheClusters.migrateLegacyEntries(defaultAccountId, key -> !key.contains("/"),
+                CacheCluster::getCacheClusterId, cluster -> true);
         List<AccountEntry<ReplicationGroup>> clusterModeToRestore = new ArrayList<>();
         List<AccountEntry<ReplicationGroup>> singleNodeToRestore = new ArrayList<>();
         List<AccountEntry<CacheCluster>> cacheClustersToRestore = new ArrayList<>();
