@@ -1310,7 +1310,7 @@ public class RedshiftService {
 
         return Pagination.paginate(matching, SnapshotCopyGrant::getSnapshotCopyGrantName,
                 maxRecords, marker, SNAPSHOT_COPY_GRANT_PAGE_DEFAULT, SNAPSHOT_COPY_GRANT_PAGE_MAX,
-                "InvalidParameterValue");
+                "InvalidParameterValue", "Marker");
     }
 
     public synchronized SnapshotCopyGrant deleteSnapshotCopyGrant(String name) {
