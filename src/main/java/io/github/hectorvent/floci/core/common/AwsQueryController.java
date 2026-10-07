@@ -629,6 +629,9 @@ public class AwsQueryController {
             "ModifyClusterParameterGroup",
             "CreateClusterSubnetGroup", "DescribeClusterSubnetGroups", "ModifyClusterSubnetGroup", "DeleteClusterSubnetGroup",
             "CreateSnapshotCopyGrant", "DescribeSnapshotCopyGrants", "DeleteSnapshotCopyGrant",
+            "EnableSnapshotCopy", "DisableSnapshotCopy", "ModifySnapshotCopyRetentionPeriod",
+            "CreateSnapshotSchedule", "DescribeSnapshotSchedules", "ModifySnapshotSchedule",
+            "DeleteSnapshotSchedule", "ModifyClusterSnapshotSchedule",
             "CreateTags", "DeleteTags", "DescribeTags",
             "GetClusterCredentials", "GetClusterCredentialsWithIAM"
     );
