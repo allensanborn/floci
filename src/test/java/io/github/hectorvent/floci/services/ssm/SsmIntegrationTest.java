@@ -1756,13 +1756,37 @@ class SsmIntegrationTest {
     }
 
     @Test
-    void putParameterRejectsMalformedAllowedPatternAndNonArrayPolicies() {
+    void putParameterRejectsMalformedAllowedPattern() {
         putParameterError("""
                 { "Name": "/pol/bad-pattern", "Value": "v", "Type": "String", "AllowedPattern": "[" }
                 """, "InvalidAllowedPatternException");
+    }
+
+    @Test
+    void putParameterRejectsPoliciesThatAreNotAJsonArray() {
         putParameterError("""
                 { "Name": "/pol/bad-policies", "Value": "v", "Type": "String", "Policies": "{}" }
                 """, "ValidationException");
+    }
+
+    @Test
+    void putParameterTreatsEmptyOptionalFieldsAsAbsent() {
+        // Terraform's aws_ssm_parameter sends every optional field, unset ones as "".
+        putFilterFixture("/empty/plain", "String",
+                ", \"AllowedPattern\": \"\", \"Tier\": \"\", \"Policies\": \"\"");
+        putFilterFixture("/empty/secure", "SecureString", ", \"KeyId\": \"\", \"AllowedPattern\": \"\"");
+
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/empty/plain"] }] }
+                """)
+            .body("Parameters[0]", not(hasKey("AllowedPattern")))
+            .body("Parameters[0]", not(hasKey("Policies")))
+            .body("Parameters[0].Tier", equalTo("Standard"));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/empty/secure"] }] }
+                """)
+            .body("Parameters[0].KeyId", equalTo("alias/aws/ssm"))
+            .body("Parameters[0]", not(hasKey("AllowedPattern")));
     }
 
     private void putParameterError(String body, String errorType) {

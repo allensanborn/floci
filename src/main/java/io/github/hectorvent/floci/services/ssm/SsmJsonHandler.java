@@ -129,10 +129,11 @@ public class SsmJsonHandler {
 
         // Null when the request has no Policies, so an overwrite keeps the existing ones.
         List<JsonNode> policies = null;
-        if (request.hasNonNull("Policies")) {
+        String policiesText = optionalText(request, "Policies");
+        if (policiesText != null) {
             JsonNode parsed;
             try {
-                parsed = objectMapper.readTree(request.path("Policies").asText());
+                parsed = objectMapper.readTree(policiesText);
             } catch (JsonProcessingException e) {
                 throw new AwsException("ValidationException", "Invalid policies input: " + e.getOriginalMessage(), 400);
             }
@@ -144,8 +145,8 @@ public class SsmJsonHandler {
         }
 
         long version = ssmService.putParameter(name, value, type, description, overwrite, tags,
-                request.path("KeyId").asText(null), request.path("AllowedPattern").asText(null),
-                request.path("Tier").asText(null), policies, region);
+                optionalText(request, "KeyId"), optionalText(request, "AllowedPattern"),
+                optionalText(request, "Tier"), policies, region);
 
         return Response.ok(new PutParameterResponse(version)).build();
     }
@@ -357,6 +358,12 @@ public class SsmJsonHandler {
             response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    /** Terraform sends every optional field, unset ones as "", which AWS reads as absent. */
+    private static String optionalText(JsonNode request, String field) {
+        String text = request.path(field).asText("");
+        return text.isEmpty() ? null : text;
     }
 
     private static List<String> textValues(JsonNode values) {
