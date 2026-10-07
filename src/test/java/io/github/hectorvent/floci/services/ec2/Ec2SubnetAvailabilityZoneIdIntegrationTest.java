@@ -4,9 +4,14 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import io.quarkus.test.junit.QuarkusTest;
 
@@ -177,5 +182,100 @@ class Ec2SubnetAvailabilityZoneIdIntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    /**
+     * A zone name outside the zones this region publishes is refused, as an unpublished zone id
+     * is. Accepted, us-east-1f was given the derived id us-east-1-az6 and zzz fell back to
+     * us-east-1-az1, neither of which pairs with the zone list DescribeAvailabilityZones returns.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1f", "zzz", "us-west-2a"})
+    void aZoneNameOutsideThePublishedZonesIsRefusedAndNothingIsStored(String zone) {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", "10.90.8.0/24")
+            .formParam("AvailabilityZone", zone)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+            .body("Response.Errors.Error.Message", containsString("us-east-1a, us-east-1b, us-east-1c"));
+
+        assertEquals(List.of(), subnetIdsInVpc());
+    }
+
+    /** An unpublished name is the fault even when the id beside it is valid, not a mismatch. */
+    @Test
+    void anUnpublishedZoneNameWithAValidZoneIdIsRefusedAsInvalid() {
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", "10.90.9.0/24")
+            .formParam("AvailabilityZone", "us-east-1f")
+            .formParam("AvailabilityZoneId", "us-east-1-az1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    /**
+     * Every zone a subnet can be placed in by name reads back, through DescribeSubnets, with the
+     * zone id DescribeAvailabilityZones pairs with that name.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1a", "us-east-1b", "us-east-1c"})
+    void eachAcceptedZoneNameReadsBackWithThePublishedZoneId(String zone) {
+        String subnetId = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpcId)
+            .formParam("CidrBlock", "10.90.10.0/24")
+            .formParam("AvailabilityZone", zone)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+
+        String published = given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.find { it.zoneName == '"
+                    + zone + "' }.zoneId");
+
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.availabilityZone", equalTo(zone))
+            .body("DescribeSubnetsResponse.subnetSet.item.availabilityZoneId", equalTo(published));
+    }
+
+    private List<String> subnetIdsInVpc() {
+        return given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getList("DescribeSubnetsResponse.subnetSet.item.subnetId");
     }
 }

@@ -5069,8 +5069,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * ({@code use1-az4}); Floci derives a deterministic one instead, and what matters is that
      * every surface derives it the same way, DescribeAvailabilityZones, the seeded default
      * subnets and CreateSubnet all come through here, so a subnet's zone id agrees with the zone
-     * list a client just read. A zone name that is not this region's {@code <region><letter>}
-     * keeps the first zone's id, which is what an unrecognised name resolved to before.
+     * list a client just read. CreateSubnet refuses a zone name outside the modelled zones
+     * before it gets here; for any other caller a name that is not this region's
+     * {@code <region><letter>} keeps the first zone's id.
      */
     static String zoneIdForZoneName(String region, String zoneName) {
         if (zoneName != null && zoneName.length() == region.length() + 1 && zoneName.startsWith(region)) {
@@ -5087,9 +5088,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
      * AvailabilityZoneId the caller supplied. Terraform's aws_subnet exposes both
      * ({@code availability_zone} and {@code availability_zone_id}) and forbids setting both at
      * once, so in practice exactly one arrives; a pair that disagrees is refused rather than
-     * silently resolved to one of them.
+     * silently resolved to one of them. A zone name outside the zones this region publishes is
+     * refused the same way an unpublished zone id is: zoneIdForZoneName would otherwise derive an
+     * id DescribeAvailabilityZones does not list ({@code us-east-1f}) or fall back to the first
+     * zone's ({@code zzz}).
      */
     private String resolveSubnetZoneName(String region, String availabilityZone, String availabilityZoneId) {
+        if (isSet(availabilityZone)) {
+            requireModelledZoneName(region, availabilityZone);
+        }
         if (!isSet(availabilityZoneId)) {
             return isSet(availabilityZone) ? availabilityZone : region + "a";
         }
@@ -5100,6 +5107,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                             + availabilityZoneId + "'", 400);
         }
         return fromId;
+    }
+
+    private static void requireModelledZoneName(String region, String availabilityZone) {
+        for (String suffix : MODELLED_ZONE_SUFFIXES) {
+            if (availabilityZone.equals(region + suffix)) {
+                return;
+            }
+        }
+        throw new AwsException("InvalidParameterValue",
+                "Value (" + availabilityZone + ") for parameter availabilityZone is invalid. Subnets can "
+                        + "currently only be created in the following availability zones: "
+                        + String.join(", ", Arrays.stream(MODELLED_ZONE_SUFFIXES)
+                                .map(suffix -> region + suffix).toList()) + ".", 400);
     }
 
     /**
