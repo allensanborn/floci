@@ -404,8 +404,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         Subnet existing = ctx.isUpdate() ? findSubnet(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(vpcId, existing.getVpcId())
                 // Both sides canonical: a subnet saved before canonicalization may still hold host bits.
-                && Objects.equals(CidrCanonicalizer.canonicalize(cidr).orElse(cidr),
-                        CidrCanonicalizer.canonicalize(existing.getCidrBlock()).orElse(existing.getCidrBlock()))
+                && CidrCanonicalizer.sameBlock(cidr, existing.getCidrBlock())
                 && (az == null || az.equals(existing.getAvailabilityZone()));
         Subnet subnet = reuse ? existing : ec2Service.createSubnet(ctx.region(), vpcId, cidr, az);
         r.setPhysicalId(subnet.getSubnetId());
