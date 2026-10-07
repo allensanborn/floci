@@ -2,14 +2,19 @@ package io.github.hectorvent.floci.services.ssm;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -1656,8 +1661,7 @@ class SsmIntegrationTest {
             .body("Parameters[0].Policies[0].PolicyType", equalTo("Expiration"))
             .body("Parameters[0].Policies[0].PolicyStatus", equalTo("Pending"))
             .extract().path("Parameters[0].Policies[0].PolicyText");
-        org.junit.jupiter.api.Assertions.assertEquals("2099-01-01T00:00:00.000Z",
-                io.restassured.path.json.JsonPath.from(policyText).getString("Attributes.Timestamp"));
+        assertEquals("2099-01-01T00:00:00.000Z", JsonPath.from(policyText).getString("Attributes.Timestamp"));
 
         describeParameters("""
                 { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr/default-key"] }] }
@@ -1711,6 +1715,34 @@ class SsmIntegrationTest {
     }
 
     @Test
+    void putParameterIntelligentTieringCutsOverAbove4096Utf8Bytes() {
+        // An e-acute is one char but two UTF-8 bytes, so the multibyte values sit under 4096 chars.
+        putIntelligentTiering("/attr-it-size/ascii-4096", "a".repeat(4096));
+        putIntelligentTiering("/attr-it-size/ascii-4097", "a".repeat(4097));
+        putIntelligentTiering("/attr-it-size/utf8-4096", "\\u00e9".repeat(2048));
+        putIntelligentTiering("/attr-it-size/utf8-4098", "\\u00e9".repeat(2049));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Path", "Values": ["/attr-it-size"] }] }
+                """)
+            .body("Parameters.find { it.Name == '/attr-it-size/ascii-4096' }.Tier", equalTo("Standard"))
+            .body("Parameters.find { it.Name == '/attr-it-size/ascii-4097' }.Tier", equalTo("Advanced"))
+            .body("Parameters.find { it.Name == '/attr-it-size/utf8-4096' }.Tier", equalTo("Standard"))
+            .body("Parameters.find { it.Name == '/attr-it-size/utf8-4098' }.Tier", equalTo("Advanced"));
+    }
+
+    private void putIntelligentTiering(String name, String jsonEscapedValue) {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"" + jsonEscapedValue
+                    + "\", \"Type\": \"String\", \"Tier\": \"Intelligent-Tiering\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void putParameterRejectsAValueOutsideAllowedPattern() {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")
@@ -1760,6 +1792,21 @@ class SsmIntegrationTest {
         putParameterError("""
                 { "Name": "/pol/bad-pattern", "Value": "v", "Type": "String", "AllowedPattern": "[" }
                 """, "InvalidAllowedPatternException");
+    }
+
+    @Test
+    void putParameterBoundsCatastrophicAllowedPatternBacktracking() {
+        // Nested groups defeat the JDK's loop memoization; unbounded, this match runs for hours.
+        String body = "{ \"Name\": \"/pol/redos\", \"Value\": \"" + "a".repeat(40)
+                + "!\", \"Type\": \"String\", \"AllowedPattern\": \"^((a+)+)+$\" }";
+        assertTimeoutPreemptively(Duration.ofSeconds(10),
+                () -> putParameterError(body, "InvalidAllowedPatternException"));
+    }
+
+    @Test
+    void putParameterRejectsAllowedPatternOver1024Chars() {
+        putParameterError("{ \"Name\": \"/pol/long-pattern\", \"Value\": \"a\", \"Type\": \"String\","
+                + " \"AllowedPattern\": \"" + "a".repeat(1025) + "\" }", "ValidationException");
     }
 
     @Test

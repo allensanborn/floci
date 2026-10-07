@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -37,6 +38,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.ArrayList;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -54,6 +56,8 @@ public class SsmService implements ResourceProvider {
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
     private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
+    private static final int MAX_ALLOWED_PATTERN_LENGTH = 1024;
+    private static final long ALLOWED_PATTERN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
@@ -217,6 +221,11 @@ public class SsmService implements ResourceProvider {
             allowedPattern = null;
         }
         if (allowedPattern != null) {
+            if (allowedPattern.length() > MAX_ALLOWED_PATTERN_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value at 'allowedPattern' failed to satisfy constraint: "
+                                + "Member must have length less than or equal to " + MAX_ALLOWED_PATTERN_LENGTH, 400);
+            }
             Pattern pattern;
             try {
                 pattern = Pattern.compile(allowedPattern);
@@ -224,7 +233,16 @@ public class SsmService implements ResourceProvider {
                 throw new AwsException("InvalidAllowedPatternException",
                         "The request doesn't meet the regular expression requirement.", 400);
             }
-            if (!pattern.matcher(value).matches()) {
+            boolean matches;
+            try {
+                // Both pattern and value come from the caller, so bound the backtracking a pattern can force.
+                matches = pattern.matcher(new DeadlineCharSequence(value,
+                        System.nanoTime() + ALLOWED_PATTERN_TIMEOUT_NANOS, "AllowedPattern timed out")).matches();
+            } catch (IllegalStateException e) {
+                throw new AwsException("InvalidAllowedPatternException",
+                        "AllowedPattern took too long to evaluate against the parameter value.", 400);
+            }
+            if (!matches) {
                 throw new AwsException("ParameterPatternMismatchException",
                         "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
             }
