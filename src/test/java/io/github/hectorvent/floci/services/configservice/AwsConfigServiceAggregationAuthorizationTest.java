@@ -204,6 +204,19 @@ class AwsConfigServiceAggregationAuthorizationTest {
     }
 
     @Test
+    void deleteConformancePackDropsItsTags() {
+        AwsConfigService service = service();
+        String arn = service.putConformancePack(REGION, "pack", "s3://bucket/template.yaml", null)
+                .conformancePackArn();
+        service.tagResource(arn, List.of(Map.of("Key", "env", "Value", "prod")));
+
+        service.deleteConformancePack(REGION, "pack");
+
+        assertTrue(service.listTagsForResource(arn).isEmpty(),
+                "tags of a deleted conformance pack must not outlive it");
+    }
+
+    @Test
     void rejectsAnAccountIdThatIsNotTwelveDigits() {
         AwsConfigService service = service();
 
