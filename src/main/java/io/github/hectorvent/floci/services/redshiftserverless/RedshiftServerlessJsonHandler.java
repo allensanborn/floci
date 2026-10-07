@@ -433,10 +433,15 @@ public class RedshiftServerlessJsonHandler {
             if (!tag.isObject()) {
                 throw validation(field + " must contain only tag objects.");
             }
-            String key = tag.path("key").asText(null);
-            if (key != null) {
-                tags.put(key, tag.path("value").asText(null));
+            JsonNode key = tag.get("key");
+            if (key == null || !key.isTextual()) {
+                throw validation(field + " must contain only tags with a string key.");
             }
+            JsonNode value = tag.get("value");
+            if (value != null && !value.isNull() && !value.isTextual()) {
+                throw validation(field + " must contain only tags with a string value.");
+            }
+            tags.put(key.textValue(), value == null || value.isNull() ? null : value.textValue());
         }
         return tags;
     }

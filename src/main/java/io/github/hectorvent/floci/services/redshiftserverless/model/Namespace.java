@@ -48,11 +48,11 @@ public class Namespace {
         this.dbName = other.dbName;
         this.kmsKeyId = other.kmsKeyId;
         this.defaultIamRoleArn = other.defaultIamRoleArn;
-        this.iamRoles = new ArrayList<>(other.iamRoles);
-        this.logExports = new ArrayList<>(other.logExports);
+        this.iamRoles = other.iamRoles == null ? new ArrayList<>() : new ArrayList<>(other.iamRoles);
+        this.logExports = other.logExports == null ? new ArrayList<>() : new ArrayList<>(other.logExports);
         this.status = other.status;
         this.creationDate = other.creationDate;
-        this.tags = new LinkedHashMap<>(other.tags);
+        this.tags = other.tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(other.tags);
     }
 
     public String getNamespaceName() {
