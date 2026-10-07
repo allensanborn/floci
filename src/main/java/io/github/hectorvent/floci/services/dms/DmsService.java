@@ -363,7 +363,8 @@ public class DmsService implements Resettable {
      * Pages by identifier through the shared opaque-cursor helper, so {@code Marker} stays
      * resumable when a group is created or deleted between requests. DMS documents a default
      * {@code MaxRecords} of 100 and a valid range of 20 to 100, and rejects a value outside that
-     * range rather than clamping it.
+     * range rather than clamping it. The synthetic {@code default} group is listed and filterable
+     * like a stored one whenever {@link #findReplicationSubnetGroup} resolves it.
      */
     public PaginatedResult<ReplicationSubnetGroup> describeReplicationSubnetGroups(JsonNode request, String region) {
         Integer maxRecords = maxRecords(request);
@@ -372,11 +373,12 @@ public class DmsService implements Resettable {
         List<ReplicationSubnetGroup> matching;
         if (!requestedIdentifiers.isEmpty()) {
             matching = requestedIdentifiers.stream()
-                    .map(identifier -> subnetGroups.get(storageKey(region, identifier))
+                    .map(identifier -> findReplicationSubnetGroup(region, identifier)
                             .orElseThrow(() -> notFound(identifier)))
                     .toList();
         } else {
-            matching = subnetGroups.scan(key -> key.startsWith(region + "::"));
+            matching = new ArrayList<>(subnetGroups.scan(key -> key.startsWith(region + "::")));
+            findReplicationSubnetGroup(region, "default").ifPresent(matching::add);
         }
         return Pagination.paginate(matching, ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier,
                 maxRecords, marker, DEFAULT_MAX_RECORDS, MAXIMUM_MAX_RECORDS,

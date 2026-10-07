@@ -15,6 +15,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -142,6 +143,27 @@ class DmsIntegrationTest {
                     .then()
                     .statusCode(200));
         }
+    }
+
+    @Test
+    void describeResolvesTheDefaultGroupFromTheDefaultVpc() {
+        dms("DescribeReplicationSubnetGroups")
+                .body("{\"Filters\":[{\"Name\":\"replication-subnet-group-id\",\"Values\":[\"default\"]}]}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("ReplicationSubnetGroups", hasSize(1))
+                .body("ReplicationSubnetGroups[0].ReplicationSubnetGroupIdentifier", equalTo("default"))
+                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-default-us-east-1"));
+
+        dms("DescribeReplicationSubnetGroups")
+                .body("{}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("ReplicationSubnetGroups.ReplicationSubnetGroupIdentifier", hasItem("default"));
     }
 
     @Test
