@@ -127,6 +127,12 @@ public class Broker {
     }
 
     public String getBrokerId() { return brokerId; }
+
+    /**
+     * The CloudWatch log group the broker's general logs go to, as DescribeBroker
+     * reports it. Not a getter, so Jackson neither persists nor returns it.
+     */
+    public String generalLogGroup() { return "/aws/amazonmq/broker/" + brokerId + "/general"; }
     public void setBrokerId(String brokerId) { this.brokerId = brokerId; }
 
     public String getBrokerArn() { return brokerArn; }

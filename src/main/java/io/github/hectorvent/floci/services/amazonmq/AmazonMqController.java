@@ -120,7 +120,7 @@ public class AmazonMqController {
         boolean general = b.getLogs() != null && Boolean.TRUE.equals(b.getLogs().get("general"));
         Map<String, Object> logs = new LinkedHashMap<>();
         logs.put("general", general);
-        logs.put("generalLogGroup", "/aws/amazonmq/broker/" + b.getBrokerId() + "/general");
+        logs.put("generalLogGroup", b.generalLogGroup());
         return logs;
     }
 
