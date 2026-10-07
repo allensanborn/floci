@@ -82,7 +82,7 @@ class IamUserCfnProvisionerTest {
     private IamUser stubCreate(String userName, String path) {
         IamUser user = new IamUser("AIDA" + userName, userName, path,
                 "arn:aws:iam::" + ACCOUNT_ID + ":user" + path + userName);
-        when(iam.createUser(eq(userName), eq(path))).thenReturn(user);
+        when(iam.createUser(eq(userName), eq(path), any())).thenReturn(user);
         return user;
     }
 
@@ -104,7 +104,7 @@ class IamUserCfnProvisionerTest {
 
         assertEquals("custom-user", r.getPhysicalId());
         assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":user/custom-user", r.getAttributes().get("Arn"));
-        verify(iam).createUser("custom-user", "/");
+        verify(iam).createUser("custom-user", "/", null);
     }
 
     @Test
@@ -121,12 +121,12 @@ class IamUserCfnProvisionerTest {
 
         assertEquals("custom-user", r.getPhysicalId());
         assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":user/engineering/custom-user", r.getAttributes().get("Arn"));
-        verify(iam).createUser("custom-user", "/engineering/");
+        verify(iam).createUser("custom-user", "/engineering/", null);
     }
 
     @Test
     void provisionGeneratesPhysicalNameWhenUserNameIsOmitted() {
-        when(iam.createUser(any(), eq("/"))).thenAnswer(inv -> {
+        when(iam.createUser(any(), eq("/"), any())).thenAnswer(inv -> {
             String name = inv.getArgument(0);
             return new IamUser("AIDA" + name, name, "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/" + name);
         });
@@ -187,7 +187,7 @@ class IamUserCfnProvisionerTest {
 
         assertEquals("ValidationError", failure.getErrorCode());
         assertTrue(failure.getMessage().contains("resource replacement"));
-        verify(iam, never()).createUser(any(), any());
+        verify(iam, never()).createUser(any(), any(), any());
     }
 
     @Test
@@ -257,7 +257,7 @@ class IamUserCfnProvisionerTest {
         existing.getTags().put("update-tag", "old");
         existing.getTags().put("drop-tag", "remove-me");
 
-        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.createUser(eq("my-user"), eq("/"), any())).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
 
         StackResource r = resource();
@@ -301,7 +301,7 @@ class IamUserCfnProvisionerTest {
         IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
         existing.getTags().put("keep-tag", "old");
         existing.getTags().put("drop-tag", "restore-me");
-        when(iam.createUser(eq("my-user"), eq("/")))
+        when(iam.createUser(eq("my-user"), eq("/"), any()))
                 .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
         doThrow(new AwsException("ServiceFailure", "tag removal failed", 500))
@@ -330,7 +330,7 @@ class IamUserCfnProvisionerTest {
     @Test
     void updateReconcilesPathChange() {
         IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
-        when(iam.createUser(eq("my-user"), eq("/new-path/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.createUser(eq("my-user"), eq("/new-path/"), any())).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
 
         StackResource r = resource();
@@ -350,7 +350,7 @@ class IamUserCfnProvisionerTest {
     @Test
     void updateRefusesToAdoptReplacementUserWithDifferentUserId() {
         IamUser replacement = new IamUser("AIDAnew-user", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
-        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.createUser(eq("my-user"), eq("/"), any())).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(replacement);
 
         StackResource r = resource();
@@ -374,7 +374,7 @@ class IamUserCfnProvisionerTest {
         IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
         String priorDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[\"prior\"]}";
         existing.getInlinePolicies().put("first", priorDocument);
-        when(iam.createUser(eq("my-user"), eq("/"))).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.createUser(eq("my-user"), eq("/"), any())).thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
         when(iam.getUser("my-user")).thenReturn(existing);
         doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
                 .when(iam).putUserPolicy(eq("my-user"), eq("second"), any());
@@ -398,5 +398,84 @@ class IamUserCfnProvisionerTest {
         verify(iam).detachUserPolicy("my-user", "arn:aws:iam::aws:policy/NewPolicy");
         verify(iam).putUserPolicy("my-user", "first", priorDocument);
         verify(iam, never()).deleteUser("my-user");
+    }
+    private static final String BOUNDARY_OLD = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-old";
+    private static final String BOUNDARY_NEW = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-new";
+
+    /** A user this stack already owns, so provision() takes the adoption (update) path. */
+    private StackResource adoptExistingUser(String currentBoundary) {
+        IamUser existing = new IamUser("AIDAuser", "my-user", "/", "arn:aws:iam::" + ACCOUNT_ID + ":user/my-user");
+        existing.setPermissionsBoundaryArn(currentBoundary);
+        when(iam.createUser(eq("my-user"), eq("/"), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getUser("my-user")).thenReturn(existing);
+        StackResource r = resource();
+        r.setPhysicalId("my-user");
+        r.getAttributes().put("__FlociUserId", "AIDAuser");
+        return r;
+    }
+
+    @Test
+    void createPassesThePermissionsBoundaryToTheUser() {
+        stubCreate("custom-user", "/");
+
+        provisioner.provision(resource(), props("""
+                {"UserName": "custom-user", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), ctx());
+
+        verify(iam).createUser("custom-user", "/", BOUNDARY_NEW);
+    }
+
+    @Test
+    void updateAppliesAChangedPermissionsBoundary() {
+        StackResource r = adoptExistingUser(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"UserName": "my-user", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), updateCtx("my-user"));
+
+        verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW);
+        verify(iam, never()).deleteUserPermissionsBoundary(any());
+    }
+
+    @Test
+    void updateRemovesAPermissionsBoundaryTheTemplateDropped() {
+        StackResource r = adoptExistingUser(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"UserName": "my-user"}
+                """), updateCtx("my-user"));
+
+        verify(iam).deleteUserPermissionsBoundary("my-user");
+    }
+
+    @Test
+    void updateLeavesAnUnchangedOrAbsentPermissionsBoundaryAlone() {
+        // deleteUserPermissionsBoundary raises NoSuchEntity on a user without one.
+        StackResource r = adoptExistingUser(null);
+
+        provisioner.provision(r, props("""
+                {"UserName": "my-user"}
+                """), updateCtx("my-user"));
+
+        verify(iam, never()).deleteUserPermissionsBoundary(any());
+        verify(iam, never()).putUserPermissionsBoundary(any(), any());
+    }
+
+    @Test
+    void failedUpdateRestoresThePriorPermissionsBoundary() {
+        StackResource r = adoptExistingUser(BOUNDARY_OLD);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachUserPolicy("my-user", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"UserName": "my-user", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), updateCtx("my-user")));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_NEW);
+        order.verify(iam).putUserPermissionsBoundary("my-user", BOUNDARY_OLD);
+        verify(iam, never()).deleteUser(any());
     }
 }
