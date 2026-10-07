@@ -7889,33 +7889,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
     }
 
     /**
-     * AWS canonicalizes an IPv4 destination CIDR on input: "We modify the specified CIDR block to
-     * its canonical form; for example, if you specify 100.68.0.18/18, we modify it to
-     * 100.68.0.0/18." Running every DestinationCidrBlock through this once, here, is what lets
-     * CreateRoute, ReplaceRoute and DeleteRoute agree on "same destination" — two spellings of the
-     * same network now collide as duplicates instead of coexisting as two routes with undefined
-     * ReplaceRoute/DeleteRoute behaviour — and it is also why DescribeRouteTables echoes back the
-     * canonical form: the stored Route never holds anything else.
+     * AWS stores an IPv4 CIDR block in canonical form, with every host bit zeroed. The CreateRoute
+     * reference states it for DestinationCidrBlock: "We modify the specified CIDR block to its
+     * canonical form; for example, if you specify 100.68.0.18/18, we modify it to 100.68.0.0/18."
+     * CreateVpc and CreateSubnet store their CidrBlock the same way, so all three callers run the
+     * requested block through this once, before anything is stored or compared.
      *
-     * <p>DestinationIpv6CidrBlock has no equivalent sentence in the CreateRoute/ReplaceRoute model
-     * and is left untouched. DestinationPrefixListId is an opaque ID, not a CIDR, and is likewise
-     * untouched.
+     * <p>For routes, that is what lets CreateRoute, ReplaceRoute and DeleteRoute agree on "same
+     * destination": two spellings of the same network collide as duplicates instead of coexisting
+     * as two routes with undefined ReplaceRoute/DeleteRoute behaviour. For subnets, it is what
+     * makes the CreateSubnet overlap check see the real network. In every case it is also why the
+     * Describe calls echo back the canonical form: the stored resource never holds anything else.
      *
-     * <p>A block that is not a well-formed "IPv4/prefix" is returned unchanged: canonicalizing is
-     * not this method's job to validate the request, only to reduce what is already well-formed.
-     * The unmodified value fails downstream exactly as it did before this change.
+     * <p>Only IPv4 blocks are rewritten. DestinationIpv6CidrBlock and the IPv6 blocks of VPCs and
+     * subnets are left untouched, as is DestinationPrefixListId, which is an opaque ID, not a CIDR.
+     * A null block (an IPv6-only subnet) is returned as is.
+     *
+     * <p>A block that is not a well-formed "IPv4/prefix" is returned unchanged: this method does
+     * not validate the request, it only reduces what is already well-formed. The unmodified value
+     * fails downstream exactly as it did before canonicalization was added.
      *
      * <p>Delegates the actual bit-twiddling to {@link CidrCanonicalizer}, which also understands
-     * IPv6. That is deliberately not used here: DestinationCidrBlock is AWS's IPv4-only field —
-     * the API reference's canonicalization sentence appears only under it, never under
-     * DestinationIpv6CidrBlock — so a value that parses as an IPv6 literal is left untouched
-     * rather than canonicalized, the same as any other malformed-for-this-field input.
+     * IPv6. That is deliberately not used here: every caller passes an IPv4-only field, so a value
+     * that parses as an IPv6 literal is left untouched rather than canonicalized, the same as any
+     * other input malformed for the field.
      */
-    private static String canonicalizeIpv4Cidr(String destinationCidrBlock) {
-        if (!isSet(destinationCidrBlock) || destinationCidrBlock.contains(":")) {
-            return destinationCidrBlock;
+    private static String canonicalizeIpv4Cidr(String ipv4CidrBlock) {
+        if (!isSet(ipv4CidrBlock) || ipv4CidrBlock.contains(":")) {
+            return ipv4CidrBlock;
         }
-        return CidrCanonicalizer.canonicalize(destinationCidrBlock).orElse(destinationCidrBlock);
+        return CidrCanonicalizer.canonicalize(ipv4CidrBlock).orElse(ipv4CidrBlock);
     }
 
     /**
