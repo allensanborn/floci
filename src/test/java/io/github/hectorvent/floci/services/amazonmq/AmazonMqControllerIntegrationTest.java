@@ -84,6 +84,7 @@ class AmazonMqControllerIntegrationTest {
             .body("securityGroups", equalTo(List.of("sg-0123")))
             .body("subnetIds", equalTo(List.of("subnet-0abc")))
             .body("logs.general", equalTo(true))
+            .body("logs.generalLogGroup", equalTo("/aws/amazonmq/broker/" + brokerId + "/general"))
             .body("maintenanceWindowStartTime.dayOfWeek", equalTo("MONDAY"))
             .body("maintenanceWindowStartTime.timeOfDay", equalTo("02:00"))
             .body("maintenanceWindowStartTime.timeZone", equalTo("UTC"))
@@ -108,7 +109,8 @@ class AmazonMqControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("$", not(hasKey("securityGroups")))
-            .body("$", not(hasKey("logs")))
+            .body("logs.general", equalTo(false))
+            .body("logs.generalLogGroup", equalTo("/aws/amazonmq/broker/" + brokerId + "/general"))
             .body("$", not(hasKey("configurations")))
             .body("$", not(hasKey("encryptionOptions")));
     }

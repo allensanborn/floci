@@ -102,7 +102,7 @@ public class AmazonMqController {
         // Optional CreateBroker members: omitted when the request did not set them.
         putIfPresent(body, "securityGroups", b.getSecurityGroups());
         putIfPresent(body, "subnetIds", b.getSubnetIds());
-        putIfPresent(body, "logs", b.getLogs());
+        body.put("logs", logsSummary(b));
         putIfPresent(body, "maintenanceWindowStartTime", b.getMaintenanceWindowStartTime());
         putIfPresent(body, "storageType", b.getStorageType());
         putIfPresent(body, "authenticationStrategy", b.getAuthenticationStrategy());
@@ -112,6 +112,21 @@ public class AmazonMqController {
             body.put("configurations", Map.of("current", b.getConfiguration()));
         }
         return body;
+    }
+
+    // LogsSummary: general and generalLogGroup are required; the log group names follow
+    // /aws/amazonmq/broker/<broker-id>/<type>. auditLogGroup only when audit is enabled.
+    private static Map<String, Object> logsSummary(Broker b) {
+        Map<String, Object> requested = b.getLogs() != null ? b.getLogs() : Map.of();
+        String prefix = "/aws/amazonmq/broker/" + b.getBrokerId() + "/";
+        Map<String, Object> logs = new LinkedHashMap<>();
+        logs.put("general", Boolean.TRUE.equals(requested.get("general")));
+        logs.put("generalLogGroup", prefix + "general");
+        if (Boolean.TRUE.equals(requested.get("audit"))) {
+            logs.put("audit", true);
+            logs.put("auditLogGroup", prefix + "audit");
+        }
+        return logs;
     }
 
     private static void putIfPresent(Map<String, Object> body, String key, Object value) {
