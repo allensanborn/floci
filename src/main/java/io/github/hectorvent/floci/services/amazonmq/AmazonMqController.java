@@ -114,18 +114,13 @@ public class AmazonMqController {
         return body;
     }
 
-    // LogsSummary: general and generalLogGroup are required; the log group names follow
-    // /aws/amazonmq/broker/<broker-id>/<type>. auditLogGroup only when audit is enabled.
+    // LogsSummary: general and generalLogGroup are required. Audit logs are ActiveMQ-only,
+    // so a RabbitMQ broker reports the general log group alone.
     private static Map<String, Object> logsSummary(Broker b) {
-        Map<String, Object> requested = b.getLogs() != null ? b.getLogs() : Map.of();
-        String prefix = "/aws/amazonmq/broker/" + b.getBrokerId() + "/";
+        boolean general = b.getLogs() != null && Boolean.TRUE.equals(b.getLogs().get("general"));
         Map<String, Object> logs = new LinkedHashMap<>();
-        logs.put("general", Boolean.TRUE.equals(requested.get("general")));
-        logs.put("generalLogGroup", prefix + "general");
-        if (Boolean.TRUE.equals(requested.get("audit"))) {
-            logs.put("audit", true);
-            logs.put("auditLogGroup", prefix + "audit");
-        }
+        logs.put("general", general);
+        logs.put("generalLogGroup", "/aws/amazonmq/broker/" + b.getBrokerId() + "/general");
         return logs;
     }
 
