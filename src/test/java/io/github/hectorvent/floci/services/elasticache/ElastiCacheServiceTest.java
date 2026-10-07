@@ -674,6 +674,50 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void restorePersistedRuntimeRestoresEveryAccountUnderItsOwnAccount() {
+        String other = "111111111111";
+        StorageFactory storageFactory = sharedStorageFactory();
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+        before.createReplicationGroup("grp", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        before.createCacheCluster(cacheClusterRequest("cc", "redis", 1));
+        // Move both records to a non-default account, as a request under that account would have stored them.
+        AccountAwareStorageBackend<ReplicationGroup> groups =
+                storageFactory.<ReplicationGroup>create("elasticache", "elasticache-groups.json", null);
+        AccountAwareStorageBackend<CacheCluster> clusters =
+                storageFactory.<CacheCluster>create("elasticache", "elasticache-redis-clusters.json", null);
+        groups.putForAccount(other, "grp", groups.getForAccount("000000000000", "grp").orElseThrow());
+        groups.deleteForAccount("000000000000", "grp");
+        clusters.putForAccount(other, "cc", clusters.getForAccount("000000000000", "cc").orElseThrow());
+        clusters.deleteForAccount("000000000000", "cc");
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheService restarted = serviceWith(storageFactory, restartedContainers,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        verify(restartedContainers).tryStart(eq("grp"), anyString(), any());
+        verify(restartedContainers).tryStart(eq("cc"), anyString(), any());
+        assertEquals(ReplicationGroupStatus.AVAILABLE,
+                groups.getForAccount(other, "grp").orElseThrow().getStatus());
+        assertEquals(CacheClusterStatus.AVAILABLE,
+                clusters.getForAccount(other, "cc").orElseThrow().getCacheClusterStatus());
+        assertTrue(groups.getForAccount("000000000000", "grp").isEmpty(),
+                "A restore must not copy another account's group into the default account");
+        assertTrue(clusters.getForAccount("000000000000", "cc").isEmpty(),
+                "A restore must not copy another account's cluster into the default account");
+
+        ReplicationGroup next =
+                restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        assertEquals(16381, next.getProxyPort(),
+                "Both restored records' ports (16379, 16380) must be reserved again");
+    }
+
+    @Test
     void singleNodeRestoreFailureReportsCreateFailedAndReleasesThePort() {
         StorageFactory storageFactory = storageWithSingleNodeGroup("grp");
 
