@@ -90,6 +90,105 @@ class Ec2NatGatewayAddressIntegrationTest {
                     startsWith("eni-"));
     }
 
+    /**
+     * The interface id DescribeNatGateways publishes has to resolve through
+     * DescribeNetworkInterfaces, and the Elastic IP the gateway holds has to read as associated
+     * through DescribeAddresses. Deleting the gateway releases both.
+     */
+    @Test
+    void aGatewaysInterfaceResolvesAndItsElasticIpReadsAsAssociated() {
+        String subnetId = subnetId();
+        String allocationId = given()
+            .formParam("Action", "AllocateAddress")
+            .formParam("Domain", "vpc")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AllocateAddressResponse.allocationId");
+
+        String natGatewayId = given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId)
+            .formParam("AllocationId", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+
+        io.restassured.response.Response described = given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("NatGatewayId.1", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().response();
+        String prefix = "DescribeNatGatewaysResponse.natGatewaySet.item.";
+        String eniId = described.path(prefix + "natGatewayAddressSet.item.networkInterfaceId");
+        String privateIp = described.path(prefix + "natGatewayAddressSet.item.privateIp");
+        String associationId = described.path(prefix + "natGatewayAddressSet.item.associationId");
+        String vpcId = described.path(prefix + "vpcId");
+
+        // Twice: the id must be stable, not re-minted per read.
+        for (int i = 0; i < 2; i++) {
+            given()
+                .formParam("Action", "DescribeNetworkInterfaces")
+                .formParam("NetworkInterfaceId.1", eniId)
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
+                        equalTo(eniId))
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.interfaceType",
+                        equalTo("nat_gateway"))
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.subnetId",
+                        equalTo(subnetId))
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.vpcId",
+                        equalTo(vpcId))
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddress",
+                        equalTo(privateIp))
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item"
+                        + ".privateIpAddressesSet.item.association.allocationId", equalTo(allocationId));
+        }
+
+        given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId))
+            .body("DescribeAddressesResponse.addressesSet.item.networkInterfaceId", equalTo(eniId))
+            .body("DescribeAddressesResponse.addressesSet.item.privateIpAddress", equalTo(privateIp));
+
+        given()
+            .formParam("Action", "DeleteNatGateway")
+            .formParam("NatGatewayId", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eniId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidNetworkInterfaceID.NotFound"));
+
+        given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(allocationId))
+            .body(not(containsString("<associationId>")))
+            .body(not(containsString("<networkInterfaceId>")));
+    }
+
     @Test
     void aPrivateGatewayHasAPrivateAddressAndNoElasticIp() {
         given()
