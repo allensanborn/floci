@@ -4664,7 +4664,8 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
-        assertEquals("UserNotConfirmedException", ex.getErrorCode());
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
     }
 
     @Test
@@ -5533,7 +5534,8 @@ class CognitoServiceTest {
         assertThrows(AwsException.class, () -> service.deleteUserAttributes(invalid, List.of("email")));
         assertThrows(AwsException.class, () -> service.getUserAttributeVerificationCode(invalid, "email"));
         assertThrows(AwsException.class, () -> service.globalSignOut(invalid));
-        assertThrows(AwsException.class, () -> service.setUserMFAPreference(invalid, true, false));
+        assertThrows(AwsException.class, () -> service.setUserMFAPreference(invalid,
+                new CognitoService.MfaSettingsUpdate(true, false), CognitoService.MfaSettingsUpdate.NONE));
         assertThrows(AwsException.class, () -> service.getUserAuthFactors(invalid));
     }
 
@@ -5765,7 +5767,8 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceUpdatesEmailMfaSettings() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice",
+                new CognitoService.MfaSettingsUpdate(true, true), CognitoService.MfaSettingsUpdate.NONE);
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
@@ -5778,10 +5781,12 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceDoesNotMutateOnInvalidUpdate() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice",
+                new CognitoService.MfaSettingsUpdate(true, true), CognitoService.MfaSettingsUpdate.NONE);
 
         assertThrows(AwsException.class, () ->
-                service.adminSetUserMFAPreference(pool.getId(), "alice", false, true));
+                service.adminSetUserMFAPreference(pool.getId(), "alice",
+                        new CognitoService.MfaSettingsUpdate(false, true), CognitoService.MfaSettingsUpdate.NONE));
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 
@@ -5792,9 +5797,11 @@ class CognitoServiceTest {
     void adminSetUserMFAPreferenceDisablingEmailMfaClearsPreferredMfa() {
         UserPool pool = createPoolAndUser();
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", true, true);
+        service.adminSetUserMFAPreference(pool.getId(), "alice",
+                new CognitoService.MfaSettingsUpdate(true, true), CognitoService.MfaSettingsUpdate.NONE);
 
-        service.adminSetUserMFAPreference(pool.getId(), "alice", false, null);
+        service.adminSetUserMFAPreference(pool.getId(), "alice",
+                new CognitoService.MfaSettingsUpdate(false, null), CognitoService.MfaSettingsUpdate.NONE);
 
         CognitoUser user = service.adminGetUser(pool.getId(), "alice");
 

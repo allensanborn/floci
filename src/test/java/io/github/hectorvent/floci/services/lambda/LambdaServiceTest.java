@@ -2323,4 +2323,37 @@ class LambdaServiceTest {
         assertEquals("ValidationException", thrown.getErrorCode());
         assertEquals(400, thrown.getHttpStatus());
     }
+
+    @Test
+    void updateFunctionCode_withMismatchedRevisionId_throwsPreconditionFailedException() throws Exception {
+        // Catches: UpdateFunctionCode silently accepts a stale RevisionId and overwrites the function's code
+        // (the CodeSha256 assertion fails if the check ever runs after code extraction)
+        Map<String, Object> createReq = baseRequest("revision-lock-func");
+        service.createFunction(REGION, createReq);
+
+        LambdaFunction fn = service.getFunction(REGION, "revision-lock-func");
+        String initialRevisionId = fn.getRevisionId();
+        String initialCodeSha256 = fn.getCodeSha256();
+        String mismatchingRevision = "stale-revision-id-abc123";
+        String zipBase64 = createZipBase64("index.js");
+
+        Map<String, Object> updateReq = new HashMap<>();
+        updateReq.put("ZipFile", zipBase64);
+        updateReq.put("RevisionId", mismatchingRevision);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "revision-lock-func", updateReq));
+        assertEquals("PreconditionFailedException", ex.getErrorCode());
+        assertEquals(412, ex.getHttpStatus());
+        assertEquals("The Revision Id provided does not match the latest Revision Id. Call the GetFunction/GetAlias API to retrieve the latest Revision Id", ex.getMessage());
+
+        LambdaFunction unchangedFn = service.getFunction(REGION, "revision-lock-func");
+        assertEquals(initialRevisionId, unchangedFn.getRevisionId());
+        assertEquals(initialCodeSha256, unchangedFn.getCodeSha256());
+
+        updateReq.put("RevisionId", initialRevisionId);
+        service.updateFunctionCode(REGION, "revision-lock-func", updateReq);
+
+        LambdaFunction updatedFn = service.getFunction(REGION, "revision-lock-func");
+        assertNotEquals(initialRevisionId, updatedFn.getRevisionId());
+    }
 }

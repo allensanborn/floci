@@ -25,6 +25,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -831,6 +832,98 @@ class S3ServiceTest {
         service.deleteObject("test-bucket", "k.txt", "no-such-version");
 
         assertNull(lambdaInvoker.payload);
+    }
+
+    @Test
+    void eventRecordKeyIsFormUrlEncodedLikeS3() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-encoded-key");
+
+        service.putObject("test-bucket", "my folder/a+b=c (1).txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("my+folder/a%2Bb%3Dc+%281%29.txt", record.path("s3").path("object").path("key").asText());
+        assertEquals("my folder/a+b=c (1).txt", URLDecoder.decode(
+                record.path("s3").path("object").path("key").asText(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void successiveEventsForOneKeyCarryIncreasingSequencers() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-sequencer");
+
+        service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String first = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+        service.putObject("test-bucket", "k.txt", "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        String second = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(first.matches("[0-9A-F]{18}"), first);
+        assertTrue(second.matches("[0-9A-F]{18}"), second);
+        assertTrue(second.compareTo(first) > 0, first + " then " + second);
+    }
+
+    @Test
+    void createdEventCarriesTheSequencerAssignedWhenTheObjectWasStored() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(lambdaInvoker, "notif-s3-sequencer-stored");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        assertNotNull(stored.getEventSequencer());
+        assertEquals(stored.getEventSequencer(),
+                onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText());
+    }
+
+    @Test
+    void removalOfAStoredVersionGetsANewerSequencerThanItsCreation() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-sequencer-removal");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.deleteObject("test-bucket", "k.txt", stored.getVersionId());
+        String removed = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(removed.compareTo(stored.getEventSequencer()) > 0,
+                stored.getEventSequencer() + " then " + removed);
+    }
+
+    @Test
+    void annotationEventsCarrySequencersAfterTheObjectTheyAnnotate() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOn(lambdaInvoker, "notif-s3-sequencer-annotation",
+                "s3:ObjectAnnotation:*");
+
+        S3Object stored = service.putObject("test-bucket", "k.txt", "v1".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+        service.putObjectAnnotation("test-bucket", "k.txt", "note", null,
+                "{}".getBytes(StandardCharsets.UTF_8), null, null);
+        String put = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+        service.deleteObjectAnnotation("test-bucket", "k.txt", "note", null, null, false);
+        String deleted = onlyRecordedS3Event(lambdaInvoker).path("s3").path("object").path("sequencer").asText();
+
+        assertTrue(put.compareTo(stored.getEventSequencer()) > 0, stored.getEventSequencer() + " then " + put);
+        assertTrue(deleted.compareTo(put) > 0, put + " then " + deleted);
+    }
+
+    private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
+        return bucketNotifyingOn(lambdaInvoker, dataDir, "s3:ObjectCreated:*");
+    }
+
+    private S3Service bucketNotifyingOn(RecordingLambdaInvoker lambdaInvoker, String dataDir, String event) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve(dataDir),
+                false, lambdaInvoker, new RegionResolver("us-east-1", "000000000000"));
+        service.createBucket("test-bucket", "us-east-1");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "lambda-notif",
+                "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of(event),
+                List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+        return service;
     }
 
     private S3Service versionedBucketNotifyingOnRemoval(RecordingLambdaInvoker lambdaInvoker, String dataDir) {

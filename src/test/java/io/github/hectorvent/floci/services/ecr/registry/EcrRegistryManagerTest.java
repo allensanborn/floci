@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.HostBlindPortAllocator;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -45,13 +46,14 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link EcrRegistryManager} startup behavior. Uses a real
- * {@link PortAllocator} and a mocked Docker layer so the failure path can be
- * exercised without a Docker daemon.
+ * {@link PortAllocator} that skips the host probe ({@link HostBlindPortAllocator}) and a mocked Docker layer so the
+ * failure path can be exercised without a Docker daemon or free host ports.
  */
 class EcrRegistryManagerTest {
 
@@ -78,7 +80,7 @@ class EcrRegistryManagerTest {
 
     @BeforeEach
     void setUp() {
-        portAllocator = new PortAllocator();
+        portAllocator = new HostBlindPortAllocator();
 
         containerBuilder = Mockito.mock(ContainerBuilder.class);
         builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
@@ -165,6 +167,37 @@ class EcrRegistryManagerTest {
             assertFalse(ex.getMessage().contains("No free port available"),
                     "port pool leaked on attempt " + attempt + ": " + ex.getMessage());
         }
+        // Only a host-port collision moves on to the next port; any other failure is not retried.
+        verify(lifecycleManager, times(6)).createAndStart(any());
+    }
+
+    @Test
+    void ensureStarted_triesTheNextPortWhenDockerReportsTheChosenPortInUse() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("Bind for 127.0.0.1:6100 failed: port is already allocated"))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        manager.ensureStarted();
+
+        assertEquals(MAX_PORT, manager.effectivePort());
+        verify(builder).withLoopbackPortBinding(5000, BASE_PORT);
+        verify(builder).withLoopbackPortBinding(5000, MAX_PORT);
+        assertEquals(BASE_PORT, portAllocator.allocate(BASE_PORT, MAX_PORT), "the refused port must be released");
+    }
+
+    @Test
+    void ensureStarted_namesTheRefusedPortsWhenEveryPortInTheRangeIsInUse() {
+        when(lifecycleManager.createAndStart(any()))
+                .thenThrow(new RuntimeException("listen tcp4 127.0.0.1:6100: bind: address already in use"));
+
+        RuntimeException ex = assertThrows(RuntimeException.class, manager::ensureStarted);
+
+        assertTrue(ex.getMessage().contains("[6100, 6101]") && ex.getMessage().contains("6100-6101"),
+                ex.getMessage());
+        verify(lifecycleManager, times(2)).createAndStart(any());
+        assertFalse(manager.isStarted());
+        assertEquals(BASE_PORT, portAllocator.allocate(BASE_PORT, MAX_PORT), "refused ports must be released");
+        assertEquals(MAX_PORT, portAllocator.allocate(BASE_PORT, MAX_PORT), "refused ports must be released");
     }
 
     @Test
