@@ -481,6 +481,57 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
         .then().statusCode(200);
     }
 
+    /**
+     * An account names someone else's gateway as the peer with itself as the peer account. It must
+     * not be able to accept that: an accepted peering pins the gateway, and its real owner could
+     * then never delete it.
+     */
+    @Test
+    @Order(12)
+    void anAccountCannotAcceptForAGatewayItDoesNotOwn() {
+        String victimTgw = createTransitGateway(EAST);
+        String attackerTgw = createTransitGateway(PEER_ACCOUNT);
+        String id = createPeering(PEER_ACCOUNT, attackerTgw, victimTgw, "000000000002");
+
+        given()
+            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayID.NotFound"));
+
+        given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(ITEM + ".state", equalTo("pendingAcceptance"));
+
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", victimTgw)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DescribeTransitGateways")
+            .formParam("TransitGatewayIds.1", victimTgw)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayID.NotFound"));
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
     private static void accept(String auth, String attachmentId) {
         given()
             .formParam("Action", "AcceptTransitGatewayPeeringAttachment")

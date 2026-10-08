@@ -2399,6 +2399,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider {
                 throw new AwsException("IncorrectState", "tgw-attach " + attachmentId
                         + " is in invalid state " + attachment.getState() + ".", 400);
             }
+            // The peer gateway was recorded unresolved at create, so anyone could have named someone
+            // else's gateway with their own account as the peer. Accepting is where that is settled:
+            // the gateway has to be the caller's, the same lookup create makes for the requester's.
+            getRequiredTransitGateway(region, attachment.getAccepterTgwInfo().getTransitGatewayId());
             attachment.setState("available");
             savePeeringAttachment(owned);
             return withStoredTags(attachment);

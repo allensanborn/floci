@@ -477,9 +477,12 @@ it may belong to an account this emulator cannot see. One attachment id serves b
 cross-region peering is visible from both regions, and the `transit-gateway-id` filter matches
 either side's gateway. Creation reports `pendingAcceptance` (AWS passes through
 `initiatingRequest` first), accepting moves it to `available`, and accepting anything but a pending
-attachment returns `IncorrectState`. Peering attachments do not yet appear in
-`DescribeTransitGatewayAttachments`, cannot be associated with a route table, and peering across
-accounts is not modelled.
+attachment returns `IncorrectState`. Across accounts, only the peer account can see the attachment
+from its side and accept it, and accepting checks that the peer gateway exists in the accepter's
+account and region, returning `InvalidTransitGatewayID.NotFound` otherwise. Each account keeps its
+own tags on the attachment. A pending peering does not stop the peer gateway's owner deleting it;
+that rejects the peering instead. Peering attachments do not yet appear in
+`DescribeTransitGatewayAttachments` and cannot be associated with a route table.
 
 ### Transit Gateway Route Tables
 
