@@ -56,6 +56,7 @@ public class SsmService implements ResourceProvider {
             Set.of("Name", "Type", "KeyId", "Path", "Tier", "DataType");
     private static final String DEFAULT_SSM_KEY_ID = "alias/aws/ssm";
     private static final int STANDARD_TIER_MAX_VALUE_BYTES = 4096;
+    private static final Set<String> PARAMETER_TIERS = Set.of("Standard", "Advanced", "Intelligent-Tiering");
     private static final int MAX_ALLOWED_PATTERN_LENGTH = 1024;
     private static final long ALLOWED_PATTERN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(1);
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
@@ -194,9 +195,14 @@ public class SsmService implements ResourceProvider {
         return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
     }
 
-    public long putParameter(String name, String value, String type, String description, boolean overwrite,
-                             Map<String, String> tags, String keyId, String allowedPattern, String tier,
-                             List<JsonNode> policies, String region) {
+    public synchronized long putParameter(String name, String value, String type, String description,
+                             boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                             String tier, List<JsonNode> policies, String region) {
+        if (tier != null && !PARAMETER_TIERS.contains(tier)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + tier + "' at 'tier' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]", 400);
+        }
         validateTagKeys(tags);
         rejectReservedName(name);
         String storageKey = regionKey(region, name);
@@ -264,11 +270,13 @@ public class SsmService implements ResourceProvider {
             parameter.setPolicies(policies.isEmpty() ? null : List.copyOf(policies));
         }
         if ("Intelligent-Tiering".equals(tier)) {
-            boolean advanced = parameter.getPolicies() != null
+            boolean advanced = (existing != null && "Advanced".equals(tierOf(existing)))
+                    || parameter.getPolicies() != null
                     || value.getBytes(StandardCharsets.UTF_8).length > STANDARD_TIER_MAX_VALUE_BYTES;
             tier = advanced ? "Advanced" : "Standard";
         }
-        // AWS never moves an Advanced parameter back to Standard behind an overwrite that omits the tier.
+        // AWS never moves an Advanced parameter back to Standard behind an overwrite that omits the tier
+        // or asks for Intelligent-Tiering.
         parameter.setTier(tier != null ? tier : existing != null ? tierOf(existing) : "Standard");
         parameter.setArn(regionResolver.buildArn("ssm", region, "parameter" + name));
         parameter.setLastModifiedDate(Instant.now());

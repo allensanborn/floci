@@ -1730,6 +1730,37 @@ class SsmIntegrationTest {
             .body("Parameters.find { it.Name == '/attr-it-size/utf8-4098' }.Tier", equalTo("Advanced"));
     }
 
+    @Test
+    void putParameterIntelligentTieringOverwriteKeepsAnAdvancedParameterAdvanced() {
+        putFilterFixture("/attr-it-keep/p", "String", ", \"Tier\": \"Advanced\"");
+        putFilterFixture("/attr-it-keep/p", "String", ", \"Tier\": \"Intelligent-Tiering\", \"Overwrite\": true");
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr-it-keep/p"] }] }
+                """)
+            .body("Parameters[0].Version", equalTo(2))
+            .body("Parameters[0].Tier", equalTo("Advanced"));
+    }
+
+    @Test
+    void putParameterRejectsATierOutsideTheEnumAndStoresNothing() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "Name": "/attr-bad-tier/p", "Value": "v", "Type": "String", "Tier": "Premium" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Value 'Premium' at 'tier'"));
+        describeParameters("""
+                { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr-bad-tier/p"] }] }
+                """)
+            .body("Parameters", hasSize(0));
+    }
+
     private void putIntelligentTiering(String name, String jsonEscapedValue) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")

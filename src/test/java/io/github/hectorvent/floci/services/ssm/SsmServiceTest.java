@@ -786,6 +786,53 @@ class SsmServiceTest {
                         + "document's new share");
     }
 
+    /**
+     * Two overwrites of one name must not both read the same current version. The parameter
+     * store's put blocks the first overwrite after it has read the version; a second overwrite
+     * must wait for it rather than compute the same next version.
+     */
+    @Test
+    void concurrentOverwritesAreSerializedAndKeepEveryVersion() throws Exception {
+        String region = "us-east-1";
+        CountDownLatch firstPutStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstPut = new CountDownLatch(1);
+        Thread[] blocked = new Thread[1];
+        InMemoryStorage<String, Parameter> parameterStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, Parameter value) {
+                if (value.getVersion() == 2 && blocked[0] == null) {
+                    blocked[0] = Thread.currentThread();
+                    firstPutStarted.countDown();
+                    try {
+                        releaseFirstPut.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        SsmService service = new SsmService(parameterStore, new InMemoryStorage<>(), 50);
+        service.putParameter("/race/p", "v1", "String", null, false, region);
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = pool.submit(() -> service.putParameter("/race/p", "v2", "String", null, true, region));
+            assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS));
+            Future<?> second = pool.submit(() -> service.putParameter("/race/p", "v3", "String", null, true, region));
+            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS),
+                    "a second overwrite must wait for the one in flight, not interleave with it");
+            releaseFirstPut.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(List.of(1L, 2L, 3L), service.getParameterHistory("/race/p", region).stream()
+                .map(ParameterHistory::getVersion).toList());
+    }
+
     @Test
     void testListDocuments() {
         ssmService.createDocument("Doc1", "{}", "Command", "us-east-1");
