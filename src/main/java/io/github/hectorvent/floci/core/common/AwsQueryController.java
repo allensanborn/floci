@@ -205,6 +205,8 @@ public class AwsQueryController {
             "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
             "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
+            "CreateTransitGatewayPeeringAttachment", "AcceptTransitGatewayPeeringAttachment",
+            "DeleteTransitGatewayPeeringAttachment", "DescribeTransitGatewayPeeringAttachments",
             "CreateCapacityReservation", "DescribeCapacityReservations",
             "ModifyCapacityReservation", "CancelCapacityReservation",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
