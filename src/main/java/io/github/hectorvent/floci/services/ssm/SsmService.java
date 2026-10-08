@@ -195,9 +195,11 @@ public class SsmService implements ResourceProvider {
         return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
     }
 
-    public synchronized long putParameter(String name, String value, String type, String description,
+    public long putParameter(String name, String value, String type, String description,
                              boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
                              String tier, List<JsonNode> policies, String region) {
+        // Validation reads only the request, so it runs before the lock: an AllowedPattern match can take up
+        // to ALLOWED_PATTERN_TIMEOUT_NANOS and must not stall other SSM writers.
         if (tier != null && !PARAMETER_TIERS.contains(tier)) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + tier + "' at 'tier' failed to satisfy constraint: "
@@ -205,14 +207,6 @@ public class SsmService implements ResourceProvider {
         }
         validateTagKeys(tags);
         rejectReservedName(name);
-        String storageKey = regionKey(region, name);
-        Parameter existing = parameterStore.get(storageKey).orElse(null);
-
-        if (existing != null && !overwrite) {
-            throw new AwsException("ParameterAlreadyExists",
-                    "The parameter already exists. To overwrite this value, set the overwrite option in the request to true.",
-                    400);
-        }
 
         if (overwrite && tags != null && !tags.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -252,6 +246,25 @@ public class SsmService implements ResourceProvider {
                 throw new AwsException("ParameterPatternMismatchException",
                         "Parameter value, cannot be validated against allowedPattern: " + allowedPattern, 400);
             }
+        }
+
+        // Same monitor as the other synchronized SSM writers: the version read and the write are one step.
+        synchronized (this) {
+            return storeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern,
+                    tier, policies, region);
+        }
+    }
+
+    private long storeParameter(String name, String value, String type, String description,
+                                boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                                String tier, List<JsonNode> policies, String region) {
+        String storageKey = regionKey(region, name);
+        Parameter existing = parameterStore.get(storageKey).orElse(null);
+
+        if (existing != null && !overwrite) {
+            throw new AwsException("ParameterAlreadyExists",
+                    "The parameter already exists. To overwrite this value, set the overwrite option in the request to true.",
+                    400);
         }
 
         long version = (existing != null) ? existing.getVersion() + 1 : 1;

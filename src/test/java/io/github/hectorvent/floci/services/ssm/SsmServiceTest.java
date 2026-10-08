@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -815,22 +816,45 @@ class SsmServiceTest {
         SsmService service = new SsmService(parameterStore, new InMemoryStorage<>(), 50);
         service.putParameter("/race/p", "v1", "String", null, false, region);
 
-        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Thread first = new Thread(() -> service.putParameter("/race/p", "v2", "String", null, true, region));
+        Thread second = new Thread(() -> service.putParameter("/race/p", "v3", "String", null, true, region));
         try {
-            Future<?> first = pool.submit(() -> service.putParameter("/race/p", "v2", "String", null, true, region));
+            first.start();
             assertTrue(firstPutStarted.await(10, TimeUnit.SECONDS));
-            Future<?> second = pool.submit(() -> service.putParameter("/race/p", "v3", "String", null, true, region));
-            assertThrows(TimeoutException.class, () -> second.get(300, TimeUnit.MILLISECONDS),
+            second.start();
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (second.getState() != Thread.State.BLOCKED && second.isAlive() && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertEquals(Thread.State.BLOCKED, second.getState(),
                     "a second overwrite must wait for the one in flight, not interleave with it");
-            releaseFirstPut.countDown();
-            first.get(10, TimeUnit.SECONDS);
-            second.get(10, TimeUnit.SECONDS);
         } finally {
-            pool.shutdownNow();
+            releaseFirstPut.countDown();
+            first.join(10_000);
+            second.join(10_000);
         }
 
         assertEquals(List.of(1L, 2L, 3L), service.getParameterHistory("/race/p", region).stream()
                 .map(ParameterHistory::getVersion).toList());
+    }
+
+    @Test
+    void allowedPatternIsCheckedWithoutHoldingTheWriteLock() throws Exception {
+        SsmService service = new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(), 50);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            // Hold the monitor putParameter writes under; an AllowedPattern check must still complete, since a
+            // slow match (up to the one-second deadline) inside the lock would stall every other SSM writer.
+            synchronized (service) {
+                Future<?> rejected = pool.submit(() -> service.putParameter("/lock/p", "abc", "String", null,
+                        false, null, null, "^[0-9]+$", null, null, "us-east-1"));
+                ExecutionException e = assertThrows(ExecutionException.class,
+                        () -> rejected.get(10, TimeUnit.SECONDS));
+                assertEquals("ParameterPatternMismatchException", ((AwsException) e.getCause()).getErrorCode());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
