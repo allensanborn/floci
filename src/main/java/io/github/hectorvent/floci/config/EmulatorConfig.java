@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
+
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
@@ -77,7 +78,7 @@ public interface EmulatorConfig {
 
         /**
          * Refuse requests signed for a service AWS does not publish in the request's partition
-         * (CloudFront in GovCloud, IAM in {@code aws-eusc}). On AWS such a request never reaches
+         * (CloudFront in GovCloud, Lightsail in China). On AWS such a request never reaches
          * an API because its endpoint does not resolve; Floci serves every enabled service in
          * every partition unless this is set.
          */
@@ -3515,6 +3516,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("512")
         int streamingMaxConnections();
+
+        /**
+         * How long a Docker call waits for a free pooled connection before it fails with
+         * {@code ConnectionRequestTimeoutException}, in seconds, for both pools. A full pool means
+         * the emulator is saturated, so failing sooner beats httpclient5's default three-minute wait;
+         * the transport retry never replays a lease timeout.
+         */
+        @WithDefault("30")
+        int connectionRequestTimeoutSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.
