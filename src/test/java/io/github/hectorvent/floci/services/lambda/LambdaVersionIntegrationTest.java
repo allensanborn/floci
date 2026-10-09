@@ -279,24 +279,28 @@ class LambdaVersionIntegrationTest {
             .post(BASE_PATH + "/functions")
         .then()
             .statusCode(201);
-        for (int i = 1; i <= 11; i++) {
-            given()
-                .contentType("application/json")
-                .body("{\"Description\": \"v" + i + "\"}")
-            .when()
-                .post(BASE_PATH + "/functions/" + fnName + "/versions")
-            .then()
-                .statusCode(201)
-                .body("Version", equalTo(String.valueOf(i)));
-        }
+        try {
+            for (int i = 1; i <= 11; i++) {
+                given()
+                    .contentType("application/json")
+                    .body("{\"Description\": \"v" + i + "\"}")
+                .when()
+                    .post(BASE_PATH + "/functions/" + fnName + "/versions")
+                .then()
+                    .statusCode(201)
+                    .body("Version", equalTo(String.valueOf(i)));
+            }
 
-        given()
-        .when()
-            .get(BASE_PATH + "/functions/" + fnName + "/versions")
-        .then()
-            .statusCode(200)
-            .body("Versions.Version",
-                    contains("$LATEST", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"));
+            given()
+            .when()
+                .get(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(200)
+                .body("Versions.Version",
+                        contains("$LATEST", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"));
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
+        }
     }
 
     private void createInvocableFunction(String fnName) throws Exception {
