@@ -32,7 +32,7 @@ class AccessAnalyzerIntegrationTest {
     @Test
     void getAnalyzerReturnsCreatedAnalyzer() {
         String arn = given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"analyzerName\":\"get-me\",\"type\":\"ORGANIZATION\",\"tags\":{\"env\":\"test\"}}")
+                .body("{\"analyzerName\":\"get-me\",\"type\":\"ORGANIZATION\",\"tags\":{\"env\":\"test\"},\"configuration\":{\"unusedAccess\":{\"unusedAccessAge\":90}}}")
                 .put("/analyzer").then().statusCode(200).extract().path("arn");
         try {
             given().header("Authorization", AUTH).get("/analyzer/get-me")
@@ -42,7 +42,8 @@ class AccessAnalyzerIntegrationTest {
                     .body("analyzer.type", equalTo("ORGANIZATION"))
                     .body("analyzer.status", equalTo("ACTIVE"))
                     .body("analyzer.createdAt", notNullValue())
-                    .body("analyzer.tags.env", equalTo("test"));
+                    .body("analyzer.tags.env", equalTo("test"))
+                    .body("analyzer.configuration.unusedAccess.unusedAccessAge", equalTo(90));
         } finally {
             given().header("Authorization", AUTH).delete("/analyzer/get-me").then().statusCode(200);
         }
