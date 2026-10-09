@@ -32,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -482,6 +483,30 @@ class Ec2NetworkCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r), "the prior target is restored from the snapshot");
         verify(ec2).replaceRoute(REGION, RTB_ID, "0.0.0.0/0", null, null, IGW_ID, null, null);
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aFailedEgressOnlyRouteUpdateRestoresTheRouteItAlreadyDeleted() {
+        Route route = new Route();
+        route.setDestinationIpv6CidrBlock("::/0");
+        route.setEgressOnlyInternetGatewayId("eigw-0123456789abcdef0");
+        RouteTable rt = new RouteTable();
+        rt.setRouteTableId(RTB_ID);
+        rt.setRoutes(List.of(route));
+        when(ec2.describeRouteTables(REGION, List.of(RTB_ID), Map.of())).thenReturn(List.of(rt));
+        // The update's own delete succeeds, its create is rejected, then the restore finds nothing to delete.
+        doNothing().doThrow(new AwsException("InvalidRoute.NotFound", "no route", 400))
+                .when(ec2).deleteRoute(REGION, RTB_ID, null, "::/0", null);
+        doThrow(new AwsException("InvalidParameterCombination", "two targets", 400)).doNothing()
+                .when(ec2).createRoute(eq(REGION), eq(RTB_ID), isNull(), eq("::/0"), isNull(), any(), isNull(), any(), isNull());
+        StackResource r = prior("AWS::EC2::Route", "Egress", RTB_ID + "|::/0", Map.of("CidrBlock", "::/0"));
+        ObjectNode props = mapper.createObjectNode().put("RouteTableId", RTB_ID).put("DestinationIpv6CidrBlock", "::/0")
+                .put("EgressOnlyInternetGatewayId", "eigw-0123456789abcdef0").put("GatewayId", IGW_ID);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(RTB_ID + "|::/0")));
+
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR), "the restore must not fail");
+        verify(ec2).createRoute(REGION, RTB_ID, null, "::/0", null, null, null, "eigw-0123456789abcdef0", null);
     }
 
     @Test
