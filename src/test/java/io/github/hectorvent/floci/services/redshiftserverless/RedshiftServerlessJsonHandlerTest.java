@@ -356,6 +356,56 @@ class RedshiftServerlessJsonHandlerTest {
                 (ObjectNode) parse("{\"resourceArn\":" + quoted(arn) + ",\"tagKeys\":\"env\"}"), REGION);
         assertEquals(400, untagged.getStatus());
         assertEquals("ValidationException", errorType(untagged));
+        // The service also rejects a null tagKeys ("tagKeys is required."), so only the message
+        // shows the handler rejected the wrong type rather than reading it as absent.
+        assertEquals("tagKeys must be an array of strings.", errorMessage(untagged));
+    }
+
+    @Test
+    void aTagObjectWithAMissingOrNonStringKeyOrValueIsRejected() {
+        JsonNode namespace = body(create("tag-obj-ns")).get("namespace");
+        String arn = namespace.get("namespaceArn").textValue();
+        String[][] cases = {
+                {"{\"key\":\"env\",\"value\":7}", "tags must contain only tags with a string value."},
+                {"{\"value\":\"dev\"}", "tags must contain only tags with a string key."},
+                {"{\"key\":7,\"value\":\"dev\"}", "tags must contain only tags with a string key."}};
+        for (String[] c : cases) {
+            Response tagged = handler.handle("TagResource",
+                    parse("{\"resourceArn\":" + quoted(arn) + ",\"tags\":[" + c[0] + "]}"), REGION);
+            assertEquals(400, tagged.getStatus(), c[0]);
+            assertEquals("ValidationException", errorType(tagged), c[0]);
+            assertEquals(c[1], errorMessage(tagged), c[0]);
+
+            Response created = handler.handle("CreateNamespace", parse(
+                    "{\"namespaceName\":\"tag-obj-ns2\",\"tags\":[" + c[0] + "]}"), REGION);
+            assertEquals(c[1], errorMessage(created), c[0]);
+        }
+        JsonNode listed = body(handler.handle("ListTagsForResource",
+                parse("{\"resourceArn\":" + quoted(arn) + "}"), REGION));
+        assertEquals(0, listed.get("tags").size(), "a rejected tag must not be stored: " + listed);
+
+        Response noValue = handler.handle("TagResource",
+                parse("{\"resourceArn\":" + quoted(arn) + ",\"tags\":[{\"key\":\"env\"}]}"), REGION);
+        assertEquals(200, noValue.getStatus(), "a tag without a value stays accepted");
+    }
+
+    @Test
+    void copiesTolerateNullCollectionsFromAStateFile() throws Exception {
+        Namespace ns = mapper.readValue(
+                "{\"namespaceName\":\"n\",\"iamRoles\":null,\"logExports\":null,\"tags\":null}",
+                Namespace.class);
+        Namespace nsCopy = new Namespace(ns);
+        assertTrue(nsCopy.getIamRoles().isEmpty());
+        assertTrue(nsCopy.getLogExports().isEmpty());
+        assertTrue(nsCopy.getTags().isEmpty());
+
+        Workgroup wg = mapper.readValue("{\"workgroupName\":\"w\",\"configParameters\":null,"
+                + "\"securityGroupIds\":null,\"subnetIds\":null,\"tags\":null}", Workgroup.class);
+        Workgroup wgCopy = new Workgroup(wg);
+        assertTrue(wgCopy.getConfigParameters().isEmpty());
+        assertTrue(wgCopy.getSecurityGroupIds().isEmpty());
+        assertTrue(wgCopy.getSubnetIds().isEmpty());
+        assertTrue(wgCopy.getTags().isEmpty());
     }
 
     private JsonNode parse(String json) {
@@ -387,6 +437,10 @@ class RedshiftServerlessJsonHandlerTest {
     private JsonNode body(Response response) {
         assertEquals(200, response.getStatus(), "expected a successful response, got " + response.getEntity());
         return mapper.valueToTree(response.getEntity());
+    }
+
+    private String errorMessage(Response response) {
+        return mapper.valueToTree(response.getEntity()).path("message").asText(null);
     }
 
     private String errorType(Response response) {

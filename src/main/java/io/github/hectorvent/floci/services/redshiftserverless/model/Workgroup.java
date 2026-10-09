@@ -58,9 +58,9 @@ public class Workgroup {
         this.enhancedVpcRouting = other.enhancedVpcRouting;
         this.publiclyAccessible = other.publiclyAccessible;
         this.extraComputeForAutomaticOptimization = other.extraComputeForAutomaticOptimization;
-        this.configParameters = new ArrayList<>(other.configParameters);
-        this.securityGroupIds = new ArrayList<>(other.securityGroupIds);
-        this.subnetIds = new ArrayList<>(other.subnetIds);
+        this.configParameters = other.configParameters == null ? new ArrayList<>() : new ArrayList<>(other.configParameters);
+        this.securityGroupIds = other.securityGroupIds == null ? new ArrayList<>() : new ArrayList<>(other.securityGroupIds);
+        this.subnetIds = other.subnetIds == null ? new ArrayList<>() : new ArrayList<>(other.subnetIds);
         this.status = other.status;
         this.endpoint = other.endpoint;
         this.port = other.port;
@@ -69,7 +69,7 @@ public class Workgroup {
         this.pendingTrackName = other.pendingTrackName;
         this.pricePerformanceTarget = other.pricePerformanceTarget;
         this.creationDate = other.creationDate;
-        this.tags = new LinkedHashMap<>(other.tags);
+        this.tags = other.tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(other.tags);
         this.runtimeHost = other.runtimeHost;
         this.runtimePort = other.runtimePort;
         this.masterUsername = other.masterUsername;
