@@ -2657,6 +2657,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         boolean forceNewDeployment = request.isForceNewDeployment();
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
+        // A name that was never created takes no lock, so probing unknown names retains nothing.
+        if (!services.containsKey(key)) {
+            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+        }
         synchronized (serviceLocks.computeIfAbsent(key, k -> new Object())) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
@@ -2907,6 +2911,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
+        // A name that was never created takes no lock, so probing unknown names retains nothing.
+        if (!services.containsKey(key)) {
+            throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+        }
         synchronized (serviceLocks.computeIfAbsent(key, k -> new Object())) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
