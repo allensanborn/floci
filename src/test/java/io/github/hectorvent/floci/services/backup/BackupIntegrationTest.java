@@ -1543,12 +1543,12 @@ class BackupIntegrationTest {
         .when().get("/backup-vaults/")
         .then().statusCode(200)
             .body("BackupVaultList.BackupVaultName", hasItem(AIR_GAPPED_VAULT))
-            .body("BackupVaultList.BackupVaultName", not(hasItem(VAULT_NAME)));
+            .body("BackupVaultList.BackupVaultName", not(hasItem("lock-enforcement-vault")));
 
         given().header("Authorization", AUTH).queryParam("vaultType", "BACKUP_VAULT")
         .when().get("/backup-vaults/")
         .then().statusCode(200)
-            .body("BackupVaultList.BackupVaultName", hasItem(VAULT_NAME))
+            .body("BackupVaultList.BackupVaultName", hasItem("lock-enforcement-vault"))
             .body("BackupVaultList.BackupVaultName", not(hasItem(AIR_GAPPED_VAULT)));
     }
 
