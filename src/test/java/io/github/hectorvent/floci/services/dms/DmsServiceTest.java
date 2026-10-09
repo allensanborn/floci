@@ -42,6 +42,8 @@ class DmsServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private DmsService service;
+    /** What an unfiltered DescribeSubnets returns; empty means the region has no default VPC. */
+    private List<Subnet> regionSubnets = List.of();
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -57,6 +59,9 @@ class DmsServiceTest {
         Ec2Service ec2Service = mock(Ec2Service.class);
         when(ec2Service.describeSubnets(eq(REGION), anyList(), anyMap())).thenAnswer(invocation -> {
             List<String> requested = invocation.getArgument(1);
+            if (requested.isEmpty()) {
+                return regionSubnets;
+            }
             return requested.stream().map(DmsServiceTest::subnet).filter(Objects::nonNull).toList();
         });
         RegionResolver regionResolver = mock(RegionResolver.class);
@@ -149,6 +154,39 @@ class DmsServiceTest {
 
         assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), "eu-west-1")
                 .items().isEmpty());
+    }
+
+    @Test
+    void describeFilteredOnDefaultReturnsTheDefaultVpcGroup() {
+        useDefaultVpc();
+
+        List<ReplicationSubnetGroup> described =
+                service.describeReplicationSubnetGroups(filterRequest("default"), REGION).items();
+
+        assertEquals(1, described.size());
+        ReplicationSubnetGroup group = described.getFirst();
+        assertEquals("default", group.getReplicationSubnetGroupIdentifier());
+        assertEquals(VPC_ID, group.getVpcId());
+        assertEquals(List.of("subnet-a", "subnet-b"), group.getSubnetIds());
+    }
+
+    @Test
+    void describeListsTheDefaultGroupAlongsideCreatedOnes() {
+        useDefaultVpc();
+        service.createReplicationSubnetGroup(createRequest("user-group", "example", "subnet-a", "subnet-b"), REGION);
+
+        List<String> listed = service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).items()
+                .stream().map(ReplicationSubnetGroup::getReplicationSubnetGroupIdentifier).toList();
+
+        assertEquals(List.of("default", "user-group"), listed);
+    }
+
+    @Test
+    void describeOmitsTheDefaultGroupWhenTheRegionHasNoDefaultSubnets() {
+        assertTrue(service.describeReplicationSubnetGroups(mapper.createObjectNode(), REGION).items().isEmpty());
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.describeReplicationSubnetGroups(filterRequest("default"), REGION));
+        assertEquals("ResourceNotFoundFault", notFound.getErrorCode());
     }
 
     @Test
@@ -535,6 +573,14 @@ class DmsServiceTest {
             identifiers.add(identifier);
         }
         return identifiers;
+    }
+
+    private void useDefaultVpc() {
+        Subnet a = subnet("subnet-a");
+        Subnet b = subnet("subnet-b");
+        a.setDefaultForAz(true);
+        b.setDefaultForAz(true);
+        regionSubnets = List.of(a, b);
     }
 
     private ObjectNode pageRequest(int maxRecords, String marker) {
