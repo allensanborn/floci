@@ -3045,7 +3045,15 @@ public class RdsService implements Resettable, ResourceProvider {
                 Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
                 Map.of("engine", "mysql", "engineVersion", "8.0", "dbInstanceClass", "db.t3.micro"),
                 Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro"),
-                Map.of("engine", "sqlserver-se", "engineVersion", "15.00", "dbInstanceClass", "db.t3.micro")
+                Map.of("engine", "sqlserver-se", "engineVersion", "15.00", "dbInstanceClass", "db.t3.micro"),
+                Map.of("engine", "aurora-mysql", "engineVersion", "8.0.mysql_aurora.3.05.2", "dbInstanceClass", "db.t3.medium"),
+                Map.of("engine", "aurora-mysql", "engineVersion", "8.0.mysql_aurora.3.05.2", "dbInstanceClass", "db.t4g.medium"),
+                Map.of("engine", "aurora-mysql", "engineVersion", "8.0.mysql_aurora.3.05.2", "dbInstanceClass", "db.r5.large"),
+                Map.of("engine", "aurora-mysql", "engineVersion", "8.0.mysql_aurora.3.05.2", "dbInstanceClass", "db.r6g.large"),
+                Map.of("engine", "aurora-postgresql", "engineVersion", "16.3", "dbInstanceClass", "db.t3.medium"),
+                Map.of("engine", "aurora-postgresql", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
+                Map.of("engine", "aurora-postgresql", "engineVersion", "16.3", "dbInstanceClass", "db.r5.large"),
+                Map.of("engine", "aurora-postgresql", "engineVersion", "16.3", "dbInstanceClass", "db.r6g.large")
         );
         return options.stream()
                 .filter(option -> engine == null || engine.isBlank() || engine.equalsIgnoreCase(option.get("engine")))
