@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.backup;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,7 +12,9 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Integration tests for AWS Backup via REST JSON protocol.
@@ -1419,6 +1422,117 @@ class BackupIntegrationTest {
         .when().post("/backup-jobs/" + jid).then().statusCode(204);
 
         awaitJobState(OTHER_ACCOUNT_AUTH, jid, "ABORTED");
+    }
+
+
+    // ── Vault notifications: delivery ──────────────────────────────────────────
+
+    private static String createQueue(String name) {
+        return given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue").formParam("QueueName", name)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    /** A topic with {@code queueUrl} subscribed, so what SNS delivers can be read back from SQS. */
+    private static String topicDeliveringTo(String name, String queueUrl) {
+        String topicArn = given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic").formParam("Name", name)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs").formParam("Endpoint", queueUrl)
+        .when().post("/").then().statusCode(200);
+        return topicArn;
+    }
+
+    private static String receiveBody(String queueUrl) {
+        return given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage").formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+    }
+
+    private static String startJobInNotifiedVault(String vault, String topicArn, String event) {
+        given().header("Authorization", AUTH).contentType("application/json").body("{}")
+        .when().put("/backup-vaults/" + vault).then().statusCode(200);
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"SNSTopicArn\":\"%s\",\"BackupVaultEvents\":[\"%s\"]}".formatted(topicArn, event))
+        .when().put("/backup-vaults/" + vault + "/notification-configuration").then().statusCode(204);
+        return given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                {
+                  "BackupVaultName": "%s",
+                  "ResourceArn": "%s",
+                  "IamRoleArn": "%s"
+                }
+                """.formatted(vault, RESOURCE_ARN, IAM_ROLE))
+        .when().put("/backup-jobs").then().statusCode(200).extract().path("BackupJobId");
+    }
+
+    @Test
+    @Order(170)
+    void aCompletedJobIsPublishedOnlyToAVaultThatAskedForBackupJobCompleted() {
+        String quietQueue = createQueue("backup-notify-quiet-queue");
+        String quietTopic = topicDeliveringTo("backup-notify-quiet-topic", quietQueue);
+        String notifiedQueue = createQueue("backup-notify-queue");
+        String notifiedTopic = topicDeliveringTo("backup-notify-topic", notifiedQueue);
+
+        // The quiet vault's job is started first. Completions run on one scheduler thread in
+        // start order, so by the time the notified vault's message has arrived, any publish
+        // the quiet vault's completion was going to make has already been made.
+        String quietJob = startJobInNotifiedVault("notify-quiet-vault", quietTopic, "BACKUP_JOB_FAILED");
+        String jid = startJobInNotifiedVault("notify-vault", notifiedTopic, "BACKUP_JOB_COMPLETED");
+
+        String[] body = new String[1];
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
+            .until(() -> (body[0] = receiveBody(notifiedQueue)) != null && !body[0].isEmpty());
+
+        awaitJobCompleted(jid);
+        String rpArn = given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/" + jid).then().statusCode(200)
+            .extract().path("RecoveryPointArn");
+
+        JsonPath envelope = new JsonPath(body[0]);
+        assertEquals(notifiedTopic, envelope.getString("TopicArn"));
+        assertEquals("Notification from AWS Backup", envelope.getString("Subject"));
+        assertThat(envelope.getString("Message"), allOf(
+            startsWith("An AWS Backup job was completed successfully."),
+            containsString("Recovery point ARN: " + rpArn),
+            containsString("Resource ARN : " + RESOURCE_ARN),
+            containsString("BackupJob ID : " + jid),
+            containsString("Backup Vault Name : notify-vault")));
+
+        awaitJobCompleted(quietJob);
+        assertThat(receiveBody(quietQueue), anyOf(nullValue(), emptyString()));
+    }
+
+    @Test
+    @Order(171)
+    void aFailedPublishIsLoggedWithItsStackTraceAndDoesNotUndoTheJob() {
+        java.util.List<java.util.logging.LogRecord> records = new java.util.concurrent.CopyOnWriteArrayList<>();
+        java.util.logging.Handler capture = new java.util.logging.Handler() {
+            @Override public void publish(java.util.logging.LogRecord r) { records.add(r); }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        java.util.logging.Logger log = java.util.logging.Logger.getLogger(BackupService.class.getName());
+        log.addHandler(capture);
+        try {
+            String missingTopic = "arn:aws:sns:us-east-1:000000000000:backup-notify-no-such-topic";
+            String jid = startJobInNotifiedVault("notify-broken-vault", missingTopic, "BACKUP_JOB_COMPLETED");
+            awaitJobCompleted(jid);
+            await().atMost(Duration.ofSeconds(10)).until(() -> records.stream()
+                .anyMatch(r -> r.getLevel().intValue() >= java.util.logging.Level.WARNING.intValue()
+                    && String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED")));
+            assertThat("the warning carries the exception, not just its message",
+                records.stream().filter(r -> String.valueOf(r.getMessage()).contains("BACKUP_JOB_COMPLETED"))
+                    .allMatch(r -> r.getThrown() != null));
+        } finally {
+            log.removeHandler(capture);
+        }
     }
 
 }

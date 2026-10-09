@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.backup.model.*;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -43,6 +44,7 @@ public class BackupService {
     private final StorageBackend<String, BackupVaultNotifications> notificationStore;
 
     private final RegionResolver regionResolver;
+    private final SnsService snsService;
     private final int jobCompletionDelaySeconds;
     private final ObjectMapper objectMapper;
 
@@ -63,7 +65,7 @@ public class BackupService {
 
     @Inject
     public BackupService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                         ObjectMapper objectMapper) {
+                         ObjectMapper objectMapper, SnsService snsService) {
         this.vaultStore     = storageFactory.create("backup", "backup-vaults.json",     new TypeReference<>() {});
         this.planStore      = storageFactory.create("backup", "backup-plans.json",      new TypeReference<>() {});
         this.selectionStore = storageFactory.create("backup", "backup-selections.json", new TypeReference<>() {});
@@ -73,6 +75,7 @@ public class BackupService {
         this.notificationStore  = storageFactory.create("backup", "backup-vault-notifications.json",   new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.snsService = snsService;
         this.jobCompletionDelaySeconds = config.services().backup().jobCompletionDelaySeconds();
     }
 
@@ -757,8 +760,33 @@ public class BackupService {
 
                 incrementVaultCount(vaultName, region);
                 LOG.infov("Backup job {0} completed, recovery point: {1}", jobId, rpArn);
+                notifyJobCompleted(job, vaultName, region);
             }
         });
+    }
+
+    /**
+     * Publishes BACKUP_JOB_COMPLETED to the vault's SNS topic, if the vault asked for it.
+     * Runs after the job and recovery point are stored, and never fails the completion: AWS
+     * does not undo a backup because its notification could not be delivered.
+     */
+    private void notifyJobCompleted(BackupJob job, String vaultName, String region) {
+        try {
+            vaultStore.get(vaultKey(region, vaultName))
+                    .flatMap(vault -> notificationStore.get(subResourceKey(region, vault)))
+                    .filter(n -> n.getBackupVaultEvents() != null
+                            && n.getBackupVaultEvents().contains("BACKUP_JOB_COMPLETED"))
+                    .ifPresent(n -> snsService.publish(n.getSnsTopicArn(), null,
+                            "An AWS Backup job was completed successfully. Recovery point ARN: "
+                                    + job.getRecoveryPointArn() + ". Resource ARN : " + job.getResourceArn()
+                                    + ". BackupJob ID : " + job.getBackupJobId()
+                                    + ". Backup Vault Name : " + vaultName,
+                            "Notification from AWS Backup",
+                            AwsArnUtils.regionOrDefault(n.getSnsTopicArn(), region)));
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to publish BACKUP_JOB_COMPLETED for job {0} in vault {1}",
+                    job.getBackupJobId(), vaultName);
+        }
     }
 
     private void abortJob(String jobId) {
