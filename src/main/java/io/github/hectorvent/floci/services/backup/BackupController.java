@@ -102,9 +102,10 @@ public class BackupController {
 
     @GET
     @Path("/backup-vaults/")
-    public Response listBackupVaults(@Context HttpHeaders headers) {
+    public Response listBackupVaults(@Context HttpHeaders headers,
+                                      @QueryParam("vaultType") String byVaultType) {
         String region = regionResolver.resolveRegion(headers);
-        List<BackupVault> vaults = service.listBackupVaults(region);
+        List<BackupVault> vaults = service.listBackupVaults(region, byVaultType);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("BackupVaultList");
         vaults.forEach(list::addPOJO);

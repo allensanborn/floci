@@ -112,6 +112,9 @@ public class BackupService {
         BackupVault vault = new BackupVault();
         vault.setVaultType("LOGICALLY_AIR_GAPPED_BACKUP_VAULT");
         vault.setVaultState("AVAILABLE");
+        // Retention is mandatory and fixed at creation, so the existing locked-vault enforcement
+        // (backup-job lifecycle window, recovery-point deletion floor) applies to it as well.
+        vault.setLocked(true);
         vault.setMinRetentionDays(minRetentionDays);
         vault.setMaxRetentionDays(maxRetentionDays);
         return createVault(vault, vaultName, encryptionKeyArn, creatorRequestId, tags, region);
@@ -190,9 +193,21 @@ public class BackupService {
         vaultStore.delete(vaultKey(region, vaultName));
     }
 
-    public List<BackupVault> listBackupVaults(String region) {
+    public List<BackupVault> listBackupVaults(String region, String byVaultType) {
         String prefix = region + ":";
-        return vaultStore.scan(k -> k.startsWith(prefix));
+        // A standard vault leaves VaultType unset; AWS reports it as BACKUP_VAULT.
+        return vaultStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(v -> byVaultType == null || byVaultType.equals(
+                        v.getVaultType() == null ? "BACKUP_VAULT" : v.getVaultType()))
+                .toList();
+    }
+
+    private static void requireNotAirGapped(BackupVault vault, String action) {
+        if (vault.getVaultType() != null) {
+            throw new AwsException("InvalidRequestException",
+                    "Backup vault lock configuration cannot be " + action
+                            + " on a logically air-gapped vault: " + vault.getBackupVaultName(), 400);
+        }
     }
 
     // ── Vault sub-resources: access policy, notifications, lock ────────────────
@@ -379,6 +394,7 @@ public class BackupService {
                                                        Long maxRetentionDays,
                                                        Long changeableForDays) {
         BackupVault vault = describeBackupVault(vaultName, region);
+        requireNotAirGapped(vault, "changed");
         if (vault.isLocked() && !lockIsStillChangeable(vault)) {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be changed: " + vaultName, 400);
@@ -438,6 +454,7 @@ public class BackupService {
 
     public void deleteBackupVaultLockConfiguration(String vaultName, String region) {
         BackupVault vault = describeBackupVault(vaultName, region);
+        requireNotAirGapped(vault, "deleted");
         if (vault.isLocked() && !lockIsStillChangeable(vault)) {
             throw new AwsException("InvalidRequestException",
                     "Backup vault lock is immutable and cannot be deleted: " + vaultName, 400);

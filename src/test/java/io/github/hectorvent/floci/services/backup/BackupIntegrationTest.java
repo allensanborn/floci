@@ -1513,6 +1513,47 @@ class BackupIntegrationTest {
 
     @Test
     @Order(175)
+    void airGappedVaultIsLockedSoRetentionEnforcementApplies() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().statusCode(200).body("Locked", equalTo(true));
+    }
+
+    @Test
+    @Order(176)
+    void vaultLockCallsCannotChangeOrRemoveAirGappedRetention() {
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("{\"MinRetentionDays\":1,\"MaxRetentionDays\":2}")
+        .when().put("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT + "/vault-lock")
+        .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-vaults/" + AIR_GAPPED_VAULT)
+        .then().body("MinRetentionDays", equalTo(7)).body("MaxRetentionDays", equalTo(30));
+    }
+
+    @Test
+    @Order(177)
+    void listBackupVaultsFiltersByVaultType() {
+        given().header("Authorization", AUTH).queryParam("vaultType", "LOGICALLY_AIR_GAPPED_BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem(AIR_GAPPED_VAULT))
+            .body("BackupVaultList.BackupVaultName", not(hasItem(VAULT_NAME)));
+
+        given().header("Authorization", AUTH).queryParam("vaultType", "BACKUP_VAULT")
+        .when().get("/backup-vaults/")
+        .then().statusCode(200)
+            .body("BackupVaultList.BackupVaultName", hasItem(VAULT_NAME))
+            .body("BackupVaultList.BackupVaultName", not(hasItem(AIR_GAPPED_VAULT)));
+    }
+
+    @Test
+    @Order(178)
     void deleteBackupVaultRemovesTheAirGappedVault() {
         given().header("Authorization", AUTH)
         .when().delete("/backup-vaults/" + AIR_GAPPED_VAULT)
