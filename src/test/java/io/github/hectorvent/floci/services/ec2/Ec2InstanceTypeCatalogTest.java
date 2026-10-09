@@ -119,6 +119,16 @@ class Ec2InstanceTypeCatalogTest {
     }
 
     @Test
+    void t2FamilySupportsI386AndX86_64() {
+        for (String name : List.of("t2.nano", "t2.micro", "t2.small")) {
+            assertEquals(Set.of("i386", "x86_64"),
+                    Set.copyOf(instanceTypeCatalog.find(name).orElseThrow().supportedArchitectures), name);
+        }
+        // launch-time default architecture must stay x86_64 (first entry)
+        assertEquals("x86_64", instanceTypeCatalog.find("t2.micro").orElseThrow().supportedArchitectures.get(0));
+    }
+
+    @Test
     void burstableFamiliesCarryTheirDocumentedDefaultCreditOption() {
         assertEquals(Optional.of("standard"), Ec2InstanceTypeCatalog.defaultCpuCredits("t2.micro"));
         assertEquals(Optional.of("unlimited"), Ec2InstanceTypeCatalog.defaultCpuCredits("t3.small"));
