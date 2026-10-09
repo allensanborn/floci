@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -138,9 +139,26 @@ public class LambdaFunctionStore implements Resettable {
         return backend.scan(key -> key.startsWith(prefix) && key.endsWith("::$LATEST"));
     }
 
+    /**
+     * All versions of a function in AWS order: {@code $LATEST} first, then published versions
+     * ascending numerically. The Terraform AWS provider reads the last entry of
+     * ListVersionsByFunction as the current version, so the backend's scan order must not leak.
+     */
     public List<LambdaFunction> listVersions(String region, String functionName) {
         String prefix = "lambda::" + region + "::" + functionName + "::";
-        return backend.scan(key -> key.startsWith(prefix));
+        return backend.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparingLong(LambdaFunctionStore::versionOrder))
+                .toList();
+    }
+
+    private static long versionOrder(LambdaFunction fn) {
+        String v = fn.getVersion();
+        if (v == null || "$LATEST".equals(v)) {
+            return -1;
+        }
+        // Never throw here: deleteAll routes through this, so an unexpected key must not block it.
+        return !v.isEmpty() && v.length() < 19 && v.chars().allMatch(Character::isDigit)
+                ? Long.parseLong(v) : Long.MAX_VALUE;
     }
 
     /**

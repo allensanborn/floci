@@ -101,7 +101,8 @@ class LambdaVersionIntegrationTest {
         .then()
             .statusCode(200)
             .body("Versions", hasSize(3)) // $LATEST, 1, 2
-            .body("Versions.Version", containsInAnyOrder("$LATEST", "1", "2"))
+            // AWS order: $LATEST first, then ascending. The Terraform provider reads the last entry.
+            .body("Versions.Version", contains("$LATEST", "1", "2"))
             .body("Versions.find { it.Version == '1' }.Description", equalTo("First version"))
             .body("Versions.find { it.Version == '2' }.Description", equalTo("Second version"));
     }
@@ -253,6 +254,50 @@ class LambdaVersionIntegrationTest {
                         equalTo("arn:aws:sqs:us-east-1:000000000000:dlq"))
                 .body("Versions.find { it.Version == '1' }.KMSKeyArn",
                         equalTo("arn:aws:kms:us-east-1:000000000000:key/test-key"));
+        } finally {
+            given().delete(BASE_PATH + "/functions/" + fnName);
+        }
+    }
+
+    @Test
+    @Order(10)
+    void listVersionsByFunctionOrdersLatestFirstThenNumeric() {
+        // Eleven versions: enough that storage hash order is out of order, and that a string
+        // sort would put "10" and "11" before "2".
+        String fnName = "versioned-order-function";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "index.handler"
+                }
+                """.formatted(fnName))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201);
+        try {
+            for (int i = 1; i <= 11; i++) {
+                given()
+                    .contentType("application/json")
+                    .body("{\"Description\": \"v" + i + "\"}")
+                .when()
+                    .post(BASE_PATH + "/functions/" + fnName + "/versions")
+                .then()
+                    .statusCode(201)
+                    .body("Version", equalTo(String.valueOf(i)));
+            }
+
+            given()
+            .when()
+                .get(BASE_PATH + "/functions/" + fnName + "/versions")
+            .then()
+                .statusCode(200)
+                .body("Versions.Version",
+                        contains("$LATEST", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"));
         } finally {
             given().delete(BASE_PATH + "/functions/" + fnName);
         }
