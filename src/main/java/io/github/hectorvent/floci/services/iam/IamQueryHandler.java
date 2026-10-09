@@ -1905,7 +1905,7 @@ public class IamQueryHandler {
         // Its type is non-empty (length 1-128), so for a key the emulator does not
         // hold the element is omitted rather than emitted empty.
         XmlBuilder xml = new XmlBuilder();
-        iamService.findUserNameByAccessKeyId(getParam(params, "AccessKeyId"))
+        iamService.findAccessKeyOwnerInThisAccount(getParam(params, "AccessKeyId"))
                 .ifPresent(userName -> xml.elem("UserName", userName));
         String result = xml
                 .start("AccessKeyLastUsed")

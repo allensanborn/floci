@@ -822,6 +822,19 @@ class IamServiceTest {
     }
 
     @Test
+    void anotherAccountCannotClaimALegacyAccessKeyThroughItsOwnerLookup() {
+        InMemoryStorage<String, AccessKey> raw = new InMemoryStorage<>();
+        raw.put("AKIALEGACYEXAMPLE", new AccessKey("AKIALEGACYEXAMPLE", "secret", "worker"));
+        IamService stranger = iamService(false, new AccountAwareStorageBackend<>(raw, null, "111122223333"));
+        IamService owner = iamService(false, new AccountAwareStorageBackend<>(raw, null, "000000000000"));
+        owner.createUser("worker", "/");
+
+        assertTrue(stranger.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").isEmpty());
+        assertTrue(raw.get("AKIALEGACYEXAMPLE").isPresent(), "the stranger's lookup must leave the key unmoved");
+        assertEquals("worker", owner.findAccessKeyOwnerInThisAccount("AKIALEGACYEXAMPLE").orElseThrow());
+    }
+
+    @Test
     void renamingAUserUpdatesItsGroupMembership() {
         iamService.createUser("alice", "/");
         iamService.createGroup("devs", "/");
