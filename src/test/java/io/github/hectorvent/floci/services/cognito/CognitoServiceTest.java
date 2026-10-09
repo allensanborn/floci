@@ -26,12 +26,12 @@ import io.github.hectorvent.floci.services.cognito.verification.VerificationCode
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import io.github.hectorvent.floci.testing.MutableClock;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -4664,7 +4664,8 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
-        assertEquals("UserNotConfirmedException", ex.getErrorCode());
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+        assertEquals("User is disabled.", ex.getMessage());
     }
 
     @Test
