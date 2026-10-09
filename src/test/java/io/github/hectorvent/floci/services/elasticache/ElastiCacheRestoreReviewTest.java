@@ -133,4 +133,20 @@ class ElastiCacheRestoreReviewTest {
         account.set("000000000000");
         assertTrue(validator.getValue().validatePassword(null, "secret-token"));
     }
+
+    @Test
+    void cacheClusterCreatedUnderAnotherAccountAcceptsItsPasswordOutsideTheRequest() {
+        ElastiCacheService service = service();
+        account.set("111111111111");
+        service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest("cc", "redis", null,
+                null, null, null, AuthMode.PASSWORD, "secret-token", null, null, null, null, null, null,
+                null, null, null, null, "us-east-1", null));
+        ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator =
+                ArgumentCaptor.forClass(ElastiCacheAuthProxy.PasswordValidator.class);
+        verify(proxies).startProxy(eq("cc"), eq(AuthMode.PASSWORD), anyInt(), anyString(), anyInt(),
+                validator.capture());
+        // The proxy authenticates on its own thread, where the store falls back to the default account.
+        account.set("000000000000");
+        assertTrue(validator.getValue().validatePassword(null, "secret-token"));
+    }
 }

@@ -1313,13 +1313,16 @@ public class ElastiCacheService implements ResourceProvider {
                 cluster.setContainerPort(handle.getPort());
             }
 
+            // Resolved here, inside the request: the proxy calls the validator on its own thread,
+            // where the store's implicit account is the default one rather than the owner's.
+            String accountId = cacheClusters.accountId();
             synchronized (lockFor("cc:" + clusterId)) {
                 cacheClusters.put(clusterId, cluster);
                 if (handle != null) {
                     proxyManager.startProxy(clusterId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
                             (username, password) -> validateCacheClusterPassword(
-                                    cacheClusters.accountId(), clusterId, username, password));
+                                    accountId, clusterId, username, password));
                 } else {
                     LOG.warnv("Cache cluster {0} created without a backing cache container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
@@ -1327,7 +1330,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 // Under the same monitor as the put: a delete slipping into the gap would find
                 // no claim on the port and leave the reservation behind for good.
-                recordsHoldingTheirPort.add(recordKey(cacheClusters.accountId(), clusterId));
+                recordsHoldingTheirPort.add(recordKey(accountId, clusterId));
             }
 
             LOG.infov("Cache cluster {0} created, endpoint={1}:{2}", clusterId,
