@@ -182,6 +182,19 @@ class SqsServiceTest {
     }
 
     @Test
+    void createQueue_recreateWithSameNonCanonicalMaximumMessageSizeIsNotAConflict() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "01024"), region);
+
+        Queue same = sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "01024"), region);
+        assertEquals(queue.getQueueUrl(), same.getQueueUrl());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("padded-size-queue", Map.of("MaximumMessageSize", "2048"), region));
+        assertEquals("QueueAlreadyExists", ex.getErrorCode());
+    }
+
+    @Test
     void createQueue_rejectsMaximumMessageSizeOutsideAwsRange() {
         for (String invalid : List.of("1048577", "1023", "0", "-1", "abc")) {
             AwsException ex = assertThrows(AwsException.class,

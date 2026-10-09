@@ -648,7 +648,13 @@ public class SqsService implements Resettable, ResourceProvider {
                     // SqsManagedSseEnabled is derived on read and never stored, so the stored map
                     // alone would let a differing value through.
                     String storedValue = effective.get(entry.getKey());
-                    if (storedValue != null && !storedValue.equals(entry.getValue())) {
+                    String requested = entry.getValue();
+                    // The effective MaximumMessageSize is canonical ("1024"); canonicalise the
+                    // already-validated request too so "01024" is not a conflict with itself.
+                    if ("MaximumMessageSize".equals(entry.getKey()) && requested != null && !requested.isEmpty()) {
+                        requested = String.valueOf(parseMaxMessageSize(requested));
+                    }
+                    if (storedValue != null && !storedValue.equals(requested)) {
                         throw new AwsException("QueueAlreadyExists",
                                 "A queue already exists with the same name but different attributes.", 400);
                     }
