@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * reachable by name, which a service-level test could not (CS-001).
  *
  * <p><strong>Known limitation asserted here deliberately:</strong> increase requests are
- * kept in memory only, readable back through {@code GetRequestedServiceQuotaChange}.
+ * stored and readable back only through {@code GetRequestedServiceQuotaChange}.
  * {@code ListRequestedServiceQuotaChangeHistory} is unsupported. {@code Status} is always
  * {@code PENDING} and never advances. Documented in {@code docs/services/servicequotas.md}
  * per CS-021.
@@ -212,5 +212,21 @@ class RequestServiceQuotaIncreaseConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("IllegalArgumentException"));
+    }
+
+    @Test
+    void getRequestedChange_afterEmulatorReset_returnsNoSuchResource() {
+        String quotaCode = ServiceQuotasService.syntheticQuotaCode("resetprobe", "Resources per Region");
+        String id = request("{\"ServiceCode\":\"resetprobe\",\"QuotaCode\":\"" + quotaCode
+                + "\",\"DesiredValue\":7}")
+                .then().statusCode(200).extract().path("RequestedQuota.Id");
+        getChange("{\"RequestId\":\"" + id + "\"}").then().statusCode(200);
+
+        given().when().post("/_floci/state/reset").then().statusCode(200);
+
+        getChange("{\"RequestId\":\"" + id + "\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
     }
 }

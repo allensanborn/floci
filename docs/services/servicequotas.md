@@ -30,13 +30,14 @@ value. See Limitations.
 | `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
 | `RequestServiceQuotaIncrease` | Validates and records an increase request as `PENDING`; quota unchanged |
 | `GetRequestedServiceQuotaChange` | Returns a recorded increase request by `RequestId`, else `NoSuchResourceException` |
-| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair and returns the locally recorded request history; currently empty for the static catalog |
+| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair; always returns an empty list, recorded requests are not listed |
 <!-- floci:actions:end -->
 
 ## Limitations
 
-- **Quota increase requests are kept in memory only.** `GetRequestedServiceQuotaChange` reads
-  them back, but they do not survive a restart. Request ids are derived from the service and
+- **Quota increase requests are recorded but only readable by id.** They live in the configured
+  storage mode and are cleared by an emulator reset. `GetRequestedServiceQuotaChange` reads one
+  back; the history operations do not list them. Request ids are derived from the service and
   quota code, so a repeated request for the same quota replaces the earlier one.
 - **`Status` is always `PENDING` and never advances.** Nothing processes requests, so no
   request ever reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS

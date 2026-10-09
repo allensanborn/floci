@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -16,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ServiceQuotasServiceTest {
 
-    private final ServiceQuotasService service = new ServiceQuotasService(new ObjectMapper());
+    private final ServiceQuotasService service = new ServiceQuotasService(new ObjectMapper(), new InMemoryStorage<>());
 
     @Test
     void syntheticQuotaCodesAreStableAndWellFormed() {
