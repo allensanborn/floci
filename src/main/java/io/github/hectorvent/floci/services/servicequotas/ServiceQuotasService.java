@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 
@@ -73,6 +74,8 @@ public class ServiceQuotasService {
             "Concurrent operations");
 
     private final ObjectMapper objectMapper;
+    // ponytail: in-memory only, lost on restart; move to StorageFactory if requests must survive one
+    private final Map<String, ObjectNode> requestedQuotas = new ConcurrentHashMap<>();
 
     @Inject
     public ServiceQuotasService(ObjectMapper objectMapper) {
@@ -279,8 +282,29 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
+        requestedQuotas.put(requestKey(accountId, region, id), requestedQuota);
+
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("RequestedQuota", requestedQuota);
+        response.set("RequestedQuota", requestedQuota.deepCopy());
         return response;
+    }
+
+    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region, String accountId) {
+        if (requestId == null || requestId.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: RequestId must not be empty.", 400);
+        }
+        ObjectNode requestedQuota = requestedQuotas.get(requestKey(accountId, region, requestId));
+        if (requestedQuota == null) {
+            throw new AwsException("NoSuchResourceException",
+                    "The request failed because the specified quota increase request does not exist.", 400);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("RequestedQuota", requestedQuota.deepCopy());
+        return response;
+    }
+
+    private static String requestKey(String accountId, String region, String requestId) {
+        return accountId + "/" + region + "/" + requestId;
     }
 }
