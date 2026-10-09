@@ -485,14 +485,27 @@ public class AutoScalingQueryHandler {
 
     private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
         Map<String, List<String>> filters = new LinkedHashMap<>();
+        int filterCount = 0;
         for (int i = 1; ; i++) {
             String name = p.getFirst("Filters.member." + i + ".Name");
             if (name == null) { break; }
-            filters.computeIfAbsent(name, k -> new ArrayList<>())
-                    .addAll(memberList(p, "Filters.member." + i + ".Values"));
+            filterCount = i;
+            List<String> values = memberList(p, "Filters.member." + i + ".Values");
+            rejectIndexGap(p, "Filters.member." + i + ".Values.member.", values.size());
+            filters.computeIfAbsent(name, k -> new ArrayList<>()).addAll(values);
+        }
+        rejectIndexGap(p, "Filters.member.", filterCount);
+        String maxRecords = p.getFirst("MaxRecords");
+        Integer limit = null;
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            try {
+                limit = Integer.parseInt(maxRecords);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
+            }
         }
         AutoScalingService.TagPage page = service.describeTags(region, filters,
-                nullableIntParam(p, "MaxRecords"), p.getFirst("NextToken"));
+                limit, p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTagsResponse", NS)
                   .start("DescribeTagsResult")
@@ -1344,6 +1357,21 @@ public class AutoScalingQueryHandler {
             result.add(val);
         }
         return result;
+    }
+
+    /** A member list is read until its first missing index; any parameter past that gap would be silently dropped. */
+    private static void rejectIndexGap(MultivaluedMap<String, String> p, String prefix, int contiguous) {
+        for (String key : p.keySet()) {
+            if (!key.startsWith(prefix)) { continue; }
+            String rest = key.substring(prefix.length());
+            int dot = rest.indexOf('.');
+            String index = dot < 0 ? rest : rest.substring(0, dot);
+            if (!index.isEmpty() && index.chars().allMatch(Character::isDigit)
+                    && Integer.parseInt(index) > contiguous) {
+                throw new AwsException("ValidationError",
+                        "Parameter " + key + " follows a missing member index.", 400);
+            }
+        }
     }
 
     private List<String> commaList(String value) {

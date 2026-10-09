@@ -138,6 +138,31 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .body(org.hamcrest.Matchers.containsString("ValidationError"));
     }
 
+    @Test
+    void nonNumericMaxRecordsIsAValidationError() {
+        describe()
+                .formParam("MaxRecords", "abc")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+    }
+
+    @Test
+    void sparseFilterIndicesAreAValidationErrorNotAnUnfilteredRead() {
+        describe()
+                .formParam("Filters.member.2.Name", "key")
+                .formParam("Filters.member.2.Values.member.1", "AsgId")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+        describe()
+                .formParam("Filters.member.1.Name", "key")
+                .formParam("Filters.member.1.Values.member.2", "AsgId")
+            .when().post("/")
+            .then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("ValidationError"));
+    }
+
     private static RequestSpecification describe() {
         return given().formParam("Action", "DescribeTags").header("Authorization", AUTH);
     }
