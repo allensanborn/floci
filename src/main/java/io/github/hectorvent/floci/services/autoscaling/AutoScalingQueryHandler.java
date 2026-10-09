@@ -55,6 +55,7 @@ public class AutoScalingQueryHandler {
                 case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
                 case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
                 case "DeleteTags"                   -> handleDeleteTags(p, region);
+                case "DescribeTags"                 -> handleDescribeTags(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
                 case "SetInstanceProtection"        -> handleSetInstanceProtection(p, region);
@@ -480,6 +481,52 @@ public class AutoScalingQueryHandler {
                 .start("CreateOrUpdateTagsResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
                 .end("CreateOrUpdateTagsResponse").build());
+    }
+
+    private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        int filterCount = 0;
+        for (int i = 1; ; i++) {
+            String name = p.getFirst("Filters.member." + i + ".Name");
+            if (name == null) { break; }
+            filterCount = i;
+            List<String> values = memberList(p, "Filters.member." + i + ".Values");
+            rejectIndexGap(p, "Filters.member." + i + ".Values.member.", values.size());
+            filters.computeIfAbsent(name, k -> new ArrayList<>()).addAll(values);
+        }
+        rejectIndexGap(p, "Filters.member.", filterCount);
+        String maxRecords = p.getFirst("MaxRecords");
+        Integer limit = null;
+        if (maxRecords != null && !maxRecords.isBlank()) {
+            try {
+                limit = Integer.parseInt(maxRecords);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", "MaxRecords '" + maxRecords + "' is not a valid integer.", 400);
+            }
+        }
+        AutoScalingService.TagPage page = service.describeTags(region, filters,
+                limit, p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeTagsResponse", NS)
+                  .start("DescribeTagsResult")
+                    .start("Tags");
+        for (AutoScalingService.TagDescription tag : page.tags()) {
+            xml.start("member")
+               .elem("ResourceId", tag.resourceId())
+               .elem("ResourceType", "auto-scaling-group")
+               .elem("Key", tag.key())
+               .elem("Value", tag.value())
+               .elem("PropagateAtLaunch", String.valueOf(tag.propagateAtLaunch()))
+               .end("member");
+        }
+        xml.end("Tags");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        xml.end("DescribeTagsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeTagsResponse");
+        return ok(xml.build());
     }
 
     private Response handleDeleteTags(MultivaluedMap<String, String> p, String region) {
@@ -1310,6 +1357,21 @@ public class AutoScalingQueryHandler {
             result.add(val);
         }
         return result;
+    }
+
+    /** A member list is read until its first missing index; any parameter past that gap would be silently dropped. */
+    private static void rejectIndexGap(MultivaluedMap<String, String> p, String prefix, int contiguous) {
+        for (String key : p.keySet()) {
+            if (!key.startsWith(prefix)) { continue; }
+            String rest = key.substring(prefix.length());
+            int dot = rest.indexOf('.');
+            String index = dot < 0 ? rest : rest.substring(0, dot);
+            if (!index.isEmpty() && index.chars().allMatch(Character::isDigit)
+                    && Integer.parseInt(index) > contiguous) {
+                throw new AwsException("ValidationError",
+                        "Parameter " + key + " follows a missing member index.", 400);
+            }
+        }
     }
 
     private List<String> commaList(String value) {
