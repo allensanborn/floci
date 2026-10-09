@@ -64,6 +64,25 @@ class AccountServiceTest {
         assertEquals("ResourceNotFoundException", error.getErrorCode());
     }
 
+    @Test
+    void deleteRemovesContact() {
+        ObjectNode request = contactRequest();
+        service.putAlternateContact(ACCOUNT_ID, request);
+        service.deleteAlternateContact(ACCOUNT_ID, request);
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.getAlternateContact(ACCOUNT_ID, request));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+    }
+
+    @Test
+    void deleteUnsetTypeReturnsResourceNotFound() {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.deleteAlternateContact(ACCOUNT_ID, contactRequest()));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+    }
+
     private ObjectNode contactRequest() {
         ObjectNode request = mapper.createObjectNode();
         request.put("AlternateContactType", "SECURITY");
