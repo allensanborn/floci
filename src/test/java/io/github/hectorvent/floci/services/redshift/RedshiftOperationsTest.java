@@ -1037,6 +1037,11 @@ public class RedshiftOperationsTest {
         assertEquals(3, copy.getInt("ClusterSnapshotCopyStatus.RetentionPeriod"));
         assertEquals(5, copy.getInt("ClusterSnapshotCopyStatus.ManualSnapshotRetentionPeriod"));
 
+        // A grant a cluster's enabled copy still names cannot be deleted (InvalidSnapshotCopyGrantStateFault).
+        assertFault(redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
+                400, "InvalidSnapshotCopyGrantStateFault");
+        assertEquals(200, redshift("DisableSnapshotCopy", "ClusterIdentifier", "cluster-copy").statusCode());
+
         assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-copy").statusCode());
         assertEquals(200, redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
     }
@@ -1066,6 +1071,11 @@ public class RedshiftOperationsTest {
                 "ScheduleDefinitions.ScheduleDefinition.1", "rate(1 day)"), 400, "SnapshotScheduleAlreadyExists");
         assertFault(redshift("CreateSnapshotSchedule", "ScheduleIdentifier", "sched-bad",
                 "ScheduleDefinitions.ScheduleDefinition.1", "every noon"), 400, "InvalidSchedule");
+        for (String bad : List.of("rate(foo)", "rate(0 hours)", "rate(25 hours)", "rate(2 days)",
+                "cron(not-a-cron-expression)", "cron(0 12)")) {
+            assertFault(redshift("CreateSnapshotSchedule", "ScheduleIdentifier", "sched-bad",
+                    "ScheduleDefinitions.ScheduleDefinition.1", bad), 400, "InvalidSchedule");
+        }
 
         XmlPath schedules = describeSchedules("ScheduleIdentifier", "sched-1");
         assertEquals(1, schedules.getList("SnapshotSchedule.ScheduleIdentifier").size());
@@ -1097,6 +1107,8 @@ public class RedshiftOperationsTest {
         assertFault(redshift("DeleteSnapshotSchedule", "ScheduleIdentifier", "sched-1"),
                 400, "InvalidClusterSnapshotScheduleState");
 
+        assertFault(redshift("ModifySnapshotSchedule", "ScheduleIdentifier", "sched-1",
+                "ScheduleDefinitions.ScheduleDefinition.1", "rate(foo)"), 400, "InvalidSchedule");
         assertEquals(200, redshift("ModifySnapshotSchedule", "ScheduleIdentifier", "sched-1",
                 "ScheduleDefinitions.ScheduleDefinition.1", "cron(0 12 * * ? *)").statusCode());
         assertEquals("cron(0 12 * * ? *)", describeSchedules("ScheduleIdentifier", "sched-1")

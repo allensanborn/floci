@@ -52,6 +52,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1320,6 +1321,12 @@ public class RedshiftService {
         SnapshotCopyGrant grant = snapshotCopyGrants.get(name)
                 .orElseThrow(() -> new AwsException("SnapshotCopyGrantNotFoundFault",
                         "Snapshot copy grant " + name + " not found", 400));
+        boolean inUse = clusters.scan(k -> true).stream()
+                .anyMatch(c -> name.equals(c.getSnapshotCopyGrantName()));
+        if (inUse) {
+            throw new AwsException("InvalidSnapshotCopyGrantStateFault",
+                    "Snapshot copy grant " + name + " is used by one or more clusters", 400);
+        }
         snapshotCopyGrants.delete(name);
         snapshotCopyGrants.flush();
         return grant;
@@ -1419,13 +1426,34 @@ public class RedshiftService {
 
     private static final int SNAPSHOT_SCHEDULE_PAGE_MAX = 100;
 
-    // AWS accepts "rate(<n> hours|days)" and "cron(<expression>)" definitions.
+    private static final Pattern RATE_DEFINITION =
+            Pattern.compile("rate\\(\\s*(\\d+)\\s+(hours?|days?)\\s*\\)");
+    private static final Pattern CRON_DEFINITION =
+            Pattern.compile("cron\\(\\s*([A-Za-z0-9,\\-*/?#]+(?:\\s+[A-Za-z0-9,\\-*/?#]+){2,5})\\s*\\)");
+
+    /**
+     * Shape check against the Redshift snapshot-schedule documentation: {@code rate(<n> hours|days)}
+     * with a frequency between once an hour and once a day, or {@code cron(...)} with three to six
+     * whitespace-separated fields drawn from the documented cron alphabet. Per-field value ranges
+     * are not checked (ponytail: add if a client depends on the fault for e.g. minute 75).
+     */
+    private static boolean isValidScheduleDefinition(String definition) {
+        if (definition == null) {
+            return false;
+        }
+        Matcher rate = RATE_DEFINITION.matcher(definition);
+        if (rate.matches()) {
+            long n = Long.parseLong(rate.group(1).length() > 9 ? "0" : rate.group(1));
+            return rate.group(2).startsWith("hour") ? n >= 1 && n <= 24 : n == 1;
+        }
+        return CRON_DEFINITION.matcher(definition).matches();
+    }
     private static void validateScheduleDefinitions(List<String> definitions) {
         if (definitions == null || definitions.isEmpty()) {
             throw new AwsException("InvalidSchedule", "ScheduleDefinitions must contain at least one definition.", 400);
         }
         for (String definition : definitions) {
-            if (!definition.matches("(rate|cron)\\(.+\\)")) {
+            if (!isValidScheduleDefinition(definition)) {
                 throw new AwsException("InvalidSchedule", "Invalid schedule definition: " + definition, 400);
             }
         }
