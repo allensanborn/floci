@@ -68,6 +68,15 @@ public class AccessAnalyzerController {
         return Response.ok(response).build();
     }
 
+    @GET
+    @Path("/analyzer/{analyzerName}")
+    public Response getAnalyzer(@Context HttpHeaders headers, @PathParam("analyzerName") String analyzerName) {
+        Analyzer analyzer = accessAnalyzerService.getAnalyzer(regionResolver.resolveRegion(headers), analyzerName);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("analyzer", analyzerSummary(analyzer));
+        return Response.ok(response).build();
+    }
+
     @DELETE
     @Path("/analyzer/{analyzerName}")
     public Response deleteAnalyzer(@Context HttpHeaders headers, @PathParam("analyzerName") String analyzerName) {

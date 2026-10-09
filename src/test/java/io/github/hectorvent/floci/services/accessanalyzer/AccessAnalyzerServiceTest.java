@@ -62,6 +62,18 @@ class AccessAnalyzerServiceTest {
     }
 
     @Test
+    void getAnalyzerReadsBackCreatedAnalyzer() {
+        Analyzer created = service.createAnalyzer(request("readable", "ACCOUNT"), REGION);
+        Analyzer read = service.getAnalyzer(REGION, "readable");
+        assertEquals(created.getArn(), read.getArn());
+        assertEquals("ACCOUNT", read.getType());
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.getAnalyzer(REGION, "missing"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertThrows(AwsException.class, () -> service.getAnalyzer("eu-west-1", "readable"));
+    }
+
+    @Test
     void clearRemovesPersistedState() {
         service.createAnalyzer(request("reset-me", "ACCOUNT"), REGION);
         service.clear();

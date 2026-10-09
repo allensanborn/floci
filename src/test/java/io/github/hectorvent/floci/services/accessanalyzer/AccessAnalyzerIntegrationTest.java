@@ -30,6 +30,27 @@ class AccessAnalyzerIntegrationTest {
     }
 
     @Test
+    void getAnalyzerReturnsCreatedAnalyzer() {
+        String arn = given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"analyzerName\":\"get-me\",\"type\":\"ORGANIZATION\",\"tags\":{\"env\":\"test\"}}")
+                .put("/analyzer").then().statusCode(200).extract().path("arn");
+        try {
+            given().header("Authorization", AUTH).get("/analyzer/get-me")
+                    .then().statusCode(200)
+                    .body("analyzer.arn", equalTo(arn))
+                    .body("analyzer.name", equalTo("get-me"))
+                    .body("analyzer.type", equalTo("ORGANIZATION"))
+                    .body("analyzer.status", equalTo("ACTIVE"))
+                    .body("analyzer.createdAt", notNullValue())
+                    .body("analyzer.tags.env", equalTo("test"));
+        } finally {
+            given().header("Authorization", AUTH).delete("/analyzer/get-me").then().statusCode(200);
+        }
+        given().header("Authorization", AUTH).get("/analyzer/get-me")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void analyzerQuotasAreIndependentByExactType() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"analyzerName\":\"account-external\",\"type\":\"ACCOUNT\"}")
