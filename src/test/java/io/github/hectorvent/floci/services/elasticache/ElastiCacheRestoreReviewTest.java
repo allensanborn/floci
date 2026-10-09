@@ -23,6 +23,7 @@ import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -132,6 +133,25 @@ class ElastiCacheRestoreReviewTest {
         // The proxy authenticates on its own thread, where the store falls back to the default account.
         account.set("000000000000");
         assertTrue(validator.getValue().validatePassword(null, "secret-token"));
+    }
+
+    @Test
+    void userGroupMemberOfAnotherAccountAuthenticatesOutsideTheRequest() {
+        ElastiCacheService service = service();
+        account.set("111111111111");
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "redis", List.of("default-user-id", "app-user-id"), "us-east-1");
+        service.modifyReplicationGroup("grp", List.of("app-group"), null);
+        ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator =
+                ArgumentCaptor.forClass(ElastiCacheAuthProxy.PasswordValidator.class);
+        verify(proxies, atLeastOnce()).startProxy(eq("grp"), any(), anyInt(), anyString(), anyInt(),
+                validator.capture());
+        // The proxy authenticates on its own thread, where the store falls back to the default account.
+        account.set("000000000000");
+        assertTrue(validator.getValue().validatePassword("app", "app-pass"));
     }
 
     @Test
