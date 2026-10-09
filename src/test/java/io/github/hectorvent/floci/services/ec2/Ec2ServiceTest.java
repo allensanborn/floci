@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -413,16 +414,55 @@ class Ec2ServiceTest {
                 "tag-value", List.of("TeamA"));
 
         for (Map.Entry<String, List<String>> filter : supportedFilters.entrySet()) {
-            assertTrue(service.describeEgressOnlyInternetGatewayIds(
+            assertTrue(service.describeEgressOnlyInternetGateways("us-east-1", List.of(),
                     Map.of(filter.getKey(), filter.getValue())).isEmpty());
         }
 
         AwsException filterError = assertThrows(AwsException.class,
-                () -> service.describeEgressOnlyInternetGatewayIds(
+                () -> service.describeEgressOnlyInternetGateways("us-east-1", List.of(),
                         Map.of("unsupported", List.of("value"))));
         assertEquals("InvalidParameterValue", filterError.getErrorCode());
         assertEquals("The filter 'unsupported' is invalid", filterError.getMessage());
         assertEquals(400, filterError.getHttpStatus());
+    }
+
+    @Test
+    void egressOnlyInternetGatewayIsCreatedDescribedAndDeleted() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.42.0.0/16", false).getVpcId();
+
+        AwsException noVpc = assertThrows(AwsException.class,
+                () -> service.createEgressOnlyInternetGateway(region, "vpc-00000000000000000"));
+        assertEquals("InvalidVpcID.NotFound", noVpc.getErrorCode());
+
+        String eigwId = service.createEgressOnlyInternetGateway(region, vpcId).getEgressOnlyInternetGatewayId();
+        assertTrue(eigwId.matches("eigw-[0-9a-f]{17}"), eigwId);
+        service.createTags(region, List.of(eigwId), List.of(new Tag("Owner", "TeamA")));
+
+        List<EgressOnlyInternetGateway> found = service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of());
+        assertEquals(1, found.size());
+        assertEquals(vpcId, found.getFirst().getAttachments().getFirst().getVpcId());
+        assertEquals("attached", found.getFirst().getAttachments().getFirst().getState());
+        assertEquals("TeamA", found.getFirst().getTags().getFirst().getValue());
+        assertEquals(1, service.describeEgressOnlyInternetGateways(region, List.of(),
+                Map.of("attachment.vpc-id", List.of(vpcId), "tag:Owner", List.of("TeamA"))).size());
+        assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(),
+                Map.of("attachment.state", List.of("detached"))).isEmpty());
+        assertTrue(service.describeEgressOnlyInternetGateways("eu-west-1", List.of(eigwId), Map.of()).isEmpty());
+
+        AwsException vpcInUse = assertThrows(AwsException.class, () -> service.deleteVpc(region, vpcId));
+        assertEquals("DependencyViolation", vpcInUse.getErrorCode());
+
+        service.deleteEgressOnlyInternetGateway(region, eigwId);
+        assertTrue(service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of()).isEmpty());
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.deleteEgressOnlyInternetGateway(region, eigwId));
+        assertEquals("InvalidGatewayID.NotFound", gone.getErrorCode());
+        service.deleteVpc(region, vpcId);
     }
 
     @Test

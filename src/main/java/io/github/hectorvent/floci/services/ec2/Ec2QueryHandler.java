@@ -164,8 +164,10 @@ public class Ec2QueryHandler {
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
+                case "CreateEgressOnlyInternetGateway" -> handleCreateEgressOnlyInternetGateway(params, region);
                 case "DescribeEgressOnlyInternetGateways" ->
-                        handleDescribeEgressOnlyInternetGateways(params);
+                        handleDescribeEgressOnlyInternetGateways(params, region);
+                case "DeleteEgressOnlyInternetGateway" -> handleDeleteEgressOnlyInternetGateway(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -2951,11 +2953,44 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p) {
+    private Response handleCreateEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        EgressOnlyInternetGateway eigw = service.createEgressOnlyInternetGateway(region, p.getFirst("VpcId"));
+        applyResourceTags(p, region, "egress-only-internet-gateway", eigw.getEgressOnlyInternetGatewayId());
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        if (p.getFirst("ClientToken") != null) {
+            xml.elem("clientToken", p.getFirst("ClientToken"));
+        }
+        xml.start("egressOnlyInternetGateway").raw(eigwXml(eigw)).end("egressOnlyInternetGateway")
+                .end("CreateEgressOnlyInternetGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // Pagination is validated but never produces a nextToken: the whole set is returned in one page.
+    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p, String region) {
         validateEmptyDiscoveryPagination(p, 255);
-        service.describeEgressOnlyInternetGatewayIds(getFilters(p));
-        return emptyDescribeResponse(
-                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+        List<EgressOnlyInternetGateway> eigws = service.describeEgressOnlyInternetGateways(
+                region, getList(p, "EgressOnlyInternetGatewayId"), getFilters(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeEgressOnlyInternetGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("egressOnlyInternetGatewaySet");
+        for (EgressOnlyInternetGateway eigw : eigws) {
+            xml.start("item").raw(eigwXml(eigw)).end("item");
+        }
+        xml.end("egressOnlyInternetGatewaySet").end("DescribeEgressOnlyInternetGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        service.deleteEgressOnlyInternetGateway(region, p.getFirst("EgressOnlyInternetGatewayId"));
+        return xmlResponse(new XmlBuilder()
+                .start("DeleteEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("returnCode", "true")
+                .end("DeleteEgressOnlyInternetGatewayResponse")
+                .build());
     }
 
     private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
@@ -3805,9 +3840,8 @@ public class Ec2QueryHandler {
         String destPrefixList = p.getFirst("DestinationPrefixListId");
         String gwId = p.getFirst("GatewayId");
         String natGwId = p.getFirst("NatGatewayId");
-        // The gateway itself is not modelled (CreateEgressOnlyInternetGateway is still
-        // unimplemented), but the id the caller sent is stored and reported back so an IPv6
-        // egress route is not silently rewritten into a targetless one.
+        // The gateway id is stored as sent, not checked against the egress-only gateways that
+        // exist, so an IPv6 egress route is not silently rewritten into a targetless one.
         String eigwId = p.getFirst("EgressOnlyInternetGatewayId");
         String pcxId = p.getFirst("VpcPeeringConnectionId");
         String instanceId = p.getFirst("InstanceId");
@@ -5015,6 +5049,21 @@ public class Ec2QueryHandler {
         }
         xml.end("attachmentSet")
                 .raw(tagSetXml(igw.getTags()));
+        return xml.build();
+    }
+
+    private String eigwXml(EgressOnlyInternetGateway eigw) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("egressOnlyInternetGatewayId", eigw.getEgressOnlyInternetGatewayId())
+                .start("attachmentSet");
+        for (InternetGatewayAttachment att : eigw.getAttachments()) {
+            xml.start("item")
+                    .elem("state", att.getState())
+                    .elem("vpcId", att.getVpcId())
+                    .end("item");
+        }
+        xml.end("attachmentSet")
+                .raw(tagSetXml(eigw.getTags()));
         return xml.build();
     }
 

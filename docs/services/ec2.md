@@ -214,7 +214,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, or an attached internet gateway or egress-only internet gateway. Instances, NAT gateways and other subnet-resident resources are not checked. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
@@ -223,7 +223,6 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, and sets or resets the endpoint policy. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` and `IpAddressType` are accepted and ignored. |
 | DeleteVpcEndpoints | Deletes VPC endpoint records. |
 | DescribeVpnGateways | Validates filters and returns empty discovery results; explicit IDs return not-found errors. |
-| DescribeEgressOnlyInternetGateways | Validates filters and pagination parameters and returns an empty set, including for explicit IDs, as AWS does. |
 | CreateDefaultVpc | Creates or returns the default VPC for the region. |
 | AssociateVpcCidrBlock | Adds a secondary CIDR block association to a VPC. |
 | DisassociateVpcCidrBlock | Removes a secondary CIDR block association from a VPC. |
@@ -301,6 +300,9 @@ that publish those images.
 | DeleteInternetGateway | Deletes an internet gateway. |
 | AttachInternetGateway | Attaches an internet gateway to a VPC. |
 | DetachInternetGateway | Detaches an internet gateway from a VPC. |
+| CreateEgressOnlyInternetGateway | Creates an egress-only internet gateway attached to an existing VPC (`InvalidVpcID.NotFound` otherwise). Applies `TagSpecification` tags. `ClientToken` is echoed back but not used for idempotency. |
+| DescribeEgressOnlyInternetGateways | Lists stored egress-only internet gateways, filtered by ID and by the `egress-only-internet-gateway-id`, `attachment.vpc-id`, `attachment.state` and tag filters. An unknown ID returns an empty set, as AWS does. Pagination parameters are validated; results come back in one page. |
+| DeleteEgressOnlyInternetGateway | Deletes an egress-only internet gateway; an unknown ID fails with `InvalidGatewayID.NotFound`. |
 
 ### Route Tables
 
