@@ -6,9 +6,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Integration tests for Route 53 Resolver DNS Firewall operations
@@ -171,5 +176,74 @@ class Route53ResolverIntegrationTest {
         .then()
             .statusCode(400)
             .body("message", equalTo("IpAddresses is required"));
+    }
+
+    // ── ListResolverEndpointIpAddresses ─────────────────────────────────────────
+    //
+    // The Terraform provider calls this right after CreateResolverEndpoint to read the
+    // endpoint's ip_address set, so an unimplemented operation fails every endpoint create.
+
+    private static String listIpAddresses(String endpointId) {
+        return given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResolverEndpointId\":\"" + endpointId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+    }
+
+    @Test
+    void listResolverEndpointIpAddresses_returnsTheAddressesTheEndpointWasCreatedWith() {
+        String endpointId = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"Name\":\"ep-ips\",\"Direction\":\"OUTBOUND\",\"CreatorRequestId\":\"list-ips-1\","
+                + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+                + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.1.10\"},"
+                + "{\"SubnetId\":\"subnet-bbb\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("ResolverEndpoint.Id");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResolverEndpointId\":\"" + endpointId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("IpAddresses.size()", equalTo(2))
+            .body("IpAddresses.SubnetId", containsInAnyOrder("subnet-aaa", "subnet-bbb"))
+            .body("IpAddresses.find { it.SubnetId == 'subnet-aaa' }.Ip", equalTo("10.0.1.10"))
+            .body("IpAddresses.find { it.SubnetId == 'subnet-bbb' }.Ip", nullValue())
+            .body("IpAddresses.Status", everyItem(equalTo("ATTACHED")))
+            .body("IpAddresses.IpId", everyItem(startsWith("rni-")))
+            .body("IpAddresses.CreationTime", everyItem(notNullValue()));
+
+        // IpId is the provider's handle on each address, so it must not change between reads.
+        assertEquals(listIpAddresses(endpointId), listIpAddresses(endpointId));
+    }
+
+    @Test
+    void listResolverEndpointIpAddresses_unknownEndpoint_returnsResourceNotFound() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ResolverEndpointId\":\"rslvr-in-doesnotexist\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 }
