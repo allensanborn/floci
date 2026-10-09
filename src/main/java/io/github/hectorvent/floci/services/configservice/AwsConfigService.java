@@ -843,11 +843,13 @@ public class AwsConfigService {
 
     public void deleteConformancePack(String region, String packName) {
         Map<String, ConformancePack> store = packsFor(region);
-        if (store.remove(packName) == null) {
+        ConformancePack removed = store.remove(packName);
+        if (removed == null) {
             throw new AwsException("NoSuchConformancePackException",
                     "Conformance pack '" + packName + "' does not exist.", 400);
         }
         persistRegion(conformancePacks, region);
+        tags.remove(removed.conformancePackArn());
     }
 
     public List<ConformancePack> describeConformancePacks(String region, List<String> names) {
