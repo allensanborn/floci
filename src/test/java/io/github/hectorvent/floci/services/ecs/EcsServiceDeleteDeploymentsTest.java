@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -13,15 +14,13 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import org.junit.jupiter.api.Test;
 
-import io.github.hectorvent.floci.core.common.AwsException;
-
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -30,8 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
@@ -176,6 +175,22 @@ class EcsServiceDeleteDeploymentsTest {
         }
 
         assertEquals(before, locks.size(), "requests for services that do not exist add no lock entries");
+    }
+
+    @Test
+    void clearDropsTheServiceLocks() throws Exception {
+        EcsService service = newMockModeService();
+        service.createCluster(CLUSTER, REGION);
+        registerTaskDef(service);
+        service.createService(CLUSTER, "gone", "del-fam", 0, LaunchType.FARGATE, List.of(), null, REGION);
+        java.lang.reflect.Field field = EcsService.class.getDeclaredField("serviceLocks");
+        field.setAccessible(true);
+        Map<?, ?> locks = (Map<?, ?>) field.get(service);
+        assertEquals(1, locks.size());
+
+        service.clear();
+
+        assertEquals(0, locks.size(), "a state reset leaves no service lock behind");
     }
 
     private final ConcurrentLinkedQueue<Throwable> workerFailures = new ConcurrentLinkedQueue<>();
