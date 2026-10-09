@@ -8820,6 +8820,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         natGateway.setCreateTime(Instant.now());
         natGateway.setRegion(region);
         synchronized (privateIpAllocationLock) {
+            // Checked under the same lock that writes the association below, so two gateways
+            // cannot both see the allocation free. An allocation already held by an instance or
+            // another gateway is refused, not taken over.
+            if (isSet(allocationId)) {
+                Address held = getRequiredAddress(region, allocationId);
+                if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())) {
+                    throw new AwsException("Resource.AlreadyAssociated",
+                            "Elastic IP address " + allocationId + " is already associated.", 400);
+                }
+            }
             NatGatewayAddress gatewayAddress =
                     natGatewayAddress(region, natGateway.getNatGatewayId(), subnetId, allocationId);
             natGateway.getNatGatewayAddresses().add(gatewayAddress);
@@ -8880,7 +8890,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * gateway's subnet record is gone, as for an endpoint.
      */
     private List<NetworkInterface> natNetworkInterfacesOf(NatGateway natGateway, String ownerId) {
-        Subnet subnet = subnets.get(key(natGateway.getRegion(), natGateway.getSubnetId())).orElse(null);
+        String subnetKey = key(natGateway.getRegion(), natGateway.getSubnetId());
+        Subnet subnet = (subnets instanceof AccountAwareStorageBackend<Subnet> aware
+                ? aware.getForAccount(ownerId, subnetKey) : subnets.get(subnetKey)).orElse(null);
         if (subnet == null) {
             return List.of();
         }
@@ -9048,6 +9060,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ensureDefaultResources(region);
         for (Address addr : addresses.scan(k -> true)) {
             if (addr.getRegion().equals(region) && associationId.equals(addr.getAssociationId())) {
+                // A NAT gateway holds its Elastic IP for its whole life and is released by
+                // DeleteNatGateway; clearing only the allocation would leave the gateway and its
+                // interface still claiming the address.
+                if (isNatGatewayAssociation(region, associationId)) {
+                    throw new AwsException("InvalidParameterValue", "The association " + associationId
+                            + " belongs to a NAT gateway and cannot be disassociated; delete the NAT gateway.",
+                            400);
+                }
                 addr.setInstanceId(null);
                 addr.setAssociationId(null);
                 addr.setNetworkInterfaceId(null);
@@ -9061,6 +9081,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return;
             }
         }
+    }
+
+    private boolean isNatGatewayAssociation(String region, String associationId) {
+        return natGateways.scan(k -> true).stream()
+                .filter(g -> region.equals(g.getRegion()))
+                .flatMap(g -> g.getNatGatewayAddresses().stream())
+                .anyMatch(a -> associationId.equals(a.getAssociationId()));
     }
 
     public void releaseAddress(String region, String allocationId) {
@@ -10250,13 +10277,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         // The ENI a NAT gateway owns. DescribeNatGateways publishes its id (aws_nat_gateway's
-        // network_interface_id), so it has to resolve here too. Scoped like the endpoint arm: a
-        // plain scan on the account-aware store already reads only the caller's partition.
-        for (NatGateway natGateway : natGateways.scan(k -> true)) {
+        // network_interface_id), so it has to resolve here too. Unlike the endpoint arm above this
+        // one honours the explicit account: gateways and their subnets are read for safeAccount.
+        List<NatGateway> accountNatGateways = natGateways instanceof AccountAwareStorageBackend<NatGateway> aware
+                ? aware.scanForAccount(safeAccount, k -> true)
+                : natGateways.scan(k -> true);
+        for (NatGateway natGateway : accountNatGateways) {
             if (!region.equals(natGateway.getRegion())) {
                 continue;
             }
-            for (NetworkInterface natNi : natNetworkInterfacesOf(natGateway, endpointOwnerAccountId)) {
+            for (NetworkInterface natNi : natNetworkInterfacesOf(natGateway, safeAccount)) {
                 String natEniId = natNi.getNetworkInterfaceId();
                 if (foundIds.contains(natEniId)) {
                     continue;

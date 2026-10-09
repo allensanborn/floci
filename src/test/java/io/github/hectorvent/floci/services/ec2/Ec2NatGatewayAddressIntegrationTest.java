@@ -233,4 +233,90 @@ class Ec2NatGatewayAddressIntegrationTest {
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
     }
+
+    private String allocate() {
+        return given()
+            .formParam("Action", "AllocateAddress")
+            .formParam("Domain", "vpc")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("AllocateAddressResponse.allocationId");
+    }
+
+    private io.restassured.response.Response createNat(String allocationId) {
+        return given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId())
+            .formParam("AllocationId", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/");
+    }
+
+    /** An Elastic IP held by another gateway or by an instance is refused, not taken over. */
+    @Test
+    void aGatewayCannotTakeAnElasticIpThatIsAlreadyAssociated() {
+        String heldByGateway = allocate();
+        createNat(heldByGateway).then().statusCode(200);
+        createNat(heldByGateway).then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("Resource.AlreadyAssociated"));
+
+        String heldByInstance = allocate();
+        given()
+            .formParam("Action", "AssociateAddress")
+            .formParam("AllocationId", heldByInstance)
+            .formParam("InstanceId", "i-0123456789abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        createNat(heldByInstance).then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("Resource.AlreadyAssociated"));
+
+        // The refused call left the first gateway's association alone.
+        given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", heldByGateway)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", startsWith("eipassoc-"));
+    }
+
+    /** The association a gateway publishes is released by deleting the gateway, not by disassociating. */
+    @Test
+    void aGatewaysElasticIpCannotBeDisassociated() {
+        String allocationId = allocate();
+        String natGatewayId = createNat(allocationId).then().statusCode(200)
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+        String associationId = given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
+
+        given()
+            .formParam("Action", "DisassociateAddress")
+            .formParam("AssociationId", associationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+
+        given()
+            .formParam("Action", "DescribeAddresses")
+            .formParam("AllocationId.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId));
+
+        given()
+            .formParam("Action", "DeleteNatGateway")
+            .formParam("NatGatewayId", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+    }
 }

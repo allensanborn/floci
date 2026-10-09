@@ -646,6 +646,29 @@ class Ec2ServiceTest {
                 .anyMatch(n -> eni.getNetworkInterfaceId().equals(n.getNetworkInterfaceId())));
     }
 
+    /**
+     * The NAT arm of DescribeNetworkInterfaces reads gateways for the account it was asked about.
+     * A gateway made under the default account resolves for that account and is NotFound for
+     * another one named explicitly.
+     */
+    @Test
+    void natGatewayInterfaceResolvesOnlyForTheAccountThatOwnsTheGateway() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        String eniId = service.createNatGateway("us-east-1", subnetId, null, "private", null)
+                .getNatGatewayAddresses().getFirst().getNetworkInterfaceId();
+
+        String owner = service.callerAccountId();
+        assertEquals(eniId, service.describeNetworkInterfaces(owner, "us-east-1", List.of(eniId), Map.of())
+                .networkInterfaces().getFirst().getNetworkInterfaceId());
+        AwsException e = assertThrows(AwsException.class, () -> service.describeNetworkInterfaces(
+                "999999999999", "us-east-1", List.of(eniId), Map.of()));
+        assertEquals("InvalidNetworkInterfaceID.NotFound", e.getErrorCode());
+    }
+
     @Test
     void runInstancesRequiresImageIdInsteadOfDefaulting() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
