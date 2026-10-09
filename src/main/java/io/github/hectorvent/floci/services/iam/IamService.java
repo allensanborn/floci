@@ -701,6 +701,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return accessKeys.get(accessKeyId).map(AccessKey::getUserName);
     }
 
+    /**
+     * The owner of a key in the calling account, for a read that is not the owner's own request.
+     * Unlike {@link #findUserNameByAccessKeyId}, an unprefixed pre-multi-account key is adopted into
+     * this account only when its user lives here, so another account asking first cannot read the
+     * owner's name or take the key out of the account that holds it.
+     */
+    public Optional<String> findAccessKeyOwnerInThisAccount(String accessKeyId) {
+        if (accessKeyId == null) {
+            return Optional.empty();
+        }
+        if (!(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
+            return findUserNameByAccessKeyId(accessKeyId);
+        }
+        return aware.getForAccountMigratingLegacy(aware.accountId(), accessKeyId,
+                        key -> users.get(key.getUserName()).isPresent())
+                .map(AccessKey::getUserName);
+    }
+
     public void deleteUser(String userName) {
         IamUser user = getUser(userName);
         if (!user.getAttachedPolicyArns().isEmpty()) {
