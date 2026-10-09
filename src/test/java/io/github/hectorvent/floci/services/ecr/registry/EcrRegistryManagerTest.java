@@ -1,16 +1,5 @@
 package io.github.hectorvent.floci.services.ecr.registry;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
-import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
-import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
-import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
-import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
-import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import io.github.hectorvent.floci.core.common.docker.HostBlindPortAllocator;
-import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmd;
@@ -25,6 +14,17 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
+import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
+import io.github.hectorvent.floci.core.common.docker.HostBlindPortAllocator;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -35,6 +35,7 @@ import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -462,6 +463,58 @@ class EcrRegistryManagerTest {
         assertTrue(manager.getRepositoryUri("000000000000", "eu-central-1", "app")
                 .startsWith(proxyEndpoint.substring(proxyEndpoint.indexOf("://") + 3) + "/"));
         verify(regionResolver, never()).getDefaultRegion();
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "hostname, false, 000000000000.dkr.ecr.us-east-1.localhost:54321/app, http://000000000000.dkr.ecr.us-east-1.localhost:54321",
+            "path, false, localhost:54321/000000000000/us-east-1/app, http://000000000000.dkr.ecr.us-east-1.localhost:54321",
+            "hostname, true, 000000000000.dkr.ecr.us-east-1.localhost.floci.io:54321/app, https://000000000000.dkr.ecr.us-east-1.localhost.floci.io:54321",
+            "path, true, localhost.floci.io:54321/000000000000/us-east-1/app, https://localhost.floci.io:54321"
+    })
+    void advertisedUrisUseTheHostPortTheFlociContainerPublishes(String style, boolean tlsUris,
+                                                                String repositoryUri, String proxyEndpoint) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(tlsUris);
+        when(ecr.uriStyle()).thenReturn(style);
+        when(ecr.tlsUri()).thenReturn(tlsUris);
+        // docker run -p 54321:4566: the Docker daemon logs in, pushes and pulls through the host port.
+        when(currentContainerNetworkResolver.resolvePublishedPort(4566)).thenReturn(OptionalInt.of(54321));
+
+        assertEquals(repositoryUri, manager.getRepositoryUri("000000000000", "us-east-1", "app"));
+        assertEquals(proxyEndpoint, manager.getProxyEndpoint());
+        verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "hostname, 123456789012.dkr.ecr.us-east-1.localhost:54321/backend-user:1",
+            "path, localhost:54321/123456789012/us-east-1/backend-user:1"
+    })
+    void rewriteImageUri_flociPublishedOnAnotherHostPort_pointsTheDaemonAtThePublishedPort(String style,
+                                                                                         String expectedImage) {
+        when(ecr.uriStyle()).thenReturn(style);
+        when(currentContainerNetworkResolver.resolvePublishedPort(4566)).thenReturn(OptionalInt.of(54321));
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        assertEquals(expectedImage, manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @Test
+    void advertisedUrisKeepFlociPortWhenItIsNotPublishedFromAContainer() {
+        when(config.port()).thenReturn(4577);
+        when(currentContainerNetworkResolver.resolvePublishedPort(4577)).thenReturn(OptionalInt.empty());
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        assertEquals("000000000000.dkr.ecr.us-east-1.localhost:4577/app",
+                manager.getRepositoryUri("000000000000", "us-east-1", "app"));
+        assertEquals("http://000000000000.dkr.ecr.us-east-1.localhost:4577", manager.getProxyEndpoint());
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:4577/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+        verify(currentContainerNetworkResolver, Mockito.atLeastOnce()).resolvePublishedPort(4577);
     }
 
     @Test

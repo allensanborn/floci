@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
@@ -34,7 +34,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1035,10 +1034,10 @@ public class DurableExecutionService implements Resettable {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", NOT_FOUND, 404));
     }
 
+    /** In creation order, as AWS lists them, not in the order they changed. */
     private static List<DurableOperation> unseenOperations(DurableExecution execution) {
         return execution.getOperations().values().stream()
                 .filter(operation -> operation.getChangeSequence() > execution.getSeenSequence())
-                .sorted(Comparator.comparingLong(DurableOperation::getChangeSequence))
                 .toList();
     }
 
