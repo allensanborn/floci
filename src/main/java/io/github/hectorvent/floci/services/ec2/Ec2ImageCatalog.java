@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.eks.EksClusterManager;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -332,6 +334,19 @@ public class Ec2ImageCatalog {
                 image.setImageOwnerAlias(imageOwnerAlias);
             }
             image.setCreationDate(creationDate);
+            if (rootVolumeType != null) {
+                // Same value the volume-type filter matches on, so the returned image shows
+                // the mapping it was selected by and a CopyImage keeps that type.
+                EbsBlockDevice ebs = new EbsBlockDevice();
+                ebs.setSnapshotId("snap-" + String.format("%017x", imageId.hashCode() & 0xffffffffL));
+                ebs.setVolumeSize(8);
+                ebs.setVolumeType(rootVolumeType);
+                ebs.setDeleteOnTermination(true);
+                BlockDeviceMapping mapping = new BlockDeviceMapping();
+                mapping.setDeviceName(image.getRootDeviceName());
+                mapping.setEbs(ebs);
+                image.setBlockDeviceMappings(List.of(mapping));
+            }
             return image;
         }
     }

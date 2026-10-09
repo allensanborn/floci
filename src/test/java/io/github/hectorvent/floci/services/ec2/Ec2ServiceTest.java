@@ -1145,6 +1145,22 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void catalogImageSelectedByVolumeTypeReturnsAndCopiesThatMapping() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Image found = service.describeImages("us-east-1", List.of(), List.of(),
+                Map.of("block-device-mapping.volume-type", List.of("gp2"))).get(0);
+        assertEquals("gp2", found.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
+
+        Image copy = service.copyImage("us-east-1", "us-east-1", found.getImageId(), "copy", null);
+        assertEquals("gp2", copy.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
+    }
+
+    @Test
     void describeImagesFiltersRegisteredImagesByBlockDeviceMappingVolumeType() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
