@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -419,6 +420,39 @@ class GuardDutyServiceTest {
 
     private static final String DESTINATION_NOT_FOUND =
             "The request is rejected because the one or more input parameters have invalid values.";
+
+    @Test
+    void createPublishingDestinationWithSameClientTokenReturnsOriginal() throws Exception {
+        String detectorId = service.createDetector(REGION, ACCOUNT, request("{\"enable\":true}")).getId();
+        String body = "{\"destinationType\":\"S3\",\"clientToken\":\"tok-1\","
+                + "\"destinationProperties\":{\"destinationArn\":\"arn:aws:s3:::a\"}}";
+        String first = service.createPublishingDestination(REGION, detectorId, request(body)).destinationId();
+        String retry = service.createPublishingDestination(REGION, detectorId, request(body)).destinationId();
+        String other = service.createPublishingDestination(REGION, detectorId,
+                request(body.replace("tok-1", "tok-2"))).destinationId();
+
+        assertEquals(first, retry);
+        assertNotEquals(first, other);
+        assertEquals(2, service.listPublishingDestinations(REGION, detectorId, null, null).items().size());
+    }
+
+    @Test
+    void deleteDetectorRemovesItsPublishingDestinations() throws Exception {
+        InMemoryStorage<String, PublishingDestination> destinations = new InMemoryStorage<>();
+        GuardDutyService svc = new GuardDutyService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), destinations);
+        String keep = svc.createDetector(REGION, ACCOUNT, request("{\"enable\":true}")).getId();
+        String dropRegion = "us-west-2";
+        String drop = svc.createDetector(dropRegion, ACCOUNT, request("{\"enable\":true}")).getId();
+        String body = "{\"destinationType\":\"S3\",\"destinationProperties\":{\"destinationArn\":\"arn:aws:s3:::a\"}}";
+        svc.createPublishingDestination(REGION, keep, request(body));
+        svc.createPublishingDestination(dropRegion, drop, request(body));
+
+        svc.deleteDetector(dropRegion, drop);
+
+        assertEquals(1, destinations.scan(k -> true).size());
+        assertEquals(1, svc.listPublishingDestinations(REGION, keep, null, null).items().size());
+    }
 
     @Test
     void publishingDestinationsArePartitionedByAccountEvenForTheSameDetector() throws Exception {

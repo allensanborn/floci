@@ -169,6 +169,9 @@ public class GuardDutyService {
             throw detectorNotFound();
         }
         detectorStore.delete(key);
+        String prefix = destinationKey(region, detectorId, "");
+        destinationStore.scan(k -> k.startsWith(prefix)).forEach(d ->
+                destinationStore.delete(destinationKey(region, detectorId, d.destinationId())));
     }
 
     public Page<String> listDetectorIds(String region, String accountId, String maxResultsValue, String nextToken) {
@@ -320,12 +323,23 @@ public class GuardDutyService {
         }
         JsonNode properties = request.get("destinationProperties");
         requireObject(properties, "destinationProperties");
+        String clientToken = optionalText(request, "clientToken");
+        if (clientToken != null) {
+            // Idempotent replay: a retried create returns the destination the token already made.
+            String prefix = destinationKey(region, detectorId, "");
+            for (PublishingDestination existing : destinationStore.scan(k -> k.startsWith(prefix))) {
+                if (clientToken.equals(existing.clientToken())) {
+                    return existing;
+                }
+            }
+        }
         PublishingDestination destination = new PublishingDestination(
                 UUID.randomUUID().toString().replace("-", ""),
                 "S3",
                 optionalText(properties, "destinationArn"),
                 optionalText(properties, "kmsKeyArn"),
-                "PUBLISHING");
+                "PUBLISHING",
+                clientToken);
         destinationStore.put(destinationKey(region, detectorId, destination.destinationId()), destination);
         return destination;
     }
@@ -350,7 +364,8 @@ public class GuardDutyService {
                 current.destinationType(),
                 properties.has("destinationArn") ? optionalText(properties, "destinationArn") : current.destinationArn(),
                 properties.has("kmsKeyArn") ? optionalText(properties, "kmsKeyArn") : current.kmsKeyArn(),
-                current.status()));
+                current.status(),
+                current.clientToken()));
     }
 
     public synchronized void deletePublishingDestination(String region, String detectorId, String destinationId) {
