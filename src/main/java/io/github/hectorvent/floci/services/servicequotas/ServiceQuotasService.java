@@ -296,7 +296,7 @@ public class ServiceQuotasService {
         return response;
     }
 
-    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region, String accountId) {
+    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region) {
         if (requestId == null || requestId.isEmpty()) {
             throw new AwsException("IllegalArgumentException",
                     "Invalid input: RequestId must not be empty.", 400);

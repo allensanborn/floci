@@ -34,7 +34,7 @@ public class ServiceQuotasJsonHandler {
             case "ListAWSDefaultServiceQuotas" -> handleListServiceQuotas(request, region, accountId);
             case "RequestServiceQuotaIncrease" -> handleRequestServiceQuotaIncrease(request, region, accountId);
             case "GetRequestedServiceQuotaChange" -> Response.ok(service.getRequestedServiceQuotaChange(
-                    stringOrNull(request, "RequestId"), region, accountId)).build();
+                    stringOrNull(request, "RequestId"), region)).build();
             case "ListRequestedServiceQuotaChangeHistoryByQuota" ->
                     Response.ok(service.listRequestedServiceQuotaChangeHistoryByQuota(
                             stringOrNull(request, "ServiceCode"), stringOrNull(request, "QuotaCode"),
