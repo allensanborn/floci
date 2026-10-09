@@ -784,8 +784,8 @@ public class BackupService {
                             "Notification from AWS Backup",
                             AwsArnUtils.regionOrDefault(n.getSnsTopicArn(), region)));
         } catch (Exception e) {
-            LOG.warnv("Failed to publish BACKUP_JOB_COMPLETED for job {0} in vault {1}: {2}",
-                    job.getBackupJobId(), vaultName, e.getMessage());
+            LOG.warnv(e, "Failed to publish BACKUP_JOB_COMPLETED for job {0} in vault {1}",
+                    job.getBackupJobId(), vaultName);
         }
     }
 
