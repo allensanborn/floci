@@ -576,13 +576,27 @@ class BackupIntegrationTest {
 
     @Test
     @Order(83)
-    void describeDeletedVaultReturns404() {
+    void describeDeletedVaultReturns400() {
+        // AWS Backup documents ResourceNotFoundException as HTTP 400, not 404.
         given()
             .header("Authorization", AUTH)
         .when()
             .get("/backup-vaults/" + VAULT_NAME)
         .then()
-            .statusCode(404);
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(84)
+    void missingPlanAndJobReturn400() {
+        given().header("Authorization", AUTH)
+        .when().get("/backup/plans/no-such-plan/")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+        .when().get("/backup-jobs/no-such-job")
+        .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     // ── Vault sub-resources: access policy, notifications, lock ────────────────
@@ -659,7 +673,7 @@ class BackupIntegrationTest {
         given().header("Authorization", AUTH).contentType("application/json")
             .body("{\"Policy\":\"{}\"}")
         .when().put("/backup-vaults/no-such-vault/access-policy")
-        .then().statusCode(404).body("message", containsString("no-such-vault"));
+        .then().statusCode(400).body("message", containsString("no-such-vault"));
     }
 
     @Test
