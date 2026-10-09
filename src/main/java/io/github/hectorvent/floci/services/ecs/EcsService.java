@@ -404,6 +404,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void clear() {
         // The stores hold the ECS state and afterReset() restarts the reconciler.
         launchFailures.clear();
+        serviceLocks.clear();
     }
 
     /**
