@@ -74,6 +74,12 @@ class AccessAnalyzerServiceTest {
     }
 
     @Test
+    void getAnalyzerRejectsInvalidName() {
+        AwsException invalid = assertThrows(AwsException.class, () -> service.getAnalyzer(REGION, "1-bad name"));
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @Test
     void clearRemovesPersistedState() {
         service.createAnalyzer(request("reset-me", "ACCOUNT"), REGION);
         service.clear();
