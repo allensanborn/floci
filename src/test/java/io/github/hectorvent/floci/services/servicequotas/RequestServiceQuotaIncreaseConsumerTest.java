@@ -21,10 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * {@code UnknownOperationException}. A green run therefore proves the operation is
  * reachable by name, which a service-level test could not (CS-001).
  *
- * <p><strong>Known limitation asserted here deliberately:</strong> the emulator does not
- * persist increase requests. {@code GetRequestedServiceQuotaChange} and
- * {@code ListRequestedServiceQuotaChangeHistory} are unsupported, so a request is
- * observable only in the response that creates it. {@code Status} is therefore always
+ * <p><strong>Known limitation asserted here deliberately:</strong> increase requests are
+ * stored and readable back only through {@code GetRequestedServiceQuotaChange}.
+ * {@code ListRequestedServiceQuotaChangeHistory} is unsupported. {@code Status} is always
  * {@code PENDING} and never advances. Documented in {@code docs/services/servicequotas.md}
  * per CS-021.
  */
@@ -43,9 +42,17 @@ class RequestServiceQuotaIncreaseConsumerTest {
     }
 
     private static io.restassured.response.Response request(String body) {
+        return call(TARGET, body);
+    }
+
+    private static io.restassured.response.Response getChange(String body) {
+        return call("ServiceQuotasV20190624.GetRequestedServiceQuotaChange", body);
+    }
+
+    private static io.restassured.response.Response call(String target, String body) {
         return given()
                 .contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", TARGET)
+                .header("X-Amz-Target", target)
                 .header("Authorization", AUTH_HEADER)
                 .body(body)
             .when()
@@ -168,5 +175,58 @@ class RequestServiceQuotaIncreaseConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("IllegalArgumentException"));
+    }
+
+    /** The Terraform provider reads the change back by id right after requesting it. */
+    @Test
+    void getRequestedChange_afterRequest_returnsStoredRequest() {
+        String quotaCode = ServiceQuotasService.syntheticQuotaCode("getchangeprobe", "Resources per Region");
+        String id = request("{\"ServiceCode\":\"getchangeprobe\",\"QuotaCode\":\"" + quotaCode
+                + "\",\"DesiredValue\":4242,\"ContextId\":\"ctx-1\"}")
+                .then().statusCode(200).extract().path("RequestedQuota.Id");
+
+        getChange("{\"RequestId\":\"" + id + "\"}")
+        .then()
+            .statusCode(200)
+            .body("RequestedQuota.Id", equalTo(id))
+            .body("RequestedQuota.ServiceCode", equalTo("getchangeprobe"))
+            .body("RequestedQuota.QuotaCode", equalTo(quotaCode))
+            .body("RequestedQuota.QuotaName", equalTo("Resources per Region"))
+            .body("RequestedQuota.DesiredValue", equalTo(4242.0f))
+            .body("RequestedQuota.Status", equalTo("PENDING"))
+            .body("RequestedQuota.QuotaContext.ContextId", equalTo("ctx-1"))
+            .body("RequestedQuota.Created", notNullValue());
+    }
+
+    @Test
+    void getRequestedChange_unknownId_returnsNoSuchResource() {
+        getChange("{\"RequestId\":\"NOSUCHID\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
+    }
+
+    @Test
+    void getRequestedChange_missingRequestId_returnsIllegalArgument() {
+        getChange("{}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("IllegalArgumentException"));
+    }
+
+    @Test
+    void getRequestedChange_afterEmulatorReset_returnsNoSuchResource() {
+        String quotaCode = ServiceQuotasService.syntheticQuotaCode("resetprobe", "Resources per Region");
+        String id = request("{\"ServiceCode\":\"resetprobe\",\"QuotaCode\":\"" + quotaCode
+                + "\",\"DesiredValue\":7}")
+                .then().statusCode(200).extract().path("RequestedQuota.Id");
+        getChange("{\"RequestId\":\"" + id + "\"}").then().statusCode(200);
+
+        given().when().post("/_floci/state/reset").then().statusCode(200);
+
+        getChange("{\"RequestId\":\"" + id + "\"}")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("NoSuchResourceException"));
     }
 }

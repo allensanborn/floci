@@ -16,8 +16,8 @@ network ACL", 20) carry their AWS default values, so tooling that compares a des
 the default before requesting an increase takes the same path it would against AWS.
 
 Applied quotas and AWS default quotas return the same data, and quota values are static.
-`RequestServiceQuotaIncrease` is accepted and validated but does not change any quota value —
-see Limitations.
+`RequestServiceQuotaIncrease` is accepted, validated, and recorded, but does not change any quota
+value. See Limitations.
 
 ## Supported Actions
 
@@ -28,15 +28,17 @@ see Limitations.
 | `GetServiceQuota` | Returns one quota by service and quota code, else `NoSuchResourceException` |
 | `GetAWSDefaultServiceQuota` | Same as GetServiceQuota; defaults equal applied values |
 | `ListAWSDefaultServiceQuotas` | Same as ListServiceQuotas; defaults equal applied values |
-| `RequestServiceQuotaIncrease` | Validates and echoes an increase request as `PENDING`; not persisted, quota unchanged |
-| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair and returns the locally recorded request history; currently empty for the static catalog |
+| `RequestServiceQuotaIncrease` | Validates and records an increase request as `PENDING`; quota unchanged |
+| `GetRequestedServiceQuotaChange` | Returns a recorded increase request by `RequestId`, else `NoSuchResourceException` |
+| `ListRequestedServiceQuotaChangeHistoryByQuota` | Validates the service/quota pair; always returns an empty list, recorded requests are not listed |
 <!-- floci:actions:end -->
 
 ## Limitations
 
-- **Quota increase requests are not persisted.** `RequestServiceQuotaIncrease` validates its
-  input, resolves the quota, and returns a well-formed `RequestedQuota`, but keeps no state.
-  The request is observable only in the response that creates it.
+- **Quota increase requests are recorded but only readable by id.** They live in the configured
+  storage mode and are cleared by an emulator reset. `GetRequestedServiceQuotaChange` reads one
+  back; the history operations do not list them. Request ids are derived from the service and
+  quota code, so a repeated request for the same quota replaces the earlier one.
 - **`Status` is always `PENDING` and never advances.** Nothing processes requests, so no
   request ever reaches `APPROVED`, `CASE_OPENED`, or `DENIED`. `PENDING` is what real AWS
   returns on creation, so a caller that only reads the creation response sees faithful data;
@@ -48,8 +50,7 @@ see Limitations.
 - **A requested increase does not change the quota.** `GetServiceQuota` continues to return
   the catalog value after a successful increase request. Quota values remain static by design
   so pipelines never stall on an unenforced limit.
-- `GetRequestedServiceQuotaChange` and `ListRequestedServiceQuotaChangeHistory` are not
-  implemented — there is no request store for them to read.
+- `ListRequestedServiceQuotaChangeHistory` is not implemented.
 - `CaseId` is never returned; no support case is opened. `SupportCaseAllowed` in the request is
   accepted and ignored, as the emulator has no case-opening path either way.
 - The quota-increase template operations (`PutServiceQuotaIncreaseRequestIntoTemplate` and

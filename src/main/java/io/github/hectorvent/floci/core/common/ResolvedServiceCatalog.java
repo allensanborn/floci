@@ -457,7 +457,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodePipeline_20150709."), Set.of("codepipeline"), Set.of(), Set.of()),
                 descriptor("servicequotas", "servicequotas", config.services().servicequotas().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "servicequotas", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("ServiceQuotasV20190624."), Set.of("servicequotas"), Set.of(), Set.of()),
                 descriptor("ram", "ram", config.services().ram().enabled(), true,

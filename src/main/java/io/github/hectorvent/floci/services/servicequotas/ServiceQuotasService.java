@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.servicequotas;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -73,10 +76,17 @@ public class ServiceQuotasService {
             "Concurrent operations");
 
     private final ObjectMapper objectMapper;
+    private final StorageBackend<String, ObjectNode> requestedQuotas;
 
     @Inject
-    public ServiceQuotasService(ObjectMapper objectMapper) {
+    public ServiceQuotasService(ObjectMapper objectMapper, StorageFactory storageFactory) {
+        this(objectMapper, storageFactory.create("servicequotas", "servicequotas-requests.json",
+                new TypeReference<Map<String, ObjectNode>>() {}));
+    }
+
+    ServiceQuotasService(ObjectMapper objectMapper, StorageBackend<String, ObjectNode> requestedQuotas) {
         this.objectMapper = objectMapper;
+        this.requestedQuotas = requestedQuotas;
     }
 
     public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
@@ -279,8 +289,28 @@ public class ServiceQuotasService {
             requestedQuota.set("QuotaContext", context);
         }
 
+        requestedQuotas.put(requestKey(region, id), requestedQuota);
+
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("RequestedQuota", requestedQuota);
+        response.set("RequestedQuota", requestedQuota.deepCopy());
         return response;
+    }
+
+    public ObjectNode getRequestedServiceQuotaChange(String requestId, String region) {
+        if (requestId == null || requestId.isEmpty()) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: RequestId must not be empty.", 400);
+        }
+        ObjectNode requestedQuota = requestedQuotas.get(requestKey(region, requestId))
+                .orElseThrow(() -> new AwsException("NoSuchResourceException",
+                        "The request failed because the specified quota increase request does not exist.", 400));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("RequestedQuota", requestedQuota.deepCopy());
+        return response;
+    }
+
+    // The account-aware backend prefixes the caller's account id itself.
+    private static String requestKey(String region, String requestId) {
+        return region + "/" + requestId;
     }
 }
