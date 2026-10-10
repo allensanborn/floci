@@ -86,7 +86,7 @@ public class Route53ResolverService {
      * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
      * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
      * verbatim, so holding the addresses on the resource would put an unmodeled member on the
-     * wire. Only the CreatorRequestId conflict check reads this.
+     * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
     private final ObjectMapper objectMapper;
@@ -229,6 +229,31 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverEndpoints() {
         return endpointStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
+     * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint
+     * and the entry, so it is stable across calls. An address the request left for AWS to
+     * pick has no {@code Ip}: Floci does not allocate from the subnet.
+     */
+    public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        JsonNode recorded = endpointIpRequestStore.get(id)
+                .map(node -> node.path("IpAddressRequests"))
+                .orElse(objectMapper.createArrayNode());
+        List<ObjectNode> addresses = new ArrayList<>();
+        for (JsonNode request : recorded) {
+            ObjectNode address = objectMapper.createObjectNode();
+            address.put("IpId", "rni-" + deterministicHex(id + "|" + canonicalKey(request), 17));
+            copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
+            address.put("Status", "ATTACHED");
+            address.put("StatusMessage", "This IP address is operational.");
+            address.set("CreationTime", endpoint.get("CreationTime"));
+            address.set("ModificationTime", endpoint.get("CreationTime"));
+            addresses.add(address);
+        }
+        return addresses;
     }
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
