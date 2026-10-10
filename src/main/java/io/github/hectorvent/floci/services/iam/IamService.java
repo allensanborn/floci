@@ -1049,6 +1049,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         "The role with name " + roleName + " cannot be found.", 404));
     }
 
+    public IamRole getValidatedRole(String roleName) {
+        validateRoleName(roleName);
+        return getRole(roleName);
+    }
+
     /**
      * Looks up a role by name in a specific account's namespace, without throwing when absent.
      *
@@ -1132,6 +1137,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRole(String roleName) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
@@ -1220,6 +1226,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (roleName == null) {
             throw new AwsException("NoSuchEntity", "The request must include RoleName.", 404);
         }
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         // The path cannot classify a role — CreateRole will put an ordinary one under the
         // service-role prefix — so only roles minted here are deletable through this action. The
@@ -1256,6 +1263,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateRole(String roleName, String description, int maxSessionDuration) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (description != null) role.setDescription(description);
@@ -1264,6 +1272,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateAssumeRolePolicy(String roleName, String policyDocument) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         role.setAssumeRolePolicyDocument(policyDocument);
@@ -1278,6 +1287,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that check and this call would silently receive the update meant for the original role.
      */
     public void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
             throw new AwsException("EntityAlreadyExists",
@@ -1289,6 +1299,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void tagRole(String roleName, Map<String, String> newTags) {
+        validateRoleName(roleName);
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
             role.setTags(mergeTagsWithinQuota(role.getTags(), newTags, "TagsPerRole", true));
@@ -1297,6 +1308,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void untagRole(String roleName, List<String> tagKeys) {
+        validateRoleName(roleName);
         synchronized (tagLock) {
             IamRole role = getRole(roleName);
             removeTagsCaseInsensitive(role.getTags(), tagKeys);
@@ -1305,6 +1317,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Map<String, String> listRoleTags(String roleName) {
+        validateRoleName(roleName);
         return getRole(roleName).getTags();
     }
 
@@ -1761,6 +1774,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void attachRolePolicy(String roleName, String policyArn) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         IamPolicy policy = requirePolicy(policyArn);
@@ -1772,6 +1786,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void detachRolePolicy(String roleName, String policyArn) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().remove(policyArn)) {
@@ -1783,6 +1798,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
+        validateRoleName(roleName);
         return getRole(roleName).getAttachedPolicyArns().stream()
                 .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
@@ -1860,6 +1876,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         Map<String, String> inlinePolicies = role.getInlinePolicies();
@@ -1889,6 +1906,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public String getRolePolicy(String roleName, String policyName) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         String doc = role.getInlinePolicies().get(policyName);
         if (doc == null) {
@@ -1899,6 +1917,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRolePolicy(String roleName, String policyName) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (role.getInlinePolicies().remove(policyName) == null) {
@@ -1909,6 +1928,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<String> listRolePolicies(String roleName) {
+        validateRoleName(roleName);
         return new ArrayList<>(getRole(roleName).getInlinePolicies().keySet());
     }
 
@@ -2067,6 +2087,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
+        validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         requireNotServiceLinked(getRole(roleName), roleName);
         List<String> roleNames = profile.getRoleNames();
@@ -2083,6 +2104,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
+        validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         // Tolerates an already-deleted role, so guard only what is still there.
         roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
@@ -2091,6 +2113,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<InstanceProfile> listInstanceProfilesForRole(String roleName) {
+        validateRoleName(roleName);
         getRole(roleName); // validates existence
         return instanceProfiles.scan(k -> true).stream()
                 .filter(p -> p.getRoleNames().contains(roleName))
@@ -4865,6 +4888,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         requirePolicy(permissionsBoundaryArn); // validate policy exists
@@ -4874,6 +4898,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRolePermissionsBoundary(String roleName) {
+        validateRoleName(roleName);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         if (role.getPermissionsBoundaryArn() == null) {
