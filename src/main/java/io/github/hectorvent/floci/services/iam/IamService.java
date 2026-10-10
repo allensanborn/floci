@@ -784,11 +784,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void updateUser(String userName, String newUserName, String newPath, String expectedUserId) {
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
-            if (expectedUserId != null && !expectedUserId.equals(user.getUserId())) {
-                throw new AwsException("EntityAlreadyExists",
-                        "User " + userName + " was replaced by a different user of the same name; "
-                                + "refusing to apply an update meant for the original user.", 409);
-            }
+            requireSameUser(user, userName, expectedUserId);
             if (newUserName != null && !newUserName.equals(userName)) {
                 boolean nameTaken = resourcesInCurrentAccount(users)
                         .filter(existing -> !existing.getUserId().equals(user.getUserId()))
@@ -1288,14 +1284,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
         validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        if (expectedRoleId != null && !expectedRoleId.equals(role.getRoleId())) {
-            throw new AwsException("EntityAlreadyExists",
-                    "Role " + roleName + " was replaced by a different role of the same name; "
-                            + "refusing to apply an update meant for the original role.", 409);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            role.setAssumeRolePolicyDocument(policyDocument);
+            roles.put(roleName, role);
         }
-        role.setAssumeRolePolicyDocument(policyDocument);
-        roles.put(roleName, role);
     }
 
     public void tagRole(String roleName, Map<String, String> newTags) {
@@ -4918,12 +4912,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn, String expectedRoleId) {
         validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireSameRole(role, roleName, expectedRoleId);
-        requireNotServiceLinked(role, roleName);
-        requirePolicy(permissionsBoundaryArn); // validate policy exists
-        role.setPermissionsBoundaryArn(permissionsBoundaryArn);
-        roles.put(roleName, role);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            requirePolicy(permissionsBoundaryArn); // validate policy exists
+            role.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            roles.put(roleName, role);
+        }
         LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
     }
 
@@ -4934,15 +4930,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** ID-verified like {@link #putRolePermissionsBoundary(String, String, String)}. */
     public void deleteRolePermissionsBoundary(String roleName, String expectedRoleId) {
         validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireSameRole(role, roleName, expectedRoleId);
-        requireNotServiceLinked(role, roleName);
-        if (role.getPermissionsBoundaryArn() == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Role " + roleName + " does not have a permissions boundary.", 404);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            if (role.getPermissionsBoundaryArn() == null) {
+                throw new AwsException("NoSuchEntity",
+                        "Role " + roleName + " does not have a permissions boundary.", 404);
+            }
+            role.setPermissionsBoundaryArn(null);
+            roles.put(roleName, role);
         }
-        role.setPermissionsBoundaryArn(null);
-        roles.put(roleName, role);
         LOG.infov("Deleted permissions boundary for role: {0}", roleName);
     }
 

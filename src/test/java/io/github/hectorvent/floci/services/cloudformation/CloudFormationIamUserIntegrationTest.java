@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -324,7 +325,7 @@ class CloudFormationIamUserIntegrationTest {
             .formParam("UserName", userName)
         .when().post("/").then().statusCode(200).extract().asString();
         assertThat(attachedPolicies, containsString("ReadOnlyAccess"));
-        assertThat(attachedPolicies, org.hamcrest.Matchers.not(containsString("PowerUserAccess")));
+        assertThat(attachedPolicies, not(containsString("PowerUserAccess")));
 
         // Verify drop-policy was deleted
         String inlinePolicies = given()
@@ -334,7 +335,7 @@ class CloudFormationIamUserIntegrationTest {
             .formParam("UserName", userName)
         .when().post("/").then().statusCode(200).extract().asString();
         assertThat(inlinePolicies, containsString("<member>keep-policy</member>"));
-        assertThat(inlinePolicies, org.hamcrest.Matchers.not(containsString("<member>drop-policy</member>")));
+        assertThat(inlinePolicies, not(containsString("<member>drop-policy</member>")));
 
         // Verify group-b was removed
         String userGroups = given()
@@ -344,7 +345,7 @@ class CloudFormationIamUserIntegrationTest {
             .formParam("UserName", userName)
         .when().post("/").then().statusCode(200).extract().asString();
         assertThat(userGroups, containsString("group-a-" + suffix));
-        assertThat(userGroups, org.hamcrest.Matchers.not(containsString("group-b-" + suffix)));
+        assertThat(userGroups, not(containsString("group-b-" + suffix)));
 
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
@@ -407,7 +408,7 @@ class CloudFormationIamUserIntegrationTest {
         assertThat(updatedTags, containsString("<Value>production</Value>"));
         assertThat(updatedTags, containsString("<Key>Team</Key>"));
         assertThat(updatedTags, containsString("<Value>identity</Value>"));
-        assertThat(updatedTags, org.hamcrest.Matchers.not(containsString("<Key>Owner</Key>")));
+        assertThat(updatedTags, not(containsString("<Key>Owner</Key>")));
 
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
@@ -464,7 +465,7 @@ class CloudFormationIamUserIntegrationTest {
                 .statusCode(200)
                 .extract().asString();
             assertThat(body, containsString(read[2]));
-            assertThat(body, org.hamcrest.Matchers.not(containsString("PermissionsBoundary")));
+            assertThat(body, not(containsString("PermissionsBoundary")));
         }
 
         deleteStack(stackName);
