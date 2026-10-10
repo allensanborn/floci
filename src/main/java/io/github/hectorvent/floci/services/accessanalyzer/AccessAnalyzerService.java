@@ -83,14 +83,18 @@ public class AccessAnalyzerService implements Resettable {
                 100, 1000, "ValidationException");
     }
 
-    public synchronized void deleteAnalyzer(String region, String analyzerName) {
+    public Analyzer getAnalyzer(String region, String analyzerName) {
         validateAnalyzerName(analyzerName);
-        String key = storageKey(region, analyzerName);
-        if (analyzers.get(key).isEmpty()) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The specified analyzer could not be found.", 404);
-        }
-        analyzers.delete(key);
+        return analyzers.get(storageKey(region, analyzerName)).orElseThrow(AccessAnalyzerService::analyzerNotFound);
+    }
+
+    public synchronized void deleteAnalyzer(String region, String analyzerName) {
+        getAnalyzer(region, analyzerName);
+        analyzers.delete(storageKey(region, analyzerName));
+    }
+
+    private static AwsException analyzerNotFound() {
+        return new AwsException("ResourceNotFoundException", "The specified analyzer could not be found.", 404);
     }
 
     private static int analyzerLimit(String type) {

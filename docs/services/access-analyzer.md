@@ -13,6 +13,7 @@ Floci supports the analyzer lifecycle used by local governance workflows.
 | --- | --- |
 | `ListAnalyzers` | - |
 | `CreateAnalyzer` | - |
+| `GetAnalyzer` | - |
 | `DeleteAnalyzer` | - |
 <!-- floci:actions:end -->
 
