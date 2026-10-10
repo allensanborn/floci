@@ -18,7 +18,7 @@
 #              Version form field to disambiguate, the way isElbClassicRequest already
 #              reads it, which is a cross-service routing change of its own.
 #
-# 189 entries: 171 unrouted, 18 claimed by another service.
+# 188 entries: 170 unrouted, 18 claimed by another service.
 #
 # Shrink this file, never grow it. Removing a line is the point; adding one needs a
 # reason in the PR that adds it. AwsQueryActionRoutingParityTest fails on an entry that
@@ -48,7 +48,7 @@ cloudformation	ActivateOrganizationsAccess	sqs
 cloudformation	DescribeOrganizationsAccess	sqs
 cloudformation	ListStackSetAutoDeploymentTargets	sqs
 
-# ec2: 83 (83 unrouted, 0 claimed elsewhere)
+# ec2: 82 (82 unrouted, 0 claimed elsewhere)
 ec2	AcceptVpcPeeringConnection	sqs
 ec2	AllocateHosts	sqs
 ec2	AllocateIpamPoolCidr	sqs
@@ -75,7 +75,6 @@ ec2	DeleteTransitGatewayRoute	sqs
 ec2	DeleteTransitGatewayRouteTable	sqs
 ec2	DeleteTransitGatewayVpcAttachment	sqs
 ec2	DeleteVpcPeeringConnection	sqs
-ec2	DescribeEgressOnlyInternetGateways	sqs
 ec2	DescribeHosts	sqs
 ec2	DescribeInstanceCreditSpecifications	sqs
 ec2	DescribeIpamByoasn	sqs
