@@ -107,7 +107,8 @@ class ContainerLauncherTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
-        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.port()).thenReturn(4566);
         lenient().when(config.defaultRegion()).thenReturn("us-east-1");
         lenient().when(config.defaultAccountId()).thenReturn("000000000000");
         lenient().when(config.hostname()).thenReturn(Optional.empty());
@@ -612,6 +613,28 @@ class ContainerLauncherTest {
                 "the owner-account access key must win when the function's own triad is incomplete");
         assertTrue(env.stream().noneMatch("AWS_ACCESS_KEY_ID=user-partial-key"::equals),
                 "a partial user-supplied access key must never override the owner-account baseline");
+    }
+
+    @Test
+    void launchFunction_endpointUsesListenPortNotAdvertisedBaseUrlPort() throws Exception {
+        // docker run -p 4811:4566 -e FLOCI_BASE_URL=http://localhost:4811: 4811 exists only on the
+        // host. The function container reaches Floci over the Docker network, where it listens on
+        // floci.port (4566), so that is the port AWS_ENDPOINT_URL must carry.
+        Path codePath = Files.createDirectory(tempDir.resolve("endpoint-port"));
+        // lenient: the fixed code never reads base-url here; the stub sets up the mismatch.
+        lenient().when(config.baseUrl()).thenReturn("http://localhost:4811");
+        when(config.port()).thenReturn(4566);
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("endpoint-port-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        List<String> env = captureRealContainerSpec().env();
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://127.0.0.1:4566"), env.toString());
     }
 
     @Test
