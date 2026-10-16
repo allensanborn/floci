@@ -845,6 +845,19 @@ public class Ec2QueryHandler {
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
                 firstNonBlank(p.getFirst("PrivateIpAddress"), p.getFirst("NetworkInterface.1.PrivateIpAddress")));
 
+        // EbsOptimized was dropped at launch, so an aws_instance with ebs_optimized = true read back
+        // false and Terraform replaced it on every plan. The request wins over a launch template.
+        Boolean ebsOptimized = boolParam(p, "EbsOptimized");
+        if (ebsOptimized == null && launchTemplateData != null) {
+            ebsOptimized = launchTemplateData.getEbsOptimized();
+        }
+        if (ebsOptimized != null) {
+            for (Instance inst : res.getInstances()) {
+                service.modifyInstanceAttribute(region, inst.getInstanceId(), "ebsOptimized", ebsOptimized.toString());
+                inst.setEbsOptimized(ebsOptimized);
+            }
+        }
+
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
             for (Instance inst : res.getInstances()) {
