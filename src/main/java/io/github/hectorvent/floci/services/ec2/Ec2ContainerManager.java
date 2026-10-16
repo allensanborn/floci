@@ -718,11 +718,15 @@ public class Ec2ContainerManager {
             specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
         }
         if (image.systemd()) {
+            // A private cgroup namespace, as kind gives its nodes: the guest's systemd owns its own
+            // cgroup subtree (Docker mounts it read-write for a privileged container). With the
+            // host namespace and the host's /sys/fs/cgroup bound in, every guest's systemd managed
+            // the same tree, so two Kubernetes nodes shared one kubepods.slice and each kubelet
+            // tore down the other's pod sandboxes.
             specBuilder
-                    .withCgroupnsMode("host")
+                    .withCgroupnsMode("private")
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
-                    .withBind("/sys/fs/cgroup", "/sys/fs/cgroup")
                     // The guest shares the Docker host's kernel but ships none of its modules, so
                     // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
                     // when the module is built in. kind binds the host's tree the same way.
