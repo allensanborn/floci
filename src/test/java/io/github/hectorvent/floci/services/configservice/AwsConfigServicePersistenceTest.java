@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -138,6 +139,24 @@ class AwsConfigServicePersistenceTest {
 
     private static ConfigEvaluation evaluation(String resourceType, String resourceId, String complianceType) {
         return new ConfigEvaluation(resourceType, resourceId, complianceType, null, 1700000000.0, null, null);
+    }
+
+    @Test
+    void aStartedRecorderIsStillRecordingAfterRestart() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        AwsConfigService first = serviceWithStorage(storage);
+        first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null)));
+        first.putDeliveryChannel(REGION,
+                new DeliveryChannel("default", "config-bucket", null, null, null, null));
+        first.startConfigurationRecorder(REGION, "default");
+
+        AwsConfigService reloaded = serviceWithStorage(storage);
+
+        assertTrue(reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
+        reloaded.stopConfigurationRecorder(REGION, "default");
+        assertFalse(serviceWithStorage(storage).describeConfigurationRecorderStatus(REGION, null)
+                .getFirst().recording());
     }
 
     private static AwsConfigService serviceWithStorage(StorageFactory storage) {
