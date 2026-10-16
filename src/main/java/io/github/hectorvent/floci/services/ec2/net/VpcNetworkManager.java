@@ -825,21 +825,27 @@ public class VpcNetworkManager {
         synchronized (vpc.declarationLock) {
             vpc.subnetDeclarations.keySet().forEach(subnetId -> subnetOwner.remove(key(region, subnetId)));
         }
-        if (!vpc.created) {
+        // A network this process never materialised can still exist: one a previous run created
+        // for a VPC none of whose instances has started since. Startup reconciliation noted it.
+        boolean fromPreviousRun = networksFromPreviousRun.remove(key(region, vpcId));
+        if (!vpc.created && !fromPreviousRun) {
             return;
         }
         // Floci attached itself to reach private addresses (attachCurrentContainer). Docker refuses
         // to remove a network with an endpoint left on it, so that attachment goes first, or every
         // retry fails and the network outlives its VPC, holding the CIDR the next VPC declares.
-        if (vpc.flociContainerId != null) {
+        String flociContainerId = vpc.flociContainerId != null ? vpc.flociContainerId
+                : currentContainerNetworkResolver == null ? null
+                : currentContainerNetworkResolver.resolveContainerId().orElse(null);
+        if (flociContainerId != null) {
             try {
                 dockerClient.disconnectFromNetworkCmd()
                         .withNetworkId(vpc.networkName)
-                        .withContainerId(vpc.flociContainerId)
+                        .withContainerId(flociContainerId)
                         .withForce(true)
                         .exec();
             } catch (Exception e) {
-                LOG.debugv("Could not detach Floci container {0} from {1}: {2}", vpc.flociContainerId,
+                LOG.debugv("Could not detach Floci container {0} from {1}: {2}", flociContainerId,
                         vpc.networkName, e.getMessage());
             }
         }
@@ -864,6 +870,9 @@ public class VpcNetworkManager {
     }
 
     // ─── Startup reconciliation ──────────────────────────────────────────────
+
+    /** VPCs still declared at startup whose network a previous run created: deleting one removes it. */
+    private final Set<String> networksFromPreviousRun = ConcurrentHashMap.newKeySet();
 
     /**
      * Removes VPC networks this Floci left behind on a previous run.
@@ -902,6 +911,7 @@ public class VpcNetworkManager {
                 String vpcId = ALIASES.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
                 String region = ALIASES.labelValue(labels, ContainerStorageHelper.REGION_LABEL);
                 if (vpcId != null && region != null && stillDeclared.test(region, vpcId)) {
+                    networksFromPreviousRun.add(key(region, vpcId));
                     continue;
                 }
                 disconnectAll(network);

@@ -474,6 +474,29 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void deletingAVpcAfterARestartRemovesTheNetworkItsPredecessorCreated() {
+        // A restarted process declares the VPC again but has not materialised it: no instance in
+        // it has started since. The network from before the restart must still go with the VPC.
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true); // startup: the VPC is still declared
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(networkName), removedNetworks);
+    }
+
+    @Test
+    void deletingAVpcWhoseNetworkNeverExistedRemovesNothing() {
+        manager.declareVpc(REGION, "vpc-2", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-2");
+
+        assertTrue(removedNetworks.isEmpty());
+    }
+
+    @Test
     void deletingAVpcDetachesFlociBeforeRemovingTheNetwork() {
         CurrentContainerNetworkResolver currentContainerNetworkResolver =
                 mock(CurrentContainerNetworkResolver.class);
