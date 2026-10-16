@@ -562,6 +562,22 @@ public class Ec2QueryHandler {
      * them — declare no {@code locationName} and so serialize as {@code TagSpecifications}. Both
      * spellings are read, because an action that used the plural silently lost every tag.
      */
+    /**
+     * The private IP a RunInstances launch asks for: the top-level {@code PrivateIpAddress}, or the
+     * primary interface spec's. An interface spec with another device index describes a secondary
+     * interface, so its address is not the primary's; AWS refuses both shapes in one request.
+     */
+    private static String requestedPrivateIp(MultivaluedMap<String, String> p, int interfaceDeviceIndex) {
+        String topLevel = p.getFirst("PrivateIpAddress");
+        String onInterface = interfaceDeviceIndex == 0 ? p.getFirst("NetworkInterface.1.PrivateIpAddress") : null;
+        if (topLevel != null && !topLevel.isBlank() && onInterface != null && !onInterface.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Network interfaces and an instance-level private IP address should not be specified "
+                            + "on the same request", 400);
+        }
+        return firstNonBlank(topLevel, onInterface);
+    }
+
     private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
         return parseTagsForResource(p, resourceType, false);
     }
@@ -774,6 +790,7 @@ public class Ec2QueryHandler {
         // the instance's primary interface (network_interface { network_interface_id = ... }).
         String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
         int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
+        String privateIpAddress = requestedPrivateIp(p, networkInterfaceDeviceIndex);
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
@@ -866,7 +883,7 @@ public class Ec2QueryHandler {
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType));
+                "spot".equals(marketType), privateIpAddress);
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();
