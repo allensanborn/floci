@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.ec2.model.Host;
 import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecification;
 import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecificationListResult;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
@@ -258,6 +259,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, LaunchTemplate> launchTemplates;
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
+    /** In memory unless the StorageFactory constructor replaces it, so hermetic test constructors need no change. */
+    private StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints =
+            AccountAwareStorageBackend.inMemory("000000000000");
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
@@ -515,6 +519,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 storageFactory.create("ec2", "ec2-hosts.json", new TypeReference<Map<String, Host>>() {}),
                 storageFactory.create("ec2", "ec2-transit-gateway-peering-attachments.json",
                         new TypeReference<Map<String, TransitGatewayPeeringAttachment>>() {}));
+
+        this.instanceConnectEndpoints = storageFactory.create("ec2", "ec2-instance-connect-endpoints.json",
+                new TypeReference<Map<String, InstanceConnectEndpoint>>() {});
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -4020,6 +4027,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 addIfSet(bySubnet.computeIfAbsent(ni.getSubnetId(), ignored -> new HashSet<>()),
                         ni.getPrivateIpAddress());
             }
+        }
+        for (InstanceConnectEndpoint endpoint : instanceConnectEndpoints.scan(k -> k.startsWith(regionPrefix))) {
+            addIfSet(bySubnet.computeIfAbsent(endpoint.getSubnetId(), ignored -> new HashSet<>()),
+                    endpoint.getPrivateIpAddress());
         }
         for (NatGateway natGateway : natGateways.scan(k -> k.startsWith(regionPrefix))) {
             if ("deleted".equals(natGateway.getState())) {
@@ -9642,6 +9653,184 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             result.add(ni);
         }
         return result;
+    }
+
+    // ─── EC2 Instance Connect Endpoints ─────────────────────────────────────
+
+    /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
+    static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
+    private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    /** States the AWS CLI accepts as usable when it looks an endpoint up for a tunnel. */
+    private static final Set<String> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES =
+            Set.of("create-complete", "update-in-progress", "update-complete", "update-failed");
+
+    /**
+     * Creates an endpoint in {@code subnetId}. Creation is immediate ({@code create-complete}); on
+     * AWS it takes a few minutes. The DNS names live under {@link #INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX},
+     * which resolves to the loopback address where Floci's HTTPS listener is published, and which
+     * Floci's wildcard server certificate covers.
+     */
+    public InstanceConnectEndpoint createInstanceConnectEndpoint(String region, String subnetId,
+                                                                 List<String> securityGroupIds,
+                                                                 Boolean preserveClientIp, String ipAddressType,
+                                                                 List<Tag> tagList) {
+        if (subnetId == null || subnetId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
+        }
+        Subnet subnet = requireSubnet(region, subnetId);
+        String type = ipAddressType == null || ipAddressType.isBlank() ? "ipv4" : ipAddressType;
+        if (!INSTANCE_CONNECT_ENDPOINT_IP_TYPES.contains(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + type + ") for parameter IpAddressType is invalid.", 400);
+        }
+        if (Boolean.TRUE.equals(preserveClientIp) && !"ipv4".equals(type)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "PreserveClientIp is only supported on IPv4 EC2 Instance Connect Endpoints.", 400);
+        }
+        List<String> groups = new ArrayList<>();
+        if (securityGroupIds == null || securityGroupIds.isEmpty()) {
+            securityGroups.scan(k -> true).stream()
+                    .filter(sg -> region.equals(sg.getRegion()) && subnet.getVpcId().equals(sg.getVpcId())
+                            && "default".equals(sg.getGroupName()))
+                    .findFirst()
+                    .ifPresent(sg -> groups.add(sg.getGroupId()));
+        } else {
+            for (String groupId : securityGroupIds) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+                if (!subnet.getVpcId().equals(sg.getVpcId())) {
+                    throw new AwsException("InvalidParameter", "Security group " + groupId
+                            + " does not belong to VPC " + subnet.getVpcId() + ".", 400);
+                }
+                groups.add(groupId);
+            }
+        }
+
+        String id = "eice-" + randomHex(17);
+        InstanceConnectEndpoint endpoint = new InstanceConnectEndpoint();
+        endpoint.setInstanceConnectEndpointId(id);
+        endpoint.setInstanceConnectEndpointArn(AwsArnUtils.Arn.of("ec2", region, callerAccountId(),
+                "instance-connect-endpoint/" + id).toString());
+        endpoint.setOwnerId(callerAccountId());
+        endpoint.setState("create-complete");
+        endpoint.setDnsName(id + "." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        endpoint.setFipsDnsName(id + "-fips." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        endpoint.setNetworkInterfaceIds(new ArrayList<>(List.of("eni-" + randomHex(17))));
+        endpoint.setVpcId(subnet.getVpcId());
+        endpoint.setSubnetId(subnetId);
+        endpoint.setAvailabilityZone(subnet.getAvailabilityZone());
+        endpoint.setAvailabilityZoneId(subnet.getAvailabilityZoneId());
+        endpoint.setCreatedAt(Instant.now());
+        endpoint.setPreserveClientIp(Boolean.TRUE.equals(preserveClientIp));
+        endpoint.setSecurityGroupIds(groups);
+        endpoint.setIpAddressType(type);
+        endpoint.setRegion(region);
+        synchronized (privateIpAllocationLock) {
+            endpoint.setPrivateIpAddress(assignPrivateIp(region, subnetId));
+            instanceConnectEndpoints.put(key(region, id), endpoint);
+        }
+        if (tagList != null && !tagList.isEmpty()) {
+            createTags(region, List.of(id), tagList);
+        }
+        return withTags(endpoint);
+    }
+
+    public List<InstanceConnectEndpoint> describeInstanceConnectEndpoints(String region, List<String> ids,
+                                                                          Map<String, List<String>> filters) {
+        for (String id : ids) {
+            requireInstanceConnectEndpoint(region, id);
+        }
+        return instanceConnectEndpoints.scan(k -> true).stream()
+                .filter(endpoint -> region.equals(endpoint.getRegion()))
+                .filter(endpoint -> ids.isEmpty() || ids.contains(endpoint.getInstanceConnectEndpointId()))
+                .map(this::withTags)
+                .filter(endpoint -> filters == null || filters.entrySet().stream()
+                        .allMatch(filter -> matchesInstanceConnectEndpointFilter(endpoint, filter.getKey(),
+                                filter.getValue())))
+                .sorted(Comparator.comparing(InstanceConnectEndpoint::getInstanceConnectEndpointId))
+                .collect(Collectors.toList());
+    }
+
+    /** Deletes the endpoint and answers with it in {@code delete-in-progress}, as AWS does. */
+    public InstanceConnectEndpoint deleteInstanceConnectEndpoint(String region, String id) {
+        InstanceConnectEndpoint endpoint = withTags(requireInstanceConnectEndpoint(region, id));
+        synchronized (privateIpAllocationLock) {
+            instanceConnectEndpoints.delete(key(region, id));
+            if (vpcNetworkManager != null) {
+                vpcNetworkManager.releasePrivateIp(region, endpoint.getSubnetId(), endpoint.getPrivateIpAddress());
+            }
+        }
+        tags.delete(id);
+        endpoint.setState("delete-in-progress");
+        return endpoint;
+    }
+
+    /** The usable endpoint a tunnel names, or empty: unknown, or not in a state the CLI would use. */
+    public Optional<InstanceConnectEndpoint> findUsableInstanceConnectEndpoint(String region, String id) {
+        return instanceConnectEndpoints.get(key(region, id))
+                .filter(endpoint -> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES.contains(endpoint.getState()));
+    }
+
+    /** The running instance in {@code vpcId} holding {@code privateIp}: what a tunnel connects to. */
+    public Optional<Instance> findRunningInstanceByPrivateIp(String region, String vpcId, String privateIp) {
+        return instances.scan(k -> true).stream()
+                .filter(instance -> region.equals(instance.getRegion()))
+                .filter(instance -> vpcId.equals(instance.getVpcId()) && privateIp.equals(instance.getPrivateIpAddress()))
+                .filter(instance -> instance.getState() != null && "running".equals(instance.getState().getName()))
+                .findFirst();
+    }
+
+    /**
+     * Whether the endpoint may open {@code port} on {@code instance}: its own groups must allow the
+     * traffic out, and the instance's groups must allow it in from the endpoint, the way AWS
+     * evaluates a tunnel. The source the instance sees is the endpoint's interface address, or
+     * any address when the client IP is preserved, which only a CIDR rule can admit.
+     */
+    public boolean instanceConnectEndpointMayReach(InstanceConnectEndpoint endpoint, Instance instance, int port) {
+        String region = endpoint.getRegion();
+        List<SecurityGroup> endpointGroups = endpoint.getSecurityGroupIds().stream()
+                .map(id -> securityGroups.get(key(region, id)).orElse(null))
+                .filter(Objects::nonNull)
+                .toList();
+        List<String> instanceGroupIds = instance.getSecurityGroups() == null ? List.of()
+                : instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList();
+        List<SecurityGroup> instanceGroups = instanceGroupIds.stream()
+                .map(id -> securityGroups.get(key(region, id)).orElse(null))
+                .filter(Objects::nonNull)
+                .toList();
+        SecurityGroupPolicy.Peer target = new SecurityGroupPolicy.Peer(instance.getPrivateIpAddress(),
+                instance.getOwnerId(), instance.getVpcId(), new HashSet<>(instanceGroupIds));
+        SecurityGroupPolicy.Peer source = new SecurityGroupPolicy.Peer(endpoint.getPrivateIpAddress(),
+                endpoint.getOwnerId(), endpoint.getVpcId(), new HashSet<>(endpoint.getSecurityGroupIds()));
+        return SecurityGroupPolicy.allows(endpointGroups, true, "tcp", port, -1, target, Map.of())
+                && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source, Map.of());
+    }
+
+    private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {
+        return instanceConnectEndpoints.get(key(region, id)).orElseThrow(() -> new AwsException(
+                "InvalidInstanceConnectEndpointId.NotFound",
+                "The instance connect endpoint ID '" + id + "' does not exist", 400));
+    }
+
+    private InstanceConnectEndpoint withTags(InstanceConnectEndpoint endpoint) {
+        endpoint.setTags(new ArrayList<>(tags.get(endpoint.getInstanceConnectEndpointId()).orElse(List.of())));
+        return endpoint;
+    }
+
+    private boolean matchesInstanceConnectEndpointFilter(InstanceConnectEndpoint endpoint, String name,
+                                                         List<String> values) {
+        if (name.startsWith("tag:") || "tag-key".equals(name)) {
+            return matchesTagFilter(endpoint.getTags(), name, values, this::matchesFilterValue);
+        }
+        return switch (name) {
+            case "instance-connect-endpoint-id" -> matchesFilterValue(values, endpoint.getInstanceConnectEndpointId());
+            case "state" -> matchesFilterValue(values, endpoint.getState());
+            case "vpc-id" -> matchesFilterValue(values, endpoint.getVpcId());
+            case "subnet-id" -> matchesFilterValue(values, endpoint.getSubnetId());
+            case "availability-zone" -> matchesFilterValue(values, endpoint.getAvailabilityZone());
+            case "owner-id" -> matchesFilterValue(values, endpoint.getOwnerId());
+            default -> throw new AwsException("InvalidParameterValue",
+                    "The filter '" + name + "' is invalid", 400);
+        };
     }
 
     public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,

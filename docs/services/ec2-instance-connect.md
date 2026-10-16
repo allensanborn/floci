@@ -56,4 +56,31 @@ must provide one (the instance ID is in the guest's `AWS_EC2_INSTANCE_ID` enviro
   `ec2:osuser` condition key.
 - The signing material lives in memory: a restart issues a new intermediate and signers under the
   same local CA, so guests keep verifying.
-- EC2 Instance Connect Endpoint tunnels.
+
+## Instance Connect Endpoint tunnels
+
+`aws ec2-instance-connect open-tunnel` and `aws ec2-instance-connect ssh --connection-type eice`
+open a SigV4-presigned WebSocket to `wss://<endpoint DnsName>/openTunnel`, and binary frames carry
+the TCP stream to the instance. Floci serves that path on its HTTPS listener, so it needs
+`FLOCI_TLS_ENABLED=true`. Endpoint DNS names are `<endpoint id>.localhost.floci.io`, which public DNS
+resolves to `127.0.0.1` and Floci's wildcard certificate covers.
+
+Two properties of the AWS CLI shape how a client reaches it. The CLI always dials port 443, so the
+client's loopback port 443 must reach Floci's port (publish `127.0.0.1:443:4566`, or forward it inside
+a client container). And the tunnel's TLS uses the operating system's trust store, not
+`AWS_CA_BUNDLE`, so that store must trust Floci's local CA (`GET /_floci/ca.pem`).
+
+Before the WebSocket upgrade, Floci checks what AWS checks and answers a refusal as an HTTP error
+the CLI prints:
+
+| Check | Refusal |
+| --- | --- |
+| The URL is presigned for `ec2-instance-connect` and not past `X-Amz-Expires` | 403 |
+| `remotePort` is 22 or 3389, `maxTunnelDuration` is 1 to 3600 seconds | 400 |
+| The endpoint exists in a usable state | 404 |
+| A running instance holds `privateIpAddress` in the endpoint's VPC | 404 |
+| The endpoint's security groups allow the port out to the instance, and the instance's allow it in from the endpoint's address or groups | 403 |
+| The instance accepts the TCP connection | 504 |
+
+The tunnel closes after `maxTunnelDuration` (3600 seconds by default). The SigV4 signature itself is
+not verified, and with `PreserveClientIp` the instance still sees the endpoint's address.

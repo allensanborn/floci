@@ -559,6 +559,16 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DescribeNatGateways | Lists or returns stored NAT gateways. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
 
+### EC2 Instance Connect Endpoints
+
+| Action | Description |
+|--------|-------------|
+| CreateInstanceConnectEndpoint | Creates an endpoint in a subnet, `create-complete` at once, with a private address from the subnet. |
+| DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `availability-zone`, `owner-id`, `tag:<key>`, `tag-key`. |
+| DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
+
+The endpoint's tunnel is real: see [EC2 Instance Connect](ec2-instance-connect.md#instance-connect-endpoint-tunnels).
+
 ### Capacity Reservations
 
 | Action | Description |

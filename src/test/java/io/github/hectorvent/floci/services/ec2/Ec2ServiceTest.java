@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
@@ -6174,6 +6175,100 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
+    }
+
+    @Test
+    void instanceConnectEndpointLifecycleFiltersAndDefaults() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.71.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.71.1.0/24", "us-east-1a").getSubnetId();
+        String otherVpc = service.createVpc("us-east-1", "10.72.0.0/16", false).getVpcId();
+        String foreignGroup = service.createSecurityGroup("us-east-1", "foreign", "x", otherVpc).getGroupId();
+
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint("us-east-1", subnetId, List.of(),
+                null, null, List.of(new Tag("Name", "kthw")));
+        String id = endpoint.getInstanceConnectEndpointId();
+        assertTrue(id.startsWith("eice-"), id);
+        assertEquals("create-complete", endpoint.getState());
+        assertEquals(id + ".localhost.floci.io", endpoint.getDnsName());
+        assertEquals(vpcId, endpoint.getVpcId());
+        assertEquals("ipv4", endpoint.getIpAddressType());
+        assertFalse(endpoint.isPreserveClientIp(), "AWS's default");
+        assertEquals(1, endpoint.getSecurityGroupIds().size(), "the VPC's default group when none is given");
+        assertTrue(endpoint.getPrivateIpAddress().startsWith("10.71.1."), endpoint.getPrivateIpAddress());
+
+        assertEquals(List.of(id), service.describeInstanceConnectEndpoints("us-east-1", List.of(),
+                Map.of("vpc-id", List.of(vpcId), "state", List.of("create-complete"), "tag:Name", List.of("kthw")))
+                .stream().map(InstanceConnectEndpoint::getInstanceConnectEndpointId).toList());
+        assertTrue(service.describeInstanceConnectEndpoints("us-east-1", List.of(),
+                Map.of("vpc-id", List.of(otherVpc))).isEmpty());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints("us-east-1", List.of(), Map.of("bogus", List.of("x"))))
+                .getErrorCode());
+        assertEquals("InvalidParameter", assertThrows(AwsException.class, () -> service
+                .createInstanceConnectEndpoint("us-east-1", subnetId, List.of(foreignGroup), null, null, List.of()))
+                .getErrorCode());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class, () -> service
+                .createInstanceConnectEndpoint("us-east-1", subnetId, List.of(), true, "dualstack", List.of()))
+                .getErrorCode());
+        assertEquals("InvalidSubnetID.NotFound", assertThrows(AwsException.class, () -> service
+                .createInstanceConnectEndpoint("us-east-1", "subnet-0000000000000000f", List.of(), null, null, List.of()))
+                .getErrorCode());
+
+        assertEquals("delete-in-progress", service.deleteInstanceConnectEndpoint("us-east-1", id).getState());
+        assertEquals("InvalidInstanceConnectEndpointId.NotFound", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints("us-east-1", List.of(id), Map.of())).getErrorCode());
+        assertTrue(service.findUsableInstanceConnectEndpoint("us-east-1", id).isEmpty());
+    }
+
+    @Test
+    void instanceConnectEndpointReachNeedsTheEndpointsEgressAndTheInstancesIngress() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.73.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.73.1.0/24", "us-east-1a").getSubnetId();
+        String eiceGroup = service.createSecurityGroup("us-east-1", "eice", "x", vpcId).getGroupId();
+        String hostGroup = service.createSecurityGroup("us-east-1", "host", "x", vpcId).getGroupId();
+        service.revokeSecurityGroupEgress("us-east-1", eiceGroup, List.of(permission("-1", null, null, null, "0.0.0.0/0")));
+        service.authorizeSecurityGroupEgress("us-east-1", eiceGroup, List.of(permission("tcp", 22, 22, hostGroup, null)));
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                List.of(hostGroup), subnetId, null, List.of(), null, null).getInstances().getFirst();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint("us-east-1", subnetId,
+                List.of(eiceGroup), null, null, List.of());
+
+        assertFalse(service.instanceConnectEndpointMayReach(endpoint, instance, 22), "no ingress on the host yet");
+        service.authorizeSecurityGroupIngress("us-east-1", hostGroup, List.of(permission("tcp", 22, 22, eiceGroup, null)));
+        assertTrue(service.instanceConnectEndpointMayReach(endpoint, instance, 22));
+        assertFalse(service.instanceConnectEndpointMayReach(endpoint, instance, 3389), "the endpoint may only send 22");
+        assertTrue(service.findRunningInstanceByPrivateIp("us-east-1", vpcId, instance.getPrivateIpAddress()).isEmpty(),
+                "a pending instance is not a tunnel target");
+        // Mock mode has no container to report the launch; mark it running as the launch would.
+        service.getInstance("us-east-1", instance.getInstanceId()).orElseThrow().setState(InstanceState.running());
+        assertEquals(instance.getInstanceId(), service.findRunningInstanceByPrivateIp("us-east-1", vpcId,
+                instance.getPrivateIpAddress()).orElseThrow().getInstanceId());
+    }
+
+    private static IpPermission permission(String protocol, Integer from, Integer to, String groupId, String cidr) {
+        IpPermission permission = new IpPermission();
+        permission.setIpProtocol(protocol);
+        permission.setFromPort(from);
+        permission.setToPort(to);
+        if (groupId != null) {
+            UserIdGroupPair pair = new UserIdGroupPair();
+            pair.setGroupId(groupId);
+            permission.setUserIdGroupPairs(new ArrayList<>(List.of(pair)));
+        }
+        if (cidr != null) {
+            IpRange range = new IpRange();
+            range.setCidrIp(cidr);
+            permission.setIpRanges(new ArrayList<>(List.of(range)));
+        }
+        return permission;
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
