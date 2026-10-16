@@ -353,6 +353,8 @@ class Ec2ContainerManagerTest {
         assertEquals("172.17.0.9", instance.getImdsSourceIp(),
                 "the stale address would otherwise stay registered while IMDS requests arrive "
                         + "from an address nothing knows about");
+        // The restarted container's namespace is new: the link-local IMDS endpoint is set up again.
+        verify(dockerClient, timeout(2000).atLeastOnce()).execCreateCmd(TEST_CONTAINER_ID);
     }
 
     @Test
