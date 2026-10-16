@@ -4,7 +4,7 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest. Those guests also get the Docker host's `/lib/modules` read-only, so `modprobe` finds modules the shared kernel already has (for example `br_netfilter`, which Kubernetes node setup loads); the guest cannot load a module the host kernel lacks.
 
 | EC2 state | Docker operation |
 |---|---|
