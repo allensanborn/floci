@@ -3481,6 +3481,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
                 .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
         String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
+        LaunchTemplateData.Ebs rootEbs = rootEbsFor(findImageForCapture(region, imageId), mappedDevices);
+        validateRootEbs(rootEbs);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -3618,17 +3620,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         rootVol.setVolumeId(rootVolId);
                         rootVol.setAvailabilityZone(az);
                         rootVol.setVolumeType(rootVolumeType);
-                        rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+                        // The request's mapping for the root device sizes and encrypts it, as on AWS.
+                        rootVol.setSize(rootEbs != null && rootEbs.getVolumeSize() != null
+                                ? rootEbs.getVolumeSize() : DEFAULT_ROOT_VOLUME_SIZE_GIB);
                         rootVol.setState("in-use");
                         rootVol.setRegion(region);
-                        rootVol.setEncrypted(ebsEncryptionByDefault(region));
+                        rootVol.setEncrypted((rootEbs != null && Boolean.TRUE.equals(rootEbs.getEncrypted()))
+                                || ebsEncryptionByDefault(region));
+                        if (rootEbs != null) {
+                            rootVol.setKmsKeyId(rootEbs.getKmsKeyId());
+                            if (rootEbs.getIops() != null) {
+                                rootVol.setIops(rootEbs.getIops());
+                            }
+                            rootVol.setThroughput(rootEbs.getThroughput());
+                        }
+                        if ("gp3".equals(rootVolumeType) && rootVol.getThroughput() == null) {
+                            rootVol.setThroughput(125);
+                        }
                         rootVol.setCreateTime(Instant.now());
                         VolumeAttachment att = new VolumeAttachment();
                         att.setVolumeId(rootVolId);
                         att.setInstanceId(instanceId);
                         att.setDevice(inst.getRootDeviceName());
                         att.setState("attached");
-                        att.setDeleteOnTermination(true);
+                        att.setDeleteOnTermination(rootEbs == null || rootEbs.getDeleteOnTermination() == null
+                                || rootEbs.getDeleteOnTermination());
                         att.setAttachTime(Instant.now());
                         rootVol.getAttachments().add(att);
                         volumes.put(key(region, rootVolId), rootVol);
@@ -6565,9 +6581,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private boolean sameProtocolAndPorts(IpPermission a, IpPermission b) {
-        return Objects.equals(a.getIpProtocol(), b.getIpProtocol())
-                && Objects.equals(a.getFromPort(), b.getFromPort())
-                && Objects.equals(a.getToPort(), b.getToPort());
+        String protocol = SecurityGroupPolicy.normalizeProtocol(a.getIpProtocol());
+        if (!Objects.equals(protocol, SecurityGroupPolicy.normalizeProtocol(b.getIpProtocol()))) {
+            return false;
+        }
+        // "All traffic" has no ports, and AWS ignores any a request names: Terraform's
+        // aws_security_group revokes the default egress rule as -1 with FromPort=0, ToPort=0.
+        return "-1".equals(protocol)
+                || (Objects.equals(a.getFromPort(), b.getFromPort()) && Objects.equals(a.getToPort(), b.getToPort()));
     }
 
     private boolean hasSources(IpPermission perm) {
@@ -7036,6 +7057,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * The root volume takes the type a request mapping for the AMI's root device names, else the
      * type the AMI's root mapping declares, as on AWS.
      */
+    /** The request's EBS settings for the AMI's root device, or null when it maps none. */
+    private static LaunchTemplateData.Ebs rootEbsFor(Image image,
+                                                     List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
+        String rootDeviceName = image != null && image.getRootDeviceName() != null
+                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
+        return requestMappings == null ? null : requestMappings.stream()
+                .filter(m -> m.getEbs() != null && Objects.equals(m.getDeviceName(), rootDeviceName))
+                .map(LaunchTemplateData.BlockDeviceMapping::getEbs)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static void validateRootEbs(LaunchTemplateData.Ebs rootEbs) {
+        if (rootEbs == null) {
+            return;
+        }
+        if (rootEbs.getKmsKeyId() != null && !Boolean.TRUE.equals(rootEbs.getEncrypted())) {
+            throw new AwsException("InvalidParameterDependency",
+                    "The parameter KmsKeyId requires the parameter Encrypted to be set.", 400);
+        }
+        if (rootEbs.getVolumeSize() != null && rootEbs.getVolumeSize() < DEFAULT_ROOT_VOLUME_SIZE_GIB) {
+            throw new AwsException("InvalidBlockDeviceMapping", "Volume of size " + rootEbs.getVolumeSize()
+                    + "GB is smaller than snapshot, expect size >= " + DEFAULT_ROOT_VOLUME_SIZE_GIB + "GB", 400);
+        }
+    }
+
     private static String rootVolumeTypeFor(Image image,
                                             List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
         String rootDeviceName = image != null && image.getRootDeviceName() != null
@@ -10774,6 +10821,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Volume createVolume(String region, String availabilityZone, String volumeType,
                                int size, boolean encrypted, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
+        return createVolume(region, availabilityZone, volumeType, size, encrypted, iops, throughput, snapshotId,
+                volumeTags, null);
+    }
+
+    /**
+     * @param kmsKeyId the customer managed key to encrypt with, recorded as given and reported back as
+     *                 {@code KmsKeyId}; AWS requires {@code Encrypted} with it. Nothing is encrypted.
+     */
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags, String kmsKeyId) {
+        if (kmsKeyId != null && !kmsKeyId.isBlank() && !encrypted) {
+            throw new AwsException("InvalidParameterDependency",
+                    "The parameter KmsKeyId requires the parameter Encrypted to be set.", 400);
+        }
         ensureDefaultResources(region);
         String volumeId = "vol-" + randomHex(17);
         String effectiveType = volumeType != null ? volumeType : "gp2";
@@ -10785,6 +10847,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // With encryption by default on, AWS encrypts every new volume and the Encrypted parameter
         // cannot opt out of it.
         vol.setEncrypted(encrypted || ebsEncryptionByDefault(region));
+        vol.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : null);
         vol.setIops(iops > 0 ? iops : (volumeType != null && volumeType.startsWith("io") ? iops : 0));
         // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
         if ("gp3".equals(effectiveType)) {

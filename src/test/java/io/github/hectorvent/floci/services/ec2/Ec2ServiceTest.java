@@ -6253,6 +6253,56 @@ class Ec2ServiceTest {
                 instance.getPrivateIpAddress()).orElseThrow().getInstanceId());
     }
 
+    @Test
+    void revokingAllTrafficIgnoresPortsLikeTerraformsDefaultEgressRevoke() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.74.0.0/16", false).getVpcId();
+        String groupId = service.createSecurityGroup("us-east-1", "tf", "x", vpcId).getGroupId();
+
+        service.revokeSecurityGroupEgress("us-east-1", groupId, List.of(permission("-1", 0, 0, null, "0.0.0.0/0")));
+
+        assertTrue(service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst().getIpPermissionsEgress().isEmpty(), "the default allow-all egress is gone");
+    }
+
+    @Test
+    void volumesRecordTheirKmsKeyAndRootVolumesFollowTheLaunchMapping() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String key = "arn:aws:kms:us-east-1:000000000000:key/0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7";
+        assertEquals(key, service.createVolume("us-east-1", "us-east-1a", "gp3", 20, true, 0, null, null,
+                List.of(), key).getKmsKeyId());
+        assertEquals("InvalidParameterDependency", assertThrows(AwsException.class, () -> service.createVolume(
+                "us-east-1", "us-east-1a", "gp3", 20, false, 0, null, null, List.of(), key)).getErrorCode());
+
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(20);
+        ebs.setEncrypted(true);
+        ebs.setKmsKeyId(key);
+        ebs.setVolumeType("gp3");
+        root.setEbs(ebs);
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                List.of(), null, null, List.of(), null, null, null, null, 0, null, null, null, null, false,
+                null, null, List.of(root)).getInstances().getFirst();
+        Volume rootVolume = service.describeVolumes("us-east-1", List.of(instance.getRootVolumeId()), Map.of()).getFirst();
+        assertEquals(20, rootVolume.getSize());
+        assertTrue(rootVolume.isEncrypted());
+        assertEquals(key, rootVolume.getKmsKeyId());
+        assertEquals("gp3", rootVolume.getVolumeType());
+
+        ebs.setVolumeSize(4);
+        assertEquals("InvalidBlockDeviceMapping", assertThrows(AwsException.class, () -> service.runInstances(
+                "us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null, List.of(), null, null, List.of(),
+                null, null, null, null, 0, null, null, null, null, false, null, null, List.of(root))).getErrorCode());
+    }
+
     private static IpPermission permission(String protocol, Integer from, Integer to, String groupId, String cidr) {
         IpPermission permission = new IpPermission();
         permission.setIpProtocol(protocol);
