@@ -18,6 +18,10 @@ services:
     doc: docs/services/access-analyzer.md
     sources:
       - { path: src/main/java/io/github/hectorvent/floci/services/accessanalyzer/AccessAnalyzerController.java, mode: rest }
+  - service: ec2-instance-connect
+    doc: docs/services/ec2-instance-connect.md
+    sources:
+      - { path: src/main/java/io/github/hectorvent/floci/services/ec2instanceconnect/InstanceConnectJsonHandler.java, mode: switch }
   - service: acm
     doc: docs/services/acm.md
     sources:

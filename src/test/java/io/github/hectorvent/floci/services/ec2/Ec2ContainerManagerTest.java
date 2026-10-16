@@ -37,6 +37,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.ec2instanceconnect.InstanceConnectKeys;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -248,7 +249,7 @@ class Ec2ContainerManagerTest {
             networks.put(second, new ContainerNetwork().withIpv4Address(sharedFirst ? "10.0.1.10" : "192.0.2.10"));
             when(settings.getNetworks()).thenReturn(networks);
             when(command.exec()).thenReturn(response);
-            Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+            Ec2MetadataServer server = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
             Ec2ContainerManager manager = managerWith(lifecycle, docker, server);
             Instance guest = instance("i-multinetwork");
             guest.setDockerContainerId(TEST_CONTAINER_ID);
