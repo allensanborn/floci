@@ -27,6 +27,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.util.Map;
 
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -107,6 +108,55 @@ public class SecurityHubController {
     public Response updateSecurityHubConfiguration(@Context HttpHeaders headers, String body) {
         securityHubService.updateSecurityHubConfiguration(region(headers), readTree(body));
         return empty();
+    }
+
+    @GET
+    @Path("/standards")
+    public Response describeStandards(@Context HttpHeaders headers) {
+        String region = region(headers);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode standards = response.putArray("Standards");
+        for (SecurityHubService.Standard standard : SecurityHubService.STANDARDS) {
+            ObjectNode item = standards.addObject()
+                    .put("StandardsArn", securityHubService.standardsArn(region, standard))
+                    .put("Name", standard.name())
+                    .put("Description", standard.name())
+                    .put("EnabledByDefault", standard.enabledByDefault());
+            item.putObject("StandardsManagedBy").put("Company", "AWS").put("Product", "Security Hub");
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/standards/register")
+    public Response batchEnableStandards(@Context HttpHeaders headers, String body) {
+        return subscriptions(securityHubService.enableStandards(region(headers), readTree(body)), "READY");
+    }
+
+    @POST
+    @Path("/standards/deregister")
+    public Response batchDisableStandards(@Context HttpHeaders headers, String body) {
+        return subscriptions(securityHubService.disableStandards(region(headers), readTree(body)), "DELETING");
+    }
+
+    @POST
+    @Path("/standards/get")
+    public Response getEnabledStandards(@Context HttpHeaders headers, String body) {
+        return subscriptions(securityHubService.enabledStandards(region(headers), readTree(body)), "READY");
+    }
+
+    private Response subscriptions(Map<String, String> subscriptions, String status) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("StandardsSubscriptions");
+        subscriptions.forEach((subscriptionArn, standardsArn) -> {
+            ObjectNode item = items.addObject()
+                    .put("StandardsSubscriptionArn", subscriptionArn)
+                    .put("StandardsArn", standardsArn)
+                    .put("StandardsStatus", status)
+                    .put("StandardsControlsUpdatable", "READY_FOR_UPDATES");
+            item.putObject("StandardsInput");
+        });
+        return Response.ok(response).build();
     }
 
     @GET

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,6 +48,43 @@ class SecurityHubServiceTest {
         assertTrue(state.isEnabled());
         assertEquals("STANDARD_CONTROL", state.getControlFindingGenerator());
         assertEquals(Map.of("env", "test"), service.tagsForResource(REGION, service.hubArn(REGION)));
+    }
+
+    @Test
+    void enablingTheHubSubscribesTheDefaultStandardsUnlessToldNotTo() throws Exception {
+        service.enableSecurityHub(REGION, objectMapper.readTree("{}"));
+
+        assertEquals(Set.of(
+                "arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0",
+                "arn:aws:securityhub:us-east-1::standards/aws-foundational-security-best-practices/v/1.0.0"),
+                Set.copyOf(service.enabledStandards(REGION, null).values()));
+    }
+
+    @Test
+    void standardsSubscriptionsCanBeEnabledListedAndDisabled() throws Exception {
+        assertEquals("InvalidAccessException", assertThrows(AwsException.class,
+                () -> service.enabledStandards(REGION, null)).getErrorCode(), "the hub must be enabled first");
+        service.enableSecurityHub(REGION, objectMapper.readTree("{\"EnableDefaultStandards\": false}"));
+        assertTrue(service.enabledStandards(REGION, null).isEmpty());
+
+        String nist = "arn:aws:securityhub:us-east-1::standards/nist-800-53/v/5.0.0";
+        Map<String, String> enabled = service.enableStandards(REGION, objectMapper.readTree(
+                "{\"StandardsSubscriptionRequests\": [{\"StandardsArn\": \"" + nist + "\"}]}"));
+        String subscription = "arn:aws:securityhub:us-east-1:" + ACCOUNT_ID + ":subscription/nist-800-53/v/5.0.0";
+        assertEquals(Map.of(subscription, nist), enabled);
+        assertEquals(Map.of(subscription, nist), service.enabledStandards(REGION, objectMapper.readTree(
+                "{\"StandardsSubscriptionArns\": [\"" + subscription + "\"]}")));
+
+        assertEquals("InvalidInputException", assertThrows(AwsException.class, () -> service.enableStandards(REGION,
+                objectMapper.readTree("{\"StandardsSubscriptionRequests\": [{\"StandardsArn\": \"arn:aws:securityhub:"
+                        + "us-east-1::standards/made-up/v/1.0.0\"}]}"))).getErrorCode());
+
+        assertEquals(Map.of(subscription, nist), service.disableStandards(REGION, objectMapper.readTree(
+                "{\"StandardsSubscriptionArns\": [\"" + subscription + "\"]}")));
+        assertTrue(service.enabledStandards(REGION, null).isEmpty());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class, () -> service.disableStandards(
+                REGION, objectMapper.readTree("{\"StandardsSubscriptionArns\": [\"" + subscription + "\"]}")))
+                .getErrorCode());
     }
 
     /** An account id is scoped to its partition: a China ARN of the same account names nothing here. */
