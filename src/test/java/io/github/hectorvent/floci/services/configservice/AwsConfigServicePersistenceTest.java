@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
+import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
 import io.github.hectorvent.floci.services.configservice.model.RecordingGroup;
 import org.junit.jupiter.api.Test;
@@ -20,6 +21,8 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -138,6 +141,45 @@ class AwsConfigServicePersistenceTest {
 
     private static ConfigEvaluation evaluation(String resourceType, String resourceId, String complianceType) {
         return new ConfigEvaluation(resourceType, resourceId, complianceType, null, 1700000000.0, null, null);
+    }
+
+    @Test
+    void aStartedRecorderIsStillRecordingAfterRestart() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        AwsConfigService first = serviceWithStorage(storage);
+        first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null)));
+        first.putDeliveryChannel(REGION,
+                new DeliveryChannel("default", "config-bucket", null, null, null, null));
+        first.startConfigurationRecorder(REGION, "default");
+
+        AwsConfigService reloaded = serviceWithStorage(storage);
+
+        assertTrue(reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
+        reloaded.stopConfigurationRecorder(REGION, "default");
+        assertFalse(serviceWithStorage(storage).describeConfigurationRecorderStatus(REGION, null)
+                .getFirst().recording());
+    }
+
+    @Test
+    void aDeletedRecorderDoesNotComeBackRecordingAfterRestart() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        AwsConfigService first = serviceWithStorage(storage);
+        ConfigurationRecorder recorder = new ConfigurationRecorder("default",
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null));
+        first.putConfigurationRecorder(REGION, recorder);
+        first.putDeliveryChannel(REGION,
+                new DeliveryChannel("default", "config-bucket", null, null, null, null));
+        first.startConfigurationRecorder(REGION, "default");
+        first.deleteConfigurationRecorder(REGION, "default");
+
+        AwsConfigService reloaded = serviceWithStorage(storage);
+        reloaded.putConfigurationRecorder(REGION, recorder);
+
+        ConfigurationRecorderStatus status =
+                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+        assertFalse(status.recording());
+        assertNull(status.lastStartTime());
     }
 
     private static AwsConfigService serviceWithStorage(StorageFactory storage) {
