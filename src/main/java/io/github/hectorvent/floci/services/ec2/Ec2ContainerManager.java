@@ -993,6 +993,7 @@ public class Ec2ContainerManager {
         InstanceState pending = InstanceState.pending();
         instance.setState(pending);
         submitLifecycleOperation(containerId, () -> {
+            boolean setUpMetadataEndpoint = false;
             try {
                 dockerClient.startContainerCmd(containerId).exec();
                 boolean running = false;
@@ -1026,6 +1027,11 @@ public class Ec2ContainerManager {
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
                     refreshMetadataAddresses(instance, containerId);
+                    // A restarted container has a new network namespace: the link-local IMDS
+                    // address launch configured is gone, and without it the guest cannot reach
+                    // 169.254.169.254 (instance credentials, user data, EC2 Instance Connect keys).
+                    // A protected instance's helper kept its namespace, and the address with it.
+                    setUpMetadataEndpoint = namespace == null;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -1046,6 +1052,12 @@ public class Ec2ContainerManager {
                     LOG.warnv("Error in post-start hook for instance {0}: {1}",
                             instance.getInstanceId(), e.getMessage());
                 }
+            }
+            // Best effort with its own bounded commands, as at launch: the instance is already
+            // running, so a slow or failing setup cannot hold it pending.
+            if (setUpMetadataEndpoint) {
+                configureLinkLocalMetadataEndpoint(containerId, instance.getInstanceId(),
+                        dockerHostResolver.resolve(), config.services().ec2().imdsPort());
             }
         });
     }

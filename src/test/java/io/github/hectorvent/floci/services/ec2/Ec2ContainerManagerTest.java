@@ -426,6 +426,7 @@ class Ec2ContainerManagerTest {
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
         DockerClient dockerClient = mock(DockerClient.class);
+        List<String[]> execs = recordExecs(dockerClient);
         when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
                 .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
         // The VPC address is static, so it survives the stop; the bridge address does not.
@@ -453,6 +454,75 @@ class Ec2ContainerManagerTest {
         assertEquals("172.17.0.9", instance.getImdsSourceIp(),
                 "the stale address would otherwise stay registered while IMDS requests arrive "
                         + "from an address nothing knows about");
+        // The restarted container's namespace is new: the link-local IMDS endpoint is set up again.
+        awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd,
+                Ec2ContainerManager.metadataProxyInstallCommand())), Duration.ofSeconds(2));
+    }
+
+    @Test
+    void startSetsTheImdsEndpointUpOnlyAfterTheInstanceIsRunning() throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-imds-after-running");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("10.0.1.10");
+
+        // Setup is best effort and can take minutes on a slow image; it must not hold the
+        // instance pending or delay the post-start hook.
+        List<String> events = new CopyOnWriteArrayList<>();
+        DockerClient dockerClient = mock(DockerClient.class);
+        recordExecs(dockerClient, () -> events.add("exec while " + instance.getState().getName()));
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, mock(Ec2MetadataServer.class));
+
+        manager.start(instance, () -> events.add("postStart"));
+
+        awaitUntil(() -> events.stream().anyMatch(event -> event.startsWith("exec")), Duration.ofSeconds(5));
+        assertEquals(List.of("postStart", "exec while running"), events.subList(0, 2), events.toString());
+    }
+
+    @Test
+    void startOfAProtectedInstanceDoesNotSetTheImdsEndpointUpAgain() throws Exception {
+        // The helper container kept its network namespace across the stop, and the address with it.
+        DockerClient dockerClient = mock(DockerClient.class);
+        List<String[]> execs = recordExecs(dockerClient);
+        Instance instance = startProtectedInstance(mock(Ec2MetadataServer.class), Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), dockerClient);
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        assertTrue(execs.stream().noneMatch(cmd -> Arrays.equals(cmd,
+                Ec2ContainerManager.metadataProxyInstallCommand())), "no IMDS setup exec for a protected start");
+    }
+
+    /** Records every command exec'd in the test container; each exec then fails, which start tolerates. */
+    private static List<String[]> recordExecs(DockerClient dockerClient) {
+        return recordExecs(dockerClient, () -> { });
+    }
+
+    /** As {@link #recordExecs(DockerClient)}, running {@code onExec} as each exec is created. */
+    private static List<String[]> recordExecs(DockerClient dockerClient, Runnable onExec) {
+        List<String[]> execs = new CopyOnWriteArrayList<>();
+        ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.execCreateCmd(TEST_CONTAINER_ID)).thenReturn(execCreate);
+        when(execCreate.withCmd(any(String[].class))).thenAnswer(invocation -> {
+            Object[] args = invocation.getArguments();
+            execs.add(args.length == 1 && args[0] instanceof String[] cmd
+                    ? cmd : Arrays.copyOf(args, args.length, String[].class));
+            onExec.run();
+            return execCreate;
+        });
+        when(execCreate.exec()).thenThrow(new IllegalStateException("no exec in this test"));
+        return execs;
     }
 
     @ParameterizedTest
@@ -550,10 +620,14 @@ class Ec2ContainerManagerTest {
     }
 
     private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels) {
+        return startProtectedInstance(metadataServer, helperLabels, mock(DockerClient.class));
+    }
+
+    private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels,
+                                            DockerClient dockerClient) {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
-        DockerClient dockerClient = mock(DockerClient.class);
         when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
                 .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
         // A workload in the helper's namespace has no Docker attachment of its own, so there is
