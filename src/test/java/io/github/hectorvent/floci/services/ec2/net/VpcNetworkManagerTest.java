@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkReso
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -37,6 +38,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -469,6 +471,28 @@ class VpcNetworkManagerTest {
         verify(connect).withContainerId("floci-container");
         verify(connect).withContainerId("instance-1");
         verify(connect, times(2)).withNetworkId(networkName);
+    }
+
+    @Test
+    void deletingAVpcDetachesFlociBeforeRemovingTheNetwork() {
+        CurrentContainerNetworkResolver currentContainerNetworkResolver =
+                mock(CurrentContainerNetworkResolver.class);
+        when(currentContainerNetworkResolver.resolveContainerId()).thenReturn(Optional.of("floci-container"));
+        VpcNetworkManager dockerHostedManager =
+                new VpcNetworkManager(config, docker, currentContainerNetworkResolver);
+        String networkName = dockerHostedManager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        dockerHostedManager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        dockerHostedManager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = dockerHostedManager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        dockerHostedManager.attach(REGION, "vpc-1", "subnet-a", "instance-1", address);
+
+        dockerHostedManager.deleteVpcNetwork(REGION, "vpc-1");
+
+        DisconnectFromNetworkCmd disconnect = docker.disconnectFromNetworkCmd();
+        InOrder order = inOrder(disconnect, docker);
+        order.verify(disconnect).withContainerId("floci-container");
+        order.verify(docker).removeNetworkCmd(networkName);
     }
 
     @Test

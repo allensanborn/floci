@@ -828,6 +828,21 @@ public class VpcNetworkManager {
         if (!vpc.created) {
             return;
         }
+        // Floci attached itself to reach private addresses (attachCurrentContainer). Docker refuses
+        // to remove a network with an endpoint left on it, so that attachment goes first, or every
+        // retry fails and the network outlives its VPC, holding the CIDR the next VPC declares.
+        if (vpc.flociContainerId != null) {
+            try {
+                dockerClient.disconnectFromNetworkCmd()
+                        .withNetworkId(vpc.networkName)
+                        .withContainerId(vpc.flociContainerId)
+                        .withForce(true)
+                        .exec();
+            } catch (Exception e) {
+                LOG.debugv("Could not detach Floci container {0} from {1}: {2}", vpc.flociContainerId,
+                        vpc.networkName, e.getMessage());
+            }
+        }
         removeNetworkWithRetry(vpc.networkName, 1);
     }
 
