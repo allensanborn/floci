@@ -1026,6 +1026,14 @@ public class Ec2ContainerManager {
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
                     refreshMetadataAddresses(instance, containerId);
+                    // A restarted container has a new network namespace: the link-local IMDS
+                    // address launch configured is gone, and without it the guest cannot reach
+                    // 169.254.169.254 (instance credentials, user data, EC2 Instance Connect keys).
+                    // A protected instance's helper kept its namespace, and the address with it.
+                    if (namespace == null) {
+                        configureLinkLocalMetadataEndpoint(containerId, instanceId, dockerHostResolver.resolve(),
+                                config.services().ec2().imdsPort());
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
