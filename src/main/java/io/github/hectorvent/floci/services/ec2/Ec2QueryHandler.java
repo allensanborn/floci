@@ -834,7 +834,8 @@ public class Ec2QueryHandler {
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
-                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings);
+                p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
+                firstNonBlank(p.getFirst("PrivateIpAddress"), p.getFirst("NetworkInterface.1.PrivateIpAddress")));
 
         if (!networkInterfaceTags.isEmpty()) {
             List<String> eniIds = new ArrayList<>();

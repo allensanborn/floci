@@ -139,6 +139,21 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void effectiveAddressAtKeepsTheDeclaredOffsetEvenWhenSubstituted() {
+        manager.declareVpc(REGION, "vpc-kept", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-kept", "subnet-kept", "10.0.1.0/24");
+        existingNetwork("external", "10.1.0.0/16", Map.of());
+        manager.declareVpc(REGION, "vpc-moved", "10.1.0.0/16");
+        manager.declareSubnet(REGION, "vpc-moved", "subnet-moved", "10.1.1.0/24");
+
+        assertEquals("10.0.1.4", manager.effectiveAddressAt(REGION, "subnet-kept", 4).orElseThrow());
+        String moved = manager.effectiveAddressAt(REGION, "subnet-moved", 21).orElseThrow();
+        assertTrue(manager.isSubstituted(REGION, "vpc-moved"));
+        assertTrue(moved.endsWith(".21") && !moved.startsWith("10.1."), moved + " keeps the declared offset inside the substitute block");
+        assertTrue(manager.effectiveAddressAt(REGION, "subnet-unknown", 4).isEmpty());
+    }
+
+    @Test
     void addingASubnetAfterPlanningKeepsExistingLeases() {
         manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");

@@ -774,6 +774,37 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesHonoursARequestedPrivateIpAndValidatesItAsAwsDoes() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String vpcId = service.createVpc("us-east-1", "10.70.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.70.1.0/24", "us-east-1a").getSubnetId();
+        java.util.function.BiFunction<Integer, String, Reservation> launch = (count, ip) ->
+                service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, count, null,
+                        List.of(), subnetId, null, List.of(), null, null, null, null, 0, null, null, null,
+                        null, false, null, null, null, ip);
+
+        assertEquals("10.70.1.20", launch.apply(1, "10.70.1.20").getInstances().getFirst().getPrivateIpAddress());
+        assertNotEquals("10.70.1.20", launch.apply(1, null).getInstances().getFirst().getPrivateIpAddress(),
+                "an unrequested launch steps around the requested address");
+
+        Map<String, String> refusals = new LinkedHashMap<>();
+        refusals.put("10.70.1.20", "InvalidIPAddress.InUse");
+        refusals.put("10.70.2.20", "InvalidParameterValue");
+        refusals.put("10.70.1.3", "InvalidParameterValue");
+        refusals.put("10.70.1.255", "InvalidParameterValue");
+        refusals.put("10.70.1.x", "InvalidParameterValue");
+        refusals.forEach((ip, code) -> assertEquals(code,
+                assertThrows(AwsException.class, () -> launch.apply(1, ip)).getErrorCode(), ip));
+        assertEquals("InvalidParameterValue",
+                assertThrows(AwsException.class, () -> launch.apply(2, "10.70.1.30")).getErrorCode());
+        assertEquals("10.70.1.4", launch.apply(1, "10.70.1.4").getInstances().getFirst().getPrivateIpAddress(),
+                "the first address AWS does not reserve");
+    }
+
+    @Test
     void mockModeTreatsExistingNonTerminatedInstanceAsRunningContainer() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
         Ec2Service service = new Ec2Service(mockConfig(true), containerManager,

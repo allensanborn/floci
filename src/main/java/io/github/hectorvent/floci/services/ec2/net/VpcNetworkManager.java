@@ -451,6 +451,23 @@ public class VpcNetworkManager {
     }
 
     /**
+     * The address at {@code offset} in the subnet's effective range: the declared address itself
+     * unless the range was substituted, its counterpart in the substitute block if it was.
+     *
+     * @return empty when the subnet has no Docker-backed range, or the offset falls outside it
+     */
+    public Optional<String> effectiveAddressAt(String region, String subnetId, long offset) {
+        if (!enabled() || subnetId == null) {
+            return Optional.empty();
+        }
+        SubnetBinding subnet = subnetBinding(region, subnetId);
+        if (subnet == null || subnet.effective == null) {
+            return Optional.empty();
+        }
+        return subnet.effective.addressAt(offset);
+    }
+
+    /**
      * Claims one specific address in a subnet's range, rather than picking the next free one.
      *
      * <p>This exists for restart. The lease table lives only in memory, so a restarted emulator

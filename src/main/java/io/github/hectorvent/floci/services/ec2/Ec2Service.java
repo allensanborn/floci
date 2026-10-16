@@ -3332,6 +3332,45 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
                                     String hostId, String tenancy,
                                     List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, null);
+    }
+
+    /**
+     * @param privateIpAddress the primary private address the caller asked for (top-level
+     *                         {@code PrivateIpAddress}, or the primary interface's), or null for
+     *                         the subnet's next free one. Only one instance can hold it, so it
+     *                         needs a count of one, and it cannot be combined with a supplied
+     *                         network interface, which carries its own address.
+     */
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings,
+                                    String privateIpAddress) {
+        if (privateIpAddress != null && !privateIpAddress.isBlank()) {
+            if (networkInterfaceId != null && !networkInterfaceId.isBlank()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Network interfaces and an instance-level private IP address should not be specified on the same request",
+                        400);
+            }
+            if (maxCount > 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "A private IP address can only be specified when launching a single instance", 400);
+            }
+        } else {
+            privateIpAddress = null;
+        }
         if (hostId != null && !hostId.isBlank()) {
             Host host = getRequiredAvailableHost(region, hostId);
             if ((availabilityZone == null || availabilityZone.isBlank())
@@ -3475,7 +3514,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         // since the unlocked check above.
                         validateHostPlacement(getRequiredAvailableHost(region, hostId), az, effectiveInstanceType, tenancy);
                     }
-                    List<String> privateIps = allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
+                    List<String> privateIps = privateIpAddress != null
+                            ? List.of(claimRequestedPrivateIp(region, finalSubnetId, privateIpAddress))
+                            : allocateLaunchAddresses(region, finalSubnetId, suppliedEni, count);
                     for (int i = 0; i < count; i++) {
                         String instanceId = "i-" + randomHex(17);
                         String privateIp = privateIps.get(i);
@@ -3850,6 +3891,48 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw e;
         }
         return addresses;
+    }
+
+    /**
+     * Claims the address a launch asked for, validated as AWS does: inside the subnet's declared
+     * CIDR, not one of the five addresses AWS reserves, and not held by anything else. When the
+     * subnet's Docker range was substituted (its declared CIDR collided with another network),
+     * the instance gets the address at the same offset in the substitute block, which the
+     * substitution's WARN already says is what will be reported. Callers must hold
+     * {@link #privateIpAllocationLock}.
+     */
+    private String claimRequestedPrivateIp(String region, String subnetId, String requested) {
+        Cidr4 cidr = (subnetId != null ? subnets.get(key(region, subnetId)) : Optional.<Subnet>empty())
+                .flatMap(subnet -> Cidr4.parse(subnet.getCidrBlock()))
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "A private IP address requires a subnet", 400));
+        Cidr4 address = Cidr4.parse(requested + "/32")
+                .filter(parsed -> parsed.prefix() == 32 && requested.equals(parsed.addressAt(0).orElse(null)))
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "Invalid value '" + requested + "' for PrivateIpAddress", 400));
+        if (!cidr.containsAddress(address.network())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Address " + requested + " does not fall within the subnet's address range", 400);
+        }
+        long offset = address.network() - cidr.network();
+        if (offset < 4 || offset > cidr.size() - 2) {
+            throw new AwsException("InvalidParameterValue",
+                    "Address " + requested + " is in subnet's reserved address range", 400);
+        }
+        AwsException inUse = new AwsException("InvalidIPAddress.InUse", "Address " + requested + " is in use.", 400);
+        if (privateIpsInUse(region, subnetId).contains(requested)) {
+            throw inUse;
+        }
+        if (vpcNetworkManager != null) {
+            Optional<String> effective = vpcNetworkManager.effectiveAddressAt(region, subnetId, offset);
+            if (effective.isPresent()) {
+                if (!vpcNetworkManager.reservePrivateIp(region, subnetId, effective.get())) {
+                    throw inUse;
+                }
+                return effective.get();
+            }
+        }
+        return requested;
     }
 
     private String assignPrivateIp(String region, String subnetId) {

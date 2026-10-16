@@ -967,6 +967,13 @@ Limits worth knowing before reading a passing test as evidence:
 Set `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=false` to go back to synthesised private addresses
 and the shared default bridge. It is also off whenever `mock` is on.
 
+A launch can ask for its primary private address with `PrivateIpAddress` (or the primary
+interface's `NetworkInterface.1.PrivateIpAddress`, the shape Terraform's `private_ip` sends with an
+interface spec). As on AWS it must fall inside the subnet's CIDR and outside the five reserved
+addresses (`InvalidParameterValue`), must not already be held (`InvalidIPAddress.InUse`), and needs a
+launch of exactly one instance. In a VPC whose CIDR was substituted, the instance gets the address at
+the same offset in the substitute block.
+
 Synthesised addresses come from the subnet's own CIDR block, skipping the first four addresses
 and the last one as AWS reserves them, and skipping every address a persisted instance, network
 interface or NAT gateway in the subnet still holds, so a restart does not hand one out twice. A

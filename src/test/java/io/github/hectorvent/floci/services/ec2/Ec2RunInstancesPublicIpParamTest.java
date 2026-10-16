@@ -57,6 +57,36 @@ class Ec2RunInstancesPublicIpParamTest {
         assertForwarded(baseParams(), null);
     }
 
+    @Test
+    void requestedPrivateIpReachesTheServiceInEitherWireShape() {
+        assertPrivateIpForwarded(params("PrivateIpAddress", "10.0.1.20"), "10.0.1.20");
+        assertPrivateIpForwarded(params("NetworkInterface.1.PrivateIpAddress", "10.0.1.21"), "10.0.1.21");
+        assertPrivateIpForwarded(baseParams(), null);
+    }
+
+    private void assertPrivateIpForwarded(MultivaluedMap<String, String> p, String expected) {
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.runInstances(anyString(), nullable(String.class), nullable(String.class),
+                anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
+                nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
+                nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
+                nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
+                nullable(String.class), nullable(String.class), nullable(List.class), nullable(String.class)))
+                .thenReturn(new Reservation());
+        new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2IpamService.class), mock(RegionResolver.class)).handle("RunInstances", p, REGION);
+
+        ArgumentCaptor<String> privateIp = ArgumentCaptor.forClass(String.class);
+        verify(service).runInstances(anyString(), nullable(String.class), nullable(String.class),
+                anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
+                nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
+                nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
+                nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
+                nullable(String.class), nullable(String.class), nullable(List.class), privateIp.capture());
+        assertEquals(expected, privateIp.getValue());
+    }
+
     private void assertForwarded(MultivaluedMap<String, String> p, Boolean expected) {
         Ec2Service service = mock(Ec2Service.class);
         when(service.runInstances(anyString(), nullable(String.class), nullable(String.class),
@@ -64,7 +94,7 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 nullable(Boolean.class), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
-                nullable(String.class), nullable(String.class), nullable(List.class)))
+                nullable(String.class), nullable(String.class), nullable(List.class), nullable(String.class)))
                 .thenReturn(new Reservation());
 
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
@@ -79,7 +109,7 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 associatePublicIp.capture(), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
-                nullable(String.class), nullable(String.class), nullable(List.class));
+                nullable(String.class), nullable(String.class), nullable(List.class), nullable(String.class));
         if (expected == null) {
             assertNull(associatePublicIp.getValue(),
                     "an absent override must stay null so the subnet default decides");
