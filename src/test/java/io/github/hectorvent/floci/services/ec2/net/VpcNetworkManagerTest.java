@@ -119,6 +119,35 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void deletingAVpcAfterARestartRemovesTheNetworkItsPredecessorCreated() {
+        // A restarted process declares the VPC again but has not materialised it: no instance in
+        // it has started since. The network from before the restart must still go with the VPC.
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true); // startup: the VPC is still declared
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(networkName), removedNetworks);
+    }
+
+    @Test
+    void thePredecessorsNetworkGoesWithItsVpcWithStartupReapingOffToo() {
+        when(config.services().ec2().vpcNetworks().reconcileOnStartup()).thenReturn(false);
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        existingNetwork("floci-vpc-4650-us-east-1-vpc-dead", "10.7.0.0/16", ourLabels("vpc-dead", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> "vpc-1".equals(vpcId));
+        assertTrue(removedNetworks.isEmpty(), "with reaping off an orphan stays");
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(networkName), removedNetworks);
+    }
+
+    @Test
     void declaringAndDeletingUnusedNetworksDoesNotContactDocker() {
         manager.declareVpc(REGION, "vpc-private", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-private", "subnet-a", "10.0.1.0/24");

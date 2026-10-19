@@ -842,7 +842,10 @@ public class VpcNetworkManager {
         synchronized (vpc.declarationLock) {
             vpc.subnetDeclarations.keySet().forEach(subnetId -> subnetOwner.remove(key(region, subnetId)));
         }
-        if (!vpc.created) {
+        // A network this process never materialised can still exist: one a previous run created
+        // for a VPC none of whose instances has started since. Startup reconciliation noted it.
+        boolean fromPreviousRun = networksFromPreviousRun.remove(key(region, vpcId));
+        if (!vpc.created && !fromPreviousRun) {
             return;
         }
         String flociContainerId = vpc.flociContainerId;
@@ -875,6 +878,9 @@ public class VpcNetworkManager {
 
     // ─── Startup reconciliation ──────────────────────────────────────────────
 
+    /** VPCs still declared at startup whose network a previous run created: deleting one removes it. */
+    private final Set<String> networksFromPreviousRun = ConcurrentHashMap.newKeySet();
+
     /**
      * Removes VPC networks this Floci left behind on a previous run.
      *
@@ -887,12 +893,17 @@ public class VpcNetworkManager {
      * API port) are considered. Several Floci instances share a daemon here; scoping by owner is
      * what makes the deletion safe.
      *
+     * <p>The networks of VPCs that are still declared are kept and remembered, so deleting such a
+     * VPC later removes its network even though this run never materialised it. That listing runs
+     * with {@code reconcile-on-startup} off too; only the removal of orphans is behind the flag.
+     *
      * @param stillDeclared answers whether (region, vpcId) exists in the restored state
      */
     public void reconcileOrphans(BiPredicate<String, String> stillDeclared) {
-        if (!enabled() || !config.services().ec2().vpcNetworks().reconcileOnStartup()) {
+        if (!enabled()) {
             return;
         }
+        boolean reap = config.services().ec2().vpcNetworks().reconcileOnStartup();
         int removed = 0;
         try {
             List<Network> networks = ALIASES.listByLabels(
@@ -912,6 +923,10 @@ public class VpcNetworkManager {
                 String vpcId = ALIASES.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
                 String region = ALIASES.labelValue(labels, ContainerStorageHelper.REGION_LABEL);
                 if (vpcId != null && region != null && stillDeclared.test(region, vpcId)) {
+                    networksFromPreviousRun.add(key(region, vpcId));
+                    continue;
+                }
+                if (!reap) {
                     continue;
                 }
                 disconnectAll(network);
