@@ -12048,6 +12048,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Volume createVolume(String region, String availabilityZone, String volumeType,
                                int size, boolean encrypted, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
+        return createVolume(region, availabilityZone, volumeType, size, encrypted, iops, throughput, snapshotId,
+                volumeTags, null);
+    }
+
+    /**
+     * @param kmsKeyId the customer managed key to encrypt with, recorded as given and reported back as
+     *                 {@code KmsKeyId}; AWS requires {@code Encrypted} with it. Nothing is encrypted.
+     */
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags, String kmsKeyId) {
+        if (kmsKeyId != null && !kmsKeyId.isBlank() && !encrypted) {
+            throw new AwsException("InvalidParameterDependency",
+                    "The parameter KmsKeyId requires the parameter Encrypted to be set.", 400);
+        }
         ensureDefaultResources(region);
         String volumeId = "vol-" + randomHex(17);
         String effectiveType = volumeType != null ? volumeType : "gp2";
@@ -12059,6 +12074,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // With encryption by default on, AWS encrypts every new volume and the Encrypted parameter
         // cannot opt out of it.
         vol.setEncrypted(encrypted || ebsEncryptionByDefault(region));
+        vol.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : null);
         vol.setIops(iops > 0 ? iops : (volumeType != null && volumeType.startsWith("io") ? iops : 0));
         // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
         if ("gp3".equals(effectiveType)) {

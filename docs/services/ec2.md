@@ -922,7 +922,7 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 
 | Action | Description |
 |--------|-------------|
-| CreateVolume | Creates an EBS volume record. |
+| CreateVolume | Creates an EBS volume record. `KmsKeyId` is recorded and returned as given (nothing is encrypted); without `Encrypted=true` it fails with `InvalidParameterDependency`, as on AWS. |
 | DescribeVolumes | Lists or returns stored EBS volume records. |
 | DeleteVolume | Deletes an EBS volume record. |
 | ModifyVolume | Modifies size, type, IOPS, throughput, or multi-attach settings of an EBS volume record. |
