@@ -1099,6 +1099,7 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withCmd(List.of("/sbin/init"));
         verify(harness.builder).withCgroupnsMode("host");
         verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        verify(harness.builder).withReadOnlyBind("/lib/modules", "/lib/modules");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
     }
 
