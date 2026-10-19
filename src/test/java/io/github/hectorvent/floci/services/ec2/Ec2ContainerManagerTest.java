@@ -1099,8 +1099,8 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(harness.builder).withCmd(List.of("/sbin/init"));
-        verify(harness.builder).withCgroupnsMode("host");
-        verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        verify(harness.builder).withCgroupnsMode("private");
+        verify(harness.builder, never()).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
         verify(harness.builder).withReadOnlyBind("/lib/modules", "/lib/modules");
         // User data runs after the sshd step, so once it has started that step is settled.
         awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
