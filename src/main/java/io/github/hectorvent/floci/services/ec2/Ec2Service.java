@@ -3702,7 +3702,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         mappedDevices.stream()
                 .filter(m -> m.getEbs() != null && m.getEbs().getVolumeType() != null)
                 .forEach(m -> requireValidVolumeType(m.getEbs().getVolumeType()));
-        String rootVolumeType = rootVolumeTypeFor(findImageForCapture(region, imageId), mappedDevices);
+        Image launchImage = findImageForCapture(region, imageId);
+        String rootVolumeType = rootVolumeTypeFor(launchImage, mappedDevices);
+        LaunchTemplateData.Ebs rootEbs = rootEbsFor(launchImage, mappedDevices);
+        int imageRootSize = imageRootVolumeSize(launchImage);
+        validateRootEbs(rootEbs, imageRootSize);
         List<Instance> launched = new ArrayList<>();
         // Resolving the AMI, building the instances that depend on it and publishing them is one
         // step. A DeregisterImage releases the captured layer only when no live instance resolves
@@ -3851,17 +3855,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         rootVol.setVolumeId(rootVolId);
                         rootVol.setAvailabilityZone(az);
                         rootVol.setVolumeType(rootVolumeType);
-                        rootVol.setSize(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+                        // The request's mapping for the root device sizes and encrypts it, as on AWS.
+                        rootVol.setSize(rootEbs != null && rootEbs.getVolumeSize() != null
+                                ? rootEbs.getVolumeSize() : imageRootSize);
                         rootVol.setState("in-use");
                         rootVol.setRegion(region);
-                        rootVol.setEncrypted(ebsEncryptionByDefault(region));
+                        rootVol.setEncrypted((rootEbs != null && Boolean.TRUE.equals(rootEbs.getEncrypted()))
+                                || ebsEncryptionByDefault(region));
+                        if (rootEbs != null) {
+                            rootVol.setKmsKeyId(rootEbs.getKmsKeyId());
+                            if (rootEbs.getIops() != null) {
+                                rootVol.setIops(rootEbs.getIops());
+                            }
+                        }
+                        // Throughput is a gp3-only attribute, 125 MiB/s unless the mapping names one.
+                        if ("gp3".equals(rootVolumeType)) {
+                            rootVol.setThroughput(rootEbs != null && rootEbs.getThroughput() != null
+                                    ? rootEbs.getThroughput() : 125);
+                        }
                         rootVol.setCreateTime(Instant.now());
                         VolumeAttachment att = new VolumeAttachment();
                         att.setVolumeId(rootVolId);
                         att.setInstanceId(instanceId);
                         att.setDevice(inst.getRootDeviceName());
                         att.setState("attached");
-                        att.setDeleteOnTermination(true);
+                        att.setDeleteOnTermination(rootEbs == null || rootEbs.getDeleteOnTermination() == null
+                                || rootEbs.getDeleteOnTermination());
                         att.setAttachTime(Instant.now());
                         rootVol.getAttachments().add(att);
                         volumes.put(key(region, rootVolId), rootVol);
@@ -7767,6 +7786,45 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ebs.setEncrypted(sourceEbs.getEncrypted());
         mapping.setEbs(ebs);
         return mapping;
+    }
+
+    /** The request's EBS settings for the AMI's root device, or null when it maps none. */
+    private static LaunchTemplateData.Ebs rootEbsFor(Image image,
+                                                     List<LaunchTemplateData.BlockDeviceMapping> requestMappings) {
+        String rootDeviceName = image != null && image.getRootDeviceName() != null
+                ? image.getRootDeviceName() : new Instance().getRootDeviceName();
+        return requestMappings == null ? null : requestMappings.stream()
+                .filter(m -> m.getEbs() != null && Objects.equals(m.getDeviceName(), rootDeviceName))
+                .map(LaunchTemplateData.BlockDeviceMapping::getEbs)
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** The size the AMI's root mapping declares (its snapshot's), else the default root size. */
+    private static int imageRootVolumeSize(Image image) {
+        if (image == null || image.getBlockDeviceMappings() == null) {
+            return DEFAULT_ROOT_VOLUME_SIZE_GIB;
+        }
+        return image.getBlockDeviceMappings().stream()
+                .filter(m -> m.getEbs() != null && m.getEbs().getVolumeSize() != null
+                        && Objects.equals(m.getDeviceName(), image.getRootDeviceName()))
+                .map(m -> m.getEbs().getVolumeSize())
+                .findFirst()
+                .orElse(DEFAULT_ROOT_VOLUME_SIZE_GIB);
+    }
+
+    private static void validateRootEbs(LaunchTemplateData.Ebs rootEbs, int imageRootSize) {
+        if (rootEbs == null) {
+            return;
+        }
+        if (rootEbs.getKmsKeyId() != null && !Boolean.TRUE.equals(rootEbs.getEncrypted())) {
+            throw new AwsException("InvalidParameterDependency",
+                    "The parameter KmsKeyId requires the parameter Encrypted to be set.", 400);
+        }
+        if (rootEbs.getVolumeSize() != null && rootEbs.getVolumeSize() < imageRootSize) {
+            throw new AwsException("InvalidBlockDeviceMapping", "Volume of size " + rootEbs.getVolumeSize()
+                    + "GB is smaller than snapshot, expect size >= " + imageRootSize + "GB", 400);
+        }
     }
 
     /**
