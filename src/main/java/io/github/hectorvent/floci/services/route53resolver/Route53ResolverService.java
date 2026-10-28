@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -23,11 +24,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.HashSet;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -238,10 +240,18 @@ public class Route53ResolverService {
         endpoint.put("IpAddressCount", ipAddresses.size());
         ArrayNode normalized = normalizedIpRequests(ipAddresses);
         Map<String, Subnet> subnets = subnetsOf(normalized, region);
-        // AWS: HostVPCId is the VPC of the endpoint's subnets. A subnet EC2 does not know is still
-        // accepted (as before), so an endpoint over only unknown subnets keeps a derived id.
-        endpoint.put("HostVPCId", subnets.values().stream().map(Subnet::getVpcId).findFirst()
-                .orElse("vpc-" + deterministicHex(id, 8)));
+        // AWS: HostVPCId is the VPC of the endpoint's subnets (first subnet in request order).
+        // When EC2 knows none of them the invented vpc-<hex> is kept purely for back-compat with
+        // Floci's earlier accept-any-subnet behaviour; what AWS does there is unverified.
+        String hostVpc = null;
+        for (JsonNode r : ipAddresses) {
+            Subnet known = subnets.get(text(r, "SubnetId"));
+            if (known != null) {
+                hostVpc = known.getVpcId();
+                break;
+            }
+        }
+        endpoint.put("HostVPCId", hostVpc != null ? hostVpc : "vpc-" + deterministicHex(id, 8));
         endpoint.put("Status", "OPERATIONAL");
         endpoint.put("CreatorRequestId", text(request, "CreatorRequestId"));
         endpoint.put("CreationTime", Instant.now().toString());
@@ -263,7 +273,7 @@ public class Route53ResolverService {
                 ids.add(subnetId);
             }
         });
-        Map<String, Subnet> found = new java.util.LinkedHashMap<>();
+        Map<String, Subnet> found = new LinkedHashMap<>();
         if (ec2Service != null && !ids.isEmpty()) {
             ec2Service.describeSubnets(region, ids, Map.of()).forEach(sn -> found.put(sn.getSubnetId(), sn));
         }
@@ -274,7 +284,11 @@ public class Route53ResolverService {
      * One entry per request (same order): the address allocated from the subnet for a request
      * that gave a SubnetId and no Ip/Ipv6, else null. Skips the four addresses at the bottom of
      * the CIDR and the last one (AWS reserves them), and any address already taken by this
-     * request list or by another endpoint. ponytail: IPv4 only, other-endpoint scan is linear.
+     * request list or by another endpoint.
+     * ponytail: IPv4 only; other-endpoint scan is linear; allocated IPs are not reserved in EC2 (a
+     * later RunInstances/CreateNetworkInterface in the subnet can reuse them); and
+     * Associate/DisassociateResolverEndpointIpAddress are not implemented in Floci, so a future
+     * implementation must allocate the same way.
      */
     private ArrayNode allocateIps(JsonNode requests, Map<String, Subnet> subnets) {
         Set<String> taken = new HashSet<>();
@@ -301,16 +315,9 @@ public class Route53ResolverService {
             String ip = null;
             if (subnet != null && subnet.getCidrBlock() != null && text(r, "Ip") == null
                     && text(r, "Ipv6") == null) {
-                String[] cidr = subnet.getCidrBlock().split("/");
-                long size = 1L << (32 - Integer.parseInt(cidr[1]));
-                long base = 0;
-                for (String octet : cidr[0].split("\\.")) {
-                    base = base * 256 + Integer.parseInt(octet);
-                }
-                base &= ~(size - 1);
-                for (long host = 4; host < size - 1 && ip == null; host++) {
-                    long n = base + host;
-                    String candidate = (n >> 24 & 255) + "." + (n >> 16 & 255) + "." + (n >> 8 & 255) + "." + (n & 255);
+                Optional<Cidr4> cidr = Cidr4.parse(subnet.getCidrBlock());
+                for (long host = 4; cidr.isPresent() && host < cidr.get().size() - 1 && ip == null; host++) {
+                    String candidate = cidr.get().addressAt(host).orElseThrow();
                     if (taken.add(candidate)) {
                         ip = candidate;
                     }

@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.route53resolver;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 
@@ -18,6 +21,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for Route 53 Resolver DNS Firewall operations
@@ -203,7 +207,7 @@ class Route53ResolverIntegrationTest {
                     .when().post("/").then().statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
         }
 
-        List<String> allIps = new java.util.ArrayList<>();
+        List<String> allIps = new ArrayList<>();
         for (String id : List.of(first, second)) {
             JsonPath ips = JsonPath.from(listIpAddresses(id));
             for (String subnet : List.of(subA, subB)) {
@@ -213,7 +217,7 @@ class Route53ResolverIntegrationTest {
                     long max = subnet.equals(subA) ? 254 : 14;
                     assertEquals(subnet.equals(subA) ? "10.77.1" : "10.77.2",
                             ip.substring(0, ip.lastIndexOf('.')), ip);
-                    org.junit.jupiter.api.Assertions.assertTrue(host >= 4 && host <= max, ip);
+                    assertTrue(host >= 4 && host <= max, ip);
                 });
                 allIps.addAll(inSubnet);
             }
@@ -222,8 +226,39 @@ class Route53ResolverIntegrationTest {
         assertEquals(6, new HashSet<>(allIps).size(), "addresses must not collide: " + allIps);
     }
 
-    private static io.restassured.response.ValidatableResponse ec2(String action, String... values) {
-        io.restassured.specification.RequestSpecification spec = given()
+    @Test
+    void createResolverEndpoint_replayReturnsSameIps_deleteFreesThem_explicitIpIsKept() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.78.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.78.1.0/28", "AvailabilityZone", "us-east-1a")
+                .extract().path("CreateSubnetResponse.subnet.subnetId");
+        // 10.78.1.4 is the first allocatable address; claim it explicitly so allocation must step over it.
+        String body = "{\"Name\":\"ep-mix\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
+                + "\"CreatorRequestId\":\"mix-1\",\"IpAddresses\":[{\"SubnetId\":\"" + sub
+                + "\",\"Ip\":\"10.78.1.4\"},{\"SubnetId\":\"" + sub + "\"}]}";
+        String id = createEndpoint(body);
+        List<String> ips = JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip");
+        assertEquals(new HashSet<>(List.of("10.78.1.4", "10.78.1.5")), new HashSet<>(ips));
+
+        assertEquals(id, createEndpoint(body));
+        assertEquals(new HashSet<>(ips),
+                new HashSet<>(JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip")));
+
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.DeleteResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
+                .when().post("/").then().statusCode(200);
+        String again = createEndpoint(body.replace("mix-1", "mix-2").replace("\"Ip\":\"10.78.1.4\"", "\"Ip\":\"10.78.1.9\""));
+        assertEquals(new HashSet<>(List.of("10.78.1.9", "10.78.1.4")),
+                new HashSet<>(JsonPath.from(listIpAddresses(again)).getList("IpAddresses.Ip")));
+    }
+
+    private static String createEndpoint(String body) {
+        return given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body(body)
+                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
+    }
+
+    private static ValidatableResponse ec2(String action, String... values) {
+        RequestSpecification spec = given()
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ec2/aws4_request")
                 .formParam("Action", action);
         for (int i = 0; i < values.length; i += 2) {
