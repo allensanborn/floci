@@ -1,16 +1,37 @@
 package io.github.hectorvent.floci.services.iam;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.SshPublicKeys;
+import io.github.hectorvent.floci.core.common.Totp;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Element;
+import org.xml.sax.InputSource;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPublicKey;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.function.Function;
+import java.util.function.Supplier;
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -21,9 +42,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * ListRoles, ListPolicies, ListUsers, ListGroups and the attached and inline policy lists of users,
- * groups and roles page through {@code MaxItems} and {@code Marker}. Every one of these requests models
- * {@code MaxItems} with a range of 1 to 1000 and document that an omitted value "defaults to 100".
+ * Every IAM operation that pages goes through {@code MaxItems} and {@code Marker} as the vendored
+ * {@code aws/iam-paginators.json} describes it, which {@link #everyPaginatedOperationHonoursMaxItemsAndMarker}
+ * checks operation by operation. The rest pin what that one path does on the lists where it is
+ * easiest to see: name order, a marker anchored to an item rather than a position, the default page
+ * of 100, and a marker that resumes only the listing and account that issued it.
  *
  * <p>IAM state is shared across the suite, so each test scopes its listing to a path of its own
  * and removes what it created.
@@ -212,39 +235,6 @@ class IamListPaginationIntegrationTest {
         assertTrue(byDefault.size() > 100, "the AWS managed catalog is wider than one default page");
         assertEquals(byDefault.size(), new HashSet<>(byDefault).size(), "no policy repeats across pages");
         assertEquals(byLargest, byDefault, "the page size changes where pages split, not what they hold");
-    }
-
-    @Test
-    void pagedListsRejectMaxItemsOutsideOneToOneThousand() {
-        for (String action : List.of("ListRoles", "ListPolicies", "ListUsers", "ListGroups")) {
-            iam(action).formParam("MaxItems", "0")
-            .when().post("/").then()
-                .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", equalTo(
-                        "1 validation error detected: Value '0' at 'maxItems' failed to satisfy "
-                                + "constraint: Member must have value greater than or equal to 1"));
-
-            iam(action).formParam("MaxItems", "1001")
-            .when().post("/").then()
-                .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", equalTo(
-                        "1 validation error detected: Value '1001' at 'maxItems' failed to satisfy "
-                                + "constraint: Member must have value less than or equal to 1000"));
-
-            iam(action).formParam("MaxItems", "1000").when().post("/").then().statusCode(200);
-        }
-    }
-
-    @Test
-    void pagedListsRejectAMarkerTheyDidNotIssue() {
-        for (String action : List.of("ListRoles", "ListPolicies", "ListUsers", "ListGroups")) {
-            iam(action).formParam("Marker", "not-a-marker")
-            .when().post("/").then()
-                .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
-        }
     }
 
     /**
@@ -532,40 +522,6 @@ class IamListPaginationIntegrationTest {
         }
     }
 
-    /**
-     * These lists have only ever issued signed markers, so a bare number is not an offset into
-     * them: it is refused like any other marker they did not issue.
-     */
-    @Test
-    void newlyPagedListsRejectAnUnsignedNumericMarker() {
-        String name = "pg-numeric-" + suffix();
-        createRole(name, "/");
-        call("CreateUser", "UserName", name);
-        call("CreateGroup", "GroupName", name);
-        try {
-            List<String[]> requests = List.of(new String[]{"ListUsers"}, new String[]{"ListGroups"},
-                    new String[]{"ListAttachedUserPolicies", "UserName"},
-                    new String[]{"ListAttachedGroupPolicies", "GroupName"},
-                    new String[]{"ListAttachedRolePolicies", "RoleName"},
-                    new String[]{"ListUserPolicies", "UserName"},
-                    new String[]{"ListGroupPolicies", "GroupName"},
-                    new String[]{"ListRolePolicies", "RoleName"});
-            for (String[] r : requests) {
-                RequestSpecification request = iam(r[0]).formParam("Marker", "1");
-                if (r.length > 1) {
-                    request.formParam(r[1], name);
-                }
-                request.when().post("/").then()
-                    .statusCode(400)
-                    .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
-            }
-        } finally {
-            deleteRole(name);
-            call("DeleteUser", "UserName", name);
-            call("DeleteGroup", "GroupName", name);
-        }
-    }
-
     /** A marker resumes only the listing that issued it: same action, same principal. */
     @Test
     void aMarkerFromAnotherListingIsRejected() {
@@ -674,5 +630,520 @@ class IamListPaginationIntegrationTest {
                 }
             }
         }
+    }
+
+    // =========================================================================
+    // Every operation the generated table pages
+    // =========================================================================
+
+    /** Operations that cannot list two items: an account holds at most one alias. */
+    private static final Set<String> AT_MOST_ONE_ITEM = Set.of("ListAccountAliases");
+
+    private static final CertificateGenerator CERTIFICATES = new CertificateGenerator();
+    private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
+
+    /** A request that lists at least two items of one operation, and what removes them again. */
+    private record Fixture(List<String> params, Runnable cleanup) {
+        static Fixture of(Runnable cleanup, String... params) {
+            return new Fixture(List.of(params), cleanup);
+        }
+    }
+
+    private record Listing(List<String> items, boolean truncated, String marker) {}
+
+    /** The paginated operations of the vendored table, each with its paging entry. */
+    private static Map<String, JsonNode> paginators() throws IOException {
+        try (InputStream in = Thread.currentThread().getContextClassLoader()
+                .getResourceAsStream("aws/iam-paginators.json")) {
+            Map<String, JsonNode> found = new TreeMap<>();
+            new ObjectMapper().readTree(in).path("operations").properties().forEach(entry -> {
+                if (entry.getValue().path("paginator").asBoolean()) {
+                    found.put(entry.getKey(), entry.getValue());
+                }
+            });
+            return found;
+        }
+    }
+
+    private static RequestSpecification listRequest(String action, Fixture fixture, String maxItems, String marker) {
+        RequestSpecification request = iam(action);
+        for (int i = 0; i < fixture.params().size(); i += 2) {
+            request.formParam(fixture.params().get(i), fixture.params().get(i + 1));
+        }
+        if (maxItems != null) {
+            request.formParam("MaxItems", maxItems);
+        }
+        return withMarker(request, marker);
+    }
+
+    /** One page, its items read from every result key the table names for the operation. */
+    private static Listing listing(String action, JsonNode paginator, Fixture fixture, String maxItems, String marker) {
+        String body = listRequest(action, fixture, maxItems, marker).when().post("/")
+                .then().statusCode(200).extract().asString();
+        Element result;
+        try {
+            result = (Element) DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                    .parse(new InputSource(new StringReader(body))).getDocumentElement()
+                    .getElementsByTagName(action + "Result").item(0);
+        } catch (Exception e) {
+            throw new IllegalStateException(action + " answered unparseable XML: " + body, e);
+        }
+        List<String> items = new ArrayList<>();
+        for (JsonNode resultKey : paginator.path("resultKeys")) {
+            Element list = child(result, resultKey.asText());
+            for (org.w3c.dom.Node item = list == null ? null : list.getFirstChild(); item != null; item = item.getNextSibling()) {
+                if (item instanceof Element member) {
+                    items.add(resultKey.asText() + ":" + member.getTextContent());
+                }
+            }
+        }
+        Element next = child(result, paginator.path("outputToken").asText());
+        Element truncated = child(result, paginator.path("moreResults").asText());
+        return new Listing(items, truncated != null && Boolean.parseBoolean(truncated.getTextContent()),
+                next == null || next.getTextContent().isEmpty() ? null : next.getTextContent());
+    }
+
+    /** The direct child of {@code parent} named {@code name}, or null. */
+    private static Element child(Element parent, String name) {
+        for (org.w3c.dom.Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
+            if (node instanceof Element element && element.getTagName().equals(name)) {
+                return element;
+            }
+        }
+        return null;
+    }
+
+    private static List<String> walkFrom(String action, JsonNode paginator, Fixture fixture, String maxItems, String marker) {
+        List<String> items = new ArrayList<>();
+        do {
+            Listing page = listing(action, paginator, fixture, maxItems, marker);
+            assertEquals(page.truncated(), page.marker() != null, action + ": a Marker exactly when truncated");
+            items.addAll(page.items());
+            marker = page.marker();
+        } while (marker != null);
+        return items;
+    }
+
+    private static void refused(RequestSpecification request, String code) {
+        request.when().post("/").then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo(code));
+    }
+
+    /**
+     * botocore's {@code paginators-1.json} lists every IAM operation that pages, and the vendored
+     * table carries each one. Each must hold {@code MaxItems} to the model's range, cut a page at
+     * it, resume from the {@code Marker} it issued without losing or repeating an item, default to
+     * the documented page size, and refuse a marker it did not issue. The fixture map has to name
+     * exactly the table's operations, so one AWS starts paging later fails here until it has one.
+     */
+    @Test
+    void everyPaginatedOperationHonoursMaxItemsAndMarker() throws IOException {
+        Map<String, JsonNode> paginators = paginators();
+        Map<String, Supplier<Fixture>> fixtures = fixtures();
+        assertEquals(paginators.keySet(), new TreeSet<>(fixtures.keySet()),
+                "every operation the table pages has a fixture, and nothing else does");
+
+        String foreignMarker = null;
+        for (Map.Entry<String, JsonNode> entry : paginators.entrySet()) {
+            String action = entry.getKey();
+            JsonNode paginator = entry.getValue();
+            JsonNode bounds = paginator.path("maxItems");
+            int min = bounds.path("min").asInt();
+            int max = bounds.path("max").asInt();
+            Fixture fixture = fixtures.get(action).get();
+            try {
+                listRequest(action, fixture, Integer.toString(min - 1), null).when().post("/").then()
+                    .statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '"
+                            + (min - 1) + "' at 'maxItems' failed to satisfy constraint: "
+                            + "Member must have value greater than or equal to " + min));
+                listRequest(action, fixture, Integer.toString(max + 1), null).when().post("/").then()
+                    .statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '"
+                            + (max + 1) + "' at 'maxItems' failed to satisfy constraint: "
+                            + "Member must have value less than or equal to " + max));
+
+                List<String> all = walkFrom(action, paginator, fixture, Integer.toString(max), null);
+                assertEquals(all.size(), new HashSet<>(all).size(), action + ": no item twice");
+
+                Listing first = listing(action, paginator, fixture, "1", null);
+                if (AT_MOST_ONE_ITEM.contains(action)) {
+                    assertTrue(all.size() <= 1, action);
+                    assertFalse(first.truncated(), action);
+                } else {
+                    assertTrue(all.size() >= 2, action + ": the fixture lists two items, not " + all);
+                    assertEquals(1, first.items().size(), action + ": MaxItems=1 is one item");
+                    assertTrue(first.truncated(), action + ": a cut page is truncated");
+                    assertNotNull(first.marker(), action + ": a cut page carries a Marker");
+                    List<String> resumed = new ArrayList<>(first.items());
+                    resumed.addAll(walkFrom(action, paginator, fixture, Integer.toString(max), first.marker()));
+                    assertEquals(all, resumed, action + ": the Marker resumes after the item it ended on");
+
+                    if (foreignMarker != null) {
+                        refused(listRequest(action, fixture, null, foreignMarker), "InvalidInput");
+                    }
+                    foreignMarker = first.marker();
+                }
+
+                Listing unlimited = listing(action, paginator, fixture, null, null);
+                int pageSize = bounds.path("default").asInt();
+                assertEquals(all.subList(0, Math.min(pageSize, all.size())), unlimited.items(),
+                        action + ": an omitted MaxItems is the documented " + pageSize);
+                assertEquals(all.size() > pageSize, unlimited.truncated(), action);
+
+                refused(listRequest(action, fixture, null, "not-a-marker"), "InvalidInput");
+                refused(listRequest(action, fixture, null, "1"), "InvalidInput");
+            } catch (AssertionError e) {
+                throw new AssertionError(action + ": " + e.getMessage(), e);
+            } finally {
+                fixture.cleanup().run();
+            }
+        }
+    }
+
+    private static String createUser(String name) {
+        return iam("CreateUser").formParam("UserName", name).when().post("/").then().statusCode(200)
+            .extract().path("CreateUserResponse.CreateUserResult.User.Arn");
+    }
+
+    private static void tag(String action, String idParam, String id) {
+        call(action, idParam, id, "Tags.member.1.Key", "pg-a", "Tags.member.1.Value", "1",
+                "Tags.member.2.Key", "pg-b", "Tags.member.2.Value", "2");
+    }
+
+    private static String createVirtualMfaDevice(String name) {
+        return iam("CreateVirtualMFADevice").formParam("VirtualMFADeviceName", name).when().post("/").then()
+            .statusCode(200).extract()
+            .path("CreateVirtualMFADeviceResponse.CreateVirtualMFADeviceResult.VirtualMFADevice.SerialNumber");
+    }
+
+    private static void enableMfaDevice(String userName, String deviceName) {
+        XmlPath created = iam("CreateVirtualMFADevice").formParam("VirtualMFADeviceName", deviceName)
+            .when().post("/").then().statusCode(200).extract().xmlPath();
+        String base = "CreateVirtualMFADeviceResponse.CreateVirtualMFADeviceResult.VirtualMFADevice.";
+        String seed = new String(Base64.getDecoder().decode(created.getString(base + "Base32StringSeed").trim()),
+                StandardCharsets.UTF_8);
+        long step = Totp.stepAt(Instant.now());
+        call("EnableMFADevice", "UserName", userName, "SerialNumber", created.getString(base + "SerialNumber"),
+                "AuthenticationCode1", Totp.codeAt(seed, step - 1), "AuthenticationCode2", Totp.codeAt(seed, step));
+    }
+
+    private static String sshPublicKey() {
+        try {
+            KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+            generator.initialize(2048);
+            return SshPublicKeys.toOpenSsh((RSAPublicKey) generator.generateKeyPair().getPublic());
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String samlMetadata(String entityId) {
+        return "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
+                + entityId + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
+                + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
+                + "<ds:X509Certificate>cGFnaW5n</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
+                + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+    }
+
+    /** One fixture per paginated operation, each listing at least two items where it can. */
+    private static Map<String, Supplier<Fixture>> fixtures() {
+        Map<String, Supplier<Fixture>> fixtures = new HashMap<>();
+        fixtures.put("GetAccountAuthorizationDetails", () -> {
+            String a = "pg-gaad-a-" + suffix();
+            String b = "pg-gaad-b-" + suffix();
+            createUser(a);
+            createUser(b);
+            return Fixture.of(() -> {
+                call("DeleteUser", "UserName", a);
+                call("DeleteUser", "UserName", b);
+            });
+        });
+        fixtures.put("GetGroup", () -> {
+            String group = "pg-getgroup-" + suffix();
+            List<String> users = List.of(group + "-u0", group + "-u1");
+            call("CreateGroup", "GroupName", group);
+            users.forEach(user -> {
+                createUser(user);
+                call("AddUserToGroup", "GroupName", group, "UserName", user);
+            });
+            return Fixture.of(() -> {
+                users.forEach(user -> {
+                    call("RemoveUserFromGroup", "GroupName", group, "UserName", user);
+                    call("DeleteUser", "UserName", user);
+                });
+                call("DeleteGroup", "GroupName", group);
+            }, "GroupName", group);
+        });
+        fixtures.put("ListAccessKeys", () -> {
+            String user = "pg-keys-" + suffix();
+            createUser(user);
+            List<String> keys = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                keys.add(iam("CreateAccessKey").formParam("UserName", user).when().post("/").then().statusCode(200)
+                    .extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"));
+            }
+            return Fixture.of(() -> {
+                keys.forEach(key -> call("DeleteAccessKey", "UserName", user, "AccessKeyId", key));
+                call("DeleteUser", "UserName", user);
+            }, "UserName", user);
+        });
+        fixtures.put("ListAccountAliases", () -> Fixture.of(() -> { }));
+        for (String[] holder : List.of(new String[]{"User", "UserName"}, new String[]{"Group", "GroupName"},
+                new String[]{"Role", "RoleName"})) {
+            Function<String, Runnable> createHolder = name -> {
+                switch (holder[0]) {
+                    case "User" -> createUser(name);
+                    case "Group" -> call("CreateGroup", "GroupName", name);
+                    default -> createRole(name, "/");
+                }
+                return () -> call("Delete" + holder[0], holder[1], name);
+            };
+            fixtures.put("ListAttached" + holder[0] + "Policies", () -> {
+                String name = "pg-attached-" + suffix();
+                Runnable deleteHolder = createHolder.apply(name);
+                List<String> arns = List.of(createPolicy(name + "-0", "/"), createPolicy(name + "-1", "/"));
+                arns.forEach(arn -> call("Attach" + holder[0] + "Policy", holder[1], name, "PolicyArn", arn));
+                return Fixture.of(() -> {
+                    arns.forEach(arn -> {
+                        call("Detach" + holder[0] + "Policy", holder[1], name, "PolicyArn", arn);
+                        deletePolicy(arn);
+                    });
+                    deleteHolder.run();
+                }, holder[1], name);
+            });
+            fixtures.put("List" + holder[0] + "Policies", () -> {
+                String name = "pg-inline-" + suffix();
+                Runnable deleteHolder = createHolder.apply(name);
+                List<String> policies = List.of("pg-inline-0", "pg-inline-1");
+                policies.forEach(policy -> call("Put" + holder[0] + "Policy", holder[1], name,
+                        "PolicyName", policy, "PolicyDocument", POLICY_DOCUMENT));
+                return Fixture.of(() -> {
+                    policies.forEach(policy -> call("Delete" + holder[0] + "Policy", holder[1], name,
+                            "PolicyName", policy));
+                    deleteHolder.run();
+                }, holder[1], name);
+            });
+        }
+        fixtures.put("ListEntitiesForPolicy", () -> {
+            String name = "pg-entities-" + suffix();
+            String arn = createPolicy(name, "/");
+            createUser(name);
+            createRole(name, "/");
+            call("AttachUserPolicy", "UserName", name, "PolicyArn", arn);
+            call("AttachRolePolicy", "RoleName", name, "PolicyArn", arn);
+            return Fixture.of(() -> {
+                call("DetachUserPolicy", "UserName", name, "PolicyArn", arn);
+                call("DetachRolePolicy", "RoleName", name, "PolicyArn", arn);
+                call("DeleteUser", "UserName", name);
+                deleteRole(name);
+                deletePolicy(arn);
+            }, "PolicyArn", arn);
+        });
+        for (String[] principal : List.of(new String[]{"Users", "User", "UserName"},
+                new String[]{"Groups", "Group", "GroupName"}, new String[]{"Roles", "Role", "RoleName"})) {
+            fixtures.put("List" + principal[0], () -> {
+                String tag = suffix();
+                String path = "/pg-" + principal[0].toLowerCase() + "-" + tag + "/";
+                List<String> names = List.of("pg-" + tag + "-0", "pg-" + tag + "-1");
+                for (String name : names) {
+                    if (principal[1].equals("Role")) {
+                        createRole(name, path);
+                    } else {
+                        call("Create" + principal[1], principal[2], name, "Path", path);
+                    }
+                }
+                return Fixture.of(() -> names.forEach(name -> call("Delete" + principal[1], principal[2], name)),
+                        "PathPrefix", path);
+            });
+        }
+        fixtures.put("ListGroupsForUser", () -> {
+            String user = "pg-memberships-" + suffix();
+            List<String> groups = List.of(user + "-g0", user + "-g1");
+            createUser(user);
+            groups.forEach(group -> {
+                call("CreateGroup", "GroupName", group);
+                call("AddUserToGroup", "GroupName", group, "UserName", user);
+            });
+            return Fixture.of(() -> {
+                groups.forEach(group -> {
+                    call("RemoveUserFromGroup", "GroupName", group, "UserName", user);
+                    call("DeleteGroup", "GroupName", group);
+                });
+                call("DeleteUser", "UserName", user);
+            }, "UserName", user);
+        });
+        fixtures.put("ListInstanceProfiles", () -> {
+            String tag = suffix();
+            String path = "/pg-profiles-" + tag + "/";
+            List<String> profiles = List.of("pg-profile-" + tag + "-0", "pg-profile-" + tag + "-1");
+            profiles.forEach(profile -> call("CreateInstanceProfile", "InstanceProfileName", profile, "Path", path));
+            return Fixture.of(() -> profiles.forEach(profile -> call("DeleteInstanceProfile",
+                    "InstanceProfileName", profile)), "PathPrefix", path);
+        });
+        fixtures.put("ListInstanceProfilesForRole", () -> {
+            String role = "pg-profiled-" + suffix();
+            List<String> profiles = List.of(role + "-0", role + "-1");
+            createRole(role, "/");
+            profiles.forEach(profile -> {
+                call("CreateInstanceProfile", "InstanceProfileName", profile);
+                call("AddRoleToInstanceProfile", "InstanceProfileName", profile, "RoleName", role);
+            });
+            return Fixture.of(() -> {
+                profiles.forEach(profile -> {
+                    call("RemoveRoleFromInstanceProfile", "InstanceProfileName", profile, "RoleName", role);
+                    call("DeleteInstanceProfile", "InstanceProfileName", profile);
+                });
+                deleteRole(role);
+            }, "RoleName", role);
+        });
+        fixtures.put("ListMFADevices", () -> {
+            String user = "pg-mfa-" + suffix();
+            createUser(user);
+            enableMfaDevice(user, user + "-0");
+            enableMfaDevice(user, user + "-1");
+            return Fixture.of(() -> {
+                List<String> serials = iam("ListMFADevices").formParam("UserName", user).when().post("/").then()
+                    .statusCode(200).extract().xmlPath()
+                    .getList("ListMFADevicesResponse.ListMFADevicesResult.MFADevices.member.SerialNumber", String.class);
+                serials.forEach(serial -> {
+                    call("DeactivateMFADevice", "UserName", user, "SerialNumber", serial);
+                    call("DeleteVirtualMFADevice", "SerialNumber", serial);
+                });
+                call("DeleteUser", "UserName", user);
+            }, "UserName", user);
+        });
+        fixtures.put("ListVirtualMFADevices", () -> {
+            String name = "pg-virtual-" + suffix();
+            List<String> serials = List.of(createVirtualMfaDevice(name + "-0"), createVirtualMfaDevice(name + "-1"));
+            return Fixture.of(() -> serials.forEach(serial -> call("DeleteVirtualMFADevice", "SerialNumber", serial)));
+        });
+        fixtures.put("ListPolicies", () -> {
+            String tag = suffix();
+            String path = "/pg-policies-" + tag + "/";
+            List<String> arns = List.of(createPolicy("pg-" + tag + "-0", path), createPolicy("pg-" + tag + "-1", path));
+            return Fixture.of(() -> arns.forEach(IamListPaginationIntegrationTest::deletePolicy),
+                    "Scope", "Local", "PathPrefix", path);
+        });
+        fixtures.put("ListPolicyVersions", () -> {
+            String arn = createPolicy("pg-versions-" + suffix(), "/");
+            call("CreatePolicyVersion", "PolicyArn", arn, "PolicyDocument", POLICY_DOCUMENT);
+            return Fixture.of(() -> {
+                call("DeletePolicyVersion", "PolicyArn", arn, "VersionId", "v2");
+                deletePolicy(arn);
+            }, "PolicyArn", arn);
+        });
+        fixtures.put("ListServerCertificates", () -> {
+            String tag = suffix();
+            String path = "/pg-certs-" + tag + "/";
+            List<String> names = List.of("pg-cert-" + tag + "-0", "pg-cert-" + tag + "-1");
+            names.forEach(name -> uploadServerCertificate(name, path));
+            return Fixture.of(() -> names.forEach(name -> call("DeleteServerCertificate", "ServerCertificateName", name)),
+                    "PathPrefix", path);
+        });
+        fixtures.put("ListSigningCertificates", () -> {
+            String user = "pg-signing-" + suffix();
+            createUser(user);
+            List<String> ids = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                ids.add(iam("UploadSigningCertificate").formParam("UserName", user)
+                        .formParam("CertificateBody", CERTIFICATES.generateSelfSignedCertificate(
+                                "signing.test.local", List.of(), KeyAlgorithm.EC_prime256v1).certificatePem())
+                    .when().post("/").then().statusCode(200).extract()
+                    .path("UploadSigningCertificateResponse.UploadSigningCertificateResult.Certificate.CertificateId"));
+            }
+            return Fixture.of(() -> {
+                ids.forEach(id -> call("DeleteSigningCertificate", "UserName", user, "CertificateId", id));
+                call("DeleteUser", "UserName", user);
+            }, "UserName", user);
+        });
+        fixtures.put("ListSSHPublicKeys", () -> {
+            String user = "pg-ssh-" + suffix();
+            createUser(user);
+            List<String> ids = new ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                ids.add(iam("UploadSSHPublicKey").formParam("UserName", user).formParam("SSHPublicKeyBody", sshPublicKey())
+                    .when().post("/").then().statusCode(200).extract()
+                    .path("UploadSSHPublicKeyResponse.UploadSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyId"));
+            }
+            return Fixture.of(() -> {
+                ids.forEach(id -> call("DeleteSSHPublicKey", "UserName", user, "SSHPublicKeyId", id));
+                call("DeleteUser", "UserName", user);
+            }, "UserName", user);
+        });
+        fixtures.put("SimulateCustomPolicy", () -> Fixture.of(() -> { },
+                "PolicyInputList.member.1", POLICY_DOCUMENT,
+                "ActionNames.member.1", "s3:GetObject", "ActionNames.member.2", "s3:PutObject"));
+        fixtures.put("SimulatePrincipalPolicy", () -> {
+            String user = "pg-simulate-" + suffix();
+            String arn = createUser(user);
+            return Fixture.of(() -> call("DeleteUser", "UserName", user), "PolicySourceArn", arn,
+                    "ActionNames.member.1", "s3:GetObject", "ActionNames.member.2", "s3:PutObject");
+        });
+        fixtures.put("ListUserTags", () -> {
+            String user = "pg-usertags-" + suffix();
+            createUser(user);
+            tag("TagUser", "UserName", user);
+            return Fixture.of(() -> call("DeleteUser", "UserName", user), "UserName", user);
+        });
+        fixtures.put("ListRoleTags", () -> {
+            String role = "pg-roletags-" + suffix();
+            createRole(role, "/");
+            tag("TagRole", "RoleName", role);
+            return Fixture.of(() -> deleteRole(role), "RoleName", role);
+        });
+        fixtures.put("ListPolicyTags", () -> {
+            String arn = createPolicy("pg-policytags-" + suffix(), "/");
+            tag("TagPolicy", "PolicyArn", arn);
+            return Fixture.of(() -> deletePolicy(arn), "PolicyArn", arn);
+        });
+        fixtures.put("ListInstanceProfileTags", () -> {
+            String profile = "pg-profiletags-" + suffix();
+            call("CreateInstanceProfile", "InstanceProfileName", profile);
+            tag("TagInstanceProfile", "InstanceProfileName", profile);
+            return Fixture.of(() -> call("DeleteInstanceProfile", "InstanceProfileName", profile),
+                    "InstanceProfileName", profile);
+        });
+        fixtures.put("ListMFADeviceTags", () -> {
+            String serial = createVirtualMfaDevice("pg-mfatags-" + suffix());
+            tag("TagMFADevice", "SerialNumber", serial);
+            return Fixture.of(() -> call("DeleteVirtualMFADevice", "SerialNumber", serial), "SerialNumber", serial);
+        });
+        fixtures.put("ListOpenIDConnectProviderTags", () -> {
+            String arn = iam("CreateOpenIDConnectProvider").formParam("Url", "https://pg-" + suffix() + ".example.test")
+                    .formParam("ThumbprintList.member.1", THUMBPRINT)
+                .when().post("/").then().statusCode(200).extract()
+                    .path("CreateOpenIDConnectProviderResponse.CreateOpenIDConnectProviderResult.OpenIDConnectProviderArn");
+            tag("TagOpenIDConnectProvider", "OpenIDConnectProviderArn", arn);
+            return Fixture.of(() -> call("DeleteOpenIDConnectProvider", "OpenIDConnectProviderArn", arn),
+                    "OpenIDConnectProviderArn", arn);
+        });
+        fixtures.put("ListSAMLProviderTags", () -> {
+            String name = "pg-saml-" + suffix();
+            String arn = iam("CreateSAMLProvider").formParam("Name", name)
+                    .formParam("SAMLMetadataDocument", samlMetadata("https://idp.example.test/" + name))
+                .when().post("/").then().statusCode(200).extract()
+                    .path("CreateSAMLProviderResponse.CreateSAMLProviderResult.SAMLProviderArn");
+            tag("TagSAMLProvider", "SAMLProviderArn", arn);
+            return Fixture.of(() -> call("DeleteSAMLProvider", "SAMLProviderArn", arn), "SAMLProviderArn", arn);
+        });
+        fixtures.put("ListServerCertificateTags", () -> {
+            String name = "pg-certtags-" + suffix();
+            uploadServerCertificate(name, "/");
+            tag("TagServerCertificate", "ServerCertificateName", name);
+            return Fixture.of(() -> call("DeleteServerCertificate", "ServerCertificateName", name),
+                    "ServerCertificateName", name);
+        });
+        return fixtures;
+    }
+
+    private static void uploadServerCertificate(String name, String path) {
+        CertificateGenerator.GeneratedCertificate pair = CERTIFICATES.generateSelfSignedCertificate(
+                "certs.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        call("UploadServerCertificate", "ServerCertificateName", name, "Path", path,
+                "CertificateBody", pair.certificatePem(), "PrivateKey", pair.privateKeyPem());
     }
 }
