@@ -489,6 +489,48 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void stopDuringASlowImdsSetupAfterStartDoesNotWaitForTheSetup() throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+
+        DockerClient dockerClient = mock(DockerClient.class);
+        // The package install hangs, as it can on a slow mirror, until the test lets it fail.
+        CountDownLatch setupEntered = new CountDownLatch(1);
+        CountDownLatch releaseSetup = new CountDownLatch(1);
+        ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
+        when(dockerClient.execCreateCmd(TEST_CONTAINER_ID)).thenReturn(execCreate);
+        when(execCreate.exec()).thenAnswer(invocation -> {
+            setupEntered.countDown();
+            releaseSetup.await(10, TimeUnit.SECONDS);
+            throw new IllegalStateException("no exec in this test");
+        });
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        when(dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, mock(Ec2MetadataServer.class));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-stop-during-imds-setup");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("10.0.1.10");
+        try {
+            manager.start(instance);
+            assertTrue(setupEntered.await(5, TimeUnit.SECONDS), "the IMDS setup never began");
+
+            manager.stop(instance);
+
+            awaitUntil(() -> "stopped".equals(instance.getState().getName()), Duration.ofSeconds(3));
+            verify(dockerClient).stopContainerCmd(TEST_CONTAINER_ID);
+        } finally {
+            releaseSetup.countDown();
+        }
+    }
+
+    @Test
     void startOfAProtectedInstanceDoesNotSetTheImdsEndpointUpAgain() throws Exception {
         // The helper container kept its network namespace across the stop, and the address with it.
         DockerClient dockerClient = mock(DockerClient.class);

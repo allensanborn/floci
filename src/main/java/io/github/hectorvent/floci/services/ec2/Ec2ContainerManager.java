@@ -62,6 +62,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1042,7 +1043,8 @@ public class Ec2ContainerManager {
                 instance.compareAndSetState(pending, InstanceState.stopped());
                 return;
             }
-            if (!instance.compareAndSetState(pending, InstanceState.running())) {
+            InstanceState running = InstanceState.running();
+            if (!instance.compareAndSetState(pending, running)) {
                 return;
             }
             if (postStart != null) {
@@ -1053,13 +1055,34 @@ public class Ec2ContainerManager {
                             instance.getInstanceId(), e.getMessage());
                 }
             }
-            // Best effort with its own bounded commands, as at launch: the instance is already
-            // running, so a slow or failing setup cannot hold it pending.
             if (setUpMetadataEndpoint) {
-                configureLinkLocalMetadataEndpoint(containerId, instance.getInstanceId(),
-                        dockerHostResolver.resolve(), config.services().ec2().imdsPort());
+                setUpMetadataEndpointWhileRunning(instance, containerId, running);
             }
         });
+    }
+
+    /**
+     * Best effort with its own bounded commands, as at launch, and off the container's lifecycle
+     * queue: a slow setup holds neither the instance pending nor a stop queued behind this start.
+     * It goes ahead only while {@code running} is still the instance's state, so a stop, terminate
+     * or later start makes it stand down; an exec against a container already stopped just fails.
+     */
+    private void setUpMetadataEndpointWhileRunning(Instance instance, String containerId, InstanceState running) {
+        String instanceId = instance.getInstanceId();
+        BooleanSupplier stillRunning = () -> instance.getState() == running;
+        try {
+            executor.execute(() -> {
+                try {
+                    configureLinkLocalMetadataEndpoint(containerId, instanceId, dockerHostResolver.resolve(),
+                            config.services().ec2().imdsPort(), stillRunning);
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not configure link-local IMDS endpoint for EC2 instance {0}: {1}",
+                            instanceId, e.getMessage());
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            LOG.warnv("Could not schedule link-local IMDS setup for EC2 instance {0}: {1}", instanceId, e.getMessage());
+        }
     }
 
     boolean isContainerRunning(String containerId) {
@@ -1703,11 +1726,22 @@ public class Ec2ContainerManager {
     }
 
     private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort) {
+        configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort, () -> true);
+    }
+
+    private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort,
+                                                    BooleanSupplier stillWanted) {
         try {
+            if (!stillWanted.getAsBoolean()) {
+                return;
+            }
             ContainerExec.Result install = execInContainerForResult(containerId, metadataProxyInstallCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install IMDS proxy dependencies for EC2 instance {0}: {1}",
                         instanceId, install.summary());
+                return;
+            }
+            if (!stillWanted.getAsBoolean()) {
                 return;
             }
 
