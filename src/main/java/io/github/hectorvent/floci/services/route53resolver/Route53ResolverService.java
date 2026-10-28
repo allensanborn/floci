@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -256,10 +257,12 @@ public class Route53ResolverService {
         endpoint.put("CreatorRequestId", text(request, "CreatorRequestId"));
         endpoint.put("CreationTime", Instant.now().toString());
         endpoint.put("ModificationTime", Instant.now().toString());
+        // Allocate before writing anything, so an exhausted subnet leaves no endpoint behind.
+        ArrayNode allocated = allocateIps(normalized, subnets);
         endpointStore.put(id, endpoint);
         ObjectNode record = objectMapper.createObjectNode();
         record.set("IpAddressRequests", normalized);
-        record.set("AllocatedIps", allocateIps(normalized, subnets));
+        record.set("AllocatedIps", allocated);
         endpointIpRequestStore.put(id, record);
         putTags(endpoint, tags);
         return endpoint.deepCopy();
@@ -283,44 +286,54 @@ public class Route53ResolverService {
     /**
      * One entry per request (same order): the address allocated from the subnet for a request
      * that gave a SubnetId and no Ip/Ipv6, else null. Skips the four addresses at the bottom of
-     * the CIDR and the last one (AWS reserves them), and any address already taken by this
-     * request list or by another endpoint.
+     * the CIDR and the last one (AWS reserves them), and any address already taken in the same
+     * subnet by this request list or by another endpoint. Throws when a subnet has none left.
      * ponytail: IPv4 only; other-endpoint scan is linear; allocated IPs are not reserved in EC2 (a
      * later RunInstances/CreateNetworkInterface in the subnet can reuse them); and
      * Associate/DisassociateResolverEndpointIpAddress are not implemented in Floci, so a future
      * implementation must allocate the same way.
      */
     private ArrayNode allocateIps(JsonNode requests, Map<String, Subnet> subnets) {
-        Set<String> taken = new HashSet<>();
+        // Addresses are unique per subnet, not per account: two VPCs may reuse a CIDR.
+        Map<String, Set<String>> taken = new HashMap<>();
         requests.forEach(r -> {
             if (text(r, "Ip") != null) {
-                taken.add(text(r, "Ip"));
+                taken.computeIfAbsent(text(r, "SubnetId"), k -> new HashSet<>()).add(text(r, "Ip"));
             }
         });
         endpointIpRequestStore.scan(k -> true).forEach(rec -> {
-            rec.path("IpAddressRequests").forEach(r -> {
-                if (text(r, "Ip") != null) {
-                    taken.add(text(r, "Ip"));
+            JsonNode reqs = rec.path("IpAddressRequests");
+            JsonNode allocs = rec.path("AllocatedIps");
+            for (int i = 0; i < reqs.size(); i++) {
+                Set<String> inSubnet = taken.computeIfAbsent(text(reqs.get(i), "SubnetId"), k -> new HashSet<>());
+                if (text(reqs.get(i), "Ip") != null) {
+                    inSubnet.add(text(reqs.get(i), "Ip"));
                 }
-            });
-            rec.path("AllocatedIps").forEach(a -> {
-                if (a.isTextual()) {
-                    taken.add(a.asText());
+                if (allocs.path(i).isTextual()) {
+                    inSubnet.add(allocs.get(i).asText());
                 }
-            });
+            }
         });
         ArrayNode out = objectMapper.createArrayNode();
         for (JsonNode r : requests) {
             Subnet subnet = subnets.get(text(r, "SubnetId"));
             String ip = null;
-            if (subnet != null && subnet.getCidrBlock() != null && text(r, "Ip") == null
-                    && text(r, "Ipv6") == null) {
+            boolean wantsAllocation = subnet != null && subnet.getCidrBlock() != null && text(r, "Ip") == null
+                    && text(r, "Ipv6") == null;
+            if (wantsAllocation) {
+                Set<String> inSubnet = taken.computeIfAbsent(subnet.getSubnetId(), k -> new HashSet<>());
                 Optional<Cidr4> cidr = Cidr4.parse(subnet.getCidrBlock());
                 for (long host = 4; cidr.isPresent() && host < cidr.get().size() - 1 && ip == null; host++) {
                     String candidate = cidr.get().addressAt(host).orElseThrow();
-                    if (taken.add(candidate)) {
+                    if (inSubnet.add(candidate)) {
                         ip = candidate;
                     }
+                }
+                // ponytail: IPv6 / unparseable CIDR (cidr empty) is not modelled, so only a parsed IPv4
+                // CIDR that ran dry is rejected.
+                if (ip == null && cidr.isPresent()) {
+                    throw new AwsException("InvalidRequestException",
+                            "The subnet " + subnet.getSubnetId() + " has no free IP addresses.", 400);
                 }
             }
             if (ip == null) {
