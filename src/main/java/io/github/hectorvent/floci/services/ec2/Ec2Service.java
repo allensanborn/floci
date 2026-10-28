@@ -141,6 +141,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -5012,16 +5013,45 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * the primary interface it was associated through, or null.
      */
     private Address primaryElasticAddress(String region, Instance instance) {
+        return primaryElasticAddress(region, instance, elasticAddresses(region));
+    }
+
+    private Address primaryElasticAddress(String region, Instance instance, ElasticAddresses elastic) {
+        TreeSet<Integer> candidates = new TreeSet<>(
+                elastic.positions().getOrDefault(instance.getInstanceId(), List.of()));
         String primaryInterfaceId = primaryInterfaceId(instance);
-        for (Address address : addresses.scan(k -> k.startsWith(region + "::"))) {
-            boolean onInstance = instance.getInstanceId().equals(address.getInstanceId())
-                    || primaryInterfaceId != null && primaryInterfaceId.equals(address.getNetworkInterfaceId());
-            if (onInstance && address.getAssociationId() != null
-                    && secondaryPrivateIpOf(region, instance, address.getPrivateIpAddress()) == null) {
+        if (primaryInterfaceId != null) {
+            candidates.addAll(elastic.positions().getOrDefault(primaryInterfaceId, List.of()));
+        }
+        for (int position : candidates) {
+            Address address = elastic.associated().get(position);
+            if (secondaryPrivateIpOf(region, instance, address.getPrivateIpAddress()) == null) {
                 return address;
             }
         }
         return null;
+    }
+
+    /**
+     * A region's associated Elastic IPs in store order, each position listed under its instance id
+     * and its interface id, so a response rendering many instances reads the store once.
+     */
+    record ElasticAddresses(List<Address> associated, Map<String, List<Integer>> positions) {}
+
+    ElasticAddresses elasticAddresses(String region) {
+        List<Address> associated = addresses.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(address -> address.getAssociationId() != null)
+                .toList();
+        Map<String, List<Integer>> positions = new HashMap<>();
+        for (int i = 0; i < associated.size(); i++) {
+            for (String owner : new String[] {associated.get(i).getInstanceId(),
+                    associated.get(i).getNetworkInterfaceId()}) {
+                if (owner != null) {
+                    positions.computeIfAbsent(owner, k -> new ArrayList<>()).add(i);
+                }
+            }
+        }
+        return new ElasticAddresses(associated, positions);
     }
 
     /**
@@ -5030,11 +5060,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * DescribeNetworkInterfaces shows it, otherwise the automatic public address (owned by
      * "amazon"), otherwise null. Other interfaces carry none.
      */
-    public NetworkInterfaceAssociation instanceInterfaceAssociation(Instance instance, InstanceNetworkInterface eni) {
+    NetworkInterfaceAssociation instanceInterfaceAssociation(Instance instance, InstanceNetworkInterface eni,
+                                                             ElasticAddresses elasticAddresses) {
         if (eni.getDeviceIndex() != 0) {
             return null;
         }
-        Address elastic = primaryElasticAddress(instance.getRegion(), instance);
+        Address elastic = primaryElasticAddress(instance.getRegion(), instance, elasticAddresses);
         if (elastic != null) {
             return networkInterfaceAssociation(elastic, eni.getOwnerId());
         }

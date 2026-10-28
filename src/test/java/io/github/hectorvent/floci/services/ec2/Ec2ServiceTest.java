@@ -142,6 +142,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -348,6 +349,32 @@ class Ec2ServiceTest {
         assertEquals(1, mockingDetails(service).getInvocations().stream()
                 .filter(invocation -> invocation.getMethod().getName().equals("instanceVolumeAttachments"))
                 .count());
+    }
+
+    @Test
+    void describeInstancesScansTheAddressesOnceWhateverTheInstanceCount() {
+        AccountAwareStorageBackend<Address> addressStore = spy(AccountAwareStorageBackend.<Address>inMemory("000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-addresses.json", addressStore)));
+        List<Instance> launched = service.runInstances("us-east-1", "ami-test", "t3.micro", 3, 3, null, List.of(),
+                null, null, List.of(), null, null).getInstances();
+        Address elastic = service.allocateAddress("us-east-1");
+        service.associateAddress("us-east-1", elastic.getAllocationId(), launched.get(1).getInstanceId());
+        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                new RegionResolver("us-east-1", "000000000000"));
+        // The first read settles the pending launches, which reads the addresses once per launch.
+        handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+        clearInvocations(addressStore);
+
+        Response response = handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String xml = response.getEntity().toString();
+        assertTrue(xml.contains("<association><publicIp>" + elastic.getPublicIp() + "</publicIp>"), xml);
+        verify(addressStore, times(1)).scan(any());
     }
 
     @Test

@@ -959,8 +959,10 @@ public class Ec2QueryHandler {
                 .start("instancesSet");
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
         Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(res.getInstances());
+        Ec2Service.ElasticAddresses elasticAddresses = service.elasticAddresses(region);
         for (Instance inst : res.getInstances()) {
-            xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
+            xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments, elasticAddresses))
+                    .end("item");
         }
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
@@ -1425,6 +1427,7 @@ public class Ec2QueryHandler {
         Map<String, String> capacityAssociations = service.capacityReservationAssociations(region);
         Map<String, List<VolumeAttachment>> volumeAttachments = service.instanceVolumeAttachments(
                 reservations.stream().flatMap(res -> res.getInstances().stream()).toList());
+        Ec2Service.ElasticAddresses elasticAddresses = service.elasticAddresses(region);
         for (Reservation res : reservations) {
             xml.start("item")
                     .elem("reservationId", res.getReservationId())
@@ -1432,7 +1435,8 @@ public class Ec2QueryHandler {
                     .start("groupSet").end("groupSet")
                     .start("instancesSet");
             for (Instance inst : res.getInstances()) {
-                xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments)).end("item");
+                xml.start("item").raw(instanceXml(inst, capacityAssociations, volumeAttachments, elasticAddresses))
+                        .end("item");
             }
             xml.end("instancesSet").end("item");
         }
@@ -5150,7 +5154,8 @@ public class Ec2QueryHandler {
     // ─── XML fragment builders ────────────────────────────────────────────────
 
     private String instanceXml(Instance inst, Map<String, String> capacityAssociations,
-                               Map<String, List<VolumeAttachment>> volumeAttachments) {
+                               Map<String, List<VolumeAttachment>> volumeAttachments,
+                               Ec2Service.ElasticAddresses elasticAddresses) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("instanceId", inst.getInstanceId())
                 .elem("imageId", inst.getImageId())
@@ -5222,7 +5227,7 @@ public class Ec2QueryHandler {
             }
             xml.end("groupSet");
             // The provider derives associate_public_ip_address from the presence of this element.
-            NetworkInterfaceAssociation association = service.instanceInterfaceAssociation(inst, eni);
+            NetworkInterfaceAssociation association = service.instanceInterfaceAssociation(inst, eni, elasticAddresses);
             if (association != null) {
                 xml.start("association")
                         .elem("publicIp", association.getPublicIp())
