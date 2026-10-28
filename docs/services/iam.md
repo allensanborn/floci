@@ -44,8 +44,10 @@ Every IAM operation whose request models `Marker` pages through one path, driven
 `ListServiceSpecificCredentials`, `ListDelegationRequests` and `ListPoliciesGrantingServiceAccess`).
 An operation AWS starts paging later needs `make aws-data-sync`, not new handler code.
 
-- `MaxItems` must be between 1 and 1000, as `maxItemsType` declares; any other value is a
-  `ValidationError`. An omitted `MaxItems` is the default the reference documents ("the number of
+- `MaxItems` must be between 1 and 1000, as `maxItemsType` declares, and a `Marker` between 1 and
+  320 characters of `markerType`'s pattern. Both are read from the model rather than from the table:
+  every paged operation is in the `IamRequestShapes` wave (`tools/aws/regen_iam_shapes.py`), so a
+  value outside either is a `ValidationError` before the operation runs. An omitted `MaxItems` is the default the reference documents ("the number of
   items defaults to 100"), and the whole list where it documents none
   (`ListServiceSpecificCredentials`). `ListPoliciesGrantingServiceAccess` models no `MaxItems`, so it
   is never truncated.
@@ -62,9 +64,9 @@ An operation AWS starts paging later needs `make aws-data-sync`, not new handler
   and inline policies by name, attached policies by ARN, tags by key, policy versions by number).
   `ListEntitiesForPolicy` and `GetAccountAuthorizationDetails` page their several lists as one, in
   the paginator's order.
-- `markerType`'s 320-character bound is not checked separately: every issued marker matches its
-  pattern and every other value is refused, but a marker naming an ARN with a long path can exceed
-  320 characters and is still accepted back.
+- Every marker Floci issues fits `markerType`'s 320 characters. One whose key would not, an ARN with
+  a long path, carries a SHA-256 digest of the key instead, and Floci keeps the key the digest stands
+  for, so the marker still resumes after its item when that item has been deleted.
 
 ### Users
 
@@ -222,6 +224,14 @@ outside the model's enum, a `MaxItems` outside 1 to 1000 and a `Marker` breaking
 pattern were all answered with a 200. A number too large for a 64-bit integer is a number all the
 same, so a `MaxItems` of `9223372036854775808` breaks the maximum rather than reading as no number
 at all.
+
+Every other paged operation joined that wave (see [Pagination](#pagination)), most with their whole
+request. Six join with `MaxItems` and `Marker` alone and keep the reading they have for the rest:
+the three report readers, whose `JobId` is answered as one fixed length ("length equal to 36") and
+whose `SortKey` is held to its enum by hand, `ListPoliciesGrantingServiceAccess`, whose empty
+`ServiceNamespaces` is answered `InvalidInput`, and `SimulateCustomPolicy` and
+`SimulatePrincipalPolicy`, whose `ContextEntries` nest a list inside a list of structures, which the
+walk does not read.
 
 ### Permission Boundaries
 

@@ -16,16 +16,7 @@
         "RoleDetailList",
         "Policies"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "GetGroup": {
       "paginator": true,
@@ -36,16 +27,7 @@
       "resultKeys": [
         "Users"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "GetOrganizationsAccessReport": {
       "paginator": false,
@@ -54,16 +36,7 @@
       "limitKey": "MaxItems",
       "moreResults": "IsTruncated",
       "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "GetServiceLastAccessedDetails": {
       "paginator": false,
@@ -72,16 +45,7 @@
       "limitKey": "MaxItems",
       "moreResults": "IsTruncated",
       "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "GetServiceLastAccessedDetailsWithEntities": {
       "paginator": false,
@@ -90,16 +54,7 @@
       "limitKey": "MaxItems",
       "moreResults": "IsTruncated",
       "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListAccessKeys": {
       "paginator": true,
@@ -110,16 +65,7 @@
       "resultKeys": [
         "AccessKeyMetadata"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListAccountAliases": {
       "paginator": true,
@@ -130,16 +76,7 @@
       "resultKeys": [
         "AccountAliases"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListAttachedGroupPolicies": {
       "paginator": true,
@@ -150,16 +87,7 @@
       "resultKeys": [
         "AttachedPolicies"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListAttachedRolePolicies": {
       "paginator": true,
@@ -170,16 +98,7 @@
       "resultKeys": [
         "AttachedPolicies"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListAttachedUserPolicies": {
       "paginator": true,
@@ -190,16 +109,7 @@
       "resultKeys": [
         "AttachedPolicies"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListDelegationRequests": {
       "paginator": false,
@@ -208,16 +118,7 @@
       "limitKey": "MaxItems",
       "moreResults": "isTruncated",
       "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListEntitiesForPolicy": {
       "paginator": true,
@@ -230,16 +131,7 @@
         "PolicyUsers",
         "PolicyRoles"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListGroupPolicies": {
       "paginator": true,
@@ -250,16 +142,7 @@
       "resultKeys": [
         "PolicyNames"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListGroups": {
       "paginator": true,
@@ -270,16 +153,7 @@
       "resultKeys": [
         "Groups"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListGroupsForUser": {
       "paginator": true,
@@ -290,16 +164,7 @@
       "resultKeys": [
         "Groups"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListInstanceProfileTags": {
       "paginator": true,
@@ -310,16 +175,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListInstanceProfiles": {
       "paginator": true,
@@ -330,16 +186,7 @@
       "resultKeys": [
         "InstanceProfiles"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListInstanceProfilesForRole": {
       "paginator": true,
@@ -350,16 +197,7 @@
       "resultKeys": [
         "InstanceProfiles"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListMFADeviceTags": {
       "paginator": true,
@@ -370,16 +208,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListMFADevices": {
       "paginator": true,
@@ -390,16 +219,7 @@
       "resultKeys": [
         "MFADevices"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListOpenIDConnectProviderTags": {
       "paginator": true,
@@ -410,16 +230,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListPolicies": {
       "paginator": true,
@@ -430,16 +241,7 @@
       "resultKeys": [
         "Policies"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListPoliciesGrantingServiceAccess": {
       "paginator": false,
@@ -447,12 +249,7 @@
       "outputToken": "Marker",
       "limitKey": null,
       "moreResults": "IsTruncated",
-      "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      }
+      "resultKeys": []
     },
     "ListPolicyTags": {
       "paginator": true,
@@ -463,16 +260,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListPolicyVersions": {
       "paginator": true,
@@ -483,16 +271,7 @@
       "resultKeys": [
         "Versions"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListRolePolicies": {
       "paginator": true,
@@ -503,16 +282,7 @@
       "resultKeys": [
         "PolicyNames"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListRoleTags": {
       "paginator": true,
@@ -523,16 +293,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListRoles": {
       "paginator": true,
@@ -543,16 +304,7 @@
       "resultKeys": [
         "Roles"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListSAMLProviderTags": {
       "paginator": true,
@@ -563,16 +315,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListSSHPublicKeys": {
       "paginator": true,
@@ -583,16 +326,7 @@
       "resultKeys": [
         "SSHPublicKeys"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListServerCertificateTags": {
       "paginator": true,
@@ -603,16 +337,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListServerCertificates": {
       "paginator": true,
@@ -623,16 +348,7 @@
       "resultKeys": [
         "ServerCertificateMetadataList"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListServiceSpecificCredentials": {
       "paginator": false,
@@ -641,16 +357,7 @@
       "limitKey": "MaxItems",
       "moreResults": "IsTruncated",
       "resultKeys": [],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": null
-      }
+      "defaultItems": null
     },
     "ListSigningCertificates": {
       "paginator": true,
@@ -661,16 +368,7 @@
       "resultKeys": [
         "Certificates"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListUserPolicies": {
       "paginator": true,
@@ -681,16 +379,7 @@
       "resultKeys": [
         "PolicyNames"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListUserTags": {
       "paginator": true,
@@ -701,16 +390,7 @@
       "resultKeys": [
         "Tags"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListUsers": {
       "paginator": true,
@@ -721,16 +401,7 @@
       "resultKeys": [
         "Users"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "ListVirtualMFADevices": {
       "paginator": true,
@@ -741,16 +412,7 @@
       "resultKeys": [
         "VirtualMFADevices"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "SimulateCustomPolicy": {
       "paginator": true,
@@ -761,16 +423,7 @@
       "resultKeys": [
         "EvaluationResults"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     },
     "SimulatePrincipalPolicy": {
       "paginator": true,
@@ -781,16 +434,7 @@
       "resultKeys": [
         "EvaluationResults"
       ],
-      "marker": {
-        "min": 1,
-        "max": 320,
-        "pattern": "[\\u0020-\\u00FF]+"
-      },
-      "maxItems": {
-        "min": 1,
-        "max": 1000,
-        "default": 100
-      }
+      "defaultItems": 100
     }
   }
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.Totp;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
@@ -11,11 +12,10 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.w3c.dom.Element;
-import org.xml.sax.InputSource;
+import org.w3c.dom.Node;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPublicKey;
@@ -31,7 +31,6 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import javax.xml.parsers.DocumentBuilderFactory;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -331,6 +330,49 @@ class IamListPaginationIntegrationTest {
             if (!deleted) {
                 deletePolicy(arn);
             }
+        }
+    }
+
+    /**
+     * ListAttachedRolePolicies keys a page by policy ARN, and a long path makes that ARN longer than
+     * the 320 characters the model allows a Marker. The marker issued still fits, so the request
+     * carrying it clears the model check, and with the policy it ended on deleted before the next
+     * page it resumes at the next policy, skipping none and repeating none.
+     */
+    @Test
+    void aMarkerEndingOnALongPolicyArnFitsTheModelAndResumesPastItsDeletion() {
+        String tag = suffix();
+        String path = "/" + ("pg-long-path-" + tag + "/").repeat(15);
+        String role = "pg-long-" + tag;
+        createRole(role, "/");
+        List<String> arns = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            arns.add(createPolicy(role + "-" + i, path));
+            call("AttachRolePolicy", "RoleName", role, "PolicyArn", arns.getLast());
+        }
+        List<String> remaining = new ArrayList<>(arns);
+        try {
+            assertTrue(arns.getFirst().length() > 320, arns.getFirst().length() + " characters");
+            Page first = page("ListAttachedRolePolicies", "AttachedPolicies", "PolicyArn",
+                    iam("ListAttachedRolePolicies").formParam("RoleName", role).formParam("MaxItems", "1"));
+            assertEquals(List.of(arns.getFirst()), first.names());
+            assertNotNull(first.marker());
+            assertTrue(first.marker().length() <= 320, first.marker().length() + " characters");
+
+            call("DetachRolePolicy", "RoleName", role, "PolicyArn", arns.getFirst());
+            deletePolicy(arns.getFirst());
+            remaining.remove(arns.getFirst());
+
+            Page rest = page("ListAttachedRolePolicies", "AttachedPolicies", "PolicyArn",
+                    withMarker(iam("ListAttachedRolePolicies").formParam("RoleName", role), first.marker()));
+            assertEquals(arns.subList(1, 3), rest.names());
+            assertFalse(rest.truncated());
+        } finally {
+            remaining.forEach(arn -> {
+                call("DetachRolePolicy", "RoleName", role, "PolicyArn", arn);
+                deletePolicy(arn);
+            });
+            deleteRole(role);
         }
     }
 
@@ -682,8 +724,7 @@ class IamListPaginationIntegrationTest {
                 .then().statusCode(200).extract().asString();
         Element result;
         try {
-            result = (Element) DocumentBuilderFactory.newInstance().newDocumentBuilder()
-                    .parse(new InputSource(new StringReader(body))).getDocumentElement()
+            result = (Element) XmlParser.parseDocument(body).getDocumentElement()
                     .getElementsByTagName(action + "Result").item(0);
         } catch (Exception e) {
             throw new IllegalStateException(action + " answered unparseable XML: " + body, e);
@@ -691,7 +732,7 @@ class IamListPaginationIntegrationTest {
         List<String> items = new ArrayList<>();
         for (JsonNode resultKey : paginator.path("resultKeys")) {
             Element list = child(result, resultKey.asText());
-            for (org.w3c.dom.Node item = list == null ? null : list.getFirstChild(); item != null; item = item.getNextSibling()) {
+            for (Node item = list == null ? null : list.getFirstChild(); item != null; item = item.getNextSibling()) {
                 if (item instanceof Element member) {
                     items.add(resultKey.asText() + ":" + member.getTextContent());
                 }
@@ -705,7 +746,7 @@ class IamListPaginationIntegrationTest {
 
     /** The direct child of {@code parent} named {@code name}, or null. */
     private static Element child(Element parent, String name) {
-        for (org.w3c.dom.Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
+        for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
             if (node instanceof Element element && element.getTagName().equals(name)) {
                 return element;
             }
@@ -737,6 +778,10 @@ class IamListPaginationIntegrationTest {
      * the documented page size, and refuse a marker it did not issue. The fixture map has to name
      * exactly the table's operations, so one AWS starts paging later fails here until it has one.
      */
+    /** {@code maxItemsType}'s range, which {@link IamRequestShapes} holds every paged request to. */
+    private static final int MAX_ITEMS_MIN = 1;
+    private static final int MAX_ITEMS_MAX = 1000;
+
     @Test
     void everyPaginatedOperationHonoursMaxItemsAndMarker() throws IOException {
         Map<String, JsonNode> paginators = paginators();
@@ -748,9 +793,8 @@ class IamListPaginationIntegrationTest {
         for (Map.Entry<String, JsonNode> entry : paginators.entrySet()) {
             String action = entry.getKey();
             JsonNode paginator = entry.getValue();
-            JsonNode bounds = paginator.path("maxItems");
-            int min = bounds.path("min").asInt();
-            int max = bounds.path("max").asInt();
+            int min = MAX_ITEMS_MIN;
+            int max = MAX_ITEMS_MAX;
             Fixture fixture = fixtures.get(action).get();
             try {
                 listRequest(action, fixture, Integer.toString(min - 1), null).when().post("/").then()
@@ -789,7 +833,7 @@ class IamListPaginationIntegrationTest {
                 }
 
                 Listing unlimited = listing(action, paginator, fixture, null, null);
-                int pageSize = bounds.path("default").asInt();
+                int pageSize = paginator.path("defaultItems").asInt();
                 assertEquals(all.subList(0, Math.min(pageSize, all.size())), unlimited.items(),
                         action + ": an omitted MaxItems is the documented " + pageSize);
                 assertEquals(all.size() > pageSize, unlimited.truncated(), action);
@@ -895,11 +939,12 @@ class IamListPaginationIntegrationTest {
         for (String[] holder : List.of(new String[]{"User", "UserName"}, new String[]{"Group", "GroupName"},
                 new String[]{"Role", "RoleName"})) {
             Function<String, Runnable> createHolder = name -> {
-                switch (holder[0]) {
-                    case "User" -> createUser(name);
-                    case "Group" -> call("CreateGroup", "GroupName", name);
-                    default -> createRole(name, "/");
-                }
+                Runnable create = switch (holder[0]) {
+                    case "User" -> () -> createUser(name);
+                    case "Group" -> () -> call("CreateGroup", "GroupName", name);
+                    default -> () -> createRole(name, "/");
+                };
+                create.run();
                 return () -> call("Delete" + holder[0], holder[1], name);
             };
             fixtures.put("ListAttached" + holder[0] + "Policies", () -> {

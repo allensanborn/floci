@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.core.common;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Base64;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SignedMarkersTest {
 
@@ -44,6 +47,22 @@ class SignedMarkersTest {
         String marker = markers.issue("ab", "c");
 
         assertNull(markers.cursorOf("a", Base64Url.encode(
-                new String(java.util.Base64.getUrlDecoder().decode(marker)).replaceFirst("^c", "bc"))));
+                new String(Base64.getUrlDecoder().decode(marker)).replaceFirst("^c", "bc"))));
+    }
+
+    /** A cursor too long for the limit is named by digest, and still resumes only its own scope. */
+    @Test
+    void aCursorTooLongForTheLimitStillFitsAndResolves() {
+        SignedMarkers bounded = new SignedMarkers(320);
+        String arn = "arn:aws:iam::000000000000:policy/" + "p/".repeat(250) + "name";
+        String marker = bounded.issue("account-a\nListAttachedRolePolicies", arn);
+
+        assertTrue(marker.length() <= 320, marker.length() + " characters");
+        assertEquals(arn, bounded.cursorOf("account-a\nListAttachedRolePolicies", marker));
+        assertNull(bounded.cursorOf("account-b\nListAttachedRolePolicies", marker));
+        assertNull(markers.cursorOf("account-a\nListAttachedRolePolicies", marker),
+                "another instance holds neither the key nor the cursor");
+        assertEquals("user-b", bounded.cursorOf("s", bounded.issue("s", "user-b")),
+                "a cursor that fits is carried as it is");
     }
 }

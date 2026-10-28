@@ -66,6 +66,8 @@ public class IamQueryHandler {
 
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
+    /** {@code markerType}'s maximum, which every marker issued has to fit to be accepted back. */
+    private static final int MARKER_MAX_LENGTH = 320;
     /** {@code jobIDType} on every report reader: min 36 and max 36, which is a UUID string. */
     private static final int JOB_ID_LENGTH = 36;
     /** {@code arnType} on {@code PolicySourceArn} and {@code TemplateArn}: 20 to 2048, no pattern. */
@@ -115,7 +117,7 @@ public class IamQueryHandler {
     private final RegionResolver regionResolver;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
     /** Signs each page's Marker, so only a marker this handler issued names an item. */
-    private final SignedMarkers markers = new SignedMarkers();
+    private final SignedMarkers markers = new SignedMarkers(MARKER_MAX_LENGTH);
 
     @Inject
     public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator,
@@ -1577,15 +1579,16 @@ public class IamQueryHandler {
         items.addAll(Listed.of(1, entities.users(), IamUser::getUserName));
         items.addAll(Listed.of(2, entities.roles(), IamRole::getRoleName));
         return pagedLists("ListEntitiesForPolicy", items, params, (xml, listed) -> {
-            switch (listed.item()) {
-                case IamGroup group -> xml.start("member").elem("GroupName", group.getGroupName())
-                        .elem("GroupId", group.getGroupId()).end("member");
-                case IamUser user -> xml.start("member").elem("UserName", user.getUserName())
-                        .elem("UserId", user.getUserId()).end("member");
-                case IamRole role -> xml.start("member").elem("RoleName", role.getRoleName())
-                        .elem("RoleId", role.getRoleId()).end("member");
+            XmlBuilder member = switch (listed.item()) {
+                case IamGroup group -> new XmlBuilder().elem("GroupName", group.getGroupName())
+                        .elem("GroupId", group.getGroupId());
+                case IamUser user -> new XmlBuilder().elem("UserName", user.getUserName())
+                        .elem("UserId", user.getUserId());
+                case IamRole role -> new XmlBuilder().elem("RoleName", role.getRoleName())
+                        .elem("RoleId", role.getRoleId());
                 default -> throw new IllegalStateException("not a policy entity: " + listed.item());
-            }
+            };
+            xml.start("member").raw(member.build()).end("member");
         });
     }
 
@@ -2916,12 +2919,14 @@ public class IamQueryHandler {
 
     /**
      * The one path every paged IAM list goes through, driven by {@code action}'s entry in the
-     * generated {@link IamPaginators} table: its limit's bounds and default, and the request
-     * member that resumes it.
+     * generated {@link IamPaginators} table: its limit's default and the request member that
+     * resumes it.
      *
-     * <p>{@code MaxItems} is held to the model's range, and an omitted one is the documented
-     * default ("the number of items defaults to 100") where the reference states one and the
-     * whole list where it does not. An operation whose request models no limit is never cut.
+     * <p>{@code MaxItems} and {@code Marker} reach here already held to the model's bounds, 1 to
+     * 1000 and 1 to 320 characters, by {@link IamRequestShapes}, which checks every paged operation
+     * before it runs. An omitted {@code MaxItems} is the documented default ("the number of items
+     * defaults to 100") where the reference states one and the whole list where it does not. An
+     * operation whose request models no limit is never cut.
      *
      * <p>A {@code Marker} resumes only the listing that issued it. AWS documents it as "the value
      * of the Marker element in the response that you received", so it is opaque: a value this
@@ -2932,16 +2937,12 @@ public class IamQueryHandler {
      * of the page before by {@code keyOf}, so the next page continues after that item wherever it
      * now sits: an item created or deleted ahead of it skips nothing and repeats nothing.
      *
-     * <p>The marker's length and pattern bounds are not checked separately: every marker this
-     * handler issues satisfies the pattern, every other value is refused as unissued, and a key
-     * long enough to push an issued marker past 320 characters (an ARN with a long path) would
-     * otherwise be refused on the way back.
+     * <p>Every marker issued fits those 320 characters, however long the key it names: one whose
+     * key would not fit names it by digest, which {@link SignedMarkers} resolves back to the key.
      */
     private <T> Page<T> paginate(String action, List<T> items, Function<T, String> keyOf,
                                  MultivaluedMap<String, String> params) {
         IamPaginators.Paginator paginator = IamPaginators.of(action);
-        // The limit is checked before the marker, as a request that breaks the model's constraints
-        // is rejected before anything is read from it.
         int limit = limit(paginator, params, items.size());
         String scope = markerScope(action, paginator, params);
         int from = resumeIndex(items, keyOf, params.getFirst(paginator.inputToken()), scope);
@@ -2964,20 +2965,13 @@ public class IamQueryHandler {
         if (raw == null || raw.isBlank()) {
             return paginator.defaultItems() != null ? paginator.defaultItems() : size;
         }
-        int limit;
+        // The range is the model's and was checked ahead of the operation; a value that is no
+        // number is left to the operation by that check, and answered here.
         try {
-            limit = Integer.parseInt(raw.trim());
+            return Integer.parseInt(raw.trim());
         } catch (NumberFormatException e) {
             throw new AwsException("InvalidInput", "The value " + raw + " at 'maxItems' is not a number.", 400);
         }
-        String member = Character.toLowerCase(paginator.limitKey().charAt(0)) + paginator.limitKey().substring(1);
-        if (limit < paginator.minItems()) {
-            throw validationError(raw, member, "Member must have value greater than or equal to " + paginator.minItems());
-        }
-        if (limit > paginator.maxItems()) {
-            throw validationError(raw, member, "Member must have value less than or equal to " + paginator.maxItems());
-        }
-        return limit;
     }
 
     /** What a marker is signed over: the account, the operation and the listing's own members. */

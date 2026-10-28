@@ -33,9 +33,12 @@ final class IamPaginators {
      * {@code defaultItems} is null where the reference documents no default page size, in which
      * case an omitted limit returns the whole list. {@code resultKeys} is empty for an operation
      * botocore has no paginator for.
+     *
+     * <p>No bound is carried: the limit's range and the marker's length are request constraints,
+     * which {@link IamRequestShapes} holds a request to before the operation runs.
      */
     record Paginator(String inputToken, String outputToken, String limitKey, String moreResults,
-                     List<String> resultKeys, int minItems, int maxItems, Integer defaultItems) {
+                     List<String> resultKeys, Integer defaultItems) {
     }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -68,11 +71,6 @@ final class IamPaginators {
     }
 
     private static Paginator paginator(String operation, JsonNode node) {
-        String limitKey = text(node, "limitKey");
-        JsonNode bounds = node.path("maxItems");
-        if (limitKey != null && !(bounds.path("min").isInt() && bounds.path("max").isInt())) {
-            throw new IllegalStateException(RESOURCE_NAME + ": " + operation + " has a limit without bounds");
-        }
         List<String> resultKeys = new ArrayList<>();
         node.path("resultKeys").forEach(key -> resultKeys.add(key.asText()));
         String inputToken = text(node, "inputToken");
@@ -81,9 +79,9 @@ final class IamPaginators {
         if (inputToken == null || outputToken == null || moreResults == null) {
             throw new IllegalStateException(RESOURCE_NAME + ": " + operation + " lacks a token");
         }
-        return new Paginator(inputToken, outputToken, limitKey, moreResults, List.copyOf(resultKeys),
-                bounds.path("min").asInt(), bounds.path("max").asInt(),
-                bounds.path("default").isInt() ? bounds.path("default").asInt() : null);
+        JsonNode defaultItems = node.path("defaultItems");
+        return new Paginator(inputToken, outputToken, text(node, "limitKey"), moreResults,
+                List.copyOf(resultKeys), defaultItems.isInt() ? defaultItems.asInt() : null);
     }
 
     private static String text(JsonNode node, String field) {

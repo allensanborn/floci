@@ -45,15 +45,13 @@ def paginator(*result_keys: str) -> dict:
             "result_key": result_keys[0] if len(result_keys) == 1 else list(result_keys)}
 
 
-def test_a_paginator_names_its_tokens_lists_and_bounds():
+def test_a_paginator_names_its_tokens_lists_and_default_but_no_bounds():
     found = r.operations_from(model(ListRoles=(PAGED_REQUEST, paged_response("Roles"))),
                               {"ListRoles": paginator("Roles")})
 
     assert found == {"ListRoles": {
         "paginator": True, "inputToken": "Marker", "outputToken": "Marker", "limitKey": "MaxItems",
-        "moreResults": "IsTruncated", "resultKeys": ["Roles"],
-        "marker": {"min": 1, "max": 320, "pattern": "[\\u0020-\\u00FF]+"},
-        "maxItems": {"min": 1, "max": 1000, "default": 100},
+        "moreResults": "IsTruncated", "resultKeys": ["Roles"], "defaultItems": 100,
     }}
 
 
@@ -82,14 +80,14 @@ def test_a_request_without_max_items_has_no_limit():
         {"Marker": {"shape": "markerType"}}, paged_response("PoliciesGrantingServiceAccess"))), {})
 
     assert found["ListPoliciesGrantingServiceAccess"]["limitKey"] is None
-    assert "maxItems" not in found["ListPoliciesGrantingServiceAccess"]
+    assert "defaultItems" not in found["ListPoliciesGrantingServiceAccess"]
 
 
 def test_an_undocumented_default_is_null_rather_than_invented():
     request = {"Marker": {"shape": "markerType"}, "MaxItems": {"shape": "maxItemsType"}}
     found = r.operations_from(model(ListServiceSpecificCredentials=(request, paged_response("C"))), {})
 
-    assert found["ListServiceSpecificCredentials"]["maxItems"]["default"] is None
+    assert found["ListServiceSpecificCredentials"]["defaultItems"] is None
 
 
 def test_an_operation_without_a_marker_is_left_out():
@@ -125,6 +123,6 @@ def test_check_ignores_the_provenance_and_catches_a_changed_entry(tmp_path):
     output.write_text(json.dumps(stale), encoding="utf-8")
     assert r.main(["--check", "--botocore-data", data, "--output", str(output)]) == 0
 
-    stale["operations"]["ListRoles"]["maxItems"]["max"] = 100
+    stale["operations"]["ListRoles"]["defaultItems"] = 10
     output.write_text(json.dumps(stale), encoding="utf-8")
     assert r.main(["--check", "--botocore-data", data, "--output", str(output)]) == 1

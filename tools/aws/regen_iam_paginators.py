@@ -4,8 +4,8 @@
 IAM pages its lists with a `Marker` request member and a `MaxItems` limit, and answers with
 `IsTruncated` and the `Marker` that continues the list. `IamQueryHandler` pages every such list
 through one path, which reads from this file what each operation pages by: the request member that
-resumes it, the member that limits it and that limit's bounds and default, the response members
-that say whether it was truncated and how to continue, and the lists it pages.
+resumes it, the member that limits it and that limit's default, the response members that say
+whether it was truncated and how to continue, and the lists it pages.
 
 Every IAM operation whose request models `Marker` is kept. For the operations botocore pages
 (`paginators-1.json`, 34 of them) the paginator names the tokens, the limit key and the result
@@ -15,10 +15,12 @@ their members are read from the request and response shapes and they carry no re
 `"paginator": false` says so. ListPoliciesGrantingServiceAccess models no `MaxItems` at all, so
 its `limitKey` is null.
 
-The bounds are `service-2.json`'s: `maxItemsType` (1 to 1000) and `markerType` (1 to 320
-characters of `[\\u0020-\\u00FF]+`). The default page size is not a constraint the model encodes
-but a sentence in the limit member's documentation ("the number of items defaults to 100"), so it is
-read from there and is null where the documentation states none.
+No bound is kept here. `maxItemsType` (1 to 1000) and `markerType` (1 to 320 characters) are
+constraints of the request, so `regen_iam_shapes.py` vendors them with the rest of each paged
+operation's request and `IamRequestShapes` holds a request to them before it runs. The default page
+size is not a constraint the model encodes but a sentence in the limit member's documentation ("the
+number of items defaults to 100"), so it is read from there as `defaultItems`, null where the
+documentation states none.
 
 The model is botocore's `iam/2010-05-08/` (Apache-2.0, https://github.com/boto/botocore), located,
 in order, at `--botocore-data`, the `local/aws/botocore` checkout, then the installed `botocore`
@@ -56,11 +58,6 @@ def load_paginators(directory: Path) -> dict:
 
 def _as_list(value) -> list[str]:
     return [value] if isinstance(value, str) else list(value)
-
-
-def _bounds(model: dict, member: dict, *fields: str) -> dict:
-    shape = model["shapes"][member["shape"]]
-    return {field: shape[field] for field in fields if field in shape}
 
 
 def operations_from(model: dict, paginators: dict) -> dict[str, dict]:
@@ -104,12 +101,10 @@ def operations_from(model: dict, paginators: dict) -> dict[str, dict]:
             "limitKey": limit_key,
             "moreResults": more_results,
             "resultKeys": result_keys,
-            "marker": _bounds(model, request[input_token], "min", "max", "pattern"),
         }
         if limit_key is not None:
             documented = DEFAULT_RE.search(request[limit_key].get("documentation", ""))
-            entry["maxItems"] = {**_bounds(model, request[limit_key], "min", "max"),
-                                 "default": int(documented.group(1)) if documented else None}
+            entry["defaultItems"] = int(documented.group(1)) if documented else None
         found[name] = entry
     missing = sorted(set(paginators) - set(found))
     if missing:

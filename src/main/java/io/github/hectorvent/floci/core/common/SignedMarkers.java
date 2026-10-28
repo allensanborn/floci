@@ -5,7 +5,10 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Pagination markers that name a cursor, as AWS's opaque tokens do. Each marker is signed with a
@@ -15,8 +18,27 @@ import java.security.SecureRandom;
 public final class SignedMarkers {
 
     private static final char SEPARATOR = '.';
+    /** Opens a cursor that stands for a longer one by its digest. No key a list pages by holds a NUL. */
+    private static final String DIGEST_PREFIX = "\u0000#";
 
     private final byte[] key = newKey();
+    private final int maxLength;
+    /**
+     * The cursors too long to carry, by the digest a marker carries instead. An entry is the key of
+     * an item a page ended on, so a marker resumes after that item even once it is deleted.
+     */
+    // ponytail: never evicted, so it grows by one entry per distinct long key a page has ended on;
+    // bound it with an LRU, and refuse an evicted marker as expired, if that ever matters.
+    private final Map<String, String> longCursors = new ConcurrentHashMap<>();
+
+    public SignedMarkers() {
+        this(Integer.MAX_VALUE);
+    }
+
+    /** Markers no longer than {@code maxLength}, however long the cursor they name. */
+    public SignedMarkers(int maxLength) {
+        this.maxLength = maxLength;
+    }
 
     public String issue(String cursor) {
         return Base64Url.encode(cursor + SEPARATOR + sign(cursor));
@@ -25,9 +47,22 @@ public final class SignedMarkers {
     /**
      * A marker for {@code cursor} that only {@link #cursorOf(String, String)} with the same
      * {@code scope} recognises. The scope is signed rather than carried, so it costs the marker no
-     * length.
+     * length. A cursor that would make the marker longer than this instance's limit is carried as
+     * its digest instead and read back from the cursors this instance has issued.
      */
     public String issue(String scope, String cursor) {
+        if (!cursor.startsWith(DIGEST_PREFIX)) {
+            String marker = scopedMarker(scope, cursor);
+            if (marker.length() <= maxLength) {
+                return marker;
+            }
+        }
+        String digest = DIGEST_PREFIX + digest(cursor);
+        longCursors.put(digest, cursor);
+        return scopedMarker(scope, digest);
+    }
+
+    private String scopedMarker(String scope, String cursor) {
         return Base64Url.encode(cursor + SEPARATOR + sign(scoped(scope, cursor)));
     }
 
@@ -55,7 +90,16 @@ public final class SignedMarkers {
         if (!MessageDigest.isEqual(presented, sign(signed).getBytes(StandardCharsets.UTF_8))) {
             return null;
         }
-        return cursor;
+        return cursor.startsWith(DIGEST_PREFIX) ? longCursors.get(cursor) : cursor;
+    }
+
+    private static String digest(String cursor) {
+        try {
+            return Base64Url.encode(MessageDigest.getInstance("SHA-256")
+                    .digest(cursor.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required to shorten pagination markers", e);
+        }
     }
 
     /** Length-prefixed, so no scope and cursor pair signs the same text as another. */
