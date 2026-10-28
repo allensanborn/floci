@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.cloudfront;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
@@ -41,6 +44,7 @@ import org.jboss.resteasy.reactive.server.core.CurrentRequestManager;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.PushbackInputStream;
 import java.net.IDN;
 import java.net.URI;
@@ -110,6 +114,10 @@ public class CloudFrontServingController {
     private final CloudFrontService service;
     private final S3Service s3Service;
     private final LambdaWebService lambdaWebService;
+    private final ApiGatewayService apiGatewayService;
+    private final ApiGatewayV2Service apiGatewayV2Service;
+    private final ApiGatewayExecuteApiHostFilter executeApiHostFilter;
+    private final String flociHostname;
     private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
@@ -119,11 +127,17 @@ public class CloudFrontServingController {
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
                                        LambdaWebService lambdaWebService, LambdaWebIamAuth lambdaWebIamAuth,
+                                       ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
+                                       ApiGatewayExecuteApiHostFilter executeApiHostFilter,
                                        EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
                                        HttpServer httpServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
+        this.apiGatewayService = apiGatewayService;
+        this.apiGatewayV2Service = apiGatewayV2Service;
+        this.executeApiHostFilter = executeApiHostFilter;
+        this.flociHostname = emulatorConfig.hostname().orElse("localhost");
         this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
@@ -557,8 +571,7 @@ public class CloudFrontServingController {
                     && config.get("ParametersInCacheKeyAndForwardedToOrigin") instanceof Map<?, ?> parameters
                     ? parameters : null;
         } catch (AwsException e) {
-            // AWS managed cache policies are not modeled. The common ones (CachingDisabled,
-            // CachingOptimized) forward no viewer values, which is what an unknown id contributes.
+            // Amplify-only managed policies and unknown ids forward no viewer values.
             LOG.debugv("Cache policy {0} is not defined; it forwards no viewer values", cachePolicyId);
             return null;
         }
@@ -741,9 +754,8 @@ public class CloudFrontServingController {
                         putHeader(headers, "Access-Control-Max-Age",
                                 Integer.toString(cors.maxAgeSeconds()));
                     }
-                    if (!cors.allowedHeaders().isEmpty()) {
-                        putHeader(headers, "Access-Control-Allow-Headers",
-                                String.join(", ", cors.allowedHeaders()));
+                    if (cors.allowHeaders() != null) {
+                        putHeader(headers, "Access-Control-Allow-Headers", cors.allowHeaders());
                     }
                     if (!cors.exposeHeaders().isEmpty()) {
                         putHeader(headers, "Access-Control-Expose-Headers",
@@ -772,16 +784,25 @@ public class CloudFrontServingController {
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
-            // Floci serves its own Web Function endpoints, whatever port and protocol the origin names.
+            // Floci serves its own Web Function and execute-api endpoints, whatever port and protocol the origin names.
             String webEndpoint = webFunctionEndpoint(origin);
-            if (webEndpoint != null && originRequest.headers().stream()
+            String executeApiHost = webEndpoint == null ? executeApiHost(origin) : null;
+            boolean inProcess = webEndpoint != null || executeApiHost != null;
+            if (inProcess && originRequest.headers().stream()
                     .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
                 // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
-                LOG.debugv("CloudFront forwards the viewer Host to Web Function origin {0}", origin.getId());
+                LOG.debugv("CloudFront forwards the viewer Host to in-process origin {0}", origin.getId());
                 return OriginResponse.error(502, "Bad Gateway.");
             }
-            URI target = webEndpoint != null
-                    ? flociListenerUri(forwardUri, originRequest.rawQuery())
+            // Dot segments would be resolved after the host filter's check and escape the API's stage.
+            String originPath = executeApiHost != null
+                    ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
+            if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
+                byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
+                return new OriginResponse(404, MediaType.APPLICATION_JSON, notFound, notFound.length, Map.of());
+            }
+            URI target = inProcess
+                    ? flociListenerUri(originPath, originRequest.rawQuery())
                     : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
                     .uri(target);
@@ -799,6 +820,9 @@ public class CloudFrontServingController {
                     }
                 }
             }
+            if (executeApiHost != null) {
+                originHeaders.put("Host", executeApiHost);
+            }
             if (webEndpoint != null) {
                 originHeaders.put("Host", webEndpoint);
                 if (alwaysAmzAuth(origin)) {
@@ -809,7 +833,7 @@ public class CloudFrontServingController {
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = (webEndpoint != null ? flociClient : httpClient).open(
+            CloudFrontOriginHttpClient.OpenResponse resp = (inProcess ? flociClient : httpClient).open(
                     rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
                     requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
@@ -852,6 +876,37 @@ public class CloudFrontServingController {
     }
 
     /**
+     * The origin's host when it is an execute-api endpoint of an HTTP or REST API that exists in this
+     * Floci, which the execute-api host filter then routes, and null otherwise.
+     */
+    private String executeApiHost(Origin origin) {
+        String host;
+        try {
+            host = normalizeOriginHost(origin.getDomainName());
+        } catch (IllegalArgumentException ignored) {
+            // An invalid domain cannot name a local API; the normal origin fetch rejects it.
+            return null;
+        }
+        String apiId = ApiGatewayExecuteApiHostFilter.extractApiId(host, flociHostname);
+        if (apiId == null) {
+            return null;
+        }
+        try {
+            boolean exists = apiGatewayV2Service.findApiOwner(apiId).isPresent()
+                    || apiGatewayService.findRestApiOwner(apiId).isPresent();
+            return exists ? host : null;
+        } catch (AwsException e) {
+            LOG.debugv("CloudFront execute-api origin id is ambiguous: {0}", apiId);
+            return null;
+        }
+    }
+
+    private static String rawPath(String forwardUri) {
+        int query = forwardUri.indexOf('?');
+        return query < 0 ? forwardUri : forwardUri.substring(0, query);
+    }
+
+    /**
      * The plain HTTP port at the address the viewer reached Floci at, which also serves the Web
      * Function endpoints. A viewer over TLS reached the HTTPS port instead.
      */
@@ -863,7 +918,8 @@ public class CloudFrontServingController {
 
     /**
      * The origin's connection settings for one request: {@code Origin.ConnectionTimeout},
-     * {@code CustomOriginConfig.OriginReadTimeout} and {@code Origin.ConnectionAttempts}. A value
+     * {@code CustomOriginConfig.OriginReadTimeout}, {@code CustomOriginConfig.OriginKeepaliveTimeout},
+     * {@code Origin.ConnectionAttempts} and {@code Origin.ResponseCompletionTimeout}. A value
      * outside the range AWS accepts falls back to the AWS default, since the model can be built
      * programmatically or loaded from persisted state without the API validation.
      */
@@ -882,8 +938,19 @@ public class CloudFrontServingController {
                 CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
                 CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS,
                 CloudFrontOriginTimeouts.DEFAULT_CONNECTION_ATTEMPTS);
+        int keepAliveSeconds = clampToDefault(
+                intOrDefault(origin.getCustomOriginConfig(), "OriginKeepaliveTimeout",
+                        CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS),
+                CloudFrontOriginTimeouts.MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                CloudFrontOriginTimeouts.DEFAULT_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS);
+        Integer completionSeconds = origin.getResponseCompletionTimeout();
+        Duration completionTimeout = (completionSeconds == null || completionSeconds <= 0)
+                ? CloudFrontOriginTimeouts.DEFAULT_RESPONSE_COMPLETION_TIMEOUT
+                : Duration.ofSeconds(completionSeconds);
         return new CloudFrontOriginHttpClient.OriginTimeouts(
-                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts);
+                Duration.ofSeconds(connectSeconds), Duration.ofSeconds(readSeconds), attempts,
+                completionTimeout, Duration.ofSeconds(keepAliveSeconds));
     }
 
     private static int clampToDefault(int value, int min, int max, int fallback) {
@@ -1116,7 +1183,7 @@ public class CloudFrontServingController {
                 InputStream body = origin.stream();
                 StreamingOutput entity = output -> {
                     try (InputStream in = body) {
-                        in.transferTo(output);
+                        streamToViewer(in, output);
                     }
                 };
                 rb.entity(entity);
@@ -1133,6 +1200,21 @@ public class CloudFrontServingController {
         } catch (RuntimeException e) {
             origin.closeStream();
             throw e;
+        }
+    }
+
+    /**
+     * Copies the origin's body to the viewer, flushing every chunk, so the viewer's response
+     * starts before the body is over, as CloudFront's does. A response the origin never completes
+     * ends with the bytes that did arrive and a closed connection, the way CloudFront ends it,
+     * instead of an error page that hides what the viewer already received.
+     */
+    private static void streamToViewer(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = in.read(buffer)) >= 0) {
+            out.write(buffer, 0, read);
+            out.flush();
         }
     }
 

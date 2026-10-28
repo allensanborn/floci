@@ -170,20 +170,34 @@ import software.amazon.awssdk.services.wafv2.Wafv2Client;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.zip.ZipEntry;
@@ -266,6 +280,22 @@ public final class TestFixtures {
             Thread.sleep(pollMillis);
         }
         throw new AssertionError(resourceName + " timed out waiting for " + expected + timeoutDetails.get());
+    }
+
+    /** Opens a JDBC connection, retrying for up to 60 seconds while the database endpoint starts. */
+    public static Connection awaitJdbcConnection(String url, Properties properties)
+            throws SQLException, InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        SQLException last = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                return DriverManager.getConnection(url, properties);
+            } catch (SQLException e) {
+                last = e;
+                Thread.sleep(1000);
+            }
+        }
+        throw last != null ? last : new SQLException("Timed out waiting for " + url);
     }
 
     /** The region every fixture client signs for, for tests that build or compare region-scoped values. */
@@ -386,6 +416,28 @@ public final class TestFixtures {
      */
     public static String proxyHost() {
         return ENDPOINT.getHost();
+    }
+
+    /**
+     * A TLS context that trusts only the CA Floci serves at {@code /_floci/ca.pem}, for a client
+     * that verifies an endpoint Floci signs, such as a DSQL cluster or an encrypted cache.
+     */
+    public static SSLContext flociCaTrust() throws IOException, InterruptedException, GeneralSecurityException {
+        HttpResponse<String> ca = emulatorHttpClient().send(
+                HttpRequest.newBuilder(ENDPOINT.resolve("/_floci/ca.pem")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        KeyStore trusted = KeyStore.getInstance(KeyStore.getDefaultType());
+        trusted.load(null, null);
+        int index = 0;
+        for (Certificate certificate : CertificateFactory.getInstance("X.509").generateCertificates(
+                new ByteArrayInputStream(ca.body().getBytes(StandardCharsets.US_ASCII)))) {
+            trusted.setCertificateEntry("floci-" + index++, certificate);
+        }
+        TrustManagerFactory trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        trust.init(trusted);
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trust.getTrustManagers(), null);
+        return context;
     }
 
     // ============================================
@@ -826,7 +878,7 @@ public final class TestFixtures {
 
     private static boolean isDnsResolvable(String hostname) {
         try {
-            java.net.InetAddress.getByName(hostname);
+            InetAddress.getByName(hostname);
             return true;
         } catch (Exception e) {
             return false;
@@ -844,7 +896,7 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .endpointProvider((S3ControlEndpointProvider) params ->
-                        java.util.concurrent.CompletableFuture.completedFuture(
+                        CompletableFuture.completedFuture(
                                 Endpoint.builder().url(endpoint).build()))
                 .build();
     }
@@ -1523,6 +1575,14 @@ public final class TestFixtures {
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static BedrockAgentCoreControlClient bedrockAgentCoreControlClient(String accountId) {
+        return BedrockAgentCoreControlClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 

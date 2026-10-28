@@ -11,8 +11,10 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
@@ -21,6 +23,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
 import io.github.hectorvent.floci.services.lambda.durable.DurableWire;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
@@ -48,6 +51,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -57,6 +61,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,6 +72,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
@@ -98,6 +104,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPIC_LENGTH = 249;
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
+    private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -165,6 +173,9 @@ public class LambdaService implements ResourceProvider {
             "Environment", "EphemeralStorage", "TracingConfig", "DeadLetterConfig",
             "VpcConfig", "SnapStart", "LoggingConfig", "ImageConfig", "DurableConfig");
 
+    private static final Executor REACTIVE_SYNC_THREADS =
+            task -> Thread.ofVirtual().name("lambda-reactive-s3-sync").start(task);
+
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
     private final LambdaConcurrencyLimiter concurrencyLimiter;
@@ -183,6 +194,9 @@ public class LambdaService implements ResourceProvider {
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final StorageFactory storageFactory;
     private final LambdaLayerService layerService;
+    private final Map<String, PendingReactiveSync> pendingReactiveSyncs = new ConcurrentHashMap<>();
+    private final Map<String, Integer> runningReactiveSyncs = new ConcurrentHashMap<>();
+    private final Map<String, String> failedReactiveSyncs = new ConcurrentHashMap<>();
     private final Ec2Service ec2Service;
     /** Null in the constructors tests use, exactly as the other optional collaborators above are. */
     private final CustomResourceLiveness customResourceLiveness;
@@ -190,22 +204,9 @@ public class LambdaService implements ResourceProvider {
     private final ObjectMapper objectMapper;
     private Map<String, Integer> versionCounters = new ConcurrentHashMap<>();
     private Map<String, FunctionEventInvokeConfig> eventInvokeConfigs = new ConcurrentHashMap<>();
-    /**
-     * Per-function locks covering PutFunctionConcurrency,
-     * DeleteFunctionConcurrency, and deleteFunction itself. Serializing the
-     * limiter update + persistence pair against itself for a given function
-     * prevents the limiter and store from diverging on interleaved concurrent
-     * requests.
-     *
-     * <p>Entries are intentionally never removed — see {@code deleteFunction}
-     * for the race this avoids. The map therefore grows by one {@code Object}
-     * per distinct function ARN the emulator has ever seen (create/delete
-     * cycles with fresh names included). Acceptable footprint for a local
-     * emulator workload.
-     */
-    private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> policyMutationLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
+    private final SignedMarkers listFunctionMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -344,8 +345,8 @@ public class LambdaService implements ResourceProvider {
                 if (!acceptable) {
                     throw new AwsException("AccessDeniedException",
                             "User is not authorized to perform: lambda:GetLayerVersion on resource: "
-                                    + arn + " because no resource-based policy allows the"
-                                    + " lambda:GetLayerVersion action", 403);
+                                    + arn + " " + PolicyType.RESOURCE_BASED_POLICY.noAllow("lambda:GetLayerVersion"),
+                            403);
                 }
                 LOG.warnv("Layer {0} belongs to another account; recorded on the function but its"
                         + " content will not be mounted at /opt", arn);
@@ -655,7 +656,7 @@ public class LambdaService implements ResourceProvider {
      */
     public LambdaFunction getFunction(String region, String functionName, String qualifier) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        LambdaArnUtils.enforceRegion(region, ref);
         String effective = resolveQualifier(ref.qualifier(), qualifier);
         if (effective == null) {
             return getFunction(region, functionName);
@@ -690,7 +691,7 @@ public class LambdaService implements ResourceProvider {
      */
     String canonicalFunctionName(String region, String functionName) {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
-        enforceRegion(region, ref);
+        LambdaArnUtils.enforceRegion(region, ref);
         return ref.name();
     }
 
@@ -700,16 +701,7 @@ public class LambdaService implements ResourceProvider {
      * value, enforcing region match when the input is a full ARN.
      */
     LambdaArnUtils.ResolvedFunctionRef resolveWithRegion(String region, String functionName, String queryQualifier) {
-        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithQualifier(functionName, queryQualifier);
-        enforceRegion(region, ref);
-        return ref;
-    }
-
-    private void enforceRegion(String region, LambdaArnUtils.ResolvedFunctionRef ref) {
-        if (ref.region() != null && !ref.region().equals(region)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Region '" + ref.region() + "' in ARN does not match request region '" + region + "'", 400);
-        }
+        return LambdaArnUtils.resolveWithRegion(region, functionName, queryQualifier);
     }
 
     private record ResolvedFunctionTarget(String functionArn, String functionName) {}
@@ -736,6 +728,17 @@ public class LambdaService implements ResourceProvider {
 
     public List<LambdaFunction> listFunctions(String region) {
         return functionStore.list(region);
+    }
+
+    public PaginatedResult<LambdaFunction> listFunctions(String region, String maxItems, String marker) {
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, MAX_LIST_FUNCTIONS_ITEMS, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+        String scope = regionResolver.getAccountId() + "\n" + region + "\n";
+        return LambdaPagination.paginate(listFunctions(region), LambdaFunction::getFunctionName,
+                requested, LIST_FUNCTIONS_PAGE_SIZE, marker, listFunctionMarkers, scope);
     }
 
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {
@@ -789,6 +792,7 @@ public class LambdaService implements ResourceProvider {
 
         // Drain warm containers — they have stale code mounted
         warmPool.drainEnvironment(fn);
+        failedReactiveSyncs.remove(fn.getFunctionArn());
 
         functionStore.save(region, fn);
         LOG.infov("Updated code for function: {0}", functionName);
@@ -893,7 +897,7 @@ public class LambdaService implements ResourceProvider {
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
         if (requestedVpcConfigUpdate != null) {
-            requestedVpcConfig = new java.util.HashMap<>(requestedVpcConfigUpdate);
+            requestedVpcConfig = new HashMap<>(requestedVpcConfigUpdate);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -926,7 +930,7 @@ public class LambdaService implements ResourceProvider {
         }
         if (request.containsKey("Environment")) {
             if (environment != null && environment.containsKey("Variables")) {
-                fn.setEnvironment(environmentVariables != null ? environmentVariables : new java.util.HashMap<>());
+                fn.setEnvironment(environmentVariables != null ? environmentVariables : new HashMap<>());
             }
         }
 
@@ -1010,6 +1014,8 @@ public class LambdaService implements ResourceProvider {
         warmPool.drainEnvironment(fn);
 
         functionStore.save(region, fn);
+        // LastUpdateStatus reports the last update of either kind, so this one replaces a failed sync's.
+        failedReactiveSyncs.remove(fn.getFunctionArn());
         LOG.infov("Updated configuration for function: {0}", functionName);
         return fn;
     }
@@ -1088,6 +1094,7 @@ public class LambdaService implements ResourceProvider {
             return;
         }
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            warmPool.deleteProvisionedQualifier(fn, qualifier);
             warmPool.drainEnvironment(version.get());
             functionStore.deleteVersion(region, name, qualifier);
             reclaimVersionCodeDirectory(region, fn, qualifier, version.get());
@@ -1116,6 +1123,7 @@ public class LambdaService implements ResourceProvider {
         // object, letting a follow-up request allocate a fresh lock and run
         // in parallel — the very serialization this map exists to prevent.
         synchronized (lockForConcurrencyOp(arn)) {
+            warmPool.deleteProvisionedFunction(fn);
             if (concurrencyLimiter != null) {
                 concurrencyLimiter.reset(arn);
             }
@@ -1128,6 +1136,7 @@ public class LambdaService implements ResourceProvider {
             reclaimLegacyCodeDirectoryIfUnused(functionName);
             versionCounters.remove(versionCounterKey(region, fn));
             versionCounters.remove(legacyVersionCounterKey(region, functionName));
+            failedReactiveSyncs.remove(arn);
             if (aliasStore != null) {
                 for (LambdaAlias alias : aliasStore.list(region, functionName)) {
                     aliasStore.delete(region, functionName, alias.getName());
@@ -1430,7 +1439,7 @@ public class LambdaService implements ResourceProvider {
             }
             eventSourceArn = null;
 
-            enforceRegion(region, fnRef);
+            LambdaArnUtils.enforceRegion(region, fnRef);
             resolvedRegion = region;
 
             Object rawSource = request.get("SelfManagedEventSource");
@@ -2243,6 +2252,8 @@ public class LambdaService implements ResourceProvider {
         esmStore.delete(uuid);
         if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":dynamodb:")) {
             dynamodbStreamsPoller.mappingDeleted(uuid);
+        } else if (esm.getEventSourceArn() != null && esm.getEventSourceArn().contains(":kinesis:")) {
+            kinesisPoller.mappingDeleted(uuid);
         }
         LOG.infov("Deleted ESM {0}", uuid);
     }
@@ -2253,7 +2264,7 @@ public class LambdaService implements ResourceProvider {
      * Locked get-increment-put: StorageBackedMap has no atomic merge, so the
      * sequence must not interleave or concurrent PublishVersion calls could issue
      * duplicate version numbers. The lock is per counter key (same pattern as
-     * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
+     * the per-function concurrency lock) so publishes of unrelated functions do not
      * serialize on the instance monitor for the storage round-trip.
      */
     /**
@@ -2289,11 +2300,11 @@ public class LambdaService implements ResourceProvider {
     }
 
     /** The highest-numbered published version of a function, if any. */
-    private java.util.Optional<LambdaFunction> newestVersion(String region, String functionName) {
+    private Optional<LambdaFunction> newestVersion(String region, String functionName) {
         return functionStore.listVersions(region, functionName).stream()
                 .filter(v -> v.getVersion() != null && !"$LATEST".equals(v.getVersion()))
                 .filter(v -> v.getVersion().chars().allMatch(Character::isDigit))
-                .max(java.util.Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
+                .max(Comparator.comparingLong(v -> Long.parseLong(v.getVersion())));
     }
 
     /** Publishes an owned code snapshot; a failed copy must not reference mutable {@code $LATEST}. */
@@ -2417,7 +2428,7 @@ public class LambdaService implements ResourceProvider {
             snapshot.setEnvironment(fn.getEnvironment());
             snapshot.setVpcConfig(fn.getVpcConfig() == null
                     ? null
-                    : new java.util.HashMap<>(fn.getVpcConfig()));
+                    : new HashMap<>(fn.getVpcConfig()));
             snapshot.setVpcId(fn.getVpcId());
             snapshot.setSnapStartApplyOn(fn.getSnapStartApplyOn());
             snapshot.setLogFormat(fn.getLogFormat());
@@ -2993,7 +3004,10 @@ public class LambdaService implements ResourceProvider {
                     "Version must be a published version number, got: " + version, 400);
         }
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
-        functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            warmPool.deleteProvisionedQualifier(fn, version);
+            functionStore.deleteVersion(region, fn.getFunctionName(), version);
+        }
         LOG.infov("Deleted version {0} of function {1}", version, fn.getFunctionName());
     }
 
@@ -3001,7 +3015,7 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
@@ -3043,17 +3057,21 @@ public class LambdaService implements ResourceProvider {
 
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
-                                   java.util.Map<String, Double> routingConfig) {
+                                   Map<String, Double> routingConfig) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
-        LambdaAlias alias = getAlias(region, functionName, aliasName);
-        if (functionVersion != null) alias.setFunctionVersion(functionVersion);
-        if (description != null) alias.setDescription(description);
-        if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
-        alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        alias.setRevisionId(UUID.randomUUID().toString());
-        if (aliasStore != null) aliasStore.save(region, alias);
-        return alias;
+        LambdaFunction fn = getFunction(region, functionName);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            LambdaAlias alias = getAlias(region, functionName, aliasName);
+            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
+            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
+            if (description != null) alias.setDescription(description);
+            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+            alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            alias.setRevisionId(UUID.randomUUID().toString());
+            if (aliasStore != null) aliasStore.save(region, alias);
+            return alias;
+        }
     }
 
     /** FunctionUrlQualifier in botocore: 1-128 characters, not all digits. */
@@ -3079,8 +3097,12 @@ public class LambdaService implements ResourceProvider {
     public void deleteAlias(String region, String functionName, String aliasName) {
         validatePattern(aliasName, "name", ALIAS_NAME_PATTERN);
         String canonical = canonicalFunctionName(region, functionName);
-        getAlias(region, canonical, aliasName); // verify it exists
-        if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
+        LambdaFunction fn = getFunction(region, canonical);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            getAlias(region, canonical, aliasName); // verify it exists
+            warmPool.deleteProvisionedQualifier(fn, aliasName);
+            if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
+        }
         LOG.infov("Deleted alias {0} for function {1}", aliasName, canonical);
     }
 
@@ -3283,6 +3305,7 @@ public class LambdaService implements ResourceProvider {
         // concurrent Puts cannot leave the limiter and persisted state out of
         // sync, regardless of which call acquires the reservedLock first.
         synchronized (lockForConcurrencyOp(arn)) {
+            warmPool.validateProvisionedReservation(fn, reservedConcurrentExecutions);
             Integer previousReserved = null;
             boolean limiterUpdated = false;
             if (concurrencyLimiter != null) {
@@ -3359,7 +3382,7 @@ public class LambdaService implements ResourceProvider {
 
     /** Package-private (not private) so tests can hold this lock to prove a critical section waits for it. */
     Object lockForConcurrencyOp(String functionArn) {
-        return concurrencyOpLocks.computeIfAbsent(functionArn, k -> new Object());
+        return functionStore.lockForConcurrencyOp(functionArn);
     }
 
     public LambdaFunction getFunctionByUrlId(String urlId) {
@@ -3410,18 +3433,18 @@ public class LambdaService implements ResourceProvider {
 
     /** Stable, account-scoped S3 key for a published layer version's archive. */
     public static String layerObjectKey(String accountId, String layerName, long version) {
-        var account = accountId != null ? accountId : "000000000000";
+        String account = accountId != null ? accountId : "000000000000";
         return "layers/" + account + "/" + layerName + "/" + version;
     }
 
     /** Percent-encodes each path segment of a bucket path or object key for use in a URL. */
     public static String encodeObjectPath(String path) {
-        var encoded = new StringBuilder();
-        for (var segment : path.split("/", -1)) {
+        StringBuilder encoded = new StringBuilder();
+        for (String segment : path.split("/", -1)) {
             if (!encoded.isEmpty()) {
                 encoded.append('/');
             }
-            encoded.append(java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+            encoded.append(URLEncoder.encode(segment, StandardCharsets.UTF_8)
                     .replace("+", "%20"));
         }
         return encoded.toString();
@@ -3510,9 +3533,8 @@ public class LambdaService implements ResourceProvider {
         String bucket = tasksBucketName(region);
         try {
             try {
-                s3Service.createBucket(bucket, region);
+                s3Service.createInternalBucket(bucket, region);
             } catch (AwsException e) {
-                // createBucket is idempotent only in us-east-1; elsewhere it 409s if it exists.
                 if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())) {
                     throw e;
                 }
@@ -3779,13 +3801,13 @@ public class LambdaService implements ResourceProvider {
             String resourceArn = policyResourceArn(fn, ref.qualifier());
             List<Map<String, Object>> statements = fn.getPolicies().stream()
                     .filter(statement -> scopedTo(statement, resourceArn))
-                    .<Map<String, Object>>map(java.util.LinkedHashMap::new)
+                    .<Map<String, Object>>map(LinkedHashMap::new)
                     .toList();
             if (statements.isEmpty()) {
                 throw new AwsException("ResourceNotFoundException",
                         "The resource you requested does not exist.", 404);
             }
-            Map<String, Object> policy = new java.util.LinkedHashMap<>();
+            Map<String, Object> policy = new LinkedHashMap<>();
             policy.put("Version", "2012-10-17");
             policy.put("Id", "default");
             policy.put("Statement", statements);
@@ -4139,6 +4161,9 @@ public class LambdaService implements ResourceProvider {
      * functions linked to the updated object.
      */
     public void onS3ObjectUpdated(@Observes S3ObjectUpdatedEvent event) {
+        if (!reactiveS3SyncEnabled()) {
+            return;
+        }
         LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
         // For simplicity, we scan all functions in the default region
         // Most local dev setups use a single region.
@@ -4147,32 +4172,118 @@ public class LambdaService implements ResourceProvider {
         // other account would silently never hot-reload from S3.
         String region = regionResolver.getDefaultRegion();
         List<LambdaFunction> functions = functionStore.listAllAccounts(region);
+        boolean async = reactiveS3SyncAsync();
         for (LambdaFunction fn : functions) {
             if (!event.bucketName().equals(fn.getS3Bucket()) || !event.key().equals(fn.getS3Key())) {
                 continue;
             }
-            synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
-                if (fn.isHotReload()) {
-                    continue;
-                }
-                if (event.bucketName().equals(fn.getS3Bucket()) && event.key().equals(fn.getS3Key())) {
-                    LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
-                            fn.getFunctionName(), event.bucketName(), event.key());
-                    try {
-                        try (DeploymentPackage zip = readS3Package(fn, event.bucketName(), event.key(), region)) {
-                            extractZipCodePackage(fn, zip, region);
-                        }
-                        fn.setLastModified(Instant.now().toEpochMilli());
-                        fn.setRevisionId(UUID.randomUUID().toString());
-                        functionStore.saveForAccount(ownerAccount(fn), region, fn);
-
-                        // Push to warm workers
-                        warmPool.pushCodeUpdate(fn);
-                    } catch (Exception e) {
-                        LOG.warnv("Failed reactive sync for function {0}: {1}", fn.getFunctionName(), e.getMessage());
-                    }
-                }
+            if (!async) {
+                syncFromS3(fn, event.bucketName(), event.key(), region);
+                continue;
+            }
+            // The newest upload replaces any source still waiting, and a queued sync reads its object
+            // when it starts, so one queued sync per function covers every upload before it. The
+            // uploader's account goes with it: S3 resolves the bucket in the caller's account, and
+            // the background thread has no request of its own.
+            String functionArn = fn.getFunctionArn();
+            PendingReactiveSync source = new PendingReactiveSync(regionResolver.getAccountId(),
+                    event.bucketName(), event.key());
+            if (pendingReactiveSyncs.put(functionArn, source) == null) {
+                String ownerAccountId = ownerAccount(fn);
+                String functionName = fn.getFunctionName();
+                REACTIVE_SYNC_THREADS.execute(() -> syncQueued(ownerAccountId, region, functionName, functionArn));
             }
         }
+    }
+
+    /** Re-reads the function, which may have been redeployed or deleted while the sync was queued. */
+    private void syncQueued(String ownerAccountId, String region, String functionName, String functionArn) {
+        // Marked running before the pending source is taken, so the function never reports neither.
+        runningReactiveSyncs.merge(functionArn, 1, Integer::sum);
+        try {
+            synchronized (lockForConcurrencyOp(functionArn)) {
+                PendingReactiveSync source = pendingReactiveSyncs.remove(functionArn);
+                if (source == null) {
+                    return;
+                }
+                RequestScopes.runAs(source.accountId(), () ->
+                        functionStore.getForAccount(ownerAccountId, region, functionName)
+                                .ifPresent(fn -> deployFromS3(fn, source.bucketName(), source.key(), region)));
+            }
+        } finally {
+            runningReactiveSyncs.computeIfPresent(functionArn, (arn, count) -> count == 1 ? null : count - 1);
+        }
+    }
+
+    private void syncFromS3(LambdaFunction fn, String bucketName, String key, String region) {
+        String functionArn = fn.getFunctionArn();
+        runningReactiveSyncs.merge(functionArn, 1, Integer::sum);
+        try {
+            synchronized (lockForConcurrencyOp(functionArn)) {
+                deployFromS3(fn, bucketName, key, region);
+            }
+        } finally {
+            runningReactiveSyncs.computeIfPresent(functionArn, (arn, count) -> count == 1 ? null : count - 1);
+        }
+    }
+
+    /** Callers hold the function's lock. */
+    private void deployFromS3(LambdaFunction fn, String bucketName, String key, String region) {
+        if (fn.isHotReload()) {
+            return;
+        }
+        if (bucketName.equals(fn.getS3Bucket()) && key.equals(fn.getS3Key())) {
+            LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
+                    fn.getFunctionName(), bucketName, key);
+            try {
+                try (DeploymentPackage zip = readS3Package(fn, bucketName, key, region)) {
+                    extractZipCodePackage(fn, zip, region);
+                }
+                fn.setLastModified(Instant.now().toEpochMilli());
+                fn.setRevisionId(UUID.randomUUID().toString());
+                functionStore.saveForAccount(ownerAccount(fn), region, fn);
+
+                // Push to warm workers
+                warmPool.pushCodeUpdate(fn);
+                failedReactiveSyncs.remove(fn.getFunctionArn());
+            } catch (Exception e) {
+                LOG.warnv("Failed reactive sync for function {0}: {1}", fn.getFunctionName(), e.getMessage());
+                failedReactiveSyncs.put(fn.getFunctionArn(), "Reactive S3 sync from s3://" + bucketName
+                        + "/" + key + " failed: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * The function's LastUpdateStatus, which only a reactive S3 sync moves off Successful:
+     * InProgress from the upload until the re-deploy of {@code $LATEST} finishes, Failed when the
+     * last one could not. Held in memory, so a restart cannot leave an update reported as running.
+     */
+    public String lastUpdateStatus(LambdaFunction fn) {
+        if (!"$LATEST".equals(fn.getVersion())) {
+            return "Successful";
+        }
+        String functionArn = fn.getFunctionArn();
+        // Pending first: a sync marks itself running before it takes the pending source.
+        if (pendingReactiveSyncs.containsKey(functionArn) || runningReactiveSyncs.containsKey(functionArn)) {
+            return "InProgress";
+        }
+        return failedReactiveSyncs.containsKey(functionArn) ? "Failed" : "Successful";
+    }
+
+    /** Why the last reactive S3 sync of {@code $LATEST} failed, or null when it did not. */
+    public String lastUpdateStatusReason(LambdaFunction fn) {
+        return "Failed".equals(lastUpdateStatus(fn)) ? failedReactiveSyncs.get(fn.getFunctionArn()) : null;
+    }
+
+    private boolean reactiveS3SyncEnabled() {
+        return config == null || config.services().lambda().reactiveS3Sync().enabled();
+    }
+
+    private boolean reactiveS3SyncAsync() {
+        return config != null && config.services().lambda().reactiveS3Sync().async();
+    }
+
+    private record PendingReactiveSync(String accountId, String bucketName, String key) {
     }
 }

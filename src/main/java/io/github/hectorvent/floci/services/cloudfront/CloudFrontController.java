@@ -66,7 +66,7 @@ public class CloudFrontController {
         try {
             DistributionConfig config = parseDistributionConfig(body);
             Map<String, String> tags = new LinkedHashMap<>();
-            if (withTags != null) {
+            if (withTags != null || "DistributionConfigWithTags".equals(XmlParser.rootElementName(body))) {
                 tags = parseTags(body);
             }
             Distribution dist = new Distribution();
@@ -351,7 +351,7 @@ public class CloudFrontController {
                                       @QueryParam("Type") String type) {
         try {
             Page<CachePolicy> page = page(
-                    service.listCachePolicies(marker, paginationFetchLimit(maxItems)),
+                    service.listCachePolicies(marker, paginationFetchLimit(maxItems), type),
                     maxItems, CachePolicy::getId);
 
             XmlBuilder xml = new XmlBuilder()
@@ -362,7 +362,8 @@ public class CloudFrontController {
                     .start("Items");
             for (CachePolicy p : page.items()) {
                 xml.start("CachePolicySummary")
-                        .elem("Type", "custom")
+                        .elem("Type", CloudFrontService.isManagedCachePolicy(p.getId())
+                                ? "managed" : "custom")
                         .raw(xmlCachePolicyResponse(p))
                         .end("CachePolicySummary");
             }
@@ -893,7 +894,7 @@ public class CloudFrontController {
             }
             CloudFrontFunction fn = parseFunction(body);
             fn = service.updateFunction(name, ifMatch, fn);
-            return Response.ok(xmlFunctionResponse(fn), XML).header("ETag", fn.getEtag()).build();
+            return Response.ok(xmlFunctionResponse(fn), XML).header("ETtag", fn.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -2942,18 +2943,6 @@ public class CloudFrontController {
                         }
                         case "Origin" -> {
                             if (inOrigin && current != null) {
-                                Integer completionTimeout = current.getResponseCompletionTimeout();
-                                int effectiveReadTimeout = originReadTimeoutSeconds != null
-                                        ? originReadTimeoutSeconds
-                                        : CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
-                                if (completionTimeout != null && completionTimeout > 0
-                                        && completionTimeout < effectiveReadTimeout) {
-                                    throw new AwsException(
-                                            "InvalidArgument",
-                                            "The parameter ResponseCompletionTimeout must be greater than or "
-                                                    + "equal to OriginReadTimeout.",
-                                            400);
-                                }
                                 result.add(current);
                             }
                             inOrigin = false;

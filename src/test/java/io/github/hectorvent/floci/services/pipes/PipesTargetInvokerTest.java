@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -18,6 +20,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -107,7 +111,7 @@ class PipesTargetInvokerTest {
     void invoke_keepsTheQualifierOfTheTargetFunctionArn() {
         Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn:PROD", null);
         when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any(InvocationType.class)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
 
         invoker.invoke(pipe, "{}", "us-east-1");
 
@@ -215,6 +219,90 @@ class PipesTargetInvokerTest {
         assertEquals("{\"count\": 42}", result);
     }
 
+    @Test
+    void inputTemplate_quotedStringPlaceholderIsNotQuotedTwice() throws Exception {
+        String result = invoker.applyInputTemplate("{\"messageId\": \"<$.messageId>\"}",
+                "{\"messageId\": \"abc-123\"}");
+
+        assertEquals("abc-123", MAPPER.readTree(result).path("messageId").asText());
+    }
+
+    @Test
+    void inputTemplate_missingPathBecomesEmptyJsonString() throws Exception {
+        String result = invoker.applyInputTemplate("{\"taskType\": <$.body.missing>}",
+                "{\"body\": \"{\\\"taskType\\\":\\\"x\\\"}\"}");
+
+        assertEquals("", MAPPER.readTree(result).path("taskType").asText());
+    }
+
+    @Test
+    void inputTemplate_decodesJsonSqsBodyAtItsRoot() throws Exception {
+        String result = invoker.applyInputTemplate("{\"body\": <$.body>}",
+                "{\"body\": \"{\\\"taskType\\\":\\\"x\\\"}\"}");
+
+        JsonNode body = MAPPER.readTree(result).path("body");
+        assertTrue(body.isObject());
+        assertEquals("x", body.path("taskType").asText());
+    }
+
+    @Test
+    void inputTemplate_ingestionTimeIsAnIsoInstant() throws Exception {
+        Instant before = Instant.now().minusSeconds(1);
+        String result = invoker.applyInputTemplate("{\"t\": <aws.pipes.event.ingestion-time>}", "{}");
+        Instant after = Instant.now().plusSeconds(1);
+
+        Instant ingestionTime = Instant.parse(MAPPER.readTree(result).path("t").asText());
+        assertFalse(ingestionTime.isBefore(before));
+        assertFalse(ingestionTime.isAfter(after));
+    }
+
+    @Test
+    void extractJsonPath_messageAttributeJsonLookingStringRemainsString() throws Exception {
+        String result = invoker.extractJsonPath("$.messageAttributes.traceId.stringValue",
+                "{\"messageAttributes\":{\"traceId\":{\"stringValue\":\"{\\\"nested\\\":true}\"}}}");
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"nested\":true}", value.asText());
+    }
+
+    @Test
+    void extractJsonPath_nestedBodyValueRemainsString() throws Exception {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("Message", "{\"role\":\"admin\"}");
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("body", body.toString());
+        String result = invoker.extractJsonPath("$.body.Message",
+                payload.toString());
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"role\":\"admin\"}", value.asText());
+    }
+
+    @Test
+    void extractJsonPath_doesNotDecodeNestedBodyValueTwice() throws Exception {
+        ObjectNode body = MAPPER.createObjectNode();
+        body.put("key", "{\"id\":1}");
+        ObjectNode payload = MAPPER.createObjectNode();
+        payload.put("body", body.toString());
+        String result = invoker.extractJsonPath("$.body.key", payload.toString());
+
+        JsonNode value = MAPPER.readTree(result);
+        assertTrue(value.isTextual());
+        assertEquals("{\"id\":1}", value.asText());
+    }
+
+    @Test
+    void inputTemplate_reusesIngestionTimeForRepeatedPlaceholders() throws Exception {
+        String result = invoker.applyInputTemplate(
+                "{\"first\": <aws.pipes.event.ingestion-time>, "
+                        + "\"second\": <aws.pipes.event.ingestion-time>}", "{}");
+
+        JsonNode document = MAPPER.readTree(result);
+        assertEquals(document.path("first").asText(), document.path("second").asText());
+    }
+
     // ──────────────────────────── nested JSON string resolution ────────────────────────────
 
     @Test
@@ -273,9 +361,9 @@ class PipesTargetInvokerTest {
     void applyEnrichment_invokesLambdaAndReturnsResponse() {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
-        byte[] resp = "{\"systemId\":\"S1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] resp = "{\"systemId\":\"S1\"}".getBytes(StandardCharsets.UTF_8);
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, resp, null, "req"));
+                .thenReturn(new InvokeResult(200, null, resp, null, "req"));
 
         String out = invoker.applyEnrichment(pipe, "[{\"body\":\"{}\"}]", region);
 
@@ -283,7 +371,7 @@ class PipesTargetInvokerTest {
         ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invoke(eq(region), eq("enrich-fn"), payloadCaptor.capture(), eq(InvocationType.RequestResponse));
         assertEquals("[{\"body\":\"{}\"}]",
-                new String(payloadCaptor.getValue(), java.nio.charset.StandardCharsets.UTF_8));
+                new String(payloadCaptor.getValue(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -291,7 +379,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn:PROD");
         when(lambdaService.invoke(eq(region), eq("enrich-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
 
         invoker.applyEnrichment(pipe, "[]", region);
 
@@ -311,7 +399,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, new byte[0], null, "req"));
+                .thenReturn(new InvokeResult(200, null, new byte[0], null, "req"));
         assertNull(invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -322,8 +410,8 @@ class PipesTargetInvokerTest {
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         for (String body : new String[]{"{}", "[]", "  { }  ", "[ ]"}) {
             when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                    .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
-                            200, null, body.getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+                    .thenReturn(new InvokeResult(
+                            200, null, body.getBytes(StandardCharsets.UTF_8), null, "req"));
             assertNull(invoker.applyEnrichment(pipe, "[]", region),
                     "enrichment response " + body + " should skip the target");
         }
@@ -335,8 +423,8 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
-                        200, null, "[{}]".getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+                .thenReturn(new InvokeResult(
+                        200, null, "[{}]".getBytes(StandardCharsets.UTF_8), null, "req"));
         assertEquals("[{}]", invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -355,7 +443,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
         assertThrows(RuntimeException.class, () -> invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -366,7 +454,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = createPipe("arn:aws:lambda:" + region + ":000000000000:function:my-fn", null);
         when(lambdaService.invoke(eq(region), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
         assertThrows(RuntimeException.class, () -> invoker.invoke(pipe, "{}", region));
     }
 

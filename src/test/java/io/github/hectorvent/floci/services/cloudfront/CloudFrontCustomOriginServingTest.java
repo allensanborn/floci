@@ -76,6 +76,9 @@ class CloudFrontCustomOriginServingTest {
     /** The AWS managed CachingDisabled cache policy, which forwards no viewer values. */
     private static final String CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
 
+    /** The AWS managed CachingOptimized cache policy: Accept-Encoding only, no cookies or query. */
+    private static final String CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+
     @Inject
     CloudFrontService cloudFrontService;
 
@@ -397,6 +400,50 @@ class CloudFrontCustomOriginServingTest {
     }
 
     @Test
+    void endsTheViewerResponseWhenTheOriginDoesNotCompleteItInTime() throws Exception {
+        // The origin answers with its headers, then trickles a body in for longer than the
+        // completion timeout allows. The viewer has its status line by then, so the response ends
+        // with the body the origin managed to send.
+        int bodyBytes = 100;
+        originServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        originServer.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        originServer.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(200, bodyBytes);
+            try (OutputStream out = exchange.getResponseBody()) {
+                for (int sent = 0; sent < bodyBytes; sent++) {
+                    out.write('x');
+                    out.flush();
+                    Thread.sleep(100);
+                }
+            } catch (IOException | InterruptedException expected) {
+                // The origin connection ended, which is what the completion timeout does.
+            } finally {
+                exchange.close();
+            }
+        });
+        originServer.start();
+        Distribution created = createDistribution(
+                customOriginDistribution(allMethodsBehavior(), null, 2, 1, 2));
+
+        long started = System.nanoTime();
+        byte[] response = readViewerResponse(created.getDomainName(), "/page");
+        long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+
+        assertTrue(new String(response, StandardCharsets.ISO_8859_1).startsWith("HTTP/1.1 200"),
+                "expected the origin's status line, got " + new String(response, StandardCharsets.ISO_8859_1));
+        int sent = 0;
+        for (byte value : response) {
+            if (value == 'x') {
+                sent++;
+            }
+        }
+        assertTrue(sent < bodyBytes,
+                "expected the response to end before the whole body, got " + sent + " of " + bodyBytes + " bytes");
+        assertTrue(elapsedMillis < 5000,
+                "expected the 2 s completion timeout to end the response, took " + elapsedMillis + " ms");
+    }
+
+    @Test
     void streamsALargeOriginResponseWithItsLength() throws Exception {
         byte[] video = randomBytes(3 * 1024 * 1024 + 1);
         startServingOrigin(video, true);
@@ -549,6 +596,28 @@ class CloudFrontCustomOriginServingTest {
         assertArrayEquals(Arrays.copyOfRange(video, 100, 200), response.asByteArray());
         assertEquals("bytes=100-199", received.get().header("Range"));
         assertEquals("\"v1\"", received.get().header("If-Range"));
+    }
+
+    @Test
+    void cachingOptimizedForwardsOnlyNormalizedAcceptEncoding() throws Exception {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRecordingOrigin(received, new AtomicInteger());
+        Distribution created = createDistribution(
+                customOriginDistribution(policyBehavior(CACHING_OPTIMIZED, null)));
+
+        given()
+            .header("Host", created.getDomainName())
+            .header("Accept-Encoding", "gzip, deflate, br")
+            .header("Cookie", "session=abc")
+            .queryParam("color", "blue")
+        .when()
+            .get("/asset.js")
+        .then()
+            .statusCode(200);
+
+        assertEquals("br,gzip", received.get().header("Accept-Encoding"));
+        assertNull(received.get().header("Cookie"));
+        assertNull(received.get().query());
     }
 
     @Test
@@ -1128,6 +1197,14 @@ class CloudFrontCustomOriginServingTest {
                                                   List<Map<String, String>> customHeaders,
                                                   Integer readTimeoutSeconds,
                                                   Integer connectionAttempts) {
+        return customOriginDistribution(behavior, customHeaders, readTimeoutSeconds, connectionAttempts, null);
+    }
+
+    private Distribution customOriginDistribution(DefaultCacheBehavior behavior,
+                                                  List<Map<String, String>> customHeaders,
+                                                  Integer readTimeoutSeconds,
+                                                  Integer connectionAttempts,
+                                                  Integer completionTimeoutSeconds) {
         Map<String, Object> originConfig = customOriginConfig(originServer.getAddress().getPort());
         if (readTimeoutSeconds != null) {
             originConfig.put("OriginReadTimeout", readTimeoutSeconds);
@@ -1140,6 +1217,9 @@ class CloudFrontCustomOriginServingTest {
         if (connectionAttempts != null) {
             customOrigin.setConnectionAttempts(connectionAttempts);
         }
+        if (completionTimeoutSeconds != null) {
+            customOrigin.setResponseCompletionTimeout(completionTimeoutSeconds);
+        }
         DistributionConfig config = new DistributionConfig();
         config.setEnabled(true);
         config.setOrigins(List.of(customOrigin));
@@ -1147,6 +1227,20 @@ class CloudFrontCustomOriginServingTest {
         Distribution distribution = new Distribution();
         distribution.setConfig(config);
         return distribution;
+    }
+
+    /**
+     * The viewer's whole response, read from a raw socket, since a response the origin ends
+     * midway is not one RestAssured can read.
+     */
+    private static byte[] readViewerResponse(String host, String path) throws Exception {
+        try (Socket viewer = new Socket("127.0.0.1", RestAssured.port)) {
+            viewer.setSoTimeout(15000);
+            viewer.getOutputStream().write(("GET " + path + " HTTP/1.1\r\nHost: " + host
+                    + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            viewer.getOutputStream().flush();
+            return viewer.getInputStream().readAllBytes();
+        }
     }
 
     private static List<Map<String, String>> originVerifyHeader() {

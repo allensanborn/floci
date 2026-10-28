@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -257,6 +258,10 @@ class RedshiftServerlessIntegrationTest {
     @Test
     void snapshotLifecycleIsVisibleThroughSeparateReads() {
         doAnswer(invocation -> {
+            invocation.getArgument(6, Runnable.class).run();
+            return null;
+        }).when(runtime).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
+        doAnswer(invocation -> {
             Files.writeString(invocation.getArgument(5, Path.class), "-- dump");
             return null;
         }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
@@ -330,10 +335,11 @@ class RedshiftServerlessIntegrationTest {
                 .body("snapshots", hasSize(0));
 
         call("RestoreFromSnapshot", "{\"namespaceName\":\"snap-life-ns\",\"workgroupName\":\"snap-life-wg\","
-                + "\"snapshotArn\":\"" + snapshotArn + "\"}")
+                + "\"snapshotArn\":\"" + snapshotArn + "\",\"manageAdminPassword\":true}")
                 .statusCode(200)
                 .body("snapshotName", equalTo("snap-life"))
                 .body("namespace.namespaceName", equalTo("snap-life-ns"))
+                .body("namespace.adminPasswordSecretArn", notNullValue())
                 .body("namespace.status", equalTo("AVAILABLE"))
                 .body("ownerAccount", matchesPattern("\\d{12}"));
         call("RestoreFromSnapshot", "{\"workgroupName\":\"snap-life-wg\",\"snapshotName\":\"snap-life\"}")
@@ -651,7 +657,7 @@ class RedshiftServerlessIntegrationTest {
                 .body("resourcePolicy.policy", equalTo(policyJson));
     }
 
-    private static io.restassured.response.ValidatableResponse callAs(String accountId, String action, String body) {
+    private static ValidatableResponse callAs(String accountId, String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
@@ -779,7 +785,7 @@ class RedshiftServerlessIntegrationTest {
         call("DeleteScheduledAction", "{\"scheduledActionName\":\"admin-sched\"}").statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse call(String action, String body) {
+    private static ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .header("Authorization", AUTH)

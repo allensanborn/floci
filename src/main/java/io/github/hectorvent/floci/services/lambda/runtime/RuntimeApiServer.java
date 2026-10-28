@@ -15,6 +15,7 @@ import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -24,6 +25,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -111,6 +113,10 @@ public class RuntimeApiServer {
     // Guards stopped, pendingQueue, waitingContexts, extensions, closeFuture, and every
     // RegisteredExtension's pendingEvents/waitingContext. See class doc for the discipline.
     private final Object lock = new Object();
+    private final CompletableFuture<Void> initialization = new CompletableFuture<>();
+    private boolean runtimeNextReceived;
+    // When the launcher started this runtime's container, in epoch millis; 0 until then.
+    private volatile long containerStartedAtMs;
 
     // Invocations queued before a /next poller arrived. Guarded by lock.
     private final ArrayDeque<PendingInvocation> pendingQueue = new ArrayDeque<>();
@@ -290,6 +296,52 @@ public class RuntimeApiServer {
         return faulted;
     }
 
+    /** Waits for runtime and extension initialization, without enqueuing an invocation. */
+    public void awaitInitialization(long timeoutMs) throws Exception {
+        initialization.get(timeoutMs, TimeUnit.MILLISECONDS);
+        synchronized (lock) {
+            if (stopped || faulted) {
+                throw new IllegalStateException("Lambda execution environment is no longer ready");
+            }
+        }
+    }
+
+    public boolean isInitialized() {
+        synchronized (lock) {
+            return initialization.isDone() && !initialization.isCompletedExceptionally() && !stopped && !faulted;
+        }
+    }
+
+    /** Records that the container running this runtime has started, which opens its Init phase. */
+    public void markContainerStarted() {
+        containerStartedAtMs = System.currentTimeMillis();
+    }
+
+    /** Epoch millis at which the container started, or 0 when no launcher has recorded it. */
+    public long getContainerStartedAtMs() {
+        return containerStartedAtMs;
+    }
+
+    /**
+     * Whether the runtime has polled {@code /next} at least once, which ends its Init phase.
+     * Unlike {@link #isInitialized()} this does not wait for extensions.
+     */
+    public boolean hasRuntimePolled() {
+        synchronized (lock) {
+            return runtimeNextReceived;
+        }
+    }
+
+    private void completeInitializationIfReady() {
+        synchronized (lock) {
+            CountDownLatch latch = extensionsReady;
+            if (runtimeNextReceived && !stopped && !faulted && latch != null && latch.getCount() == 0
+                    && extensions.values().stream().allMatch(RegisteredExtension::hasReceivedFirstNext)) {
+                initialization.complete(null);
+            }
+        }
+    }
+
     /**
      * Declares how many extension binaries were launched for this container, arming the
      * init-readiness barrier that {@link #awaitExtensionsReady(long)} waits on.
@@ -299,7 +351,10 @@ public class RuntimeApiServer {
      * no {@code /opt/extensions} directory) leaves the barrier permanently open.
      */
     public void expectExtensions(int count) {
-        extensionsReady = new CountDownLatch(Math.max(0, count));
+        synchronized (lock) {
+            extensionsReady = new CountDownLatch(Math.max(0, count));
+            completeInitializationIfReady();
+        }
     }
 
     /**
@@ -316,7 +371,7 @@ public class RuntimeApiServer {
         if (latch == null) {
             return true;
         }
-        return latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        return latch.await(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -363,6 +418,8 @@ public class RuntimeApiServer {
                     // AWS Lambda tears an environment down.
                     waitingContexts.add(ctx);
                 } else {
+                    runtimeNextReceived = true;
+                    completeInitializationIfReady();
                     toDispatch = pendingQueue.poll();
                     if (toDispatch == null) {
                         waitingContexts.add(ctx);
@@ -525,6 +582,7 @@ public class RuntimeApiServer {
             if (readyLatch != null) {
                 readyLatch.countDown();
             }
+            completeInitializationIfReady();
             if (unknownExtension) {
                 ctx.response().setStatusCode(403)
                         .putHeader("Content-Type", "application/json")
@@ -606,6 +664,7 @@ public class RuntimeApiServer {
                 return;
             }
             stopped = true;
+            initialization.completeExceptionally(new IllegalStateException("Lambda execution environment stopped"));
             extensionWritesFlushed = writesFuture;
 
             ExtensionEvent shutdownEvent = ExtensionEvent.shutdown(System.currentTimeMillis() + 2000, "SPINDOWN");
@@ -911,6 +970,7 @@ public class RuntimeApiServer {
         List<PendingInvocation> stranded;
         synchronized (lock) {
             faulted = true;
+            initialization.completeExceptionally(new IllegalStateException("Lambda runtime initialization failed"));
             // Retained for a possible later enqueue(): the invocation that triggered this cold
             // start may not exist yet (see fatalRuntimeErrorPayload's doc), in which case
             // `stranded` below is empty and this is the only place the real error survives.
@@ -1037,6 +1097,7 @@ public class RuntimeApiServer {
                 return;
             }
             faulted = true;
+            initialization.completeExceptionally(new IllegalStateException("Lambda runtime exited: " + exitCode));
             // Retained for a possible later enqueue(): the invocation that would have hit this
             // container may not exist yet (see fatalRuntimeErrorPayload's doc), so this generic,
             // requestId-free payload is built here rather than only per-stranded-invocation below.
@@ -1065,7 +1126,7 @@ public class RuntimeApiServer {
                 .put("errorType", "Runtime.ExitError")
                 .put("errorMessage", message)
                 .encode()
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {
@@ -1105,6 +1166,7 @@ public class RuntimeApiServer {
                 // Set under the lock alongside the unregistration so both land as one atomic
                 // change.
                 faulted = true;
+                initialization.completeExceptionally(new IllegalStateException("Lambda extension initialization failed"));
 
                 // Anything already queued or parked would otherwise wait forever, since the guards
                 // in enqueue()/NEXT_PATH now refuse to move work through a condemned environment.

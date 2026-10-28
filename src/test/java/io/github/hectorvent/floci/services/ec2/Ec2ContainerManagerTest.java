@@ -12,7 +12,9 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.PingCmd;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
@@ -37,12 +39,14 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -51,6 +55,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,6 +74,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -99,12 +105,47 @@ import static org.mockito.Mockito.withSettings;
 
 class Ec2ContainerManagerTest {
 
+    @Test
+    void terminationRetainsFirewallIdentityAfterInterfacesAreReleased() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        SecurityGroupFirewallManager firewall = mock(SecurityGroupFirewallManager.class);
+        when(firewall.enabled()).thenReturn(true);
+        Ec2ContainerManager manager = new Ec2ContainerManager(
+                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class),
+                mock(DockerHostResolver.class), docker, mock(PortAllocator.class), mock(EmulatorConfig.class),
+                mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class), mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class), firewall);
+        Instance instance = instance("i-firewall-teardown");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        InstanceNetworkInterface eni = new InstanceNetworkInterface();
+        eni.setNetworkInterfaceId("eni-firewall-teardown");
+        instance.setNetworkInterfaces(new ArrayList<>(List.of(eni)));
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(docker.removeContainerCmd(TEST_CONTAINER_ID)).thenReturn(remove);
+        doAnswer(invocation -> {
+            // The service releases ENIs while container teardown is still in progress.
+            instance.getNetworkInterfaces().clear();
+            return null;
+        }).when(remove).exec();
+        CountDownLatch completed = new CountDownLatch(1);
+        try {
+            manager.terminate(instance, completed::countDown);
+            assertTrue(completed.await(5, TimeUnit.SECONDS), "Container teardown must finish");
+            assertEquals("terminated", instance.getState().getName());
+            verify(firewall).unregister("eni-firewall-teardown");
+        } finally {
+            manager.stop();
+        }
+    }
+
     private static final String TEST_USER_DATA_OUTPUT = "test-output";
     private static final String TEST_CONTAINER_ID = "container-1";
     private static final String TEST_LOG_STREAM_NAME = "yyyy/MM/dd/user-data";
     private static final String TEST_SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@floci";
 
-    @org.junit.jupiter.api.AfterEach
+    @AfterEach
     void resetBridgeIpPolling() {
         Ec2ContainerManager.containerBridgeIpAttempts = 30;
         Ec2ContainerManager.containerBridgeIpPollMillis = 500;
@@ -322,6 +363,61 @@ class Ec2ContainerManagerTest {
         verify(metadataServer, never()).reconcileContainerAddresses(anySet(), any());
         assertEquals("172.17.0.4", instance.getImdsSourceIp(),
                 "a transient Docker failure must not drop an existing IMDS source registration");
+    }
+
+    @Test
+    void restartWaitsForPhysicalStopBeforeStartingTheContainer() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        when(lifecycle.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
+        when(inspect.exec()).thenReturn(response);
+        StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+        when(docker.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(stop);
+        ExecutorService executor = mock(ExecutorService.class);
+        List<Runnable> tasks = new ArrayList<>();
+        doAnswer(invocation -> {
+            tasks.add(invocation.getArgument(0));
+            return null;
+        }).when(executor).submit(any(Runnable.class));
+        Ec2ContainerManager manager = new Ec2ContainerManager(mock(ContainerBuilder.class), lifecycle,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), mock(DockerHostResolver.class),
+                docker, mock(PortAllocator.class), mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class), mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class), executor, Duration.ofSeconds(5));
+        Instance instance = new Instance();
+        instance.setInstanceId("i-stop-restart");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        List<String> operations = new ArrayList<>();
+        AtomicBoolean physicalRunning = new AtomicBoolean(true);
+        when(lifecycle.isContainerRunning(TEST_CONTAINER_ID)).thenAnswer(invocation -> physicalRunning.get());
+        doAnswer(invocation -> {
+            operations.add("stop");
+            physicalRunning.set(false);
+            return null;
+        }).when(stop).exec();
+        StartContainerCmd start = docker.startContainerCmd(TEST_CONTAINER_ID);
+        doAnswer(invocation -> {
+            operations.add("start");
+            physicalRunning.set(true);
+            return null;
+        }).when(start).exec();
+
+        manager.stop(instance);
+        manager.start(instance);
+        assertEquals(1, tasks.size(), "start must wait until the physical stop completes");
+        tasks.getFirst().run();
+        assertEquals(List.of("stop"), operations);
+        assertEquals(2, tasks.size());
+        tasks.get(1).run();
+
+        assertEquals(List.of("stop", "start"), operations);
+        assertTrue(physicalRunning.get());
+        assertEquals("running", instance.getState().getName());
     }
 
     @Test
@@ -624,11 +720,11 @@ class Ec2ContainerManagerTest {
     }
 
     private static String gzipBase64(String plain) throws Exception {
-        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(bytes)) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
             gzip.write(plain.getBytes(StandardCharsets.UTF_8));
         }
-        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     private static final String CLOUDINIT_MULTIPART = """
@@ -724,7 +820,7 @@ class Ec2ContainerManagerTest {
     @Test
     void userDataShellScriptsDecodesPlainBase64ShellScript() {
         String script = "#!/bin/bash\necho ready\n";
-        String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
 
         assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(encoded));
     }
@@ -1036,7 +1132,7 @@ class Ec2ContainerManagerTest {
     @Test
     void localAwsEnvironmentProvidesCliCredentialsAndFlociEndpoint() {
         assertEquals(
-                java.util.List.of(
+                List.of(
                         "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169",
                         "AWS_ENDPOINT_URL=http://floci:4566",
                         "AWS_DEFAULT_REGION=us-west-2",

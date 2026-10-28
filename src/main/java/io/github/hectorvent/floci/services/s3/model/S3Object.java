@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -54,8 +55,8 @@ public class S3Object {
     private String dataGeneration;
 
     // Internal-only s3.object.sequencer of the write that stored this instance, assigned under the
-    // bucket lock so concurrent writes to one key get values in the order they were stored.
-    @JsonIgnore
+    // bucket lock so concurrent writes to one key get values in the order they were stored. Unlike
+    // dataGeneration, this is persisted because version promotion needs the order after restart.
     private String eventSequencer;
 
     public S3Object() {
@@ -185,7 +186,7 @@ public class S3Object {
             }
             sb.append("\"");
             return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             return "\"\"";
         }
     }

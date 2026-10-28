@@ -180,7 +180,7 @@ class GlueServiceTest {
         StorageDescriptor sd = new StorageDescriptor();
         Column column = new Column("a", "string");
         column.setParameters(Map.of("trino_type_id", "varchar"));
-        sd.setColumns(java.util.List.of(column));
+        sd.setColumns(List.of(column));
         table.setStorageDescriptor(sd);
         glueService.createTable("db1", table);
 
@@ -334,7 +334,7 @@ class GlueServiceTest {
         Table table = new Table();
         table.setName("plain");
         StorageDescriptor sd = new StorageDescriptor();
-        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        sd.setColumns(List.of(new Column("a", "string")));
         table.setStorageDescriptor(sd);
         glueService.createTable("db1", table);
 
@@ -342,7 +342,7 @@ class GlueServiceTest {
         Table replacement = new Table();
         replacement.setName("plain");
         StorageDescriptor replacementSd = new StorageDescriptor();
-        replacementSd.setColumns(java.util.List.of(new Column("b", "bigint")));
+        replacementSd.setColumns(List.of(new Column("b", "bigint")));
         replacement.setStorageDescriptor(replacementSd);
 
         glueService.updateTable("db1", replacement, null, false);
@@ -415,7 +415,7 @@ class GlueServiceTest {
         table.setViewExpandedText("SELECT 1 AS x");
         table.setParameters(Map.of("presto_view", "true"));
         StorageDescriptor storageDescriptor = new StorageDescriptor();
-        storageDescriptor.setColumns(java.util.List.of(new Column("x", "int")));
+        storageDescriptor.setColumns(List.of(new Column("x", "int")));
         table.setStorageDescriptor(storageDescriptor);
 
         glueService.createTable("db1", table);
@@ -436,7 +436,7 @@ class GlueServiceTest {
         glueService.createTable("db1", table);
 
         Partition partition = new Partition();
-        partition.setValues(java.util.List.of("2026"));
+        partition.setValues(List.of("2026"));
         glueService.createPartition("db1", "plain", partition);
 
         glueService.deleteDatabase("db1");
@@ -1208,7 +1208,7 @@ class GlueServiceTest {
         crawler.setName(name);
         crawler.setRole("arn:aws:iam::000000000000:role/my-role");
         CrawlerTargets targets = new CrawlerTargets();
-        targets.setS3Targets(java.util.List.of(new S3Target()));
+        targets.setS3Targets(List.of(new S3Target()));
         crawler.setTargets(targets);
         return crawler;
     }
@@ -1366,6 +1366,34 @@ class GlueServiceTest {
     }
 
     @Test
+    void workflowAndTriggerListsKeepTheirOwnPageSizeLimits() {
+        assertTrue(glueService.listWorkflows(25, null).items().isEmpty());
+        assertTrue(glueService.getTriggers(null, 200, null).items().isEmpty());
+        for (int maxResults : List.of(-1, 0, 26)) {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> glueService.listWorkflows(maxResults, null));
+            assertEquals("InvalidInputException", failure.getErrorCode());
+            assertEquals("MaxResults must be between 1 and 25", failure.getMessage());
+        }
+        for (int maxResults : List.of(-1, 0, 201)) {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> glueService.getTriggers(null, maxResults, null));
+            assertEquals("InvalidInputException", failure.getErrorCode());
+            assertEquals("MaxResults must be between 1 and 200", failure.getMessage());
+        }
+    }
+
+    @Test
+    void triggerPageSizeIsValidatedBeforeTheDependentJobLookup() {
+        AwsException failure = assertThrows(AwsException.class,
+                () -> glueService.getTriggers("missing", 201, null));
+        assertEquals("InvalidInputException", failure.getErrorCode());
+        assertEquals("MaxResults must be between 1 and 200", failure.getMessage());
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getTriggers("missing", 200, null)).getErrorCode());
+    }
+
+    @Test
     void taggingNonExistentResourceThrows() {
         String fakeJobArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":job/fake-job";
         String fakeCrawlerArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT_ID + ":crawler/fake-crawler";
@@ -1394,9 +1422,9 @@ class GlueServiceTest {
         Table table = new Table();
         table.setName("indexed");
         StorageDescriptor sd = new StorageDescriptor();
-        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        sd.setColumns(List.of(new Column("a", "string")));
         table.setStorageDescriptor(sd);
-        table.setPartitionKeys(java.util.List.of(new Column("a", "string"), new Column("b", "string")));
+        table.setPartitionKeys(List.of(new Column("a", "string"), new Column("b", "string")));
         glueService.createTable("db1", table);
 
         // Two settled indexes leave exactly one slot under the cap of three.
@@ -1413,7 +1441,7 @@ class GlueServiceTest {
                     start.await();
                     PartitionIndex index = new PartitionIndex();
                     index.setIndexName(indexName);
-                    index.setKeys(java.util.List.of("a", "b"));
+                    index.setKeys(List.of("a", "b"));
                     glueService.createPartitionIndex("db1", "indexed", index);
                 } catch (AwsException | InterruptedException expected) {
                     // Only the create that takes the last slot succeeds; the rest are rejected.
@@ -1431,7 +1459,7 @@ class GlueServiceTest {
     private void createSettledIndex(String indexName, String key) {
         PartitionIndex index = new PartitionIndex();
         index.setIndexName(indexName);
-        index.setKeys(java.util.List.of(key));
+        index.setKeys(List.of(key));
         glueService.createPartitionIndex("db1", "indexed", index);
         glueService.getPartitionIndexes("db1", "indexed");
     }

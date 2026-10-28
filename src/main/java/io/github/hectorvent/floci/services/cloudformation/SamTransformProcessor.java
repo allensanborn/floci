@@ -15,8 +15,11 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -94,11 +97,14 @@ class SamTransformProcessor {
         // (including the early return below when Resources is absent or not an object).
         JsonNode globals = expanded.path("Globals");
         expanded.remove("Globals");
-        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 is
-        // one of them: one value there would name every function's version.
-        if (globals.path("Function").has("AutoPublishCodeSha256")) {
-            throw new AwsException("ValidationError", "'Globals' section is invalid. 'AutoPublishCodeSha256' "
-                    + "is not a supported property of 'Function'.", 400);
+        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 and
+        // VersionDescription are two of them: one value there would name, or describe, every
+        // function's version.
+        for (String property : List.of("AutoPublishCodeSha256", "VersionDescription")) {
+            if (globals.path("Function").has(property)) {
+                throw new AwsException("ValidationError", "'Globals' section is invalid. '" + property
+                        + "' is not a supported property of 'Function'.", 400);
+            }
         }
 
         JsonNode resources = expanded.path("Resources");
@@ -293,7 +299,7 @@ class SamTransformProcessor {
         // Auth.Authorizers -> one AWS::ApiGatewayV2::Authorizer per entry, keyed by SAM authorizer
         // name so routes referencing Auth.DefaultAuthorizer (the only form handled here — per-route
         // Auth overrides are not expanded) can resolve the logical id to Ref.
-        Map<String, String> authorizerLogicalIdsByName = new java.util.LinkedHashMap<>();
+        Map<String, String> authorizerLogicalIdsByName = new LinkedHashMap<>();
         JsonNode auth = properties.path("Auth");
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isObject()) {
@@ -582,7 +588,7 @@ class SamTransformProcessor {
 
     private Map<String, String> expandImplicitRestApiAuthorizers(String apiId, JsonNode auth,
                                                                    ObjectNode resources) {
-        Map<String, String> logicalIds = new java.util.LinkedHashMap<>();
+        Map<String, String> logicalIds = new LinkedHashMap<>();
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isTextual()) {
             if (!"AWS_IAM".equals(authorizers.asText())) {
@@ -755,10 +761,10 @@ class SamTransformProcessor {
                     "SAM Api authorizer '" + defaultAuthorizer + "' is not defined in Auth.Authorizers.", 400);
         }
 
-        Map<String, String> pathToResource = new java.util.LinkedHashMap<>();
+        Map<String, String> pathToResource = new LinkedHashMap<>();
         List<String> methodIds = new ArrayList<>();
-        java.util.Set<String> permissionFns = new java.util.LinkedHashSet<>();
-        java.util.Set<String> seenRoutes = new java.util.LinkedHashSet<>();
+        Set<String> permissionFns = new LinkedHashSet<>();
+        Set<String> seenRoutes = new LinkedHashSet<>();
 
         for (ApiRoute r : routes) {
             String method = r.httpMethod().toUpperCase();
@@ -960,7 +966,7 @@ class SamTransformProcessor {
         resources.set(logicalId, lambdaResource);
 
         String aliasLogicalId = expandAutoPublishAlias(logicalId, properties,
-                lambdaResource.path("Properties"), passthrough, template, parameterValues, resources);
+                (ObjectNode) lambdaResource.path("Properties"), passthrough, template, parameterValues, resources);
         List<ObjectNode> eventInvokePolicies = expandEventInvokeConfig(
                 logicalId, properties, aliasLogicalId, passthrough, template, resources, parameterValues);
 
@@ -999,7 +1005,7 @@ class SamTransformProcessor {
      * which publishes, and the alias follows it; a given {@code AutoPublishCodeSha256} fixes the id
      * instead.
      */
-    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, JsonNode functionProperties,
+    private String expandAutoPublishAlias(String functionLogicalId, JsonNode properties, ObjectNode functionProperties,
                                           ObjectNode passthrough, JsonNode template,
                                           Map<String, String> parameterValues, ObjectNode resources) {
         validateVersionProperties(functionLogicalId, properties);
@@ -1009,6 +1015,7 @@ class SamTransformProcessor {
             return null;
         }
 
+        appendCodeSha256ToDescription(functionLogicalId, properties, functionProperties, template, parameterValues);
         String versionId = uniqueId(
                 versionLogicalId(functionLogicalId, properties, functionProperties, template, parameterValues),
                 resources);
@@ -1016,6 +1023,7 @@ class SamTransformProcessor {
         versionDef.put("Type", "AWS::Lambda::Version");
         ObjectNode versionProps = objectMapper.createObjectNode();
         versionProps.set("FunctionName", ref(functionLogicalId));
+        copyRenamed(properties, "VersionDescription", versionProps, "Description");
         versionDef.set("Properties", versionProps);
         versionDef.setAll(passthrough.deepCopy());
         // The version a new hash replaces leaves the template on that update; like SAM, keep it
@@ -1040,6 +1048,35 @@ class SamTransformProcessor {
         aliasDef.setAll(passthrough.deepCopy());
         resources.set(aliasId, aliasDef);
         return aliasId;
+    }
+
+    /**
+     * Appends a given {@code AutoPublishCodeSha256} to the function's {@code Description}, after a
+     * space, as SAM does. Lambda publishes no version of a function that has not changed since its
+     * last one, so without this a new value for the same code names a new version resource that
+     * publishes nothing, and the alias stays where it was. Like SAM, it resolves the description's
+     * template parameters first and joins any other intrinsic function with the value through
+     * {@code Fn::Join}. SAM tests the property as written, not the value it resolves to, so a
+     * {@code Ref} to an empty value appends an empty value.
+     */
+    private void appendCodeSha256ToDescription(String functionLogicalId, JsonNode properties,
+                                               ObjectNode functionProperties, JsonNode template,
+                                               Map<String, String> parameterValues) {
+        if (!isTruthy(properties.path("AutoPublishCodeSha256"))) {
+            return;
+        }
+        String codeSha256 = autoPublishCodeSha256(functionLogicalId, properties, template, parameterValues);
+        JsonNode description = resolveParameterRefs(properties.path("Description"), template, parameterValues);
+        if (!isTruthy(description)) {
+            functionProperties.put("Description", codeSha256);
+        } else if (description.isTextual()) {
+            functionProperties.put("Description", description.asText() + " " + codeSha256);
+        } else {
+            ObjectNode joined = objectMapper.createObjectNode();
+            joined.set("Fn::Join", objectMapper.createArrayNode().add(" ")
+                    .add(objectMapper.createArrayNode().add(description.deepCopy()).add(codeSha256)));
+            functionProperties.set("Description", joined);
+        }
     }
 
     /**
@@ -1515,7 +1552,7 @@ class SamTransformProcessor {
     }
 
     /** Python truthiness, which SAM applies to an optional property before reading it. */
-    private static boolean isTruthy(JsonNode node) {
+    static boolean isTruthy(JsonNode node) {
         if (node.isMissingNode() || node.isNull()) {
             return false;
         }
@@ -1629,6 +1666,7 @@ class SamTransformProcessor {
         copyIfPresent(properties, "PackageType", lambdaProps);
         copyIfPresent(properties, "Handler", lambdaProps);
         copyIfPresent(properties, "Runtime", lambdaProps);
+        copyIfPresent(properties, "Description", lambdaProps);
         copyIfPresent(properties, "ImageConfig", lambdaProps);
 
         lambdaProps.set("Code", buildLambdaCode(properties));

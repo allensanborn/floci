@@ -4,10 +4,15 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
+import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -158,8 +163,32 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.networkBorderGroup",
+                    everyItem(equalTo("us-east-1")))
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
                     startsWith("us-east-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"eu-west-1", "us-gov-west-1", "cn-north-1"})
+    @Order(337)
+    void availabilityZoneBorderGroupUsesTheRequestedRegion(String region) {
+        given()
+            .formParam("Action", "DescribeAvailabilityZones")
+            .formParam("Version", "2016-11-15")
+            .formParam("ZoneName.1", region + "b")
+            .header("Authorization", AUTH_HEADER.replace("us-east-1", region))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(1))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].networkBorderGroup",
+                    equalTo(region))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneName",
+                    equalTo(region + "b"))
+            .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item[0].zoneType",
+                    equalTo("availability-zone"));
     }
 
     // DescribeAvailabilityZones parameter validation and filtering
@@ -791,6 +820,33 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.imageId",
                     containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
             .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
+    }
+
+    @ParameterizedTest
+    @Order(9)
+    @CsvSource({
+        "679593333241, openSUSE-Leap-16-0-*, ami-opensuse-leap160",
+        "679593333241, suse-sles-15-sp6-byos-v*-hvm-ssd-x86_64, ami-sles15sp6-byos",
+        "013907871322, suse-sles-15-sp6-v*-hvm-ssd-x86_64, ami-sles15sp6",
+        "792107900819, Rocky-9-EC2-Base-9*, ami-rocky9",
+        "309956199498, RHEL-9.5.0_HVM-*, ami-rhel9"
+    })
+    void describeImagesFindsSuseAndRedHatFamilyImagesByOwnerAndName(String owner, String name, String imageId) {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", owner)
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", name)
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "x86_64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo(imageId))
+            .body("DescribeImagesResponse.imagesSet.item.imageOwnerId", equalTo(owner));
     }
 
     @Test
@@ -4070,7 +4126,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
         .extract().body().asString();
 
-        org.hamcrest.MatcherAssert.assertThat(body, not(containsString("<nextToken>")));
+        MatcherAssert.assertThat(body, not(containsString("<nextToken>")));
     }
 
     // =========================================================================
@@ -4148,14 +4204,14 @@ class Ec2IntegrationTest {
         int pageCount = 0;
         String nextToken = null;
         do {
-            io.restassured.specification.RequestSpecification req = given()
+            RequestSpecification req = given()
                     .formParam("Action", "DescribeNetworkInterfaces")
                     .formParam("MaxResults", "5")
                     .header("Authorization", AUTH_HEADER);
             if (nextToken != null) {
                 req = req.formParam("NextToken", nextToken);
             }
-            io.restassured.response.Response resp = req.when().post("/");
+            Response resp = req.when().post("/");
             resp.then().statusCode(200);
             pageCount++;
 
@@ -4167,16 +4223,16 @@ class Ec2IntegrationTest {
 
             // Every page but the last must be a full page of 5.
             if (nextToken != null && !nextToken.isEmpty()) {
-                org.hamcrest.MatcherAssert.assertThat(ids.size(), equalTo(5));
+                MatcherAssert.assertThat(ids.size(), equalTo(5));
             }
         } while (nextToken != null && !nextToken.isEmpty());
 
-        org.hamcrest.MatcherAssert.assertThat(
+        MatcherAssert.assertThat(
                 "Expected " + expectedTotal + " ENIs across " + pageCount + " page(s)",
                 collected, equalTo(expectedTotal));
         // With 5 new ENIs and MaxResults=5, at least one truncated page
         // must have occurred (i.e. more than a single page was fetched).
-        org.hamcrest.MatcherAssert.assertThat(pageCount, greaterThanOrEqualTo(2));
+        MatcherAssert.assertThat(pageCount, greaterThanOrEqualTo(2));
 
         // ── Cleanup: terminate the 5 extra instances ──
         for (String id : batchIds) {
@@ -4200,14 +4256,14 @@ class Ec2IntegrationTest {
         int total = 0;
         String nextToken = null;
         do {
-            io.restassured.specification.RequestSpecification req = given()
+            RequestSpecification req = given()
                     .formParam("Action", "DescribeNetworkInterfaces")
                     .formParam("MaxResults", "1000")
                     .header("Authorization", AUTH_HEADER);
             if (nextToken != null) {
                 req = req.formParam("NextToken", nextToken);
             }
-            io.restassured.response.Response resp = req.when().post("/");
+            Response resp = req.when().post("/");
             resp.then().statusCode(200);
 
             List<String> ids = resp.xmlPath().getList(
@@ -5071,6 +5127,149 @@ class Ec2IntegrationTest {
             .body("Response.Errors.Error.Code", equalTo("DependencyViolation"));
     }
 
+    private String newNetworkAcl(String vpcId) {
+        return given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+    }
+
+    private void putNetworkAclEntry(String action, String aclId, int ruleNumber, boolean egress,
+                                    String cidrParam, String cidr) {
+        given()
+            .formParam("Action", action)
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", String.valueOf(ruleNumber))
+            .formParam("Protocol", "-1")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", String.valueOf(egress))
+            .formParam(cidrParam, cidr)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body(action + "Response.return", equalTo("true"));
+    }
+
+    private XmlPath describeNetworkAcl(String aclId) {
+        return new XmlPath(given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().asString());
+    }
+
+    private static String naclEntryPath(int ruleNumber, boolean egress) {
+        return "DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.find { it.ruleNumber == '"
+                + ruleNumber + "' && it.egress == '" + egress + "' }";
+    }
+
+    // An entry created with only Ipv6CidrBlock reads back with that range under ipv6CidrBlock.
+    @Test
+    @Order(314)
+    void createNetworkAclEntryKeepsIpv6CidrBlock() {
+        String aclId = newNetworkAcl(newVpc("10.34.0.0/16"));
+        putNetworkAclEntry("CreateNetworkAclEntry", aclId, 100, false, "CidrBlock", "0.0.0.0/0");
+        putNetworkAclEntry("CreateNetworkAclEntry", aclId, 101, false, "Ipv6CidrBlock", "::/0");
+        putNetworkAclEntry("CreateNetworkAclEntry", aclId, 101, true, "Ipv6CidrBlock", "::/0");
+
+        XmlPath acl = describeNetworkAcl(aclId);
+
+        assertEquals("0.0.0.0/0", acl.getString(naclEntryPath(100, false) + ".cidrBlock"));
+        assertEquals(0, acl.getInt(naclEntryPath(100, false) + ".ipv6CidrBlock.size()"));
+        for (boolean egress : new boolean[] {false, true}) {
+            assertEquals("::/0", acl.getString(naclEntryPath(101, egress) + ".ipv6CidrBlock"));
+            assertEquals(0, acl.getInt(naclEntryPath(101, egress) + ".cidrBlock.size()"));
+        }
+    }
+
+    @Test
+    @Order(314)
+    void replaceNetworkAclEntrySwitchesToIpv6CidrBlock() {
+        String aclId = newNetworkAcl(newVpc("10.35.0.0/16"));
+        putNetworkAclEntry("CreateNetworkAclEntry", aclId, 120, false, "CidrBlock", "10.0.0.0/8");
+        putNetworkAclEntry("ReplaceNetworkAclEntry", aclId, 120, false, "Ipv6CidrBlock", "2001:db8::/32");
+
+        XmlPath acl = describeNetworkAcl(aclId);
+
+        assertEquals("2001:db8::/32", acl.getString(naclEntryPath(120, false) + ".ipv6CidrBlock"));
+        assertEquals(0, acl.getInt(naclEntryPath(120, false) + ".cidrBlock.size()"));
+    }
+
+    // The default ACL's IPv6 rule reads back as IPv6, and only ICMP entries carry an icmpTypeCode.
+    @Test
+    @Order(314)
+    void defaultNetworkAclIpv6RuleReadsBackWithoutIcmpTypeCode() {
+        String vpc = newVpc("10.42.0.0/16");
+        String aclId = given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .formParam("Filter.2.Name", "default")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeNetworkAclsResponse.networkAclSet.item.networkAclId");
+        for (boolean egress : new boolean[] {false, true}) {
+            given()
+                .formParam("Action", "CreateNetworkAclEntry")
+                .formParam("NetworkAclId", aclId)
+                .formParam("RuleNumber", "101")
+                .formParam("Protocol", "-1")
+                .formParam("RuleAction", "allow")
+                .formParam("Egress", String.valueOf(egress))
+                .formParam("Ipv6CidrBlock", "::/0")
+                .formParam("PortRange.From", "0")
+                .formParam("PortRange.To", "0")
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/")
+            .then().statusCode(200);
+        }
+
+        XmlPath acl = describeNetworkAcl(aclId);
+
+        for (boolean egress : new boolean[] {false, true}) {
+            assertEquals("0.0.0.0/0", acl.getString(naclEntryPath(100, egress) + ".cidrBlock"));
+            assertEquals(0, acl.getInt(naclEntryPath(100, egress) + ".ipv6CidrBlock.size()"));
+            assertEquals("::/0", acl.getString(naclEntryPath(101, egress) + ".ipv6CidrBlock"));
+            assertEquals(0, acl.getInt(naclEntryPath(101, egress) + ".cidrBlock.size()"));
+        }
+        assertEquals(0, acl.getInt(
+                "DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.icmpTypeCode.size()"));
+    }
+
+    @Test
+    @Order(314)
+    void networkAclEntryKeepsIcmpTypeCodeOnlyForIcmp() {
+        String aclId = newNetworkAcl(newVpc("10.43.0.0/16"));
+        for (String[] rule : new String[][] {{"110", "1"}, {"120", "6"}}) {
+            given()
+                .formParam("Action", "CreateNetworkAclEntry")
+                .formParam("NetworkAclId", aclId)
+                .formParam("RuleNumber", rule[0])
+                .formParam("Protocol", rule[1])
+                .formParam("RuleAction", "allow")
+                .formParam("Egress", "false")
+                .formParam("CidrBlock", "0.0.0.0/0")
+                .formParam("Icmp.Type", "8")
+                .formParam("Icmp.Code", "-1")
+                .header("Authorization", AUTH_HEADER)
+            .when().post("/")
+            .then().statusCode(200);
+        }
+
+        XmlPath acl = describeNetworkAcl(aclId);
+
+        assertEquals("8", acl.getString(naclEntryPath(110, false) + ".icmpTypeCode.type"));
+        assertEquals("-1", acl.getString(naclEntryPath(110, false) + ".icmpTypeCode.code"));
+        assertEquals(0, acl.getInt(naclEntryPath(120, false) + ".icmpTypeCode.size()"));
+    }
+
     @Test
     @Order(315)
     void describePrefixListsReturnsManagedS3() {
@@ -5832,6 +6031,7 @@ class Ec2IntegrationTest {
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
     }
 
+    /** The type of the instance's root volume, ami-0abcdef1234567890's /dev/xvda; data devices also get volumes. */
     private String rootVolumeType(String instanceId) {
         return given()
             .formParam("Action", "DescribeVolumes")
@@ -5842,6 +6042,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .extract().path("DescribeVolumesResponse.volumeSet.item.volumeType");
+            .extract().path("DescribeVolumesResponse.volumeSet.item.find { it.attachmentSet.item.device == '/dev/xvda' }"
+                    + ".volumeType");
     }
 }

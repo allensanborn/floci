@@ -364,6 +364,10 @@ requires a fresh code in `SOFTWARE_TOKEN_MFA_CODE`. Its `ChallengeParameters` ca
 `USER_ID_FOR_SRP`, the user's actual username rather than an alias (the `sub` in a pool
 with `UsernameAttributes`), to send back as `USERNAME` and to compute `SECRET_HASH` from,
 plus `FRIENDLY_DEVICE_NAME` when `VerifySoftwareToken` was given a `FriendlyDeviceName`.
+As on AWS, a code is accepted for one `SOFTWARE_TOKEN_MFA` challenge only: answering
+another with a code from the same 30-second step, or an earlier one, fails with
+`ExpiredCodeException` (`Your software token has already been used once.`) until the
+authenticator shows its next code. The code given to `VerifySoftwareToken` is not counted.
 Both token-management actions also accept an access token for an already authenticated
 user. Sessions expire with the app client's `AuthSessionValidity` and cannot be replayed
 after completion.
@@ -507,6 +511,15 @@ shortcut is not implemented yet.
 
 Any other `AuthFlow` value is rejected with `InvalidParameterException` and no tokens are issued.
 
+`CUSTOM_AUTH` can start with `CHALLENGE_NAME=SRP_A` and `SRP_A`. Floci seeds the
+DefineAuthChallenge history with `SRP_A=true`, issues a real `PASSWORD_VERIFIER` challenge,
+and verifies the SRP proof before returning to the trigger's custom challenges. Temporary-password
+users complete `NEW_PASSWORD_REQUIRED` within the same custom sequence. Each response must match
+the issued session's client, user and challenge; sessions are consumed once. Plain custom
+challenges remain supported. `RESET_REQUIRED` still requires password recovery first because
+Floci clears the SRP verifier when an administrator resets the password.
+See [AWS's custom SRP sequence](https://docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-challenge.html#user-pool-lambda-challenge-srp-authentication).
+
 The challenge `Session` of a `USER_SRP_AUTH`, `CUSTOM_AUTH` or `USER_AUTH` sign-in is valid for 3 minutes
 from when it was issued, the AWS default for the client's `AuthSessionValidity`. Answering the challenge with
 an older session fails with `NotAuthorizedException` (`Invalid session for the user, session is expired.`)
@@ -523,6 +536,19 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 `ALLOW_CUSTOM_AUTH`, the default AWS documents for such a client: only the enforcement uses that default, not
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
+
+## Custom Message Trigger
+
+`CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`
+link placeholder, and the user's current `cognito:user_status` in `userAttributes`.
+`usernameParameter` is `null` except for an AdminCreateUser invitation, where it is
+`{username}`. The initial `response` contains `emailMessage`, `emailSubject`, and
+`smsMessage`, each set to `null` for the function to customize.
+
+`CustomMessage` events omit `request.clientMetadata` when metadata is absent or empty,
+including `CustomMessage_Authentication`, which does not forward `InitiateAuth`
+metadata. Custom Email Sender events retain the key with `null` when
+there is no metadata; their event shape is distinct.
 
 ## Custom Email Sender Trigger
 
@@ -579,6 +605,17 @@ attribute to `true`.
 
 Without the setting, `UpdateUserAttributes` replaces the value immediately and
 sets the matching `*_verified` attribute to `false` until verification succeeds.
+A failed hand-over of its code to `CustomEmailSender` still keeps the complete
+attribute update, including other attributes in the same request. The request
+returns the delivery error, and the undelivered code is withdrawn so another
+verification code can be requested after the sender is working again.
+Codes issued for earlier destinations of changed contacts are also withdrawn,
+including when the replacement is pending. Codes for unchanged contacts that
+the failed delivery did not reach remain usable.
+`AdminUpdateUserAttributes` uses the same contact update and failed-sender handling.
+It skips verification delivery when the request sets the matching `*_verified`
+attribute to `true`. Otherwise, retrying an identical admin update sends a new
+code if the previous delivery failed and left no usable code.
 A verification code is still sent to the replacement value, but Cognito no
 longer retains or exposes the old value. For alias attributes, the old alias is
 removed immediately and the replacement becomes usable for sign-in only after

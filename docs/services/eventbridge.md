@@ -50,6 +50,10 @@
 | `ListReplays` | - |
 <!-- floci:actions:end -->
 
+`ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
+characters. Empty or overlong tokens return `ValidationException`; unrecognized
+cursors within those bounds return `InvalidToken`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -94,6 +98,17 @@ aws events put-events \
   }]' \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+## Target Settings
+
+`PutTargets` defaults omitted ECS `TaskCount` to `1`, and `EnableECSManagedTags` and
+`EnableExecuteCommand` to `false`. Explicit values are preserved. A task count below
+one or a malformed target `RoleArn` or `DeadLetterConfig.Arn` returns a
+`ValidationException` before any targets in the request are stored.
+Role ARNs must identify an IAM role with a non-empty name; dead-letter ARNs must
+identify an SQS queue with a region. Both require a published AWS partition and a
+12-digit account ID. Queue names are limited to 80 characters, including a FIFO
+suffix when present. These checks do not verify resource existence or permissions.
 
 ## Default Event Bus
 
@@ -147,6 +162,13 @@ IAM policies.
 ## API Destination Targets
 
 A matching rule can send events directly to HTTP or HTTPS endpoints via API destinations. An API destination pairs an HTTP endpoint URL and HTTP method with an EventBridge Connection for authentication (API key, basic auth, or OAuth client credentials).
+
+`ListConnections` applies its name-prefix and state filters before returning
+name-ordered pages. `Limit` accepts 1 to 100; Floci uses 100 when it is omitted.
+Pass the returned `NextToken` with the same filters to continue. Tokens are scoped
+to the action, account, region, prefix and state; final pages omit the token.
+A cursor remains resumable after its connection is deleted. Token lengths must
+be 1 to 2048 characters, and unrecognized cursors return `InvalidToken`.
 
 ```bash
 # 1. Create a connection with API key auth
@@ -221,6 +243,7 @@ aws events put-targets \
 ## Current Behavior
 
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.
+- A `PutEvents` entry for an event bus that does not exist is answered as AWS answers it: with an event id, not counted in `FailedEntryCount`, and dropped, as no rule matches it. Floci logs the drop at `INFO`. Floci's own deliveries to a bus, for a rule, a pipe or a schedule, are unchanged: an entry for a bus that does not exist fails there.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.

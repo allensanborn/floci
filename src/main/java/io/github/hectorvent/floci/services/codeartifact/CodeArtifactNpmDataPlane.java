@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.fasterxml.jackson.core.exc.StreamConstraintsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -148,24 +149,28 @@ public class CodeArtifactNpmDataPlane {
         context.request().pause();
         String repoId = npmRepositoryId;
         AuthorizationTokenScope tokenScope = scope.get();
+        Optional<TarballDownloadRequest> tarballTarget = nativeTarballDownloadTarget(context.request().method(),
+                npmRequest.rest());
         Optional<PackageIdentity> unpublishTarget = nativeUnpublishTarget(context.request().method(),
                 npmRequest.rest());
-        vertx.<String>executeBlocking(promise -> promise.complete(ensureBackendReady(repoId, npmRequest)))
-                .onComplete(result -> {
-                    if (result.failed()) {
-                        context.request().resume();
-                        context.response().setStatusCode(503).end();
-                        return;
-                    }
-                    proxy(context, result.result(), npmRequest.rest() + querySuffix(context), status ->
-                            unpublishTarget.ifPresent(identity -> {
-                                if (status == 200 || status == 201) {
-                                    service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
-                                            tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
-                                            identity.packageName());
-                                }
-                            }));
-                });
+        vertx.<String>executeBlocking(promise -> {
+            tarballTarget.ifPresent(target -> blockIfArchived(tokenScope, npmRequest, repoId, target));
+            promise.complete(ensureBackendReady(repoId, npmRequest));
+        }).onComplete(result -> {
+            if (result.failed()) {
+                context.request().resume();
+                context.response().setStatusCode(result.cause() instanceof AwsException ? 404 : 503).end();
+                return;
+            }
+            proxy(context, result.result(), npmRequest.rest() + querySuffix(context), status ->
+                    unpublishTarget.ifPresent(identity -> {
+                        if (status == 200 || status == 201) {
+                            service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
+                                    tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                                    identity.packageName());
+                        }
+                    }));
+        });
     }
 
     /**
@@ -220,6 +225,69 @@ public class CodeArtifactNpmDataPlane {
             return Optional.empty();
         }
         return Optional.of(packageIdentityFromPath(rest.substring(0, revIndex)));
+    }
+
+    /**
+     * A real tarball download ({@code npm install}, or a direct link from Verdaccio's own web UI)
+     * is a {@code GET} to {@code <packagePath>/-/<filename>}, the exact shape {@code
+     * VerdaccioSidecarClient}'s own tarball requests already use: detected here the same way
+     * {@link #nativeUnpublishTarget} detects its own {@code /-rev/} marker. The version is not a
+     * separate path segment the way Maven's GAV or nuget's content route carry it, only embedded
+     * in {@code filename} itself, so {@link #blockIfArchived} resolves it for real against
+     * Verdaccio's own packument rather than this method guessing it from the filename's own text.
+     *
+     * <p>Raised by Greptile's review: an earlier version of this method assumed {@code filename}
+     * always has the {@code <packageName>-<version>.tgz} shape this emulator's own publish path
+     * happens to write, and stripped that known prefix/suffix to read the version straight out of
+     * it. Nothing in the real npm publish protocol requires a client-chosen {@code dist.tarball}
+     * name to follow that convention at all (a version {@code 1.0.0} can legitimately name its
+     * tarball {@code bundle.tgz}), so a filename that didn't fit the assumed shape skipped the
+     * Archived check entirely, and one that happened to fit it by coincidence (a real tarball
+     * literally named {@code <packageName>-release.tgz}) could resolve to the wrong, unrelated
+     * version {@code release}.
+     */
+    private static Optional<TarballDownloadRequest> nativeTarballDownloadTarget(HttpMethod method, String rest) {
+        if (method != HttpMethod.GET) {
+            return Optional.empty();
+        }
+        int marker = rest.indexOf("/-/");
+        if (marker < 1) {
+            return Optional.empty();
+        }
+        PackageIdentity identity = packageIdentityFromPath(rest.substring(0, marker));
+        String filename = rest.substring(marker + 3);
+        return Optional.of(new TarballDownloadRequest(identity, filename));
+    }
+
+    private record TarballDownloadRequest(PackageIdentity identity, String filename) {}
+
+    /**
+     * Blocks (by throwing {@link AwsException}) only when {@code target}'s own filename resolves
+     * to a version this repository currently has marked {@code Archived}. Checks whether this
+     * package has any status override at all first, a plain in-memory map read, before ever
+     * paying for a live Verdaccio packument fetch: the overwhelming common case, a package
+     * nothing has ever called {@code UpdatePackageVersionsStatus}/{@code DisposePackageVersions}
+     * on, costs nothing beyond that one check. {@link VerdaccioSidecarClient#versionForTarballFilename}
+     * resolves the real version, against the packument itself rather than the filename's own
+     * text, only once there is actually something in this repository worth checking against.
+     */
+    private void blockIfArchived(AuthorizationTokenScope tokenScope, NpmRequest npmRequest, String repoId,
+            TarballDownloadRequest target) {
+        Map<String, ?> overrides = service.containerBackedOverridesForPackage(tokenScope.owner(), tokenScope.region(),
+                npmRequest.domain(), npmRequest.repository(), "npm", target.identity().namespace(),
+                target.identity().packageName());
+        if (overrides.isEmpty()) {
+            return;
+        }
+        Optional<String> version = verdaccioClient.versionForTarballFilename(repoId, npmRequest.domain(),
+                npmRequest.repository(), target.identity().namespace(), target.identity().packageName(),
+                target.filename());
+        if (version.isEmpty()) {
+            return;
+        }
+        service.requireContainerBackedVersionDownloadable(tokenScope.owner(), tokenScope.region(),
+                npmRequest.domain(), npmRequest.repository(), "npm", target.identity().namespace(),
+                target.identity().packageName(), version.get(), repoId);
     }
 
     /**
@@ -285,7 +353,8 @@ public class CodeArtifactNpmDataPlane {
                                 }
                                 String backendBaseUrl = readyResult.result();
                                 vertx.<RepublishCheck>executeBlocking(promise ->
-                                                promise.complete(checkRepublish(backendBaseUrl, npmRequest, path)),
+                                                promise.complete(checkRepublish(backendBaseUrl, npmRequest, path,
+                                                        scope)),
                                                 false)
                                         .onComplete(checkResult -> {
                                             if (context.response().closed()) {
@@ -294,7 +363,28 @@ public class CodeArtifactNpmDataPlane {
                                             }
                                             RepublishCheck check = checkResult.succeeded() ? checkResult.result()
                                                     : new RepublishCheck(false, 0L,
-                                                            packageIdentityFromPath(npmRequest.rest()), Map.of());
+                                                            packageIdentityFromPath(npmRequest.rest()), Map.of(),
+                                                            null, Map.of());
+                                            // Raised by hectorvent's review: a real npm publish to a
+                                            // coordinate updatePackageVersionsStatus/
+                                            // disposePackageVersions left Archived or Disposed must be
+                                            // refused outright, the same way PublishPackageVersion
+                                            // already refuses it for the generic format, not accepted
+                                            // and then have forgetContainerBackedStatusOverride below
+                                            // silently un-block it afterward. Checked ahead of the
+                                            // idempotent-republish shortcut too: that shortcut only
+                                            // ever matches when Verdaccio's own stored content is
+                                            // still byte-identical, which archiving (unlike disposing)
+                                            // never changes, and the User Guide draws no
+                                            // byte-identical exception for either status.
+                                            if (check.blockedMessage() != null) {
+                                                context.response().putHeader("Content-Type", "application/json")
+                                                        .setStatusCode(409)
+                                                        .end("{\"error\":\"forbidden\",\"reason\":\""
+                                                                + check.blockedMessage() + "\"}");
+                                                finish.run();
+                                                return;
+                                            }
                                             if (check.confirmed()) {
                                                 // "ok" is a message string in a real Verdaccio response
                                                 // (e.g. "created new package"), not a boolean; matching
@@ -318,6 +408,21 @@ public class CodeArtifactNpmDataPlane {
                                                     scope.region(), npmRequest.domain(), scope.owner(),
                                                     npmRequest.repository(), "npm", check.identity().namespace(),
                                                     check.identity().packageName());
+                                            // One snapshot per version in this envelope, narrower
+                                            // than fenceSnapshot above: raised by Greptile's review,
+                                            // a version DeletePackageVersions removes while this
+                                            // same callback is still in flight for it must not have
+                                            // its readme resurrected, something the package-wide
+                                            // fenceSnapshot alone (unaffected by a single version's
+                                            // own deletion) cannot catch.
+                                            Map<String, Long> readmeFenceSnapshots = new HashMap<>();
+                                            check.readmeByVersion().keySet().forEach(version ->
+                                                    readmeFenceSnapshots.put(version,
+                                                            service.currentContainerBackedVersionFence(
+                                                                    scope.region(), npmRequest.domain(),
+                                                                    scope.owner(), npmRequest.repository(), "npm",
+                                                                    check.identity().namespace(),
+                                                                    check.identity().packageName(), version)));
                                             vertx.fileSystem().open(path, new OpenOptions().setRead(true))
                                                     .onComplete(reopened -> {
                                                         if (reopened.failed()) {
@@ -333,7 +438,8 @@ public class CodeArtifactNpmDataPlane {
                                                                 reopened.result(), scope, npmRequest.domain(),
                                                                 npmRequest.repository(), check.identity(),
                                                                 check.totalAttachmentBytes(), fenceSnapshot,
-                                                                check.readmeByVersion());
+                                                                check.readmeByVersion(), readmeFenceSnapshots,
+                                                                check.beforeRevisionByVersion());
                                                     });
                                         });
                             });
@@ -442,25 +548,98 @@ public class CodeArtifactNpmDataPlane {
      * into {@code ""}, the same empty-string answer pypi's own upload path already records when
      * twine sends no {@code description} field, so a published version without a readme is never
      * mistaken for one that was never published at all.
+     *
+     * <p>{@code blockedMessage} is non-null exactly when some version in the envelope is Archived
+     * or Disposed (see {@link CodeArtifactService#requireContainerBackedVersionNotArchivedOrDisposed}),
+     * found while this check already has every version in hand; the caller refuses the whole
+     * publish on it rather than reaching {@code confirmed} or forwarding anything, since the User
+     * Guide blocks both statuses unconditionally, byte-identical content included.
+     *
+     * <p>{@code beforeRevisionByVersion} carries what {@link
+     * CodeArtifactService#requireContainerBackedVersionNotArchivedOrDisposed} returned for each
+     * version while that same guard ran (the same key set as {@code readmeByVersion}, minus any
+     * version a {@code blockedMessage} short-circuited before its own turn); the caller passes it
+     * straight into {@link CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged} once
+     * its own forward succeeds, so a status change that lands after this check ran is never erased
+     * (Greptile review).
      */
     private record RepublishCheck(boolean confirmed, long totalAttachmentBytes, PackageIdentity identity,
-            Map<String, String> readmeByVersion) {}
+            Map<String, String> readmeByVersion, String blockedMessage, Map<String, String> beforeRevisionByVersion) {}
 
-    private RepublishCheck checkRepublish(String backendBaseUrl, NpmRequest npmRequest, String spoolPath) {
+    private RepublishCheck checkRepublish(String backendBaseUrl, NpmRequest npmRequest, String spoolPath,
+            AuthorizationTokenScope scope) {
         PackageIdentity identity = packageIdentityFromPath(npmRequest.rest());
         NpmPublishEnvelopeScanner.Envelope envelope;
         try (InputStream in = new BufferedInputStream(Files.newInputStream(Path.of(spoolPath)))) {
             envelope = NpmPublishEnvelopeScanner.scan(in);
+        } catch (StreamConstraintsException e) {
+            LOG.debugv(e, "Publish for {0}/{1} is not a confirmable republish: {2}",
+                    npmRequest.domain(), npmRequest.repository(), e.getMessage());
+            // Raised by Greptile's review: forwarding unconditionally on any scan failure, as
+            // the catch block below still does for anything else, would also skip the
+            // Archived/Disposed guard entirely for a publish that failed only
+            // NpmPublishEnvelopeScanner#scan's own stricter limit (an oversized readme, see
+            // NpmPublishEnvelopeScanner#scanLeniently's own javadoc), not because anything is
+            // actually wrong with it; StreamConstraintsException is specifically that case, not
+            // genuinely malformed JSON (a plain JsonParseException, handled below exactly as
+            // before). That second, far-more-tolerant pass recovers the full envelope (not just
+            // the version names) so this can populate readmeByVersion the normal way too: {@link
+            // #forwardSpooled}'s own post-write bookkeeping, byte accounting, readme capture, and
+            // the override-clearing call that undoes a concurrent dispose racing the write (see
+            // CodeArtifactService#forgetContainerBackedStatusOverrideIfUnchanged's own javadoc),
+            // all key off readmeByVersion alone; leaving it empty here, as an earlier version of
+            // this fix did, would have let the guard below run but then skipped every one of
+            // those for whichever version it let through. If even this more tolerant pass fails,
+            // there is no safe way left to know what this publish names, so it is refused
+            // outright instead of silently forwarded with no guard having run.
+            NpmPublishEnvelopeScanner.Envelope lenientEnvelope;
+            try (InputStream in = new BufferedInputStream(Files.newInputStream(Path.of(spoolPath)))) {
+                lenientEnvelope = NpmPublishEnvelopeScanner.scanLeniently(in);
+            } catch (IOException lenientFailure) {
+                return new RepublishCheck(false, 0L, identity, Map.of(),
+                        "Could not determine which version(s) this publish names.", Map.of());
+            }
+            long lenientTotalAttachmentBytes = lenientEnvelope.attachments().values().stream()
+                    .mapToLong(NpmPublishEnvelopeScanner.Attachment::size)
+                    .sum();
+            Map<String, String> lenientReadmeByVersion = new HashMap<>();
+            lenientEnvelope.versions().forEach((version, v) -> lenientReadmeByVersion.put(version, v.readme()));
+            Map<String, String> lenientBeforeRevisionByVersion = new HashMap<>();
+            for (String version : lenientReadmeByVersion.keySet()) {
+                try {
+                    String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(
+                            scope.region(), npmRequest.domain(), scope.owner(), npmRequest.repository(), "npm",
+                            identity.namespace(), identity.packageName(), version);
+                    lenientBeforeRevisionByVersion.put(version, beforeRevision);
+                } catch (AwsException blocked) {
+                    return new RepublishCheck(false, lenientTotalAttachmentBytes, identity, lenientReadmeByVersion,
+                            blocked.getMessage(), lenientBeforeRevisionByVersion);
+                }
+            }
+            return new RepublishCheck(false, lenientTotalAttachmentBytes, identity, lenientReadmeByVersion, null,
+                    lenientBeforeRevisionByVersion);
         } catch (IOException e) {
             LOG.debugv(e, "Publish for {0}/{1} is not a confirmable republish: {2}",
                     npmRequest.domain(), npmRequest.repository(), e.getMessage());
-            return new RepublishCheck(false, 0L, identity, Map.of());
+            return new RepublishCheck(false, 0L, identity, Map.of(), null, Map.of());
         }
         long totalAttachmentBytes = envelope.attachments().values().stream()
                 .mapToLong(NpmPublishEnvelopeScanner.Attachment::size)
                 .sum();
         Map<String, String> readmeByVersion = new HashMap<>();
         envelope.versions().forEach((version, v) -> readmeByVersion.put(version, v.readme()));
+        Map<String, String> beforeRevisionByVersion = new HashMap<>();
+        for (String version : readmeByVersion.keySet()) {
+            try {
+                String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(scope.region(),
+                        npmRequest.domain(), scope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                        identity.packageName(), version);
+                beforeRevisionByVersion.put(version, beforeRevision);
+            } catch (AwsException e) {
+                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, e.getMessage(),
+                        beforeRevisionByVersion);
+            }
+        }
         Optional<JsonNode> storedDocument;
         try {
             storedDocument = verdaccioClient.fetchPackageDocument(backendBaseUrl, identity.namespace(),
@@ -468,25 +647,30 @@ public class CodeArtifactNpmDataPlane {
         } catch (IllegalStateException e) {
             LOG.warnv(e, "Could not check {0}/{1} for an existing match before publishing: {2}",
                     npmRequest.domain(), npmRequest.repository(), e.getMessage());
-            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null,
+                    beforeRevisionByVersion);
         }
         if (storedDocument.isEmpty() || !isConfirmedRepublish(envelope, storedDocument.get(), identity)) {
-            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+            return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null,
+                    beforeRevisionByVersion);
         }
         for (NpmPublishEnvelopeScanner.Version version : envelope.versions().values()) {
             try {
                 Optional<String> stored = verdaccioClient.storedTarballIntegrity(backendBaseUrl,
                         identity.namespace(), identity.packageName(), tarballFilename(version.tarball()));
                 if (stored.isEmpty() || !stored.get().equals(version.integrity())) {
-                    return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+                    return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null,
+                            beforeRevisionByVersion);
                 }
             } catch (IllegalStateException e) {
                 LOG.warnv(e, "Could not verify the stored tarball of {0}/{1} before publishing: {2}",
                         npmRequest.domain(), npmRequest.repository(), e.getMessage());
-                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion);
+                return new RepublishCheck(false, totalAttachmentBytes, identity, readmeByVersion, null,
+                        beforeRevisionByVersion);
             }
         }
-        return new RepublishCheck(true, totalAttachmentBytes, identity, readmeByVersion);
+        return new RepublishCheck(true, totalAttachmentBytes, identity, readmeByVersion, null,
+                beforeRevisionByVersion);
     }
 
     private static boolean isConfirmedRepublish(NpmPublishEnvelopeScanner.Envelope envelope, JsonNode stored,
@@ -571,7 +755,11 @@ public class CodeArtifactNpmDataPlane {
      * when the envelope couldn't be parsed (see {@link #checkRepublish}), so both become no-ops
      * in that case regardless of what Verdaccio answers. {@code fenceSnapshot} is whatever
      * {@link CodeArtifactService#currentContainerBackedPackageFence} returned at the caller's own
-     * earlier snapshot point, before this request was ever forwarded.
+     * earlier snapshot point, before this request was ever forwarded; {@code readmeFenceSnapshots}
+     * is the same idea, one entry per version in {@code readmeByVersion}, from {@link
+     * CodeArtifactService#currentContainerBackedVersionFence} instead, so a single version's own
+     * {@code DeletePackageVersions} in between can invalidate just that version's readme capture
+     * without the whole-package {@code fenceSnapshot} needing to change.
      *
      * <p>All of this bookkeeping runs in one {@code executeBlocking} call, and the response is
      * only piped to the client once that call completes, not before: a client that requests this
@@ -581,7 +769,8 @@ public class CodeArtifactNpmDataPlane {
     private void forwardSpooled(RoutingContext context, String backendBaseUrl, String backendPath,
             ReadStream<Buffer> body, AuthorizationTokenScope scope, String domain, String repository,
             PackageIdentity identity, long totalAttachmentBytes, long fenceSnapshot,
-            Map<String, String> readmeByVersion) {
+            Map<String, String> readmeByVersion, Map<String, Long> readmeFenceSnapshots,
+            Map<String, String> beforeRevisionByVersion) {
         URI backend = URI.create(backendBaseUrl);
         RequestOptions options = new RequestOptions()
                 .setHost(backend.getHost())
@@ -638,7 +827,21 @@ public class CodeArtifactNpmDataPlane {
                             readmeByVersion.forEach((version, readme) ->
                                     service.recordPublishedPackageVersionReadme(scope.region(), domain,
                                             scope.owner(), repository, "npm", identity.namespace(),
-                                            identity.packageName(), version, readme, fenceSnapshot));
+                                            identity.packageName(), version, readme,
+                                            readmeFenceSnapshots.get(version)));
+                            // Found by Qodo review: readmeByVersion's own keys are every version in
+                            // this publish envelope, independent of whether any of them actually
+                            // carried a readme, so reusing it here clears a stale Archived/Disposed
+                            // override for exactly the versions this publish just wrote real content
+                            // for, the same way the Maven/pypi native publish paths now do. Cleared
+                            // only if still unchanged since checkRepublish's own guard ran (Greptile
+                            // review): a status change that landed while the forward was in flight
+                            // must not be erased by this.
+                            readmeByVersion.keySet().forEach(version ->
+                                    service.forgetContainerBackedStatusOverrideIfUnchanged(scope.region(), domain,
+                                            scope.owner(), repository, "npm", identity.namespace(),
+                                            identity.packageName(), version,
+                                            beforeRevisionByVersion.get(version)));
                         }
                         promise.complete();
                     }, false).onComplete(result -> {

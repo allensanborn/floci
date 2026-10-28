@@ -2,12 +2,15 @@ package io.github.hectorvent.floci.services.applicationautoscaling;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -33,6 +36,7 @@ class ApplicationAutoScalingIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "AnyScaleFrontendService.";
     private static final String RESOURCE_ID = "service/aas-it-cluster/aas-it-service";
+    private static final String PAGED_RESOURCE_ID = "service/aas-it-cluster/aas-it-service-paged";
     private static final String DIMENSION = "ecs:service:DesiredCount";
 
     private static String scalableTargetArn;
@@ -42,7 +46,7 @@ class ApplicationAutoScalingIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static io.restassured.specification.RequestSpecification call(String action) {
+    private static RequestSpecification call(String action) {
         return given().header("X-Amz-Target", TARGET_PREFIX + action).contentType(CONTENT_TYPE);
     }
 
@@ -118,6 +122,37 @@ class ApplicationAutoScalingIntegrationTest {
 
     @Test
     @Order(4)
+    void describeScalableTargetsPaginatesWithMaxResultsAndNextToken() {
+        call("RegisterScalableTarget")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MinCapacity": 1,
+                  "MaxCapacity": 2
+                }
+                """.formatted(PAGED_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+
+        String nextToken = call("DescribeScalableTargets")
+            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 1 }")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ScalableTargets", hasSize(1))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        call("DescribeScalableTargets")
+            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 1, \"NextToken\": \"%s\" }"
+                .formatted(nextToken))
+        .when().post("/").then().statusCode(200)
+            .body("ScalableTargets", hasSize(1))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    @Order(5)
     void listTagsForResourceResolvesByScalableTargetArn() {
         call("ListTagsForResource")
             .body("{ \"ResourceARN\": \"%s\" }".formatted(scalableTargetArn))
@@ -126,7 +161,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void tagAndUntagResource() {
         call("TagResource")
             .body("""
@@ -154,7 +189,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void putScalingPolicyReturnsPolicyArnAndAlarms() {
         call("PutScalingPolicy")
             .body("""
@@ -185,7 +220,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void describeScalingPoliciesRoundTripsEveryConfiguredField() {
         call("DescribeScalingPolicies")
             .body("""
@@ -213,7 +248,53 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
+    void describeScalingPoliciesPaginatesWithMaxResultsAndNextToken() {
+        call("PutScalingPolicy")
+            .body("""
+                {
+                  "PolicyName": "aas-it-step-policy",
+                  "PolicyType": "StepScaling",
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "StepScalingPolicyConfiguration": { "AdjustmentType": "ChangeInCapacity" }
+                }
+                """.formatted(RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+
+        String nextToken = call("DescribeScalingPolicies")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MaxResults": 1
+                }
+                """.formatted(RESOURCE_ID, DIMENSION))
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ScalingPolicies", hasSize(1))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        call("DescribeScalingPolicies")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MaxResults": 1,
+                  "NextToken": "%s"
+                }
+                """.formatted(RESOURCE_ID, DIMENSION, nextToken))
+        .when().post("/").then().statusCode(200)
+            .body("ScalingPolicies", hasSize(1))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    @Order(10)
     void putScalingPolicyOnUnregisteredTargetThrowsObjectNotFound() {
         call("PutScalingPolicy")
             .body("""
@@ -236,7 +317,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void invalidServiceNamespaceIsRejected() {
         call("DescribeScalableTargets")
             .body("{ \"ServiceNamespace\": \"bogus\" }")
@@ -245,7 +326,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void tagsOnUnknownArnThrowResourceNotFound() {
         call("ListTagsForResource")
             .body("""
@@ -256,7 +337,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(13)
     void deregisterScalableTargetCascadesToItsPolicies() {
         call("DeregisterScalableTarget")
             .body("""
@@ -280,7 +361,7 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(14)
     void deregisteringTwiceThrowsObjectNotFound() {
         call("DeregisterScalableTarget")
             .body("""
@@ -291,10 +372,40 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(15)
     void unsupportedActionIsRejected() {
         call("PutScheduledAction")
             .body("{ \"ServiceNamespace\": \"ecs\" }")
         .when().post("/").then().statusCode(400);
+    }
+
+    @Test
+    @Order(16)
+    void invalidPaginationTokensReturnTheModeledError() {
+        for (String action : List.of("DescribeScalableTargets", "DescribeScalingPolicies")) {
+            for (String token : List.of("", "not!base64")) {
+                call(action)
+                    .body("{ \"ServiceNamespace\": \"ecs\", \"NextToken\": \"%s\" }".formatted(token))
+                .when().post("/").then().statusCode(400)
+                    .body("__type", equalTo("InvalidNextTokenException"));
+            }
+        }
+    }
+
+    @Test
+    @Order(17)
+    void pageSizeLimitsAreSpecificToEachOperation() {
+        call("DescribeScalableTargets")
+            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 50 }")
+        .when().post("/").then().statusCode(200);
+
+        call("DescribeScalingPolicies")
+            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 10 }")
+        .when().post("/").then().statusCode(200);
+
+        call("DescribeScalingPolicies")
+            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 11 }")
+        .when().post("/").then().statusCode(400)
+            .body("__type", equalTo("ValidationException"));
     }
 }

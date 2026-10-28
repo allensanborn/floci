@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudFron
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudMapCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudTrailCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
@@ -96,6 +97,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Organizat
 import io.github.hectorvent.floci.services.cloudformation.provisioners.PipesCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftClusterCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftEventSubscriptionCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.RedshiftServerlessCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Route53CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.S3CfnProvisioner;
@@ -366,6 +368,7 @@ final class CfnProvisionerFixture {
             }
             if (cloudWatchMetricsService != null) {
                 discovered.add(new CloudWatchCfnProvisioner(cloudWatchMetricsService));
+                discovered.add(new CloudWatchCompositeAlarmCfnProvisioner(cloudWatchMetricsService));
             }
             if (cloudWatchDashboardsService != null) {
                 discovered.add(new CloudWatchDashboardCfnProvisioner(cloudWatchDashboardsService));
@@ -503,6 +506,7 @@ final class CfnProvisionerFixture {
             }
             if (redshiftService != null) {
                 discovered.add(new RedshiftClusterCfnProvisioner(redshiftService));
+                discovered.add(new RedshiftEventSubscriptionCfnProvisioner(redshiftService));
             }
             if (redshiftServerlessService != null) {
                 discovered.add(new RedshiftServerlessCfnProvisioner(redshiftServerlessService));

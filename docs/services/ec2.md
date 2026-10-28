@@ -74,6 +74,26 @@ metadata.
 | `ami-debian12` | | `public.ecr.aws/docker/library/debian:12` |
 | `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
 | `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
+| `ami-opensuse-leap160` | | `registry.opensuse.org/opensuse/leap:16.0` |
+| `ami-sles15sp4-byos` | | `registry.suse.com/bci/bci-base:15.4` |
+| `ami-sles15sp5-byos` | | `registry.suse.com/bci/bci-base:15.5` |
+| `ami-sles15sp6-byos` | | `registry.suse.com/bci/bci-base:15.6` |
+| `ami-sles15sp7-byos` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-sles12sp5-byos` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-sles-sap15sp5` | | `registry.suse.com/bci/bci-base:15.5` |
+| `ami-smlm-server51-x86-64` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-smlm-server51-arm64` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-smlm-proxy51-x86-64` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-smlm-proxy51-arm64` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-sles12sp5` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-sles15sp5` | | `registry.suse.com/bci/bci-base:15.5` |
+| `ami-sles15sp6` | | `registry.suse.com/bci/bci-base:15.6` |
+| `ami-sles15sp7` | | `registry.suse.com/bci/bci-base:15.7` |
+| `ami-sles160` | | `registry.suse.com/bci/bci-base:16.0` |
+| `ami-rocky9` | | `quay.io/rockylinux/rockylinux:9.6` |
+| `ami-rocky10` | | `quay.io/rockylinux/rockylinux:10.0` |
+| `ami-rhel8` | | `registry.access.redhat.com/ubi8/ubi:8.10` |
+| `ami-rhel9` | | `registry.access.redhat.com/ubi9/ubi:9.5` |
 
 Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
 
@@ -123,7 +143,7 @@ With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a s
 
 Security-group permissions on a host-published port use the source visible inside Docker. Docker Desktop may replace the original external-client address. The legacy socat application publisher is disabled while enforcement is enabled because it obscures that source. SSH is published directly by the protected namespace. Application host ports remain available through the legacy publisher only when enforcement is explicitly disabled. Direct managed container traffic uses the logical ENI identity.
 
-When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
+When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP, with `TCP_NODELAY` on both sockets so a request the client sends as two small writes is not held for the first write's delayed ACK (about 40 ms per round trip otherwise). This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
 
 ```
 Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -> 172.17.0.3:80)
@@ -279,6 +299,10 @@ naming different VPCs find nothing.
 | DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
+| CreateDhcpOptions | Creates a DHCP options set with the supplied configurations and optional tags. |
+| DescribeDhcpOptions | Lists DHCP options sets by ID or filters, with paginated results. |
+| AssociateDhcpOptions | Associates an options set with a VPC; `default` leaves the VPC with no DHCP options. |
+| DeleteDhcpOptions | Deletes an unassociated DHCP options set. |
 | DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
@@ -297,7 +321,7 @@ private gateway lifecycles are not modelled.
 | Action | Description |
 |--------|-------------|
 | CreateSubnet | Creates a subnet in a VPC. |
-| DescribeSubnets | Lists or returns stored subnets. |
+| DescribeSubnets | Lists or returns stored subnets. The `default-for-az` filter and its `defaultForAz` alias select default or non-default subnets; values are ORed and separate filters are ANDed. |
 | DeleteSubnet | Deletes a subnet from the local EC2 store. Fails with `DependencyViolation` while the subnet still has a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything holding a network interface in it: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifySubnetAttribute | Updates supported subnet attributes. |
 
@@ -329,7 +353,10 @@ whose blob is incomplete, has bytes after its key or declares another type, and 
 more than one key line are refused with `InvalidKey.Format`. The key is stored as one OpenSSH line,
 which is what `RunInstances` copies into `authorized_keys`. `CreateKeyPair` and `ImportKeyPair`
 take a `KeyName` of up to 255 ASCII characters with no leading or trailing space; a missing or
-blank one is `MissingParameter`, and they answer any other with `InvalidParameterValue`.
+blank one is `MissingParameter`, and they answer any other with `InvalidParameterValue`. Either
+action refuses a name that a key pair in the account and region already has with
+`InvalidKeyPair.Duplicate`, and of two that ask for a free name at the same moment, one stores its
+key pair and the other gets that error.
 
 `DescribeKeyPairs` returns each key pair's `keyType` and `createTime`. It filters by `key-pair-id`,
 `key-name`, `fingerprint`, `tag-key` and `tag:<key>`, as AWS documents, and also by `key-type`,
@@ -354,10 +381,10 @@ and `sk-ecdsa-sha2-nistp256@openssh.com`.
 
 | Action | Description |
 |--------|-------------|
-| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file. |
+| CreateKeyPair | Creates an RSA or ED25519 key pair and returns its private key as PEM or as a PuTTY `.ppk` file, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 | DescribeKeyPairs | Lists or returns stored key pairs. |
 | DeleteKeyPair | Deletes a key pair from the local EC2 store. |
-| ImportKeyPair | Imports a public key as a local key pair. |
+| ImportKeyPair | Imports a public key as a local key pair, with `key-pair` tags from `TagSpecification` returned in `tagSet`. |
 
 `CreateKeyPair` creates a 2048-bit RSA key unless `KeyType=ed25519` asks for an ED25519 key, and
 returns its private key as PEM unless `KeyFormat=ppk` asks for a PuTTY key file, in the forms AWS
@@ -374,9 +401,9 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | Action | Description |
 |--------|-------------|
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
-| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. |
-| RegisterImage | Registers an AMI from supplied metadata and block device mappings. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns. |
+| CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. Applies `image` and `snapshot` tags from `TagSpecification` to the AMI and its new snapshots. |
+| RegisterImage | Registers an AMI from supplied metadata and block device mappings, with `image` tags from `TagSpecification`. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
@@ -507,11 +534,11 @@ matching how AWS itself responds.
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkAcl | Creates a network ACL in a VPC. |
+| CreateNetworkAcl | Creates a network ACL in a VPC, with `network-acl` tags from `TagSpecification`. |
 | DescribeNetworkAcls | Lists or returns stored network ACLs. |
 | DeleteNetworkAcl | Deletes a network ACL from the local EC2 store. |
-| CreateNetworkAclEntry | Adds an entry to a network ACL. |
-| ReplaceNetworkAclEntry | Replaces an entry in a network ACL. |
+| CreateNetworkAclEntry | Adds an entry to a network ACL. The entry keeps whichever of `CidrBlock` or `Ipv6CidrBlock` was supplied, and `DescribeNetworkAcls` returns it under the same name. `IcmpTypeCode` is kept for ICMP (`1`) and ICMPv6 (`58`) entries only. |
+| ReplaceNetworkAclEntry | Replaces an entry in a network ACL, including its `CidrBlock` or `Ipv6CidrBlock` and, for ICMP and ICMPv6 entries, its `IcmpTypeCode`. |
 | DeleteNetworkAclEntry | Removes an entry from a network ACL. |
 | ReplaceNetworkAclAssociation | Replaces the network ACL associated with a subnet. |
 
@@ -531,6 +558,31 @@ Two AWS-managed prefix lists exist in every region without being created —
 (`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
 read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
 modifying or deleting one returns `UnsupportedOperation`.
+
+Additional regional AWS-managed lists can be supplied through
+`FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH`. Set it to a readable JSON
+file inside the Floci container, for example:
+
+```json
+{
+  "eu-west-1": [{
+    "prefixListId": "pl-0123456789abcdef0",
+    "prefixListName": "example-managed-service",
+    "cidrs": ["192.0.2.0/24"]
+  }]
+}
+```
+
+The file is read once when EC2 starts. Each entry needs a unique ID and name
+within its region and at least one IPv4 CIDR. CIDRs are normalized to network
+blocks; repeated or equivalent blocks within one list are rejected. Entries
+cannot replace the built-in lists. Invalid or unreadable files prevent startup
+when EC2 is enabled; disabled EC2 does not read the catalog. Configured lists
+have the same AWS ownership, read-only behavior, security-group reference
+validation and describe/entry responses as the built-in lists. Both configured
+and built-in CIDRs participate in security-group policy evaluation and firewall
+rules when enforcement is enabled. They are available across accounts in their
+configured region. Leaving the setting unset keeps the built-in catalog.
 
 A customer-managed list may not take a name AWS reserves for its own: `com.amazonaws.`,
 `com.amazon.` or `com.aws.`, each including the trailing dot. `CreateManagedPrefixList`
@@ -716,6 +768,55 @@ through `payment-pending`/`assessing`. `DescribeCapacityReservations` supports t
 `availability-zone`, `end-date-type`, `instance-match-criteria`, `instance-platform`,
 `instance-type`, `state` and `tenancy` filters alongside the shared `tag:`, `tag-key` and
 `tag-value` filters.
+Future-dated requests store a `scheduled` reservation with `StartDate`,
+`DeliveryPreference: incremental` and `CommitmentInfo`. `StartDate` must be 5 to 120
+days ahead and requires `CommitmentDuration` (1 to 200000000 seconds). Scheduled
+capacity cannot satisfy instance launches. The existing capacity reconciliation
+activates it when its start time is reached. Repeating a `ClientToken` returns the
+same reservation; changed reservation parameters, including creation tags, are rejected.
+Creation tags are persisted with the reservation and are not reapplied on replay, so
+later `CreateTags` edits survive a retry. Tag order does not change request identity.
+Future-dated requests require explicit `InstanceMatchCriteria: targeted`, at least
+32 vCPUs in total using the instance-type catalog, and an instance type in the C, G,
+I, M, R, T, U or X families. Omitted or `open` matching is rejected before publication.
+Activation does not adopt existing running instances; launches must explicitly target
+the reservation. Immediate reservations retain their existing open-matching behavior.
+
+Assessment and incremental delivery are modeled synchronously, without AWS capacity
+assessment or billing. Cancellation retains Floci's immediate cancellation behavior;
+cancellation quotes and charges are not modeled.
+
+On-demand launches consume matching open reservation capacity unless their preference is
+`none`. RunInstances also honors an explicit reservation target, including one supplied by
+its launch template. `capacity-reservations-only` requires matching reservation capacity and
+never falls back to On-Demand capacity when launching or restarting. It can accompany an
+explicit reservation target; without one, only matching open reservations are eligible.
+A matching targeted reservation with too few available slots returns
+`ReservationCapacityExceeded` on launch or restart.
+CreateFleet and AutoScaling retain the template's preference and target;
+CloudFormation launch templates preserve the same declaration. Creating an open reservation
+adopts matching, unassociated running instances with an `open` preference. DescribeInstances
+reports the acquired reservation. Stop, termination,
+cancellation and expiration release membership; a restart acquires capacity using the
+instance's retained launch preference and target. A failed membership write reports an error;
+subsequent access reconciles released membership from persisted instance state.
+
+Membership and available counts publish in one atomic storage batch. Older snapshots without
+membership remain readable.
+
+`CapacityReservationResourceGroupArn` targets the members of an existing capacity pool
+in the caller's account and region. Only members with matching instance type, platform,
+Availability Zone and tenancy are eligible. Both open and targeted member reservations
+can supply capacity. The default permits On-Demand fallback when the group has no
+matching available capacity; `capacity-reservations-only` forbids that fallback at launch
+and restart. A group target cannot accompany a reservation ID, `none`, or a Spot request.
+DescribeInstances retains the group target separately from the acquired reservation ID.
+Running group-targeted instances can acquire newly added matching members or move to
+another matching member after cancellation or expiration. Existing membership survives
+group deletion until the instance releases its reservation.
+
+
+Capacity reservation zone IDs must be among those returned by `DescribeAvailabilityZones`.
 
 ### Dedicated Hosts
 
@@ -793,6 +894,9 @@ allocated address.
 | DescribeRegions | Returns the regions known to the local EC2 service. |
 | DescribeAccountAttributes | Returns local account-level EC2 attributes. |
 
+The modeled zones are standard Availability Zones. Each reports `NetworkBorderGroup` as its
+Region, such as `eu-west-1`. Local Zones and Wavelength Zones are not modeled.
+
 A zone id has AWS's shape, a short region prefix and `-az<n>`: `use1-az1` in `us-east-1`, `apne1-az1`
 in `ap-northeast-1`, `usgw1-az1` in `us-gov-west-1`. On AWS the pairing of a zone name with a zone id
 differs per account; Floci always pairs zone `a` with `az1`, `b` with `az2`, and so on. Subnets, VPC
@@ -839,16 +943,65 @@ Within `NetworkInterfaces`, `ConnectionTrackingSpecification` is stored and read
 three of its timeout members.
 
 At launch, `RunInstances` and `CreateFleet` apply the template's `BlockDeviceMappings` under the
-request's, field by field: a request entry for a `DeviceName` the template maps changes only the
-members it sets, and the rest keep the template's values; devices only one side maps apply as
-given. An Auto Scaling group launching from a template gets the template's mappings the same
-way. The root volume's type comes from the mapping for the AMI's root device, else from the
-AMI's own root mapping, else `gp3`, and `CreateImage` records that type on the new AMI's root
-mapping. A mapping with `NoDevice` set removes its device whatever else it names, so it sets no
-type and its `VolumeType` is not checked. A mapping naming a `VolumeType` outside the service model's enum fails with
-`InvalidParameterValue`, as `ModifyVolume` does. Template versions are not checked when they are
-stored, so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and
-fails at launch.
+request's, field by field: a request entry for a `DeviceName` the template maps, spelled `xvdf` or
+`/dev/xvdf`, changes only the members it sets, and the rest keep the template's values; devices
+only one side maps apply as given. A request entry that makes the device something else, an EBS
+volume (`Ebs`), an instance store volume (`VirtualName`) or nothing (`NoDevice`), replaces the
+template's choice for it, an `Ebs` block still merging member by member into the template's. An
+Auto Scaling group launching from a template gets its mappings the same way; one launching from a
+launch configuration does not pass the configuration's mappings yet. CloudFormation does not pass
+them yet: an `AWS::EC2::Instance` launches without the `BlockDeviceMappings` it or its launch
+template declares, and an `AWS::EC2::LaunchTemplate` or
+`AWS::AutoScaling::LaunchConfiguration` stores none, so instances launched from what a stack
+creates get the AMI's devices alone. A mapping naming a `VolumeType` outside the service model's
+enum fails with `InvalidParameterValue`, as `ModifyVolume` does; one with `NoDevice` set creates no
+device, so its `VolumeType` is not checked. Template versions are not checked when they are stored,
+so a template naming an unknown `VolumeType` is accepted by `CreateLaunchTemplate` and fails at
+launch.
+
+The launch's mappings then apply over the AMI's own block device mapping the same way, and the
+launch creates one EBS volume for each device left, attached at that device:
+
+- The instance's root device is the AMI's `RootDeviceName`, which the AMI's entry for it may spell
+  `xvda` or `/dev/xvda`. An AMI that maps no root device gets an 8 GiB root volume. A launch entry
+  for a device the AMI maps applies to it whether it is spelled `xvdf` or `/dev/xvdf`. `NoDevice`
+  keeps any other device the AMI maps from being created, and an entry naming a `VirtualName`, an
+  instance store volume, takes the device over, so neither leaves an EBS volume there. The root
+  is always created: an entry setting either on it leaves the AMI's root as the AMI maps it. An
+  AMI entry with no `Ebs` member, such as an instance store volume, creates nothing.
+- The catalog's images are rooted at `/dev/xvda`, including some AWS publishes with a
+  `/dev/sda1` root, such as Ubuntu and Windows, so on them an entry for `/dev/sda1` adds a data
+  volume rather than resizing the root.
+- A volume from a snapshot takes the snapshot's size unless its entry names a larger one. A smaller
+  size fails with `InvalidBlockDeviceMapping` ("Volume of size 8GB is smaller than snapshot
+  'snap-...', expect size>= 16GB"), and a snapshot that does not exist fails with
+  `InvalidSnapshot.NotFound`. An entry naming neither a size nor a snapshot gets 8 GiB. Snapshots
+  hold no data in Floci, so a volume made from one starts empty.
+- The root takes the AMI root's `VolumeType`, else `gp3`; other devices default to `gp2`, as
+  `CreateVolume` does. `Iops` applies only to `gp3`, `io1` and `io2` volumes and `Throughput` only
+  to `gp3`, so a request entry that changes a template device's type does not carry the old type's
+  settings over. A volume is encrypted when its entry or its snapshot says so, or when encryption
+  by default is on.
+- `DeleteOnTermination` defaults to `true` for every device a launch creates. When the instance
+  terminates, the volumes whose
+  attachment says `true` are deleted, the root included, unless another instance still has them
+  attached; the rest are detached. That holds as well for an instance that ends `terminated`
+  because its container never started: its volumes are settled the next time an EBS volume call
+  reads them, `DescribeVolumes` or a call naming one of them. A root kept this way holds no data
+  when the instance had a container, whose own file system was the root.
+- An entry without a `DeviceName` fails with `InvalidBlockDeviceMapping` ("Missing device name"),
+  as do a device name `AttachVolume` would refuse ("Invalid device name ...") and a device the
+  request or the template names twice ("/dev/sdh is being assigned to multiple times."), whether or
+  not a launch template is used. `CreateFleet` checks the device names before answering `DryRun`.
+- Nothing of a refused launch is kept: no instance, volume or network interface. A launch undone
+  after its instances exist, an instant `CreateFleet` whose later launch fails or a `RunInstances`
+  whose capacity reservation another launch took in the meantime, deletes every volume it created,
+  those with `DeleteOnTermination` false included. Auto Scaling and CloudFormation undo instances
+  they launched by terminating them, so there the volumes termination keeps stay.
+
+`DescribeInstances` lists every EBS volume attached to the instance in `BlockDeviceMappings`, root
+device first: those its launch created and any attached since, each with its own
+`DeleteOnTermination`; a terminated instance lists none.
 
 Both blocks are validated by `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` before
 anything is stored. An `InstanceRequirements` block must carry `VCpuCount` and `MemoryMiB`, each
@@ -892,6 +1045,12 @@ Two behaviours worth calling out, because they are what Terraform reads back:
   (`InvalidParameterCombination`); place the subnet on the primary network interface instead.
 
 #### Launch template versions
+
+For a specified template, `DescribeLaunchTemplateVersions` returns all stored versions in
+ascending numeric order by default. `LaunchTemplateVersion.N` selects explicit version numbers,
+`$Latest`, or `$Default`; the legacy `Versions.N` spelling is also accepted. Without an explicit
+version list, `MinVersion` is exclusive and `MaxVersion` inclusive. Explicit versions take
+precedence over the range. Filtering, pagination, and listing across all templates are unchanged.
 
 `CreateLaunchTemplateVersion` accepts two members outside `LaunchTemplateData` itself:
 
@@ -964,6 +1123,8 @@ A standalone ENI created via `CreateNetworkInterface` can also be handed to `Run
 | AttachVolume | Attaches a volume to an instance at the requested device; returns the attachment in `attaching` state. |
 | DetachVolume | Detaches a volume from an instance, optionally forced; returns the attachment in `detaching` state. |
 
+An encrypted volume reports the KMS key it was created with as `kmsKeyId` in `CreateVolume` and `DescribeVolumes`: the `KmsKeyId` of the `CreateVolume` request or of the launch's block device mapping (a launch template's included), or else the region's default EBS key as `GetEbsDefaultKmsKeyId` reported it then (`alias/aws/ebs` until `ModifyEbsDefaultKmsKeyId` sets another). Keys are kept as given (a key id, key ARN, alias name or alias ARN) and are not checked against KMS; AWS reports the key's ARN, and fails the volume later when the key cannot be used. A volume that is not encrypted has no key. AWS refuses a `KmsKeyId` without `Encrypted=true`, even with encryption by default on; Floci accepts it, and the volume keeps the key only when encryption by default, or for a launch volume an encrypted snapshot, makes it encrypted. A launch volume encrypted only by its snapshot and naming no key gets the region's default key, where AWS keeps the snapshot's: snapshots record no key. Volumes stored before Floci kept keys report none.
+
 When `floci.services.ec2.volume-block-devices` is enabled (the default), attached EBS volumes are backed by real Linux loop devices inside running instance containers and synthesized EKS cluster node containers:
 - **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`. It starts on the first volume operation and is removed when Floci shuts down; the backing files stay in storage.
 - **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
@@ -1023,7 +1184,7 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 | EnableEbsEncryptionByDefault | Turns on default encryption for new volumes in the region. |
 | DisableEbsEncryptionByDefault | Turns default encryption back off. |
 | GetEbsEncryptionByDefault | Reports whether default encryption is on. |
-| ModifyEbsDefaultKmsKeyId | Sets the KMS key used when a volume names none. |
+| ModifyEbsDefaultKmsKeyId | Sets the KMS key an encrypted volume gets when it names none. |
 | GetEbsDefaultKmsKeyId | Reports the current default KMS key. |
 | ResetEbsDefaultKmsKeyId | Restores the AWS-managed default key. |
 
@@ -1134,6 +1295,10 @@ One network per **VPC**, not per subnet: subnets inside a VPC route to each othe
 network per subnet would manufacture a partition AWS does not have. Per-subnet addressing is kept
 anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates static addresses
 out of its own slice of it.
+
+An address a subnet picks on its own is never one that an instance, network interface or NAT
+gateway in the subnet already holds. Default subnet ids are the same in every account, so those
+subnets share a network, and what any account holds there counts.
 
 The declared CIDR is used verbatim whenever it can be. It cannot be when it is absent, malformed,
 outside RFC 1918, or already claimed on the Docker daemon, including by another Floci VPC, since

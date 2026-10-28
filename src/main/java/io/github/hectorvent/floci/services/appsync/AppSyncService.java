@@ -24,8 +24,9 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.*;
-import java.util.Base64;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -1116,8 +1117,8 @@ public class AppSyncService {
                 return Long.parseLong(s);
             } catch (NumberFormatException e) {
                 try {
-                    return java.time.Instant.parse(s).getEpochSecond();
-                } catch (java.time.format.DateTimeParseException ex) {
+                    return Instant.parse(s).getEpochSecond();
+                } catch (DateTimeParseException ex) {
                     throw new AwsException("BadRequestException",
                         "Invalid expires value: " + s + ". Expected epoch seconds or ISO 8601.", 400);
                 }
@@ -1380,8 +1381,7 @@ public class AppSyncService {
             return 0;
         }
         try {
-            byte[] decoded = Base64.getUrlDecoder().decode(token);
-            return Integer.parseInt(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            return Integer.parseInt(Base64Url.decode(token));
         } catch (IllegalArgumentException e) {
             return -1;
         }

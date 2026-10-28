@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -30,7 +31,7 @@ class SesDkimSigningActionsIntegrationTest {
     private static final String V2_AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ses/aws4_request";
 
-    private io.restassured.specification.RequestSpecification v1(String action) {
+    private RequestSpecification v1(String action) {
         return given().contentType("application/x-www-form-urlencoded")
                 .header("Authorization", V1_AUTH).formParam("Action", action);
     }
@@ -207,7 +208,8 @@ class SesDkimSigningActionsIntegrationTest {
     void putDkimSigningAttributes_nonObjectBody_returns400() {
         given().contentType("application/json").header("Authorization", V2_AUTH).body("[]")
         .when().put("/v2/email/identities/dkim-nonobj.floci.test/dkim/signing")
-        .then().statusCode(400).body("__type", equalTo("BadRequestException"));
+        .then().statusCode(400).body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("Start of list found where not expected"));
     }
 
     @Test

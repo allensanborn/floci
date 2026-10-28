@@ -18,12 +18,14 @@ import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -102,7 +104,7 @@ class CloudFrontCfnProvisionerTest {
         return p;
     }
 
-    private static <T> T withIdentity(T model, java.util.function.Consumer<T> set) {
+    private static <T> T withIdentity(T model, Consumer<T> set) {
         set.accept(model);
         return model;
     }
@@ -184,8 +186,10 @@ class CloudFrontCfnProvisionerTest {
                 {"DistributionConfig": {
                    "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
                                 "ConnectionAttempts": 2, "ConnectionTimeout": 5,
+                                "ResponseCompletionTimeout": 90,
                                 "CustomOriginConfig": {"OriginProtocolPolicy": "https-only",
-                                                       "OriginReadTimeout": 45}}],
+                                                       "OriginReadTimeout": 45,
+                                                       "OriginKeepaliveTimeout": 120}}],
                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
                 }}
                 """), distributionCtx(null));
@@ -195,8 +199,11 @@ class CloudFrontCfnProvisionerTest {
         Origin origin = sent.getValue().getConfig().getOrigins().getFirst();
         assertEquals(2, origin.getConnectionAttempts());
         assertEquals(5, origin.getConnectionTimeout());
+        // ResponseCompletionTimeout lives on the origin, where the serving layer reads it.
+        assertEquals(Integer.valueOf(90), origin.getResponseCompletionTimeout());
         // OriginReadTimeout lives on CustomOriginConfig, where the serving layer reads it.
         assertEquals(Integer.valueOf(45), origin.getCustomOriginConfig().get("OriginReadTimeout"));
+        assertEquals(Integer.valueOf(120), origin.getCustomOriginConfig().get("OriginKeepaliveTimeout"));
     }
 
     @Test
@@ -456,7 +463,7 @@ class CloudFrontCfnProvisionerTest {
         when(cloudFront.getResponseHeadersPolicy(ID)).thenReturn(responseHeadersPolicy(ID, ETAG));
         AwsException inUse = new AwsException("ResponseHeadersPolicyInUse",
                 "The response headers policy is attached to one or more distributions.", 409);
-        org.mockito.Mockito.doThrow(inUse).when(cloudFront).deleteResponseHeadersPolicy(ID, ETAG);
+        Mockito.doThrow(inUse).when(cloudFront).deleteResponseHeadersPolicy(ID, ETAG);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.delete(RESPONSE_HEADERS_POLICY, ID, REGION));

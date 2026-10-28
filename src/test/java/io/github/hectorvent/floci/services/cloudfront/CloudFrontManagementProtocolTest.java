@@ -13,6 +13,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.xml.HasXPath.hasXPath;
 
 /** Verifies CloudFront REST XML payload roots against the AWS service model. */
@@ -47,6 +48,49 @@ class CloudFrontManagementProtocolTest {
             .body(hasXPath("local-name(/*)", equalTo(expectedRoot)))
             .body(hasXPath("namespace-uri(/*)", equalTo(
                     "http://cloudfront.amazonaws.com/doc/2020-05-31/")));
+    }
+
+    @Test
+    void distributionCreatedWithTagsReturnsThemByArn() {
+        String body = """
+                <DistributionConfigWithTags xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <DistributionConfig>
+                    <CallerReference>%s</CallerReference>
+                    <Enabled>false</Enabled>
+                    <Origins><Quantity>1</Quantity><Items><Origin>
+                      <Id>origin</Id><DomainName>example.com</DomainName>
+                      <CustomOriginConfig>
+                        <HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                        <OriginProtocolPolicy>http-only</OriginProtocolPolicy>
+                      </CustomOriginConfig>
+                    </Origin></Items></Origins>
+                    <DefaultCacheBehavior>
+                      <TargetOriginId>origin</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                    </DefaultCacheBehavior>
+                  </DistributionConfig>
+                  <Tags><Items><Tag><Key>env</Key><Value>dev</Value></Tag></Items></Tags>
+                </DistributionConfigWithTags>
+                """.formatted(UUID.randomUUID());
+
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + "distribution?WithTags");
+        created.then().statusCode(201);
+        String xml = created.asString();
+        String arn = XmlParser.extractFirst(xml, "ARN", null);
+        String id = XmlParser.extractFirst(xml, "Id", null);
+
+        try {
+            given().queryParam("Resource", arn)
+                    .when().get(API + "tagging")
+                    .then().statusCode(200)
+                    .body(hasXPath("//*[local-name()='Tag']/*[local-name()='Key']/text()", equalTo("env")))
+                    .body(hasXPath("//*[local-name()='Tag']/*[local-name()='Value']/text()", equalTo("dev")));
+        } finally {
+            given().header("If-Match", created.header("ETag"))
+                    .when().delete(API + "distribution/" + id)
+                    .then().statusCode(204);
+        }
     }
 
     @ParameterizedTest(name = "{0} omits unmodeled Marker and IsTruncated members")
@@ -220,6 +264,42 @@ class CloudFrontManagementProtocolTest {
             .delete(API + "function/" + name)
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    void updateFunctionReturnsTheHeaderNameModeledByAwsSdks() {
+        String name = "update-header-" + UUID.randomUUID();
+        String createBody = """
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                  <FunctionConfig><Comment>first</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig>
+                  <FunctionCode>YWJj</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(name);
+        String updateBody = """
+                <UpdateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <FunctionConfig><Comment>second</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig>
+                  <FunctionCode>ZGVm</FunctionCode>
+                </UpdateFunctionRequest>
+                """;
+
+        String createdEtag = given().contentType("application/xml").body(createBody)
+                .when().post(API + "function")
+                .then().statusCode(201).extract().header("ETag");
+
+        String updatedEtag = given().contentType("application/xml")
+                .header("If-Match", createdEtag).body(updateBody)
+                .when().put(API + "function/" + name)
+                .then().statusCode(200).header("ETtag", notNullValue())
+                .extract().header("ETtag");
+
+        given().queryParam("Stage", "DEVELOPMENT")
+                .when().get(API + "function/" + name + "/describe")
+                .then().statusCode(200).header("ETag", equalTo(updatedEtag));
+
+        given().header("If-Match", updatedEtag)
+                .when().delete(API + "function/" + name)
+                .then().statusCode(204);
     }
 
     @Test
@@ -483,6 +563,84 @@ class CloudFrontManagementProtocolTest {
             .then()
                 .statusCode(400)
                 .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalDelete")));
+    }
+
+    @Test
+    void managedCachePolicyIsReadableAsPolicyAndConfig() {
+        String optimized = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")))
+                .body(hasXPath("//*[local-name()='MinTTL']/text()", equalTo("1")))
+                .body(hasXPath("//*[local-name()='DefaultTTL']/text()", equalTo("86400")))
+                .body(hasXPath("//*[local-name()='MaxTTL']/text()", equalTo("31536000")))
+                .body(hasXPath("//*[local-name()='EnableAcceptEncodingGzip']/text()", equalTo("true")))
+                .body(hasXPath("//*[local-name()='EnableAcceptEncodingBrotli']/text()", equalTo("true")))
+                .body(hasXPath("//*[local-name()='HeaderBehavior']/text()", equalTo("none")));
+
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized + "/config")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("local-name(/*)", equalTo("CachePolicyConfig")))
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")));
+    }
+
+    @Test
+    void managedCachePoliciesAreListedWithTheirType() {
+        String disabled = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
+        given()
+                .queryParam("Type", "managed")
+            .when()
+                .get(API + "cache-policy")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("/*/*[local-name()='Quantity']/text()", equalTo("7")))
+                .body(hasXPath("//*[local-name()='CachePolicySummary']"
+                        + "[.//*[local-name()='Id' and text()='" + disabled + "']]"
+                        + "/*[local-name()='Type']/text()", equalTo("managed")));
+
+        given()
+                .queryParam("Type", "custom")
+            .when()
+                .get(API + "cache-policy")
+            .then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='Id' and text()='" + disabled + "'])",
+                        equalTo("0")));
+    }
+
+    @Test
+    void managedCachePolicyCannotBeUpdatedOrDeleted() {
+        String optimized = "658327ea-f89d-4fab-a63d-7e88639e58f6";
+        given()
+                .header("If-Match", "E23ZP02F085DFQ")
+                .contentType("application/xml")
+                .body(cachePolicyBody("replacement", "c", "100", "session"))
+            .when()
+                .put(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalUpdate")));
+
+        given()
+                .header("If-Match", "E23ZP02F085DFQ")
+            .when()
+                .delete(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("IllegalDelete")));
+
+        given()
+            .when()
+                .get(API + "cache-policy/" + optimized)
+            .then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='Name']/text()", equalTo("Managed-CachingOptimized")));
     }
 
     private static String cachePolicyBody(String name, String comment, String defaultTtl, String cookie) {
