@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 
@@ -249,6 +250,39 @@ class Route53ResolverIntegrationTest {
         String again = createEndpoint(body.replace("mix-1", "mix-2").replace("\"Ip\":\"10.78.1.4\"", "\"Ip\":\"10.78.1.9\""));
         assertEquals(new HashSet<>(List.of("10.78.1.9", "10.78.1.4")),
                 new HashSet<>(JsonPath.from(listIpAddresses(again)).getList("IpAddresses.Ip")));
+    }
+
+    @Test
+    void createResolverEndpoint_overlappingCidrsInTwoVpcsBothGetAddresses() {
+        for (String n : List.of("a", "b")) {
+            String vpc = ec2("CreateVpc", "CidrBlock", "10.79.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+            String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.79.1.0/28", "AvailabilityZone", "us-east-1a")
+                    .extract().path("CreateSubnetResponse.subnet.subnetId");
+            String id = createEndpoint("{\"Name\":\"ep-overlap-" + n + "\",\"Direction\":\"INBOUND\","
+                    + "\"SecurityGroupIds\":[\"sg-abc123\"],\"CreatorRequestId\":\"overlap-" + n + "\","
+                    + "\"IpAddresses\":[{\"SubnetId\":\"" + sub + "\"},{\"SubnetId\":\"" + sub + "\"}]}");
+            List<String> ips = JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip");
+            assertEquals(new HashSet<>(List.of("10.79.1.4", "10.79.1.5")), new HashSet<>(ips),
+                    "VPC " + n + " must allocate from its own subnet, not skip the other VPC's addresses");
+        }
+    }
+
+    @Test
+    void createResolverEndpoint_exhaustedSubnetIsRejectedAndStoresNothing() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.80.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+        // /28 = 16 addresses, minus 4 reserved at the bottom and 1 at the top = 11 allocatable.
+        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.80.1.0/28", "AvailabilityZone", "us-east-1a")
+                .extract().path("CreateSubnetResponse.subnet.subnetId");
+        String requests = String.join(",", Collections.nCopies(12, "{\"SubnetId\":\"" + sub + "\"}"));
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"Name\":\"ep-exhausted\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
+                        + "\"CreatorRequestId\":\"exhausted-1\",\"IpAddresses\":[" + requests + "]}")
+                .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
+                .header("Authorization", AUTH_HEADER).body("{}")
+                .when().post("/").then().statusCode(200)
+                .body("ResolverEndpoints.findAll { it.Name == 'ep-exhausted' }.size()", equalTo(0));
     }
 
     private static String createEndpoint(String body) {
