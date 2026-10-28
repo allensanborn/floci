@@ -162,6 +162,38 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void aVpcThisRunMaterialisedNextToItsPredecessorsLegacyNetworkTakesBothWithIt() {
+        // An instance started after the restart: this run created the computed-name network while
+        // the legacy-named one from before still exists. Deleting the VPC removes both.
+        String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
+        existingNetwork(legacyName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true);
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(manager.networkName(REGION, "vpc-1"), legacyName), removedNetworks);
+    }
+
+    @Test
+    void aVpcThisRunReusedItsPredecessorsNetworkForRemovesItOnce() {
+        String networkName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(networkName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true);
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address).isPresent());
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(networkName), removedNetworks);
+    }
+
+    @Test
     void declaringAndDeletingUnusedNetworksDoesNotContactDocker() {
         manager.declareVpc(REGION, "vpc-private", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-private", "subnet-a", "10.0.1.0/24");
