@@ -57,7 +57,10 @@ An operation AWS starts paging later needs `make aws-data-sync`, not new handler
   bare number included, is `InvalidInput`. The marker is signed over the account, the operation and
   every request member except `Marker` and `MaxItems`, so a marker from another operation, another
   principal or filter, or another account is refused, while the page size may change between calls.
-  Markers are signed with a key generated at startup and do not survive a restart.
+  On the lists whose `UserName` defaults to the caller (`ListAccessKeys`, `ListMFADevices`,
+  `ListSSHPublicKeys`, `ListSigningCertificates`, `ListServiceSpecificCredentials`), the marker is
+  signed over the user the list was read for, so one user's marker does not resume another's when
+  both omit `UserName`. Markers are signed with a key generated at startup and do not survive a restart.
 - A marker names the last item of its page rather than a position, so the next page resumes after
   that item wherever it now sits: an item created or deleted ahead of it neither repeats nor skips
   anything. Each list is ordered by the key its marker names (users, groups, roles, instance profiles

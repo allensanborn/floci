@@ -674,6 +674,63 @@ class IamListPaginationIntegrationTest {
         }
     }
 
+    /**
+     * A list that omits {@code UserName} is the caller's, so the marker is bound to the user it
+     * resolved to: another user in the same account, also omitting it, cannot resume it, while the
+     * same listing named explicitly still can.
+     */
+    @Test
+    void aMarkerFromAnotherCallersImplicitListingIsRejected() {
+        String tag = suffix();
+        List<String> users = List.of("pg-caller-a-" + tag, "pg-caller-b-" + tag);
+        Map<String, List<String>> keys = new HashMap<>();
+        Map<String, List<String>> sshKeys = new HashMap<>();
+        for (String user : users) {
+            createUser(user);
+            keys.put(user, new ArrayList<>());
+            sshKeys.put(user, new ArrayList<>());
+            for (int i = 0; i < 2; i++) {
+                keys.get(user).add(iam("CreateAccessKey").formParam("UserName", user).when().post("/").then()
+                    .statusCode(200).extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"));
+                sshKeys.get(user).add(iam("UploadSSHPublicKey").formParam("UserName", user)
+                    .formParam("SSHPublicKeyBody", sshPublicKey()).when().post("/").then().statusCode(200).extract()
+                    .path("UploadSSHPublicKeyResponse.UploadSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyId"));
+            }
+        }
+        Function<String, String> as = user -> "AWS4-HMAC-SHA256 Credential=" + keys.get(user).getFirst()
+                + "/20260227/us-east-1/iam/aws4_request";
+        String a = users.get(0);
+        String b = users.get(1);
+        try {
+            for (String[] op : List.of(new String[]{"ListAccessKeys", "AccessKeyMetadata", "AccessKeyId"},
+                    new String[]{"ListSSHPublicKeys", "SSHPublicKeys", "SSHPublicKeyId"})) {
+                Page first = page(op[0], op[1], op[2], given().header("Authorization", as.apply(a))
+                        .formParam("Action", op[0]).formParam("MaxItems", "1"));
+                assertTrue(first.truncated(), op[0] + " as " + a + " is cut at one item");
+                assertNotNull(first.marker());
+
+                refused(given().header("Authorization", as.apply(b)).formParam("Action", op[0])
+                        .formParam("Marker", first.marker()), "InvalidInput");
+
+                List<String> all = new ArrayList<>(first.names());
+                all.addAll(page(op[0], op[1], op[2], given().header("Authorization", as.apply(a))
+                        .formParam("Action", op[0]).formParam("Marker", first.marker())).names());
+                List<String> owned = op[0].equals("ListAccessKeys") ? keys.get(a) : sshKeys.get(a);
+                assertEquals(new TreeSet<>(owned), new TreeSet<>(all), op[0] + " resumes for its own caller");
+                assertEquals(List.of(all.get(1)), page(op[0], op[1], op[2], given()
+                        .header("Authorization", as.apply(b)).formParam("Action", op[0])
+                        .formParam("UserName", a).formParam("Marker", first.marker())).names(),
+                        op[0] + " named explicitly is the same listing");
+            }
+        } finally {
+            for (String user : users) {
+                sshKeys.get(user).forEach(id -> call("DeleteSSHPublicKey", "UserName", user, "SSHPublicKeyId", id));
+                keys.get(user).forEach(key -> call("DeleteAccessKey", "UserName", user, "AccessKeyId", key));
+                call("DeleteUser", "UserName", user);
+            }
+        }
+    }
+
     // =========================================================================
     // Every operation the generated table pages
     // =========================================================================

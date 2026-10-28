@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -418,6 +419,20 @@ public class IamQueryHandler {
                         "The Access Key with id " + accessKeyId + " cannot be found.", 404));
     }
 
+    /**
+     * The request with {@code UserName} set to the user it acts on, for a listing whose user may be
+     * the caller. A marker is signed over the request's members, so a listing paged from the raw
+     * request would give every caller who omits {@code UserName} the same scope, and one user's
+     * marker would resume another's listing. Paged from this, the marker is bound to the user the
+     * list was read for, whether named or resolved.
+     */
+    private MultivaluedMap<String, String> withResolvedUser(MultivaluedMap<String, String> params,
+                                                            String authorization) {
+        MultivaluedMap<String, String> resolved = new MultivaluedHashMap<>(params);
+        resolved.putSingle("UserName", resolveUserName(params, authorization));
+        return resolved;
+    }
+
     private Response handleGetUser(MultivaluedMap<String, String> params, String authorization) {
         // UserName is optional per the IAM model: it defaults to the user owning the
         // access key that signed the request.
@@ -532,10 +547,10 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("ResyncMFADevice", AwsNamespaces.IAM)).build();
     }
 
-    private Response handleListMFADevices(MultivaluedMap<String, String> params, String authorization) {
-        String userName = resolveUserName(params, authorization);
-        return pagedList("ListMFADevices", iamService.listMfaDevices(userName), VirtualMfaDevice::getSerialNumber,
-                params, (xml, device) -> xml.start("member")
+    private Response handleListMFADevices(MultivaluedMap<String, String> request, String authorization) {
+        MultivaluedMap<String, String> params = withResolvedUser(request, authorization);
+        return pagedList("ListMFADevices", iamService.listMfaDevices(getParam(params, "UserName")),
+                VirtualMfaDevice::getSerialNumber, params, (xml, device) -> xml.start("member")
                         .elem("UserName", device.getUserName())
                         .elem("SerialNumber", device.getSerialNumber())
                         .elem("EnableDate", isoDate(device.getEnableDate()))
@@ -893,13 +908,14 @@ public class IamQueryHandler {
      * quietly winning.
      */
     private Response handleListServiceSpecificCredentials(
-            MultivaluedMap<String, String> params, String authorization) {
-        boolean allUsers = "true".equalsIgnoreCase(getParam(params, "AllUsers"));
-        if (allUsers && getParam(params, "UserName") != null) {
+            MultivaluedMap<String, String> request, String authorization) {
+        boolean allUsers = "true".equalsIgnoreCase(getParam(request, "AllUsers"));
+        if (allUsers && getParam(request, "UserName") != null) {
             throw new AwsException("ValidationError",
                     "AllUsers cannot be specified together with UserName.", 400);
         }
-        String userName = allUsers ? null : resolveUserName(params, authorization);
+        MultivaluedMap<String, String> params = allUsers ? request : withResolvedUser(request, authorization);
+        String userName = allUsers ? null : getParam(params, "UserName");
         Page<ServiceSpecificCredential> page = paginate("ListServiceSpecificCredentials",
                 iamService.listServiceSpecificCredentials(
                         userName, getParam(params, "ServiceName"), allUsers),
@@ -1021,9 +1037,10 @@ public class IamQueryHandler {
      * The metadata list only. AWS documents SSHPublicKeyMetadata as carrying the key "without the
      * key's body or fingerprint", so neither appears here even though both are stored.
      */
-    private Response handleListSshPublicKeys(MultivaluedMap<String, String> params,
+    private Response handleListSshPublicKeys(MultivaluedMap<String, String> request,
                                              String authorization) {
-        return pagedList("ListSSHPublicKeys", iamService.listSshPublicKeys(resolveUserName(params, authorization)),
+        MultivaluedMap<String, String> params = withResolvedUser(request, authorization);
+        return pagedList("ListSSHPublicKeys", iamService.listSshPublicKeys(getParam(params, "UserName")),
                 SshPublicKey::getSshPublicKeyId, params, (xml, key) -> xml.start("member")
                         .elem("UserName", key.getUserName())
                         .elem("SSHPublicKeyId", key.getSshPublicKeyId())
@@ -1072,10 +1089,11 @@ public class IamQueryHandler {
                 AwsNamespaces.IAM, xml.build())).build();
     }
 
-    private Response handleListSigningCertificates(MultivaluedMap<String, String> params,
+    private Response handleListSigningCertificates(MultivaluedMap<String, String> request,
                                                    String authorization) {
+        MultivaluedMap<String, String> params = withResolvedUser(request, authorization);
         return pagedList("ListSigningCertificates",
-                iamService.listSigningCertificates(resolveUserName(params, authorization)),
+                iamService.listSigningCertificates(getParam(params, "UserName")),
                 SigningCertificate::getCertificateId, params,
                 (xml, certificate) -> xml.start("member").raw(signingCertificateXml(certificate)).end("member"));
     }
@@ -2021,8 +2039,9 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAccessKey", AwsNamespaces.IAM)).build();
     }
 
-    private Response handleListAccessKeys(MultivaluedMap<String, String> params, String authorization) {
-        return pagedList("ListAccessKeys", iamService.listAccessKeys(resolveUserName(params, authorization)).stream()
+    private Response handleListAccessKeys(MultivaluedMap<String, String> request, String authorization) {
+        MultivaluedMap<String, String> params = withResolvedUser(request, authorization);
+        return pagedList("ListAccessKeys", iamService.listAccessKeys(getParam(params, "UserName")).stream()
                         .sorted(Comparator.comparing(AccessKey::getAccessKeyId)).toList(),
                 AccessKey::getAccessKeyId, params, (xml, k) -> xml.start("member").raw(accessKeyXml(k, false)).end("member"));
     }
@@ -2933,7 +2952,8 @@ public class IamQueryHandler {
      * handler did not issue, a bare number included, is {@code InvalidInput}. The marker is signed
      * over the request's account, the operation, and every request member but the marker and the
      * limit, so one issued by another operation, for another principal or filter, or in another
-     * account is refused too, while the page size may change between calls. It names the last item
+     * account is refused too (a list whose user defaults to the caller pages over
+     * {@link #withResolvedUser}, so that user is among those members), while the page size may change between calls. It names the last item
      * of the page before by {@code keyOf}, so the next page continues after that item wherever it
      * now sits: an item created or deleted ahead of it skips nothing and repeats nothing.
      *
