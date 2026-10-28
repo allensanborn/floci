@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
  * {@code FromPort=0, ToPort=0}. The revoke compared ports literally, never matched the stored rule
  * (which has none), and every new group kept allowing all egress.
  */
-class Ec2RevokeAllTrafficTest {
+class Ec2RevokeAllTrafficServiceTest {
 
     private static final String REGION = "us-east-1";
 
