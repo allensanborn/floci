@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -43,7 +44,29 @@ class Ec2RunInstancesEbsOptimizedTest {
         verify(service, never()).modifyInstanceAttribute(anyString(), anyString(), eq("ebsOptimized"), anyString());
     }
 
+    @Test
+    void aLaunchTemplatesEbsOptimizedAppliesWhenTheRequestOmitsIt() {
+        Ec2Service service = mock(Ec2Service.class);
+        Instance launched = launch(service, null, true);
+
+        verify(service).modifyInstanceAttribute(REGION, "i-0123456789abcdef0", "ebsOptimized", "true");
+        assertEquals(true, launched.isEbsOptimized());
+    }
+
+    @Test
+    void theRequestsEbsOptimizedOverridesTheLaunchTemplates() {
+        Ec2Service service = mock(Ec2Service.class);
+        Instance launched = launch(service, "false", true);
+
+        verify(service).modifyInstanceAttribute(REGION, "i-0123456789abcdef0", "ebsOptimized", "false");
+        assertEquals(false, launched.isEbsOptimized());
+    }
+
     private static Instance launch(Ec2Service service, String ebsOptimized) {
+        return launch(service, ebsOptimized, null);
+    }
+
+    private static Instance launch(Ec2Service service, String ebsOptimized, Boolean templateEbsOptimized) {
         Reservation reservation = new Reservation();
         Instance launched = new Instance();
         launched.setInstanceId("i-0123456789abcdef0");
@@ -63,6 +86,13 @@ class Ec2RunInstancesEbsOptimizedTest {
         p.putSingle("MaxCount", "1");
         if (ebsOptimized != null) {
             p.putSingle("EbsOptimized", ebsOptimized);
+        }
+        if (templateEbsOptimized != null) {
+            LaunchTemplateData template = new LaunchTemplateData();
+            template.setEbsOptimized(templateEbsOptimized);
+            when(service.resolveLaunchTemplateData(eq(REGION), eq("lt-0123456789abcdef0"), nullable(String.class),
+                    nullable(String.class), anyBoolean())).thenReturn(template);
+            p.putSingle("LaunchTemplate.LaunchTemplateId", "lt-0123456789abcdef0");
         }
         new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
                 mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
