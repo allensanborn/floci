@@ -43,14 +43,20 @@ class Ec2RunInstancesEbsOptimizedIntegrationTest {
                 .formParam("LaunchTemplateData.EbsOptimized", "true")
                 .post("/").then().statusCode(200).extract()
                 .xmlPath().getString("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
-        String fromTemplate = runInstances(fromTemplate(templateId));
-        String overridden = runInstances(fromTemplate(templateId).formParam("EbsOptimized", "false"));
         try {
-            assertEbsOptimized(fromTemplate, "true");
-            assertEbsOptimized(overridden, "false");
+            String fromTemplate = runInstances(fromTemplate(templateId));
+            try {
+                assertEbsOptimized(fromTemplate, "true");
+                String overridden = runInstances(fromTemplate(templateId).formParam("EbsOptimized", "false"));
+                try {
+                    assertEbsOptimized(overridden, "false");
+                } finally {
+                    terminate(overridden);
+                }
+            } finally {
+                terminate(fromTemplate);
+            }
         } finally {
-            terminate(fromTemplate);
-            terminate(overridden);
             given().header("Authorization", AUTH).formParam("Action", "DeleteLaunchTemplate")
                     .formParam("LaunchTemplateId", templateId).post("/").then().statusCode(200);
         }
