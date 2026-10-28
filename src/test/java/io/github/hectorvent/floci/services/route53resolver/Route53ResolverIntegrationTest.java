@@ -180,6 +180,58 @@ class Route53ResolverIntegrationTest {
     // The Terraform provider calls this right after CreateResolverEndpoint to read the
     // endpoint's ip_address set, so an unimplemented operation fails every endpoint create.
 
+    @Test
+    void createResolverEndpoint_usesSubnetVpcAndAllocatesIpsFromSubnetCidr() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.77.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+        String subA = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1a")
+                .extract().path("CreateSubnetResponse.subnet.subnetId");
+        String subB = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.2.0/28", "AvailabilityZone", "us-east-1b")
+                .extract().path("CreateSubnetResponse.subnet.subnetId");
+        String body = "{\"Name\":\"ep-alloc\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
+                + "\"IpAddresses\":[{\"SubnetId\":\"" + subA + "\"},{\"SubnetId\":\"" + subA + "\"},"
+                + "{\"SubnetId\":\"" + subB + "\"}],\"CreatorRequestId\":\"alloc-";
+        String first = given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body(body + "1\"}")
+                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
+        String second = given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body(body + "2\"}")
+                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
+
+        for (String id : List.of(first, second)) {
+            given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.GetResolverEndpoint")
+                    .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
+                    .when().post("/").then().statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
+        }
+
+        List<String> allIps = new java.util.ArrayList<>();
+        for (String id : List.of(first, second)) {
+            JsonPath ips = JsonPath.from(listIpAddresses(id));
+            for (String subnet : List.of(subA, subB)) {
+                List<String> inSubnet = ips.getList("IpAddresses.findAll { it.SubnetId == '" + subnet + "' }.Ip");
+                inSubnet.forEach(ip -> {
+                    long host = Long.parseLong(ip.substring(ip.lastIndexOf('.') + 1));
+                    long max = subnet.equals(subA) ? 254 : 14;
+                    assertEquals(subnet.equals(subA) ? "10.77.1" : "10.77.2",
+                            ip.substring(0, ip.lastIndexOf('.')), ip);
+                    org.junit.jupiter.api.Assertions.assertTrue(host >= 4 && host <= max, ip);
+                });
+                allIps.addAll(inSubnet);
+            }
+        }
+        assertEquals(6, allIps.size());
+        assertEquals(6, new HashSet<>(allIps).size(), "addresses must not collide: " + allIps);
+    }
+
+    private static io.restassured.response.ValidatableResponse ec2(String action, String... values) {
+        io.restassured.specification.RequestSpecification spec = given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ec2/aws4_request")
+                .formParam("Action", action);
+        for (int i = 0; i < values.length; i += 2) {
+            spec = spec.formParam(values[i], values[i + 1]);
+        }
+        return spec.when().post("/").then().statusCode(200);
+    }
+
     private static String listIpAddresses(String endpointId) {
         return given()
             .contentType(CONTENT_TYPE)
