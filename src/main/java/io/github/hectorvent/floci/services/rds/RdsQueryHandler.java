@@ -1544,7 +1544,7 @@ public class RdsQueryHandler {
         }
         Map<String, String> parameters = parseParameterOverrides(params);
         try {
-            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, region);
+            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, parseApplyMethods(params), region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -1575,6 +1575,24 @@ public class RdsQueryHandler {
             }
         }
         return parameters;
+    }
+
+    /** ApplyMethod of each modified parameter that carries a value; omitted means the provider default. */
+    private static Map<String, String> parseApplyMethods(MultivaluedMap<String, String> params) {
+        Map<String, String> methods = new LinkedHashMap<>();
+        for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
+            for (int n = 1; ; n++) {
+                String paramName = params.getFirst(prefix + "." + n + ".ParameterName");
+                if (paramName == null) {
+                    break;
+                }
+                String method = params.getFirst(prefix + "." + n + ".ApplyMethod");
+                if (method != null) {
+                    methods.put(paramName, method);
+                }
+            }
+        }
+        return methods;
     }
 
     private Response handleCopyDbParameterGroup(
@@ -1648,6 +1666,8 @@ public class RdsQueryHandler {
                 xml.start("member")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
+                   .elem("Source", "user")
+                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
                    .end("member");
             }
@@ -1722,7 +1742,7 @@ public class RdsQueryHandler {
         Map<String, String> parameters = parseParameterOverrides(params);
         try {
             DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(
-                    name, parameters, region);
+                    name, parameters, parseApplyMethods(params), region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
@@ -1788,6 +1808,8 @@ public class RdsQueryHandler {
                 xml.start("member")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
+                   .elem("Source", "user")
+                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
                    .end("member");
             }

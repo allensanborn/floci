@@ -4694,9 +4694,9 @@ class RdsServiceTest {
         rdsService.createDbParameterGroup("regional-pg", "postgres16", "east", "us-east-1");
         rdsService.createDbParameterGroup("regional-pg", "postgres16", "west", "us-west-2");
         rdsService.modifyDbParameterGroup(
-                "regional-pg", Map.of("application_name", "east"), "us-east-1");
+                "regional-pg", Map.of("application_name", "east"), null, "us-east-1");
         rdsService.modifyDbParameterGroup(
-                "regional-pg", Map.of("application_name", "west"), "us-west-2");
+                "regional-pg", Map.of("application_name", "west"), null, "us-west-2");
 
         assertEquals("east", rdsService.getDbParameterGroup(
                 "regional-pg", "us-east-1").getParameters().get("application_name"));
@@ -4708,9 +4708,9 @@ class RdsServiceTest {
         rdsService.createDbClusterParameterGroup(
                 "regional-cpg", "aurora-postgresql16", "west", "us-west-2");
         rdsService.modifyDbClusterParameterGroup(
-                "regional-cpg", Map.of("log_statement", "none"), "us-east-1");
+                "regional-cpg", Map.of("log_statement", "none"), null, "us-east-1");
         rdsService.modifyDbClusterParameterGroup(
-                "regional-cpg", Map.of("log_statement", "all"), "us-west-2");
+                "regional-cpg", Map.of("log_statement", "all"), null, "us-west-2");
 
         assertEquals("none", rdsService.getDbClusterParameterGroup(
                 "regional-cpg", "us-east-1").getParameters().get("log_statement"));

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * The RDS model declares the {@code Parameters} list with {@code locationName: Parameter}, so the
@@ -110,6 +112,38 @@ class RdsParameterGroupWireEncodingIntegrationTest {
             .statusCode(200)
             .body(containsString("<ParameterName>rds.force_ssl</ParameterName>"))
             .body(containsString("<ParameterValue>1</ParameterValue>"));
+    }
+
+    /** The provider skips parameters without Source and hashes ApplyMethod, so both must round-trip. */
+    private static void assertSourceAndApplyMethod(String describeAction, String nameKey, String group,
+                                                   String immediateParam, String pendingParam) {
+        XmlPath xml = query(describeAction).formParam(nameKey, group)
+                .when().post("/").then().statusCode(200).extract().xmlPath();
+        for (String[] p : new String[][] {{immediateParam, "immediate"}, {pendingParam, "pending-reboot"}}) {
+            String find = "**.find { it.ParameterName == '" + p[0] + "' }.";
+            assertEquals("user", xml.getString(find + "Source"), p[0]);
+            assertEquals(p[1], xml.getString(find + "ApplyMethod"), p[0]);
+        }
+    }
+
+    @Test
+    @Order(3)
+    void describeDbParametersReturnsSourceAndApplyMethod() {
+        assertSourceAndApplyMethod("DescribeDBParameters", "DBParameterGroupName", PG,
+                "max_connections", "work_mem");
+    }
+
+    @Test
+    @Order(4)
+    void describeDbClusterParametersReturnsSourceAndApplyMethod() {
+        query("ModifyDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", CLUSTER_PG)
+                .formParam("Parameters.Parameter.1.ParameterName", "shared_preload_libraries")
+                .formParam("Parameters.Parameter.1.ParameterValue", "pg_stat_statements")
+                .formParam("Parameters.Parameter.1.ApplyMethod", "pending-reboot")
+        .when().post("/").then().statusCode(200);
+        assertSourceAndApplyMethod("DescribeDBClusterParameters", "DBClusterParameterGroupName", CLUSTER_PG,
+                "rds.force_ssl", "shared_preload_libraries");
     }
 
     @Test
