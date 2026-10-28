@@ -22,6 +22,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -152,13 +153,25 @@ class AwsConfigServicePersistenceTest {
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
+        Long startedAt = first.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime();
+        assertNotNull(startedAt);
 
         AwsConfigService reloaded = serviceWithStorage(storage);
 
-        assertTrue(reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
+        ConfigurationRecorderStatus afterStart =
+                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+        assertTrue(afterStart.recording());
+        assertEquals(startedAt, afterStart.lastStartTime());
+
         reloaded.stopConfigurationRecorder(REGION, "default");
-        assertFalse(serviceWithStorage(storage).describeConfigurationRecorderStatus(REGION, null)
-                .getFirst().recording());
+        Long stoppedAt = reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStopTime();
+        assertNotNull(stoppedAt);
+
+        ConfigurationRecorderStatus afterStop =
+                serviceWithStorage(storage).describeConfigurationRecorderStatus(REGION, null).getFirst();
+        assertFalse(afterStop.recording());
+        assertEquals(startedAt, afterStop.lastStartTime());
+        assertEquals(stoppedAt, afterStop.lastStopTime());
     }
 
     @Test
