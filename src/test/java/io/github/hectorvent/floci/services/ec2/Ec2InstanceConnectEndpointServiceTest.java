@@ -218,7 +218,7 @@ class Ec2InstanceConnectEndpointServiceTest {
                     go.await();
                     try {
                         service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
-                    } catch (AwsException gone) {
+                    } catch (AwsException expected) {
                         // InvalidSubnetID.NotFound: the delete won.
                     }
                     return null;
@@ -227,7 +227,7 @@ class Ec2InstanceConnectEndpointServiceTest {
                     go.await();
                     try {
                         service.deleteSubnet(REGION, subnetId);
-                    } catch (AwsException inUse) {
+                    } catch (AwsException expected) {
                         // DependencyViolation: the create won.
                     }
                     return null;
