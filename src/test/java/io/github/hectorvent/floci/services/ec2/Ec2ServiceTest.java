@@ -377,6 +377,31 @@ class Ec2ServiceTest {
         verify(addressStore, times(1)).scan(any());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void anElasticIpMovedAfterTheResponseReadTheAddressesIsNotShownOnItsFormerInstance(boolean reassigned) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Instance> launched = service.runInstances("us-east-1", "ami-test", "t3.micro", 2, 2, null, List.of(),
+                null, null, List.of(), null, null).getInstances();
+        Instance former = launched.get(0);
+        Address elastic = service.allocateAddress("us-east-1");
+        Address associated = service.associateAddress("us-east-1", elastic.getAllocationId(), former.getInstanceId());
+        Ec2Service.ElasticAddresses read = service.elasticAddresses("us-east-1");
+
+        if (reassigned) {
+            service.associateAddress("us-east-1", elastic.getAllocationId(), launched.get(1).getInstanceId());
+        } else {
+            service.disassociateAddress("us-east-1", associated.getAssociationId());
+        }
+
+        NetworkInterfaceAssociation shown = service.instanceInterfaceAssociation(former,
+                former.getNetworkInterfaces().getFirst(), read);
+        assertTrue(shown == null || !elastic.getAllocationId().equals(shown.getAllocationId()),
+                "the former instance still shows " + elastic.getAllocationId());
+    }
+
     @Test
     void aLaunchRefusedWhenItTakesCapacityLeavesNoVolumeBehind() {
         Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

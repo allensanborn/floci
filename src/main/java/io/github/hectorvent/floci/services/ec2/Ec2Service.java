@@ -5024,8 +5024,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             candidates.addAll(elastic.positions().getOrDefault(primaryInterfaceId, List.of()));
         }
         for (int position : candidates) {
+            // The index keeps live addresses: one disassociated or moved since it was read no
+            // longer names this instance or its interface, so the owner is checked again here.
             Address address = elastic.associated().get(position);
-            if (secondaryPrivateIpOf(region, instance, address.getPrivateIpAddress()) == null) {
+            boolean onInstance = instance.getInstanceId().equals(address.getInstanceId())
+                    || primaryInterfaceId != null && primaryInterfaceId.equals(address.getNetworkInterfaceId());
+            if (onInstance && address.getAssociationId() != null
+                    && secondaryPrivateIpOf(region, instance, address.getPrivateIpAddress()) == null) {
                 return address;
             }
         }
@@ -5034,7 +5039,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * A region's associated Elastic IPs in store order, each position listed under its instance id
-     * and its interface id, so a response rendering many instances reads the store once.
+     * and its interface id, so a response rendering many instances reads the store once. An
+     * address associated with an instance after the index was read is not found for it.
      */
     record ElasticAddresses(List<Address> associated, Map<String, List<Integer>> positions) {}
 
