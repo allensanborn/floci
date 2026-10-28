@@ -88,6 +88,8 @@ public class Ec2ContainerManager {
     private static final int LAUNCH_CORE_THREADS = 4;
     private static final int LAUNCH_MAX_THREADS = 8;
     private static final int LAUNCH_QUEUE_CAPACITY = 64;
+    // ponytail: a fixed cap on concurrent post-start IMDS setups; a start beyond it skips the setup.
+    private static final int METADATA_SETUP_CONCURRENCY = 16;
     private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
     // Wait for capacity so accepted launches are not dropped, but never run launch work on callers.
     static final RejectedExecutionHandler BLOCKING_BACKPRESSURE = (runnable, executor) -> {
@@ -155,6 +157,7 @@ public class Ec2ContainerManager {
     private final Ec2InstanceTypeCatalog instanceTypeCatalog;
     private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
+    private final Semaphore metadataSetupSlots = new Semaphore(METADATA_SETUP_CONCURRENCY);
     private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
@@ -1066,21 +1069,33 @@ public class Ec2ContainerManager {
      * queue: a slow setup holds neither the instance pending nor a stop queued behind this start.
      * It goes ahead only while {@code running} is still the instance's state, so a stop, terminate
      * or later start makes it stand down; an exec against a container already stopped just fails.
+     *
+     * <p>Not on {@link #executor}: the start runs on one of its workers, and its backpressure
+     * blocks a submitter while the queue is full, so with every worker submitting nothing would
+     * drain it. A setup that finds no free slot is skipped and logged rather than waited for.
      */
     private void setUpMetadataEndpointWhileRunning(Instance instance, String containerId, InstanceState running) {
         String instanceId = instance.getInstanceId();
+        if (!metadataSetupSlots.tryAcquire()) {
+            LOG.warnv("Skipped link-local IMDS setup for EC2 instance {0}: {1} setups already running",
+                    instanceId, METADATA_SETUP_CONCURRENCY);
+            return;
+        }
         BooleanSupplier stillRunning = () -> instance.getState() == running;
         try {
-            executor.execute(() -> {
+            Thread.ofVirtual().name("ec2-imds-setup-" + instanceId).start(() -> {
                 try {
                     configureLinkLocalMetadataEndpoint(containerId, instanceId, dockerHostResolver.resolve(),
                             config.services().ec2().imdsPort(), stillRunning);
                 } catch (RuntimeException e) {
                     LOG.warnv("Could not configure link-local IMDS endpoint for EC2 instance {0}: {1}",
                             instanceId, e.getMessage());
+                } finally {
+                    metadataSetupSlots.release();
                 }
             });
-        } catch (RejectedExecutionException e) {
+        } catch (RuntimeException e) {
+            metadataSetupSlots.release();
             LOG.warnv("Could not schedule link-local IMDS setup for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
     }

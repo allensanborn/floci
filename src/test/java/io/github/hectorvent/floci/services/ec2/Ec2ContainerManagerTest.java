@@ -530,6 +530,60 @@ class Ec2ContainerManagerTest {
         }
     }
 
+    /**
+     * The start runs on a launch-executor worker. Handing the IMDS setup to that same executor
+     * while its queue is full blocks the worker in backpressure, and with every worker doing so
+     * nothing drains the queue: here one worker and a one-slot queue stand in for eight and 64.
+     */
+    @Test
+    void startHandsTheImdsSetupOffWithoutBlockingALaunchWorkerOnAFullQueue() throws Exception {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        when(lifecycle.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+        DockerClient docker = mock(DockerClient.class);
+        List<String[]> execs = recordExecs(docker);
+        when(docker.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
+        when(inspect.exec()).thenReturn(response);
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(1, 1, 60L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(1), Ec2ContainerManager.BLOCKING_BACKPRESSURE);
+        try {
+            Ec2ContainerManager manager = new Ec2ContainerManager(mock(ContainerBuilder.class), lifecycle,
+                    mock(ContainerLogStreamer.class), mock(ContainerDetector.class), mock(DockerHostResolver.class),
+                    docker, mock(PortAllocator.class), mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                    mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class), mock(RegionResolver.class),
+                    mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                    mock(ContainerReachableEndpoint.class), executor, Duration.ofSeconds(5));
+            Instance instance = new Instance();
+            instance.setInstanceId("i-full-launch-queue");
+            instance.setDockerContainerId(TEST_CONTAINER_ID);
+            instance.setContainerBridgeIp("10.0.1.10");
+            CountDownLatch postStartEntered = new CountDownLatch(1);
+            CountDownLatch queueFull = new CountDownLatch(1);
+            CountDownLatch queuedWorkRan = new CountDownLatch(1);
+
+            manager.start(instance, () -> {
+                postStartEntered.countDown();
+                try {
+                    queueFull.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue(postStartEntered.await(5, TimeUnit.SECONDS), "the start never reached its post-start hook");
+            executor.execute(queuedWorkRan::countDown);
+            queueFull.countDown();
+
+            assertTrue(queuedWorkRan.await(3, TimeUnit.SECONDS),
+                    "the launch worker running the start never came back to drain its queue");
+            awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd,
+                    Ec2ContainerManager.metadataProxyInstallCommand())), Duration.ofSeconds(3));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
     @Test
     void startOfAProtectedInstanceDoesNotSetTheImdsEndpointUpAgain() throws Exception {
         // The helper container kept its network namespace across the stop, and the address with it.
