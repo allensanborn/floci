@@ -53,7 +53,7 @@ class Ec2MetadataProxyTest {
         // Attaches address if missing
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo"));
         // Idempotent when pid file exists and process is alive
-        assertTrue(script.contains("if [ -f /tmp/floci-imds-proxy.pid ] && kill -0 \"$(cat /tmp/floci-imds-proxy.pid)\" 2>/dev/null; then\n  exit 0\nfi"));
+        assertTrue(script.contains("if [ -f /tmp/floci-imds-proxy.pid ] && pid=\"$(cat /tmp/floci-imds-proxy.pid)\" && kill -0 \"$pid\" 2>/dev/null && grep -q socat \"/proc/$pid/cmdline\" 2>/dev/null; then\n  exit 0\nfi"));
         // Targets configured Floci host and IMDS port
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:10.0.0.1:9169 >/tmp/floci-imds-proxy.log 2>&1 &"));
         // Verifies through an IMDSv2 token even when tokenless access is refused.
@@ -71,7 +71,7 @@ class Ec2MetadataProxyTest {
 
         String script = command[2];
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.170.23/32' || ip addr add 169.254.170.23/32 dev lo"));
-        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && kill -0 \"$(cat /tmp/floci-pod-identity-proxy.pid)\" 2>/dev/null; then\n  exit 0\nfi"));
+        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && pid=\"$(cat /tmp/floci-pod-identity-proxy.pid)\" && kill -0 \"$pid\" 2>/dev/null && grep -q socat \"/proc/$pid/cmdline\" 2>/dev/null; then\n  exit 0\nfi"));
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.170.23,fork,reuseaddr TCP:10.0.0.1:4566 >/tmp/floci-pod-identity-proxy.log 2>&1 &"));
         assertTrue(script.contains("http://169.254.170.23/v1/credentials"));
     }
@@ -265,6 +265,28 @@ class Ec2MetadataProxyTest {
                     HelperShellFixture.output(directory));
         } finally {
             server.stop(0);
+            deleteProxyFiles(name);
+        }
+    }
+
+    @Test
+    void aSavedPidThatIsNotSocatDoesNotStopTheProxyStarting(@TempDir Path directory) throws Exception {
+        // A restarted guest keeps the pid file, and the pid may now belong to anything: here, this JVM.
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path started = directory.resolve("socat-started");
+        HelperShellFixture.writeTool(bin, "ip", "printf '127.0.0.1/32\\n'\n");
+        HelperShellFixture.writeTool(bin, "socat", ": > \"$TEST_SOCAT_STARTED\"\n");
+        String name = "unit-" + UUID.randomUUID();
+        try {
+            Files.writeString(Path.of("/tmp/floci-" + name + "-proxy.pid"), ProcessHandle.current().pid() + "\n");
+            String[] command = Ec2MetadataProxy.startCommand(name, "127.0.0.1", 80, "127.0.0.1", 9169,
+                    "[ -f \"$TEST_SOCAT_STARTED\" ] && exit 0");
+
+            assertEquals(0, HelperShellFixture.run(command, directory, Map.of(
+                    "PATH", bin + ":" + System.getenv("PATH"), "TEST_SOCAT_STARTED", started.toString())),
+                    HelperShellFixture.output(directory));
+            assertTrue(Files.exists(started), "socat must start when the saved pid is not the proxy");
+        } finally {
             deleteProxyFiles(name);
         }
     }
