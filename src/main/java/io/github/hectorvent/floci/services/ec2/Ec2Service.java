@@ -5073,7 +5073,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         Address elastic = primaryElasticAddress(instance.getRegion(), instance, elasticAddresses);
         if (elastic != null) {
-            return networkInterfaceAssociation(elastic, eni.getOwnerId());
+            // Copied once and checked again: a disassociation between the lookup and the copy
+            // leaves no association id, and then the instance's own address is shown instead.
+            NetworkInterfaceAssociation association = networkInterfaceAssociation(elastic, eni.getOwnerId());
+            if (association.getAssociationId() != null && association.getPublicIp() != null) {
+                return association;
+            }
         }
         String publicIp = instance.getPublicIpAddress();
         if (publicIp == null || publicIp.isBlank()) {
