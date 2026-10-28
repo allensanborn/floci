@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -24,6 +26,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -96,9 +100,11 @@ public class Route53ResolverService {
      */
     private final StorageBackend<String, ObjectNode> tagStore;
     private final ObjectMapper objectMapper;
+    /** Null only in hermetic tests built from bare stores; subnets are then treated as unknown. */
+    private final Ec2Service ec2Service;
 
     @Inject
-    public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper, Ec2Service ec2Service) {
         this.domainListStore = storageFactory.create("route53resolver", "route53resolver-domain-lists.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointStore = storageFactory.create("route53resolver", "route53resolver-endpoints.json",
@@ -113,6 +119,7 @@ public class Route53ResolverService {
         this.tagStore = storageFactory.create("route53resolver", "route53resolver-tags.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
+        this.ec2Service = ec2Service;
     }
 
     // Package-private for hermetic tests: pass in-memory StorageBackends directly, so a test
@@ -132,6 +139,7 @@ public class Route53ResolverService {
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
         this.objectMapper = objectMapper;
+        this.ec2Service = null;
     }
 
     public List<FirewallDomainList> listFirewallDomainLists(String region) {
@@ -228,16 +236,93 @@ public class Route53ResolverService {
         endpoint.put("Direction", direction);
         endpoint.set("SecurityGroupIds", request.path("SecurityGroupIds").deepCopy());
         endpoint.put("IpAddressCount", ipAddresses.size());
-        endpoint.put("HostVPCId", "vpc-" + deterministicHex(id, 8));
+        ArrayNode normalized = normalizedIpRequests(ipAddresses);
+        Map<String, Subnet> subnets = subnetsOf(normalized, region);
+        // AWS: HostVPCId is the VPC of the endpoint's subnets. A subnet EC2 does not know is still
+        // accepted (as before), so an endpoint over only unknown subnets keeps a derived id.
+        endpoint.put("HostVPCId", subnets.values().stream().map(Subnet::getVpcId).findFirst()
+                .orElse("vpc-" + deterministicHex(id, 8)));
         endpoint.put("Status", "OPERATIONAL");
         endpoint.put("CreatorRequestId", text(request, "CreatorRequestId"));
         endpoint.put("CreationTime", Instant.now().toString());
         endpoint.put("ModificationTime", Instant.now().toString());
         endpointStore.put(id, endpoint);
-        endpointIpRequestStore.put(id,
-                objectMapper.createObjectNode().set("IpAddressRequests", normalizedIpRequests(ipAddresses)));
+        ObjectNode record = objectMapper.createObjectNode();
+        record.set("IpAddressRequests", normalized);
+        record.set("AllocatedIps", allocateIps(normalized, subnets));
+        endpointIpRequestStore.put(id, record);
         putTags(endpoint, tags);
         return endpoint.deepCopy();
+    }
+
+    private Map<String, Subnet> subnetsOf(JsonNode requests, String region) {
+        List<String> ids = new ArrayList<>();
+        requests.forEach(r -> {
+            String subnetId = text(r, "SubnetId");
+            if (subnetId != null && !ids.contains(subnetId)) {
+                ids.add(subnetId);
+            }
+        });
+        Map<String, Subnet> found = new java.util.LinkedHashMap<>();
+        if (ec2Service != null && !ids.isEmpty()) {
+            ec2Service.describeSubnets(region, ids, Map.of()).forEach(sn -> found.put(sn.getSubnetId(), sn));
+        }
+        return found;
+    }
+
+    /**
+     * One entry per request (same order): the address allocated from the subnet for a request
+     * that gave a SubnetId and no Ip/Ipv6, else null. Skips the four addresses at the bottom of
+     * the CIDR and the last one (AWS reserves them), and any address already taken by this
+     * request list or by another endpoint. ponytail: IPv4 only, other-endpoint scan is linear.
+     */
+    private ArrayNode allocateIps(JsonNode requests, Map<String, Subnet> subnets) {
+        Set<String> taken = new HashSet<>();
+        requests.forEach(r -> {
+            if (text(r, "Ip") != null) {
+                taken.add(text(r, "Ip"));
+            }
+        });
+        endpointIpRequestStore.scan(k -> true).forEach(rec -> {
+            rec.path("IpAddressRequests").forEach(r -> {
+                if (text(r, "Ip") != null) {
+                    taken.add(text(r, "Ip"));
+                }
+            });
+            rec.path("AllocatedIps").forEach(a -> {
+                if (a.isTextual()) {
+                    taken.add(a.asText());
+                }
+            });
+        });
+        ArrayNode out = objectMapper.createArrayNode();
+        for (JsonNode r : requests) {
+            Subnet subnet = subnets.get(text(r, "SubnetId"));
+            String ip = null;
+            if (subnet != null && subnet.getCidrBlock() != null && text(r, "Ip") == null
+                    && text(r, "Ipv6") == null) {
+                String[] cidr = subnet.getCidrBlock().split("/");
+                long size = 1L << (32 - Integer.parseInt(cidr[1]));
+                long base = 0;
+                for (String octet : cidr[0].split("\\.")) {
+                    base = base * 256 + Integer.parseInt(octet);
+                }
+                base &= ~(size - 1);
+                for (long host = 4; host < size - 1 && ip == null; host++) {
+                    long n = base + host;
+                    String candidate = (n >> 24 & 255) + "." + (n >> 16 & 255) + "." + (n >> 8 & 255) + "." + (n & 255);
+                    if (taken.add(candidate)) {
+                        ip = candidate;
+                    }
+                }
+            }
+            if (ip == null) {
+                out.addNull();
+            } else {
+                out.add(ip);
+            }
+        }
+        return out;
     }
 
     public ObjectNode deleteResolverEndpoint(String id) {
@@ -262,8 +347,8 @@ public class Route53ResolverService {
      * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
      * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
      * the entry and its position in the recorded list, so it is stable across calls. An
-     * address the request left for AWS to pick has no {@code Ip}: Floci does not allocate
-     * from the subnet.
+     * address the request left for AWS to pick carries the one allocated from its subnet at
+     * create time, when EC2 knows the subnet; otherwise it has no {@code Ip}.
      */
     public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
@@ -274,6 +359,8 @@ public class Route53ResolverService {
                 .filter(JsonNode::isArray)
                 .orElseThrow(() -> new AwsException("InternalServiceErrorException",
                         "No IP addresses recorded for resolver endpoint: " + id, 400));
+        JsonNode allocatedIps = endpointIpRequestStore.get(id).map(n -> n.path("AllocatedIps"))
+                .orElse(objectMapper.createArrayNode());
         List<ObjectNode> addresses = new ArrayList<>();
         for (int i = 0; i < recorded.size(); i++) {
             JsonNode request = recorded.get(i);
@@ -282,6 +369,10 @@ public class Route53ResolverService {
             // to pick) distinct; the stored list is normalised once at create, so it is stable.
             address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
             copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
+            JsonNode allocated = allocatedIps.path(i);
+            if (!address.has("Ip") && allocated.isTextual()) {
+                address.put("Ip", allocated.asText());
+            }
             address.put("Status", "ATTACHED");
             address.put("StatusMessage", "This IP address is operational.");
             address.set("CreationTime", endpoint.get("CreationTime"));
