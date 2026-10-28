@@ -2233,9 +2233,11 @@ public class ApiGatewayService implements ResourceProvider {
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
         String endpointType = endpointTypeOf(request);
         if (endpointType == null) {
-            // A REST domain given only certificateArn is edge-optimized: certificateArn is the edge
-            // certificate and the provider's edge example sets nothing else. A regional certificate,
-            // or a partition without edge, keeps the REGIONAL an emulated domain always had.
+            // EDGE is AWS's default for a REST domain: terraform-provider-aws v6.70.0
+            // internal/service/apigateway/domain_name_test.go (acceptance test against AWS) creates one
+            // with only certificate_body/certificate_name and asserts a CloudFront domain and zone.
+            // A regional certificate => REGIONAL is NOT verified against AWS; it keeps Floci's previous
+            // behaviour, as does REGIONAL in a partition without edge.
             boolean regionalCertificate = request.get("regionalCertificateArn") != null
                     || request.get("regionalCertificateName") != null;
             boolean edgeAvailable = EDGE_OPTIMIZED_PARTITIONS.contains(AwsPartitions.forRegionOrCommercial(region).id());

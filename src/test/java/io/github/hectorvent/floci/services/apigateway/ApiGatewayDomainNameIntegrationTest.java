@@ -97,6 +97,21 @@ class ApiGatewayDomainNameIntegrationTest {
     }
 
     @Test
+    void domainWithOnlyARegionalCertificateStaysRegional() {
+        String domain = "default-regional.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+            .body("distributionDomainName", nullValue());
+
+        deleteDomain(domain);
+    }
+
+    @Test
     void endpointTypeCanBeMovedFromEdgeToRegional() {
         String domain = "endpoint-type.apigw-domain-it.example.com";
         createDomain("""
