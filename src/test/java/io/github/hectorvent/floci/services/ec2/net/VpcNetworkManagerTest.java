@@ -148,6 +148,20 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void aPredecessorsNetworkUnderItsLegacyNameGoesWithItsVpc() {
+        // A version before the floci-aws- prefix named the network floci-vpc-...; it is deleted
+        // by that name, not by the one this version would give it.
+        String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
+        existingNetwork(legacyName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true);
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(List.of(legacyName), removedNetworks);
+    }
+
+    @Test
     void declaringAndDeletingUnusedNetworksDoesNotContactDocker() {
         manager.declareVpc(REGION, "vpc-private", "10.0.0.0/16");
         manager.declareSubnet(REGION, "vpc-private", "subnet-a", "10.0.1.0/24");
