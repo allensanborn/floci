@@ -167,7 +167,6 @@ class CloudFrontManagementProtocolTest {
                 <UpdateRealtimeLogConfigRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
                   <ARN>arn:aws:cloudfront::000000000000:realtime-log-config/%s</ARN>
                   <SamplingRate>75</SamplingRate>
-                  <Fields><Field>timestamp</Field></Fields>
                 </UpdateRealtimeLogConfigRequest>""".formatted(name))
         .when()
             .put(API + "realtime-log-config")
@@ -180,7 +179,12 @@ class CloudFrontManagementProtocolTest {
         .when()
             .post(API + "get-realtime-log-config")
         .then()
-            .body(hasXPath("//*[local-name()='SamplingRate']/text()", equalTo("75")));
+            .body(hasXPath("//*[local-name()='SamplingRate']/text()", equalTo("75")))
+            // omitted Fields and EndPoints keep their saved values
+            .body(hasXPath("count(//*[local-name()='Fields']/*)", equalTo("3")))
+            .body(hasXPath("//*[local-name()='EndPoints']/*[local-name()='member']"
+                    + "/*[local-name()='KinesisStreamConfig']/*[local-name()='StreamARN']/text()",
+                    equalTo("arn:aws:kinesis:us-east-1:000000000000:stream/s")));
     }
 
     @Test

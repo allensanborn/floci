@@ -2171,7 +2171,14 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public synchronized RealtimeLogConfig updateRealtimeLogConfig(RealtimeLogConfig updated) {
-        getRealtimeLogConfig(updated.getName());
+        RealtimeLogConfig existing = getRealtimeLogConfig(updated.getName());
+        // EndPoints and Fields are optional on update; an omitted list keeps the saved value.
+        if (updated.getEndPoints() == null || updated.getEndPoints().isEmpty()) {
+            updated.setEndPoints(existing.getEndPoints());
+        }
+        if (updated.getFields() == null || updated.getFields().isEmpty()) {
+            updated.setFields(existing.getFields());
+        }
         String arn = arn("realtime-log-config/" + updated.getName());
         updated.setArn(arn);
         realtimeLogConfigStore.put(updated.getName(), updated);
