@@ -81,6 +81,22 @@ class ApiGatewayDomainNameIntegrationTest {
     }
 
     @Test
+    void domainWithOnlyACertificateArnDefaultsToEdge() {
+        String domain = "default-edge.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","certificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+            .body("distributionDomainName", endsWith(".cloudfront.net"))
+            .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"));
+
+        deleteDomain(domain);
+    }
+
+    @Test
     void endpointTypeCanBeMovedFromEdgeToRegional() {
         String domain = "endpoint-type.apigw-domain-it.example.com";
         createDomain("""

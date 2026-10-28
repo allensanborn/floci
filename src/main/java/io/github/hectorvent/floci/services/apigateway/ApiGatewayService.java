@@ -2232,6 +2232,15 @@ public class ApiGatewayService implements ResourceProvider {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
         String endpointType = endpointTypeOf(request);
+        if (endpointType == null) {
+            // A REST domain given only certificateArn is edge-optimized: certificateArn is the edge
+            // certificate and the provider's edge example sets nothing else. A regional certificate,
+            // or a partition without edge, keeps the REGIONAL an emulated domain always had.
+            boolean regionalCertificate = request.get("regionalCertificateArn") != null
+                    || request.get("regionalCertificateName") != null;
+            boolean edgeAvailable = EDGE_OPTIMIZED_PARTITIONS.contains(AwsPartitions.forRegionOrCommercial(region).id());
+            endpointType = !regionalCertificate && edgeAvailable ? "EDGE" : "REGIONAL";
+        }
         if (!"REGIONAL".equals(endpointType) && !"EDGE".equals(endpointType)) {
             // Private custom domains are not emulated; anything else would be a domain that is
             // neither regional nor edge-optimized, which nothing here could route or describe.
@@ -2309,8 +2318,7 @@ public class ApiGatewayService implements ResourceProvider {
 
     /**
      * Reads the endpoint type from either spelling: REST passes {@code endpointConfiguration.types},
-     * HTTP APIs pass a single {@code endpointType}. REGIONAL is the default an emulated domain gets,
-     * since nothing here fronts it with an edge distribution.
+     * HTTP APIs pass a single {@code endpointType}. Null when the request names neither.
      */
     private static String endpointTypeOf(Map<String, Object> request) {
         Object endpointType = request.get("endpointType");
@@ -2322,7 +2330,7 @@ public class ApiGatewayService implements ResourceProvider {
                 && types.getFirst() instanceof String type && !type.isBlank()) {
             return type;
         }
-        return "REGIONAL";
+        return null;
     }
 
     public CustomDomain getDomainName(String region, String domainName) {
