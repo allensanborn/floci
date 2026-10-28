@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
+import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
 import io.github.hectorvent.floci.services.configservice.model.RecordingGroup;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -151,12 +153,22 @@ class AwsConfigServicePersistenceTest {
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
 
+        Long started = first.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime();
         AwsConfigService reloaded = serviceWithStorage(storage);
 
-        assertTrue(reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
+        ConfigurationRecorderStatus afterStart = reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+        assertTrue(afterStart.recording());
+        assertNotNull(started);
+        assertEquals(started, afterStart.lastStartTime());
+
         reloaded.stopConfigurationRecorder(REGION, "default");
-        assertFalse(serviceWithStorage(storage).describeConfigurationRecorderStatus(REGION, null)
-                .getFirst().recording());
+        Long stopped = reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStopTime();
+        ConfigurationRecorderStatus afterStop = serviceWithStorage(storage)
+                .describeConfigurationRecorderStatus(REGION, null).getFirst();
+        assertFalse(afterStop.recording());
+        assertNotNull(stopped);
+        assertEquals(started, afterStop.lastStartTime());
+        assertEquals(stopped, afterStop.lastStopTime());
     }
 
     private static AwsConfigService serviceWithStorage(StorageFactory storage) {
