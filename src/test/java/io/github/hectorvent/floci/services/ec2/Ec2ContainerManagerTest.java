@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -427,7 +428,7 @@ class Ec2ContainerManagerTest {
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
         DockerClient dockerClient = mock(DockerClient.class);
-        List<String[]> execs = recordExecs(dockerClient);
+        List<List<String>> execs = ContainerExecStubs.completeEveryExec(dockerClient, TEST_CONTAINER_ID, 0, "", "");
         when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
                 .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
         // The VPC address is static, so it survives the stop; the bridge address does not.
@@ -437,7 +438,12 @@ class Ec2ContainerManagerTest {
         when(inspect.exec()).thenReturn(response);
 
         Ec2MetadataServer metadataServer = mock(Ec2MetadataServer.class);
-        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, metadataServer);
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci");
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().imdsPort()).thenReturn(9169);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, metadataServer,
+                dockerHostResolver, config);
 
         Instance instance = new Instance();
         instance.setInstanceId("i-vpc-started");
@@ -455,9 +461,12 @@ class Ec2ContainerManagerTest {
         assertEquals("172.17.0.9", instance.getImdsSourceIp(),
                 "the stale address would otherwise stay registered while IMDS requests arrive "
                         + "from an address nothing knows about");
-        // The restarted container's namespace is new: the link-local IMDS endpoint is set up again.
-        awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd,
-                Ec2ContainerManager.metadataProxyInstallCommand())), Duration.ofSeconds(2));
+        // The restarted container's namespace is new: the link-local IMDS endpoint is set up again,
+        // the proxy relaying to the Floci host and IMDS port the manager is configured with.
+        List<String> startProxy = List.of(Ec2ContainerManager.metadataProxyStartCommand("floci", 9169));
+        awaitUntil(() -> execs.contains(startProxy), Duration.ofSeconds(2));
+        assertTrue(execs.indexOf(List.of(Ec2ContainerManager.metadataProxyInstallCommand()))
+                < execs.indexOf(startProxy), "dependencies are installed before the proxy starts");
     }
 
     @Test
@@ -650,15 +659,24 @@ class Ec2ContainerManagerTest {
     private static Ec2ContainerManager managerWith(ContainerLifecycleManager lifecycleManager,
                                                    DockerClient dockerClient,
                                                    Ec2MetadataServer metadataServer) {
+        return managerWith(lifecycleManager, dockerClient, metadataServer, mock(DockerHostResolver.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS));
+    }
+
+    private static Ec2ContainerManager managerWith(ContainerLifecycleManager lifecycleManager,
+                                                   DockerClient dockerClient,
+                                                   Ec2MetadataServer metadataServer,
+                                                   DockerHostResolver dockerHostResolver,
+                                                   EmulatorConfig config) {
         return new Ec2ContainerManager(
                 mock(ContainerBuilder.class),
                 lifecycleManager,
                 mock(ContainerLogStreamer.class),
                 mock(ContainerDetector.class),
-                mock(DockerHostResolver.class),
+                dockerHostResolver,
                 dockerClient,
                 mock(PortAllocator.class),
-                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                config,
                 metadataServer,
                 mock(Ec2PortForwardManager.class),
                 mock(RegionResolver.class),

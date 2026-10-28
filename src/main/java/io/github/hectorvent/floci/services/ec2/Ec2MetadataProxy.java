@@ -114,7 +114,10 @@ public final class Ec2MetadataProxy {
                 LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
-                "if [ -f " + pidFile + " ] && kill -0 \"$(cat " + pidFile + ")\" 2>/dev/null; then",
+                // The pid file outlives a stopped container, and a restarted guest may have handed
+                // that pid to something else: only a live socat counts as the proxy already running.
+                "if [ -f " + pidFile + " ] && pid=\"$(cat " + pidFile + ")\" && kill -0 \"$pid\" 2>/dev/null"
+                        + " && grep -q socat \"/proc/$pid/cmdline\" 2>/dev/null; then",
                 "  exit 0",
                 "fi",
                 "nohup socat TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",fork,reuseaddr TCP:"
