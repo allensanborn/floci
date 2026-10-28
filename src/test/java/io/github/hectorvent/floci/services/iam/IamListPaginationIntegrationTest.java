@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
@@ -16,6 +17,11 @@ import org.w3c.dom.Node;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPublicKey;
@@ -29,6 +35,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -61,6 +68,35 @@ class IamListPaginationIntegrationTest {
     private static final String POLICY_DOCUMENT = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject",\
             "Resource":"*"}]}""";
+
+    @TestHTTPResource("/")
+    URI endpoint;
+
+    private static final HttpClient BULK = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+
+    /**
+     * Sends one {@code action} per parameter set, concurrently and without RestAssured, whose
+     * per-request overhead is most of the cost of the hundred-item fixtures. Each must answer 200.
+     */
+    private void bulk(String action, List<List<String>> requests) {
+        List<CompletableFuture<HttpResponse<String>>> sent = new ArrayList<>();
+        for (List<String> pairs : requests) {
+            StringBuilder form = new StringBuilder("Action=").append(action);
+            for (int i = 0; i < pairs.size(); i += 2) {
+                form.append('&').append(pairs.get(i)).append('=')
+                        .append(URLEncoder.encode(pairs.get(i + 1), StandardCharsets.UTF_8));
+            }
+            sent.add(BULK.sendAsync(HttpRequest.newBuilder(endpoint)
+                    .header("Authorization", IAM_AUTH)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .POST(HttpRequest.BodyPublishers.ofString(form.toString())).build(),
+                    HttpResponse.BodyHandlers.ofString()));
+        }
+        for (CompletableFuture<HttpResponse<String>> response : sent) {
+            HttpResponse<String> answered = response.join();
+            assertEquals(200, answered.statusCode(), action + ": " + answered.body());
+        }
+    }
 
     private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
@@ -185,7 +221,8 @@ class IamListPaginationIntegrationTest {
         for (int i = 0; i < 101; i++) {
             names.add(String.format("pg-default-%s-%03d", tag, i));
         }
-        names.forEach(name -> createRole(name, path));
+        bulk("CreateRole", names.stream().map(name -> List.of("RoleName", name, "Path", path,
+                "AssumeRolePolicyDocument", TRUST_POLICY)).toList());
         try {
             Page first = rolePage(path, null, null);
             assertEquals(100, first.names().size());
@@ -197,7 +234,7 @@ class IamListPaginationIntegrationTest {
             assertFalse(second.truncated());
             assertNull(second.marker());
         } finally {
-            names.forEach(IamListPaginationIntegrationTest::deleteRole);
+            bulk("DeleteRole", names.stream().map(name -> List.of("RoleName", name)).toList());
         }
     }
 
@@ -530,6 +567,10 @@ class IamListPaginationIntegrationTest {
         }
     }
 
+    /**
+     * Only the default page size: resuming after a default page is {@link #listRolesDefaultsToOneHundredItems},
+     * and resuming these two lists is {@link #everyPaginatedOperationHonoursMaxItemsAndMarker}.
+     */
     @Test
     void listUsersAndListGroupsDefaultToOneHundredItems() {
         String tag = suffix();
@@ -538,10 +579,8 @@ class IamListPaginationIntegrationTest {
         for (int i = 0; i < 101; i++) {
             names.add(String.format("pg-default-%s-%03d", tag, i));
         }
-        for (String name : names) {
-            call("CreateUser", "UserName", name, "Path", path);
-            call("CreateGroup", "GroupName", name, "Path", path);
-        }
+        bulk("CreateUser", names.stream().map(name -> List.of("UserName", name, "Path", path)).toList());
+        bulk("CreateGroup", names.stream().map(name -> List.of("GroupName", name, "Path", path)).toList());
         try {
             for (String[] list : List.of(new String[]{"ListUsers", "Users", "UserName"},
                     new String[]{"ListGroups", "Groups", "GroupName"})) {
@@ -549,18 +588,10 @@ class IamListPaginationIntegrationTest {
                 assertEquals(names.subList(0, 100), first.names(), list[0]);
                 assertTrue(first.truncated(), list[0]);
                 assertNotNull(first.marker(), list[0]);
-
-                Page second = page(list[0], list[1], list[2], iam(list[0]).formParam("PathPrefix", path)
-                        .formParam("Marker", first.marker()));
-                assertEquals(List.of(names.get(100)), second.names(), list[0]);
-                assertFalse(second.truncated(), list[0]);
-                assertNull(second.marker(), list[0]);
             }
         } finally {
-            for (String name : names) {
-                call("DeleteUser", "UserName", name);
-                call("DeleteGroup", "GroupName", name);
-            }
+            bulk("DeleteUser", names.stream().map(name -> List.of("UserName", name)).toList());
+            bulk("DeleteGroup", names.stream().map(name -> List.of("GroupName", name)).toList());
         }
     }
 
@@ -693,7 +724,7 @@ class IamListPaginationIntegrationTest {
                 keys.get(user).add(iam("CreateAccessKey").formParam("UserName", user).when().post("/").then()
                     .statusCode(200).extract().path("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId"));
                 sshKeys.get(user).add(iam("UploadSSHPublicKey").formParam("UserName", user)
-                    .formParam("SSHPublicKeyBody", sshPublicKey()).when().post("/").then().statusCode(200).extract()
+                    .formParam("SSHPublicKeyBody", SSH_PUBLIC_KEYS.get(i)).when().post("/").then().statusCode(200).extract()
                     .path("UploadSSHPublicKeyResponse.UploadSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyId"));
             }
         }
@@ -932,6 +963,9 @@ class IamListPaginationIntegrationTest {
                 "AuthenticationCode1", Totp.codeAt(seed, step - 1), "AuthenticationCode2", Totp.codeAt(seed, step));
     }
 
+    /** Two distinct keys, since a user may not upload one twice; RSA generation is slow, so once per run. */
+    private static final List<String> SSH_PUBLIC_KEYS = List.of(sshPublicKey(), sshPublicKey());
+
     private static String sshPublicKey() {
         try {
             KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
@@ -1167,7 +1201,7 @@ class IamListPaginationIntegrationTest {
             createUser(user);
             List<String> ids = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
-                ids.add(iam("UploadSSHPublicKey").formParam("UserName", user).formParam("SSHPublicKeyBody", sshPublicKey())
+                ids.add(iam("UploadSSHPublicKey").formParam("UserName", user).formParam("SSHPublicKeyBody", SSH_PUBLIC_KEYS.get(i))
                     .when().post("/").then().statusCode(200).extract()
                     .path("UploadSSHPublicKeyResponse.UploadSSHPublicKeyResult.SSHPublicKey.SSHPublicKeyId"));
             }

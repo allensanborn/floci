@@ -7,8 +7,9 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Pagination markers that name a cursor, as AWS's opaque tokens do. Each marker is signed with a
@@ -20,16 +21,23 @@ public final class SignedMarkers {
     private static final char SEPARATOR = '.';
     /** Opens a cursor that stands for a longer one by its digest. No key a list pages by holds a NUL. */
     private static final String DIGEST_PREFIX = "\u0000#";
+    /** Long cursors held per instance; a marker whose digest was evicted is refused as unknown. */
+    static final int MAX_LONG_CURSORS = 10_000;
 
     private final byte[] key = newKey();
     private final int maxLength;
     /**
      * The cursors too long to carry, by the digest a marker carries instead. An entry is the key of
      * an item a page ended on, so a marker resumes after that item even once it is deleted.
+     * Bounded with LRU-style eviction, as an expired AWS token would be refused.
      */
-    // ponytail: never evicted, so it grows by one entry per distinct long key a page has ended on;
-    // bound it with an LRU, and refuse an evicted marker as expired, if that ever matters.
-    private final Map<String, String> longCursors = new ConcurrentHashMap<>();
+    private final Map<String, String> longCursors = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+                    return size() > MAX_LONG_CURSORS;
+                }
+            });
 
     public SignedMarkers() {
         this(Integer.MAX_VALUE);

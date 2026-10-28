@@ -65,4 +65,19 @@ class SignedMarkersTest {
         assertEquals("user-b", bounded.cursorOf("s", bounded.issue("s", "user-b")),
                 "a cursor that fits is carried as it is");
     }
+
+    /** The long cursors an instance holds are bounded; the least recently used is forgotten. */
+    @Test
+    void anEvictedLongCursorIsNotRecognisedButARecentOneResumes() {
+        SignedMarkers bounded = new SignedMarkers(320);
+        String prefix = "arn:aws:iam::000000000000:policy/" + "p/".repeat(250);
+        String oldest = bounded.issue("s", prefix + "oldest");
+        for (int i = 0; i < SignedMarkers.MAX_LONG_CURSORS; i++) {
+            bounded.issue("s", prefix + i);
+        }
+        String recent = bounded.issue("s", prefix + "recent");
+
+        assertNull(bounded.cursorOf("s", oldest), "an evicted digest resolves like an unknown one");
+        assertEquals(prefix + "recent", bounded.cursorOf("s", recent));
+    }
 }
