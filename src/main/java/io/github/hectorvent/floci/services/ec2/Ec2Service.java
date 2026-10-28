@@ -5024,6 +5024,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return null;
     }
 
+    /**
+     * The association DescribeInstances shows on an instance's primary interface: the Elastic IP
+     * on its primary private address, owned by the interface owner exactly as
+     * DescribeNetworkInterfaces shows it, otherwise the automatic public address (owned by
+     * "amazon"), otherwise null. Other interfaces carry none.
+     */
+    public NetworkInterfaceAssociation instanceInterfaceAssociation(Instance instance, InstanceNetworkInterface eni) {
+        if (eni.getDeviceIndex() != 0) {
+            return null;
+        }
+        Address elastic = primaryElasticAddress(instance.getRegion(), instance);
+        if (elastic != null) {
+            return networkInterfaceAssociation(elastic, eni.getOwnerId());
+        }
+        String publicIp = instance.getPublicIpAddress();
+        if (publicIp == null || publicIp.isBlank()) {
+            return null;
+        }
+        NetworkInterfaceAssociation association = new NetworkInterfaceAssociation();
+        association.setPublicIp(publicIp);
+        association.setIpOwnerId("amazon");
+        return association;
+    }
+
     public String platformDetailsForInstance(Instance instance) {
         Image image = findImageForCapture(instance.getRegion(), instance.getImageId());
         return image != null && "windows".equalsIgnoreCase(image.getPlatform())

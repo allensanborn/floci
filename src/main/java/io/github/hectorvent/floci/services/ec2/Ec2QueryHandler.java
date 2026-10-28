@@ -5220,8 +5220,17 @@ public class Ec2QueryHandler {
                         .elem("groupName", gi.getGroupName())
                         .end("item");
             }
-            xml.end("groupSet")
-                    .start("attachment")
+            xml.end("groupSet");
+            // The provider derives associate_public_ip_address from the presence of this element.
+            NetworkInterfaceAssociation association = service.instanceInterfaceAssociation(inst, eni);
+            if (association != null) {
+                xml.start("association")
+                        .elem("publicIp", association.getPublicIp())
+                        .elem("publicDnsName", inst.getPublicDnsName())
+                        .elem("ipOwnerId", association.getIpOwnerId())
+                        .end("association");
+            }
+            xml.start("attachment")
                     .elem("attachmentId", eni.getAttachmentId())
                     .elem("deviceIndex", String.valueOf(eni.getDeviceIndex()))
                     .elem("status", "attached");
