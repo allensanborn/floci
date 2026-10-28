@@ -17,7 +17,7 @@ import static org.hamcrest.Matchers.nullValue;
  * a perpetual diff.
  */
 @QuarkusTest
-class CloudTrailEncryptionAndLogsTest {
+class CloudTrailEncryptionAndLogsIntegrationTest {
 
     private static final String CT_TARGET = "CloudTrail_20131101.";
     private static final String JSON11 = "application/x-amz-json-1.1";
