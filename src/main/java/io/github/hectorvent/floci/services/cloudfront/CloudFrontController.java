@@ -3628,17 +3628,26 @@ public class CloudFrontController {
                 .elem("ARN", cfg.getArn() != null ? cfg.getArn() : "")
                 .elem("Name", cfg.getName() != null ? cfg.getName() : "")
                 .elem("SamplingRate", cfg.getSamplingRate())
-                .start("Fields")
-                .elem("Quantity", fields.size());
-        if (!fields.isEmpty()) {
-            xml.start("Items");
-            for (String f : fields) {
-                xml.elem("Field", f);
-            }
-            xml.end("Items");
+                .start("Fields");
+        // FieldList / EndPointList are plain lists in the model (no Quantity/Items wrapper).
+        for (String f : fields) {
+            xml.elem("Field", f);
         }
         xml.end("Fields");
-        xml.start("EndPoints").elem("Quantity", 0).end("EndPoints");
+        xml.start("EndPoints");
+        if (cfg.getEndPoints() != null) {
+            for (Map<String, Object> ep : cfg.getEndPoints()) {
+                xml.start("member").elem("StreamType", String.valueOf(ep.get("StreamType")));
+                if (ep.get("KinesisStreamConfig") instanceof Map<?, ?> k) {
+                    xml.start("KinesisStreamConfig")
+                            .elem("RoleARN", String.valueOf(k.get("RoleARN")))
+                            .elem("StreamARN", String.valueOf(k.get("StreamARN")))
+                            .end("KinesisStreamConfig");
+                }
+                xml.end("member");
+            }
+        }
+        xml.end("EndPoints");
         xml.end("RealtimeLogConfig");
         return xml.build();
     }
@@ -3759,7 +3768,10 @@ public class CloudFrontController {
 
     private RealtimeLogConfig parseRealtimeLogConfig(String body) {
         RealtimeLogConfig cfg = new RealtimeLogConfig();
-        cfg.setName(XmlParser.extractFirst(body, "Name", null));
+        String name = XmlParser.extractFirst(body, "Name", null);
+        String arn = XmlParser.extractFirst(body, "ARN", null);
+        // UpdateRealtimeLogConfig identifies the config by Name or ARN.
+        cfg.setName(name == null && arn != null ? arn.substring(arn.lastIndexOf('/') + 1) : name);
         String sr = XmlParser.extractFirst(body, "SamplingRate", "100");
         try {
             cfg.setSamplingRate(Long.parseLong(sr));
@@ -3767,6 +3779,24 @@ public class CloudFrontController {
             cfg.setSamplingRate(100);
         }
         cfg.setFields(XmlParser.extractAll(body, "Field"));
+        // ponytail: zips by index; Kinesis is the only StreamType and KinesisStreamConfig is
+        // required in practice. Handle a config-less endpoint if AWS ever adds another type.
+        List<String> types = XmlParser.extractAll(body, "StreamType");
+        List<String> roles = XmlParser.extractAll(body, "RoleARN");
+        List<String> streams = XmlParser.extractAll(body, "StreamARN");
+        List<Map<String, Object>> endPoints = new ArrayList<>();
+        for (int i = 0; i < types.size(); i++) {
+            Map<String, Object> ep = new LinkedHashMap<>();
+            ep.put("StreamType", types.get(i));
+            if (i < roles.size() && i < streams.size()) {
+                Map<String, Object> k = new LinkedHashMap<>();
+                k.put("RoleARN", roles.get(i));
+                k.put("StreamARN", streams.get(i));
+                ep.put("KinesisStreamConfig", k);
+            }
+            endPoints.add(ep);
+        }
+        cfg.setEndPoints(endPoints);
         return cfg;
     }
 
