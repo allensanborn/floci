@@ -36,8 +36,8 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
-import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import org.junit.jupiter.api.AfterEach;
@@ -874,8 +874,8 @@ class Ec2ContainerManagerTest {
     void reachablePublicAddressIsNullBeforeAContainerExists() {
         Ec2ContainerManager manager = managerWithReachability(mock(ContainerNetworkReachability.class));
 
-        assertEquals(null, manager.reachablePublicAddress(new Instance()));
-        assertEquals(null, manager.reachablePublicAddress(null));
+        assertNull(manager.reachablePublicAddress(new Instance()));
+        assertNull(manager.reachablePublicAddress(null));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
@@ -1498,7 +1498,7 @@ class Ec2ContainerManagerTest {
         instance.setAssociatePublicIp(true);
         // The launch is cancelled while the worker is between registering the container and
         // publishing its address, so markRunning refuses and failLaunch runs.
-        org.mockito.Mockito.doAnswer(invocation -> {
+        doAnswer(invocation -> {
             instance.setState(InstanceState.terminated());
             return null;
         }).when(harness.metadataServer).registerContainer(any(), any(), any());
@@ -1507,8 +1507,8 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> instance.getPublicIpAddress() == null && "terminated".equals(instance.getState().getName())
                 && instance.getDockerContainerId() == null, Duration.ofSeconds(2));
         assertEquals("terminated", instance.getState().getName());
-        assertEquals(null, instance.getPublicIpAddress());
-        assertEquals(null, instance.getPublicDnsName());
+        assertNull(instance.getPublicIpAddress());
+        assertNull(instance.getPublicDnsName());
     }
 
     @Test

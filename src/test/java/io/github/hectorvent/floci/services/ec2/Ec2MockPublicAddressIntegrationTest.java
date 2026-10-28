@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -270,7 +271,7 @@ class Ec2MockPublicAddressIntegrationTest {
         assertAssociation(owner, instance, elastic, owner);
         String eni = describe(owner, instance).extract().xmlPath()
                 .getString(INSTANCE + "networkInterfaceSet.item.networkInterfaceId");
-        var interfaceView = request("DescribeNetworkInterfaces", owner).formParam("NetworkInterfaceId.1", eni)
+        XmlPath interfaceView = request("DescribeNetworkInterfaces", owner).formParam("NetworkInterfaceId.1", eni)
                 .post("/").then().statusCode(200).extract().xmlPath();
         assertEquals(elastic, interfaceView.getString("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.association.publicIp"));
         assertEquals(owner, interfaceView.getString("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.association.ipOwnerId"));
@@ -662,8 +663,8 @@ class Ec2MockPublicAddressIntegrationTest {
 
     /** Reads the primary interface's association back through DescribeInstances; null expects none. */
     private void assertAssociation(String owner, String instance, String publicIp, String ipOwnerId) {
-        var xml = describe(owner, instance).extract().xmlPath();
-        var items = xml.getList(INSTANCE + "networkInterfaceSet.item.association");
+        XmlPath xml = describe(owner, instance).extract().xmlPath();
+        List<Object> items = xml.getList(INSTANCE + "networkInterfaceSet.item.association");
         if (publicIp == null) {
             assertEquals(0, items.size(), "unexpected association " + items);
         } else {
@@ -686,7 +687,7 @@ class Ec2MockPublicAddressIntegrationTest {
                 .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
         request("AttachNetworkInterface", owner).formParam("NetworkInterfaceId", second)
                 .formParam("InstanceId", instance).formParam("DeviceIndex", 1).post("/").then().statusCode(200);
-        var xml = describe(owner, instance).extract().xmlPath();
+        XmlPath xml = describe(owner, instance).extract().xmlPath();
         assertEquals(2, xml.getList(INSTANCE + "networkInterfaceSet.item").size());
         assertEquals(1, xml.getList(INSTANCE + "networkInterfaceSet.item.association").size());
         assertEquals(0, xml.getList(INSTANCE + "networkInterfaceSet.item.find { it.networkInterfaceId == '"
