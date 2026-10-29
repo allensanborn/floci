@@ -756,4 +756,59 @@ class Ec2NetworkInterfaceIntegrationTest {
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
     }
+
+    private static int enisInSubnet() {
+        return given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "subnet-id")
+            .formParam("Filter.1.Value.1", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getList("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId").size();
+    }
+
+    @Test
+    @Order(24)
+    void twoEntriesMarkedPrimaryAreRefusedAndCreateNothing() {
+        int before = enisInSubnet();
+        createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", addressInSubnet(208),
+                "PrivateIpAddresses.1.Primary", "true",
+                "PrivateIpAddresses.2.PrivateIpAddress", addressInSubnet(209),
+                "PrivateIpAddresses.2.Primary", "true")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        Assertions.assertEquals(before, enisInSubnet());
+    }
+
+    @Test
+    @Order(25)
+    void aSecondaryEqualToThePrivateIpAddressCollapsesIntoThePrimary() {
+        String ip = addressInSubnet(210);
+        String id = createWithList(
+                "PrivateIpAddress", ip,
+                "PrivateIpAddresses.1.PrivateIpAddress", ip)
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        Assertions.assertEquals(Map.of(ip, true), describedAddresses(id));
+        deleteEni(id);
+    }
+
+    @Test
+    @Order(26)
+    void aNonPrimaryEntryEqualToThePrimaryEntryCollapsesIntoIt() {
+        String ip = addressInSubnet(211);
+        String id = createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", ip,
+                "PrivateIpAddresses.1.Primary", "true",
+                "PrivateIpAddresses.2.PrivateIpAddress", ip)
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        Assertions.assertEquals(Map.of(ip, true), describedAddresses(id));
+        deleteEni(id);
+    }
 }
