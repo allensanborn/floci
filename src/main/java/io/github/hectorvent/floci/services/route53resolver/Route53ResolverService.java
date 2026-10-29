@@ -102,7 +102,7 @@ public class Route53ResolverService {
      */
     private final StorageBackend<String, ObjectNode> tagStore;
     private final ObjectMapper objectMapper;
-    /** Null only in hermetic tests built from bare stores; subnets are then treated as unknown. */
+    /** Null only in hermetic tests built without one; subnets are then treated as unknown. */
     private final Ec2Service ec2Service;
 
     @Inject
@@ -134,6 +134,17 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
+        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, endpointIpRequestStore, tagStore,
+                objectMapper, null);
+    }
+
+    Route53ResolverService(StorageBackend<String, ObjectNode> domainListStore,
+                           StorageBackend<String, ObjectNode> endpointStore,
+                           StorageBackend<String, ObjectNode> ruleStore,
+                           StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> endpointIpRequestStore,
+                           StorageBackend<String, ObjectNode> tagStore,
+                           ObjectMapper objectMapper, Ec2Service ec2Service) {
         this.domainListStore = domainListStore;
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
@@ -141,7 +152,7 @@ public class Route53ResolverService {
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
         this.objectMapper = objectMapper;
-        this.ec2Service = null;
+        this.ec2Service = ec2Service;
     }
 
     public List<FirewallDomainList> listFirewallDomainLists(String region) {
@@ -323,9 +334,10 @@ public class Route53ResolverService {
                         .put("NetworkInterfaceId", eni.getNetworkInterfaceId())
                         .put("Ip", eni.getPrivateIpAddress());
             }
-        } catch (AwsException e) {
+        } catch (RuntimeException e) {
+            // Any failure, not only EC2's refusals, would otherwise leave the interfaces made so far.
             deleteEndpointInterfaces(region, created);
-            throw asResolverRejection(e);
+            throw e instanceof AwsException refusal ? asResolverRejection(refusal) : e;
         }
         return out;
     }
@@ -356,7 +368,9 @@ public class Route53ResolverService {
         }
     }
 
-    public ObjectNode deleteResolverEndpoint(String id) {
+    // Synchronized with createResolverEndpoint, which stores the endpoint before its record: a delete
+    // between the two would find no interfaces to delete, and the create would then store the record.
+    public synchronized ObjectNode deleteResolverEndpoint(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
         // A record written before endpoints had interfaces has no NetworkInterfaces, so none to delete.
         endpointIpRequestStore.get(id).ifPresent(record -> {
