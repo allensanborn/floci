@@ -352,6 +352,46 @@ class CloudFrontManagementProtocolTest {
             .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
     }
 
+    @ParameterizedTest(name = "{0} name is the root Name, not an item Name")
+    @CsvSource({"cache-policy, CachePolicy", "origin-request-policy, OriginRequestPolicy"})
+    void policyNameIgnoresItemNamesThatPrecedeIt(String endpoint, String type) {
+        String name = "name-order-" + UUID.randomUUID();
+        String items = """
+                <Quantity>1</Quantity><Items><Name>Session-ID</Name></Items>""";
+        String params = """
+                <HeadersConfig><HeaderBehavior>whitelist</HeaderBehavior>
+                  <Headers><Quantity>1</Quantity><Items><Name>X-Hdr</Name></Items></Headers></HeadersConfig>
+                <CookiesConfig><CookieBehavior>whitelist</CookieBehavior>
+                  <Cookies>%s</Cookies></CookiesConfig>
+                <QueryStringsConfig><QueryStringBehavior>whitelist</QueryStringBehavior>
+                  <QueryStrings>%s</QueryStrings></QueryStringsConfig>
+                """.formatted(items, items);
+        String config = endpoint.equals("cache-policy")
+                ? "<ParametersInCacheKeyAndForwardedToOrigin>"
+                  + "<EnableAcceptEncodingGzip>false</EnableAcceptEncodingGzip>" + params
+                  + "</ParametersInCacheKeyAndForwardedToOrigin><MinTTL>0</MinTTL>"
+                : params;
+        String body = "<" + type + "Config xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                + config + "<Comment>real-comment</Comment><Name>" + name + "</Name></" + type + "Config>";
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        String etag = created.header("ETag");
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)))
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo("real-comment")));
+            given().when().get(API + endpoint).then().statusCode(200)
+                    .body(hasXPath("//*[local-name()='" + type + "Summary']/*[local-name()='" + type
+                            + "']/*[local-name()='" + type + "Config']/*[local-name()='Name' and text()='"
+                            + name + "']"));
+        } finally {
+            given().header("If-Match", etag).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
     @Test
     void cachePolicyReadFillsAwsTtlDefaults() {
         String name = "default-ttl-cache-policy-" + UUID.randomUUID();
