@@ -592,9 +592,23 @@ public class ApiGatewayService implements ResourceProvider {
         }
     }
 
+    /** AWS PutMethod: a verb already on the resource is a ConflictException, not an overwrite. */
     public MethodConfig putMethod(String region, String apiId, String resourceId, String httpMethod, Map<String, Object> request) {
+        return putMethod(region, apiId, resourceId, httpMethod, request, false);
+    }
+
+    /** Internal callers (OpenAPI import, CloudFormation update) re-define methods and rely on {@code replace}. */
+    public MethodConfig putMethodReplacing(String region, String apiId, String resourceId, String httpMethod, Map<String, Object> request) {
+        return putMethod(region, apiId, resourceId, httpMethod, request, true);
+    }
+
+    private MethodConfig putMethod(String region, String apiId, String resourceId, String httpMethod, Map<String, Object> request, boolean replace) {
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
+        if (!replace && resource.getResourceMethods().containsKey(httpMethod.toUpperCase())) {
+            throw new AwsException("ConflictException", "Method already exists for this resource", 409);
+        }
         MethodConfig method = new MethodConfig();
+        method.setOperationName((String) request.get("operationName"));
         method.setHttpMethod(httpMethod.toUpperCase());
         method.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         method.setAuthorizerId((String) request.get("authorizerId"));
@@ -3413,6 +3427,10 @@ public class ApiGatewayService implements ResourceProvider {
                     }
                     continue;
                 }
+                if ("/operationName".equals(path) && "remove".equals(opType)) {
+                    method.setOperationName(null);
+                    continue;
+                }
                 if (!"replace".equals(opType)) continue;
                 if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
                 else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);
@@ -3425,6 +3443,7 @@ public class ApiGatewayService implements ResourceProvider {
                     }
                 }
                 else if ("/apiKeyRequired".equals(path)) method.setApiKeyRequired(Boolean.parseBoolean(value));
+                else if ("/operationName".equals(path)) method.setOperationName(value == null || value.isEmpty() ? null : value);
                 else if ("/requestValidatorId".equals(path)) {
                     method.setRequestValidatorId(value == null || value.isEmpty() ? null : value);
                 }
@@ -4496,7 +4515,7 @@ public class ApiGatewayService implements ResourceProvider {
             methodRequest.put("requestValidatorId", defaultValidatorId);
         }
 
-        putMethod(region, apiId, resourceId, httpMethod, methodRequest);
+        putMethodReplacing(region, apiId, resourceId, httpMethod, methodRequest);
 
         // Extract x-amazon-apigateway-integration extension
         Map<String, Object> integrationExt = null;

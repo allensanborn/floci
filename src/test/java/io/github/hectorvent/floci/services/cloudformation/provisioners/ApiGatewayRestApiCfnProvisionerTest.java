@@ -563,7 +563,7 @@ class ApiGatewayRestApiCfnProvisionerTest {
                 """), ctx());
 
         assertEquals("api-1-res-1-GET", r.getPhysicalId());
-        verify(api).putMethod(eq("us-east-1"), eq("api-1"), eq("res-1"), eq("GET"), anyMap());
+        verify(api).putMethodReplacing(eq("us-east-1"), eq("api-1"), eq("res-1"), eq("GET"), anyMap());
         verify(api).putIntegration(eq("us-east-1"), eq("api-1"), eq("res-1"), eq("GET"), anyMap());
     }
 
@@ -594,7 +594,7 @@ class ApiGatewayRestApiCfnProvisionerTest {
                 """), ctx("a1b2c3-d4e5f6-get"));
 
         assertEquals("a1b2c3-d4e5f6-get", r.getPhysicalId());
-        verify(api).putMethod(eq("us-east-1"), eq("a1b2c3"), eq("d4e5f6"), eq("GET"), anyMap());
+        verify(api).putMethodReplacing(eq("us-east-1"), eq("a1b2c3"), eq("d4e5f6"), eq("GET"), anyMap());
         assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
