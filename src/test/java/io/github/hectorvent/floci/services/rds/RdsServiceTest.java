@@ -4610,6 +4610,26 @@ class RdsServiceTest {
         assertEquals(404, exception.getHttpStatus());
     }
 
+    /** Not observable through Describe (re-modify rewrites the method), so assert the stored map. */
+    @Test
+    void resetClearsStoredApplyMethods() {
+        Map<String, String> params = Map.of("a", "1", "b", "2");
+        Map<String, String> methods = Map.of("a", "pending-reboot", "b", "pending-reboot");
+        rdsService.createDbParameterGroup("reset-pg", "mysql8.0", "d");
+        rdsService.modifyDbParameterGroup("reset-pg", params, methods, "us-east-1");
+        assertEquals(Set.of("b"), rdsService.resetDbParameterGroup("reset-pg", false, List.of("a"), "us-east-1")
+                .getApplyMethods().keySet());
+        assertTrue(rdsService.resetDbParameterGroup("reset-pg", true, List.of(), "us-east-1")
+                .getApplyMethods().isEmpty());
+
+        rdsService.createDbClusterParameterGroup("reset-cpg", "aurora-mysql8.0", "d");
+        rdsService.modifyDbClusterParameterGroup("reset-cpg", params, methods, "us-east-1");
+        assertEquals(Set.of("b"), rdsService.resetDbClusterParameterGroup("reset-cpg", false, List.of("a"), "us-east-1")
+                .getApplyMethods().keySet());
+        assertTrue(rdsService.resetDbClusterParameterGroup("reset-cpg", true, List.of(), "us-east-1")
+                .getApplyMethods().isEmpty());
+    }
+
     @Test
     void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
         rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
