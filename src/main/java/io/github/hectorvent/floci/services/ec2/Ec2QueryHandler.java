@@ -1902,6 +1902,32 @@ public class Ec2QueryHandler {
             "elasticloadbalancing", "sns", "sqs", "kinesis-streams", "kinesis-firehose",
             "states", "events", "lambda", "glue", "athena", "iot.data", "execute-api");
 
+    /**
+     * The DescribeVpcEndpointServices filters that apply to Floci's catalogue: service-name,
+     * service-type, owner (always amazon), service-region and supported-ip-address-types (ipv4).
+     * Services carry no tags, so tag and tag-key admit nothing. Other names are ignored.
+     */
+    private static boolean vpcEndpointServiceMatches(List<Map.Entry<String, List<String>>> filters,
+                                                     String name, List<String> types, String region) {
+        for (Map.Entry<String, List<String>> f : filters) {
+            String key = f.getKey();
+            List<List<String>> values = List.of(f.getValue());
+            boolean ok = switch (key) {
+                case "service-name" -> Ec2Service.everyFilterAdmits(values, name);
+                case "service-type" -> types.stream().anyMatch(t -> Ec2Service.everyFilterAdmits(values, t));
+                case "owner" -> Ec2Service.everyFilterAdmits(values, "amazon");
+                case "service-region" -> Ec2Service.everyFilterAdmits(values, region);
+                case "supported-ip-address-types" -> Ec2Service.everyFilterAdmits(values, "ipv4");
+                case "tag-key" -> false;
+                default -> !key.startsWith("tag:");
+            };
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
         List<String> azNames = service.describeAvailabilityZones(region, List.of(), List.of(), null).stream()
@@ -1931,10 +1957,8 @@ public class Ec2QueryHandler {
                 fullNames.add(s3Interface);
             }
         }
-        for (String full : fullNames) {
-            xml.elem("item", full);
-        }
-        xml.end("serviceNameSet").start("serviceDetailSet");
+        // Type per service name; Filter.N applies to it (AND across filters, OR within one).
+        Map<String, List<String>> typesByName = new LinkedHashMap<>();
         for (String full : fullNames) {
             // Where both S3 offerings share a name, AWS reports both types on that one
             // service detail. Everything else is Interface.
@@ -1948,6 +1972,17 @@ public class Ec2QueryHandler {
             } else {
                 serviceTypes = List.of("Interface");
             }
+            if (vpcEndpointServiceMatches(getFiltersList(p), full, serviceTypes, region)) {
+                typesByName.put(full, serviceTypes);
+            }
+        }
+        for (String full : typesByName.keySet()) {
+            xml.elem("item", full);
+        }
+        xml.end("serviceNameSet").start("serviceDetailSet");
+        for (Map.Entry<String, List<String>> entry : typesByName.entrySet()) {
+            String full = entry.getKey();
+            List<String> serviceTypes = entry.getValue();
             xml.start("item")
                     .elem("serviceName", full)
                     .start("serviceType");
