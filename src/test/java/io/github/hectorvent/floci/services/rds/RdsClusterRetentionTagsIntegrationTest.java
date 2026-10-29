@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -19,6 +20,14 @@ class RdsClusterRetentionTagsIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261015/us-east-1/rds/aws4_request, "
             + "SignedHeaders=content-type;host, Signature=test";
+
+    @AfterEach
+    void cleanUp() {
+        for (String id : new String[]{"ret-cluster", "ret-default-cluster", "tag-cluster"}) {
+            query("DeleteDBCluster").formParam("DBClusterIdentifier", id)
+                    .formParam("SkipFinalSnapshot", "true").when().post("/");
+        }
+    }
 
     private static RequestSpecification query(String action) {
         return given().header("Authorization", AUTH).contentType(URLENC)
