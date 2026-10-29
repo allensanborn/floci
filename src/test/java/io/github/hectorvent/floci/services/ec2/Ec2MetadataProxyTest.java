@@ -28,6 +28,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class Ec2MetadataProxyTest {
 
     @Test
+    void everyProxyCommandLeavesTheRootCgroupBeforeItStartsAnything() {
+        // A process left in the root of a systemd guest's private cgroup namespace keeps cgroup v2
+        // from enabling controllers there, and kubelet (cgroupfs driver) cannot create kubepods.
+        String prelude = Ec2MetadataProxy.LEAVE_ROOT_CGROUP;
+        assertTrue(prelude.startsWith("if [ \"$(cat /proc/self/cgroup 2>/dev/null)\" = 0::/ ]"
+                + " && [ -w /sys/fs/cgroup/cgroup.procs ]; then"));
+        assertTrue(prelude.contains("mkdir -p /sys/fs/cgroup/floci && echo $$ >/sys/fs/cgroup/floci/cgroup.procs;"));
+        // Best effort: a read-only cgroupfs must not abort a script running under set -e.
+        assertTrue(prelude.contains("2>/dev/null || true;"));
+        for (String[] command : new String[][]{
+                Ec2MetadataProxy.installCommand(),
+                Ec2MetadataProxy.startCommand("10.0.0.1", 9169),
+                Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566)}) {
+            assertTrue(command[2].startsWith("set -eu\n" + prelude + "\n"), command[2]);
+        }
+    }
+
+    @Test
     void installCommandContainsSupportedPackageManagers() {
         String[] command = Ec2MetadataProxy.installCommand();
         assertEquals(3, command.length);
