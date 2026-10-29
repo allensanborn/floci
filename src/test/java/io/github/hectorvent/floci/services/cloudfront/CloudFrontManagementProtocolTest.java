@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -125,6 +126,66 @@ class CloudFrontManagementProtocolTest {
             .body(not(hasXPath("/*/*[local-name()='Quantity']")))
             .body(hasXPath("/*/*[local-name()='Marker']"))
             .body(hasXPath("/*/*[local-name()='IsTruncated']"));
+    }
+
+    @Test
+    void realtimeLogConfigFieldsAndEndPointsRoundTripThroughGet() {
+        String name = "rtlc-" + UUID.randomUUID();
+        given()
+            .contentType("application/xml")
+            .body("""
+                <CreateRealtimeLogConfigRequest xmlns="%s">
+                  <Name>%s</Name><SamplingRate>50</SamplingRate>
+                  <Fields><Field>timestamp</Field><Field>c-ip</Field><Field>sc-status</Field></Fields>
+                  <EndPoints><member><StreamType>Kinesis</StreamType><KinesisStreamConfig>
+                    <RoleARN>arn:aws:iam::000000000000:role/r</RoleARN>
+                    <StreamARN>arn:aws:kinesis:us-east-1:000000000000:stream/s</StreamARN>
+                  </KinesisStreamConfig></member></EndPoints>
+                </CreateRealtimeLogConfigRequest>""".formatted(AwsNamespaces.CLOUDFRONT, name))
+        .when()
+            .post(API + "realtime-log-config")
+        .then()
+            .statusCode(201);
+
+        given()
+            .contentType("application/xml")
+            .body("<GetRealtimeLogConfigRequest xmlns=\"" + AwsNamespaces.CLOUDFRONT + "\"><Name>"
+                    + name + "</Name></GetRealtimeLogConfigRequest>")
+        .when()
+            .post(API + "get-realtime-log-config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath("count(//*[local-name()='Fields']/*)", equalTo("3")))
+            .body(hasXPath("//*[local-name()='Fields']/*[local-name()='Field'][2]/text()", equalTo("c-ip")))
+            .body(hasXPath("//*[local-name()='EndPoints']/*[local-name()='member']"
+                    + "/*[local-name()='KinesisStreamConfig']/*[local-name()='StreamARN']/text()",
+                    equalTo("arn:aws:kinesis:us-east-1:000000000000:stream/s")));
+
+        // update addressed by ARN only, then read back through Get
+        given()
+            .contentType("application/xml")
+            .body("""
+                <UpdateRealtimeLogConfigRequest xmlns="%s">
+                  <ARN>arn:aws:cloudfront::000000000000:realtime-log-config/%s</ARN>
+                  <SamplingRate>75</SamplingRate>
+                </UpdateRealtimeLogConfigRequest>""".formatted(AwsNamespaces.CLOUDFRONT, name))
+        .when()
+            .put(API + "realtime-log-config")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/xml")
+            .body("<GetRealtimeLogConfigRequest xmlns=\"" + AwsNamespaces.CLOUDFRONT + "\"><Name>"
+                    + name + "</Name></GetRealtimeLogConfigRequest>")
+        .when()
+            .post(API + "get-realtime-log-config")
+        .then()
+            .body(hasXPath("//*[local-name()='SamplingRate']/text()", equalTo("75")))
+            // omitted Fields and EndPoints keep their saved values
+            .body(hasXPath("count(//*[local-name()='Fields']/*)", equalTo("3")))
+            .body(hasXPath("//*[local-name()='EndPoints']/*[local-name()='member']"
+                    + "/*[local-name()='KinesisStreamConfig']/*[local-name()='StreamARN']/text()",
+                    equalTo("arn:aws:kinesis:us-east-1:000000000000:stream/s")));
     }
 
     @Test
