@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class MethodConfig {
 
     private String httpMethod;
+    private String operationName;
     private String authorizationType;
     private String authorizerId;
     private List<String> authorizationScopes = new ArrayList<>();
@@ -26,6 +27,9 @@ public class MethodConfig {
 
     public String getHttpMethod() { return httpMethod; }
     public void setHttpMethod(String httpMethod) { this.httpMethod = httpMethod; }
+
+    public String getOperationName() { return operationName; }
+    public void setOperationName(String operationName) { this.operationName = operationName; }
 
     public String getAuthorizationType() { return authorizationType; }
     public void setAuthorizationType(String authorizationType) { this.authorizationType = authorizationType; }
