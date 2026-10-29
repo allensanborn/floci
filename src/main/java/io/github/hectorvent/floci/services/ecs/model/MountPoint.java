@@ -7,7 +7,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * {@code {"sourceVolume": ..., "containerPath": ..., "readOnly": ...}}.
  * {@code sourceVolume} references a task-level {@link Volume} by name; the volume's
  * host source path is bind-mounted into the container at {@code containerPath}.
+ * {@code readOnly} is null when the caller did not send it (AWS omits it on describe).
  */
 @RegisterForReflection
-public record MountPoint(String sourceVolume, String containerPath, boolean readOnly) {
+public record MountPoint(String sourceVolume, String containerPath, Boolean readOnly) {
 }

@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -145,6 +147,27 @@ class EcsFargateTaskDefinitionIntegrationTest {
                 .body("taskDefinition.containerDefinitions[1].dependsOn[0].condition", equalTo("START"))
                 .body("taskDefinition.containerDefinitions[1].repositoryCredentials.credentialsParameter",
                         containsString("secret:dummy"));
+    }
+
+    @Test
+    void describeOmitsReadOnlyOnMountPointsAndVolumesFromThatDidNotSendIt() {
+        register("{\"family\":\"fargate-readonly-absent\",\"requiresCompatibilities\":[\"FARGATE\"],"
+                + "\"networkMode\":\"awsvpc\",\"cpu\":\"256\",\"memory\":\"1024\","
+                + "\"volumes\":[{\"name\":\"tmp\"}],"
+                + "\"containerDefinitions\":["
+                + "{\"name\":\"sidecar\",\"image\":\"busybox\",\"essential\":false},"
+                + "{\"name\":\"app\",\"image\":\"busybox\",\"essential\":true,"
+                + "\"mountPoints\":[{\"sourceVolume\":\"tmp\",\"containerPath\":\"/tmp\"},"
+                + "{\"sourceVolume\":\"tmp\",\"containerPath\":\"/ro\",\"readOnly\":true}],"
+                + "\"volumesFrom\":[{\"sourceContainer\":\"sidecar\"}]}]}", 200);
+
+        call("DescribeTaskDefinition", "{\"taskDefinition\":\"fargate-readonly-absent\"}", 200)
+                .then()
+                .body("taskDefinition.containerDefinitions[1].mountPoints[0].containerPath", equalTo("/tmp"))
+                .body("taskDefinition.containerDefinitions[1].mountPoints[0]", not(hasKey("readOnly")))
+                .body("taskDefinition.containerDefinitions[1].volumesFrom[0].sourceContainer", equalTo("sidecar"))
+                .body("taskDefinition.containerDefinitions[1].volumesFrom[0]", not(hasKey("readOnly")))
+                .body("taskDefinition.containerDefinitions[1].mountPoints[1].readOnly", equalTo(true));
     }
 
     @Test
