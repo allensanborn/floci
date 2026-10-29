@@ -39,7 +39,7 @@ class AwsConfigServicePersistenceTest {
                 rule("s3-public-read", "AWS", "S3_BUCKET_PUBLIC_READ_PROHIBITED"));
         first.putConformancePack(REGION, "ops-pack", "s3://bucket/template.yaml", null);
         first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
-                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null)));
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null));
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.tagResource(REGION, rule.configRuleArn(), List.of(Map.of("Key", "env", "Value", "prod")));
