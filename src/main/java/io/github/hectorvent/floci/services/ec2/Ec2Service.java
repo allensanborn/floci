@@ -14482,10 +14482,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             primary.setPrimary(true);
             ipList.add(primary);
             if (privateIpAddresses != null) {
+                Set<String> seen = new HashSet<>();
+                seen.add(primaryIp);
                 for (String extra : privateIpAddresses) {
-                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
+                    if (extra == null || extra.isBlank() || !seen.add(extra)) {
                         continue;
                     }
+                    // A secondary another resource holds is refused like the primary; its range is
+                    // not checked here, as before.
+                    requireRequestedPrivateIpFree(region, subnetId, extra);
                     NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
                     secondary.setPrivateIpAddress(extra);
                     secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
