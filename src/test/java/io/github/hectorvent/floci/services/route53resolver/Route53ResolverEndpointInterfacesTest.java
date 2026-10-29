@@ -2,17 +2,22 @@ package io.github.hectorvent.floci.services.route53resolver;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -21,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -122,5 +128,25 @@ class Route53ResolverEndpointInterfacesTest {
         verify(ec2).deleteNetworkInterface(REGION, "eni-2");
         assertTrue(ipRequests.scan(k -> true).isEmpty(), "no orphan record may outlive the endpoint");
         assertTrue(endpoints.scan(k -> true).isEmpty());
+    }
+
+    @Test
+    void aCleanupFailureOtherThanAMissingInterfaceIsLoggedAndTheRestAreStillDeleted() {
+        Route53ResolverService service = service(new InMemoryStorage<>());
+        when(ec2.createNetworkInterface(any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(call -> eni());
+        String id = service.createResolverEndpoint(request(), REGION, "000000000000").get("Id").asText();
+        doThrow(new AwsException("InvalidParameterValue", "Network interface 'eni-1' is currently in use", 400))
+                .when(ec2).deleteNetworkInterface(REGION, "eni-1");
+        doThrow(new AwsException("InvalidNetworkInterfaceID.NotFound", "The network interface ID 'eni-2' does not exist",
+                400)).when(ec2).deleteNetworkInterface(REGION, "eni-2");
+
+        List<LogRecord> records = LogCapture.capture(Route53ResolverService.class,
+                () -> service.deleteResolverEndpoint(id));
+
+        List<LogRecord> warnings = records.stream().filter(r -> r.getLevel().intValue() == Level.WARNING.intValue()).toList();
+        assertEquals(1, warnings.size(), "only the unexpected failure is logged");
+        assertTrue(Arrays.asList(warnings.getFirst().getParameters()).contains("eni-1"));
+        verify(ec2).deleteNetworkInterface(REGION, "eni-2");
     }
 }

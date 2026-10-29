@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -49,6 +50,8 @@ import java.util.function.Predicate;
  */
 @ApplicationScoped
 public class Route53ResolverService {
+
+    private static final Logger LOG = Logger.getLogger(Route53ResolverService.class);
 
     public static final String MANAGED_OWNER_NAME = "Route 53 Resolver DNS Firewall";
 
@@ -362,14 +365,23 @@ public class Route53ResolverService {
         return new AwsException(code, e.getMessage(), 400);
     }
 
-    /** Releases and deletes the interfaces, the way ECS tears down a task's. One already gone is skipped. */
+    /**
+     * Releases and deletes the interfaces, the way ECS tears down a task's. One that is already gone
+     * is skipped silently; any other failure is logged and the rest are still deleted, so one
+     * interface EC2 will not delete does not strand the others.
+     */
     private void deleteEndpointInterfaces(String region, List<String> interfaceIds) {
         for (String eniId : interfaceIds) {
             try {
                 ec2Service.releaseNetworkInterfaceFromService(region, eniId);
                 ec2Service.deleteNetworkInterface(region, eniId);
             } catch (AwsException e) {
-                // Already deleted: nothing left to free.
+                if ("InvalidNetworkInterfaceID.NotFound".equals(e.getErrorCode())) {
+                    // Expected: the interface is already deleted, so there is nothing left to free.
+                    continue;
+                }
+                LOG.warnv("Could not delete network interface {0} of a Route 53 Resolver endpoint: {1}",
+                        eniId, e.getMessage());
             }
         }
     }
