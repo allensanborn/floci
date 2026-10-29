@@ -1,9 +1,6 @@
 package io.github.hectorvent.floci.services.configservice;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
@@ -12,6 +9,7 @@ import io.github.hectorvent.floci.services.configservice.model.ConfigurationReco
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
 import io.github.hectorvent.floci.services.configservice.model.RecordingGroup;
+import io.github.hectorvent.floci.testing.StorageFactories;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -28,8 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Verifies AWS Config durable resources survive a restart. Each service instance gets a fresh
- * {@link StorageFactory} whose backends are new {@link PersistentStorage} files under one temporary
- * directory, so a later instance sees only what the earlier one wrote to disk and it reads back.
+ * {@link StorageFactory} in {@code persistent} mode over one temporary directory, so a later
+ * instance sees only what the earlier one wrote to disk and it reads back.
  */
 class AwsConfigServicePersistenceTest {
 
@@ -190,27 +188,8 @@ class AwsConfigServicePersistenceTest {
     /** A service over a fresh factory and fresh backends that load whatever is on disk. */
     private AwsConfigService restartedService() {
         AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, "000000000000"),
-                new DiskStorageFactory(storageDir));
+                StorageFactories.open(storageDir, "persistent", "000000000000"));
         service.initializeStorage();
         return service;
-    }
-
-    private static final class DiskStorageFactory extends StorageFactory {
-        private final Path dir;
-
-        private DiskStorageFactory(Path dir) {
-            super(null, null);
-            this.dir = dir;
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            AccountAwareStorageBackend<V> backend = new AccountAwareStorageBackend<>(
-                    new PersistentStorage<>(dir.resolve(fileName), typeReference), null, "000000000000");
-            backend.load();
-            return backend;
-        }
     }
 }
