@@ -3427,6 +3427,10 @@ public class ApiGatewayService implements ResourceProvider {
                     }
                     continue;
                 }
+                if ("/operationName".equals(path) && "remove".equals(opType)) {
+                    method.setOperationName(null);
+                    continue;
+                }
                 if (!"replace".equals(opType)) continue;
                 if ("/authorizationType".equals(path)) method.setAuthorizationType(value);
                 else if ("/authorizerId".equals(path)) method.setAuthorizerId(value);

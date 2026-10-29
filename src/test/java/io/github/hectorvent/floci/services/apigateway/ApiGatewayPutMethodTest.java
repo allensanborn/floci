@@ -2,13 +2,19 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
 class ApiGatewayPutMethodTest {
+
+    @Inject
+    ApiGatewayService service;
 
     private static String[] newResource() {
         String apiId = given().contentType(ContentType.JSON).body("{\"name\":\"pm-api\"}")
@@ -39,6 +45,24 @@ class ApiGatewayPutMethodTest {
                 .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/operationName\",\"value\":\"getPets\"}]}")
                 .patch(url(r)).then().statusCode(200);
         given().get(url(r)).then().statusCode(200).body("operationName", equalTo("getPets"));
+
+        given().contentType(ContentType.JSON)
+                .body("{\"patchOperations\":[{\"op\":\"remove\",\"path\":\"/operationName\"}]}")
+                .patch(url(r)).then().statusCode(200);
+        given().get(url(r)).then().statusCode(200).body("operationName", nullValue());
+    }
+
+    @Test
+    void replacingPathStillOverwritesExistingMethod() {
+        String[] r = newResource();
+        given().contentType(ContentType.JSON)
+                .body("{\"authorizationType\":\"NONE\",\"operationName\":\"first\"}")
+                .put(url(r)).then().statusCode(201);
+        service.putMethodReplacing("us-east-1", r[0], r[1], "GET",
+                Map.of("authorizationType", "AWS_IAM", "operationName", "second"));
+        given().get(url(r)).then().statusCode(200)
+                .body("authorizationType", equalTo("AWS_IAM"))
+                .body("operationName", equalTo("second"));
     }
 
     @Test
