@@ -1151,6 +1151,58 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("ListenerNotFound"));
     }
 
+    @Test
+    @Order(36)
+    void describeListenersByArnReturnsExistingAndRejectsUnknown() {
+        given()
+                .formParam("Action", "DescribeListeners")
+                .formParam("ListenerArns.member.1", listenerArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.ListenerArn",
+                        equalTo(listenerArn));
+
+        given()
+                .formParam("Action", "DescribeListeners")
+                .formParam("ListenerArns.member.1", listenerArn)
+                .formParam("ListenerArns.member.2",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/missing/0123456789abcdef/0123456789abcdef")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ListenerNotFound"));
+    }
+
+    @Test
+    @Order(46)
+    void describeRulesByArnReturnsExistingAndRejectsUnknown() {
+        given()
+                .formParam("Action", "DescribeRules")
+                .formParam("RuleArns.member.1", ruleArn1)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeRulesResponse.DescribeRulesResult.Rules.member.RuleArn", equalTo(ruleArn1));
+
+        given()
+                .formParam("Action", "DescribeRules")
+                .formParam("RuleArns.member.1",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener-rule/app/missing/0123456789abcdef/0123456789abcdef/0123456789abcdef")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("RuleNotFound"));
+    }
+
     // ── Rules ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -1394,6 +1446,16 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
+
+        given()
+                .formParam("Action", "DescribeListeners")
+                .formParam("ListenerArns.member.1", listenerArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ListenerNotFound"));
 
         given()
                 .formParam("Action", "DeleteTargetGroup")
