@@ -40,7 +40,6 @@ class AwsConfigServicePersistenceTest {
 
     @Test
     void durableResourcesAndTagsSurviveRestart() {
-
         AwsConfigService first = restartedService();
         ConfigRule rule = first.putConfigRule(REGION,
                 rule("s3-public-read", "AWS", "S3_BUCKET_PUBLIC_READ_PROHIBITED"));
@@ -67,7 +66,6 @@ class AwsConfigServicePersistenceTest {
 
     @Test
     void deleteAndUntagArePersistedAfterRestart() {
-
         AwsConfigService first = restartedService();
         ConfigRule rule = first.putConfigRule(REGION, rule("keep", "AWS", "REQUIRED_TAGS"));
         first.putConfigRule(REGION, rule("drop", "AWS", "REQUIRED_TAGS"));
@@ -88,7 +86,6 @@ class AwsConfigServicePersistenceTest {
 
     @Test
     void evaluationsSurviveRestart() {
-
         AwsConfigService first = restartedService();
         first.putConfigRule(REGION, rule("bucket-policy", "CUSTOM_LAMBDA",
                 "arn:aws:lambda:us-east-1:000000000000:function:check"));
@@ -104,7 +101,6 @@ class AwsConfigServicePersistenceTest {
 
     @Test
     void deleteConfigRuleCascadesEvaluationsAcrossRestart() {
-
         AwsConfigService first = restartedService();
         first.putConfigRule(REGION, rule("kept-rule", "CUSTOM_LAMBDA",
                 "arn:aws:lambda:us-east-1:000000000000:function:check"));
@@ -124,7 +120,6 @@ class AwsConfigServicePersistenceTest {
 
     @Test
     void retentionConfigurationSurvivesRestart() {
-
         AwsConfigService first = restartedService();
         first.putRetentionConfiguration(REGION, 90);
 
