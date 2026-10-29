@@ -163,7 +163,7 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>python3</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>ZnVuY3Rpb24gaGFuZGxlcihldmVudCkgeyByZXR1cm4gZXZlbnQucmVxdWVzdDsgfQ==</FunctionCode>
                 </CreateFunctionRequest>
                 """.formatted(name);
 
@@ -195,7 +195,7 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>cloudfront-js-2.0</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>ZnVuY3Rpb24gaGFuZGxlcihldmVudCkgeyByZXR1cm4gZXZlbnQucmVxdWVzdDsgfQ==</FunctionCode>
                 </CreateFunctionRequest>
                 """.formatted(name);
 
@@ -267,6 +267,20 @@ class CloudFrontManagementProtocolTest {
     }
 
     @Test
+    void createFunctionRejectsFunctionCodeThatIsNotBase64() {
+        given().contentType("application/xml").body("""
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>bad-code-%s</Name>
+                  <FunctionConfig><Comment>c</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig>
+                  <FunctionCode>function handler(event) {}</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(UUID.randomUUID()))
+        .when().post(API + "function")
+        .then().statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
+    }
+
+    @Test
     void updateFunctionReturnsTheHeaderNameModeledByAwsSdks() {
         String name = "update-header-" + UUID.randomUUID();
         String createBody = """
@@ -296,6 +310,11 @@ class CloudFrontManagementProtocolTest {
         given().queryParam("Stage", "DEVELOPMENT")
                 .when().get(API + "function/" + name + "/describe")
                 .then().statusCode(200).header("ETag", equalTo(updatedEtag));
+
+        // FunctionCode is a blob: GetFunction returns the decoded bytes, not the base64 text.
+        given().queryParam("Stage", "DEVELOPMENT")
+                .when().get(API + "function/" + name)
+                .then().statusCode(200).body(equalTo("def"));
 
         given().header("If-Match", updatedEtag)
                 .when().delete(API + "function/" + name)
