@@ -4777,8 +4777,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private static void addIfSet(Set<String> addresses, String address) {
         if (address != null && !address.isBlank()) {
-            // CreateNetworkInterface keeps its address as given, so a zero-padded octet has to be
-            // folded here for the in-use checks to see one address rather than two.
+            // An interface persisted before CreateNetworkInterface canonicalised its address may
+            // still hold a zero-padded octet, so it is folded here for the in-use checks to see
+            // one address rather than two.
             addresses.add(canonicalIpv4(address).orElse(address));
         }
     }
@@ -14425,10 +14426,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        // An explicit address is checked the way RunInstances checks its PrivateIpAddress: it must be
+        // one the subnet can assign, in canonical form, and no other resource may hold it.
+        String requestedIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
         synchronized (privateIpAllocationLock) {
             String eniId = "eni-" + randomHex(17);
-            String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
-                    ? privateIpAddress : assignPrivateIp(region, subnetId);
+            if (requestedIp != null) {
+                claimRequestedPrivateIp(region, subnetId, requestedIp);
+            }
+            String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
             NetworkInterface ni = new NetworkInterface();
