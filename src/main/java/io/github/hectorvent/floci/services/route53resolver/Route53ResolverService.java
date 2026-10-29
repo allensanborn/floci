@@ -15,8 +15,8 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
-import io.github.hectorvent.floci.services.ec2.net.Cidr4;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -24,13 +24,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 
@@ -94,6 +91,8 @@ public class Route53ResolverService {
      * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
      * verbatim, so holding the addresses on the resource would put an unmodeled member on the
      * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
+     * Also holds the endpoint's region and, in {@code NetworkInterfaces}, the EC2 interface
+     * behind each address (see {@link #createEndpointInterfaces}).
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
     /**
@@ -257,12 +256,14 @@ public class Route53ResolverService {
         endpoint.put("CreatorRequestId", text(request, "CreatorRequestId"));
         endpoint.put("CreationTime", Instant.now().toString());
         endpoint.put("ModificationTime", Instant.now().toString());
-        // Allocate before writing anything, so an exhausted subnet leaves no endpoint behind.
-        ArrayNode allocated = allocateIps(normalized, subnets);
+        // Before anything is stored, so an address EC2 refuses leaves no endpoint behind.
+        ArrayNode interfaces = createEndpointInterfaces(id, normalized, subnets,
+                securityGroupIdsOf(request), region);
         endpointStore.put(id, endpoint);
         ObjectNode record = objectMapper.createObjectNode();
         record.set("IpAddressRequests", normalized);
-        record.set("AllocatedIps", allocated);
+        record.put("Region", region);
+        record.set("NetworkInterfaces", interfaces);
         endpointIpRequestStore.put(id, record);
         putTags(endpoint, tags);
         return endpoint.deepCopy();
@@ -283,70 +284,92 @@ public class Route53ResolverService {
         return found;
     }
 
+    private List<String> securityGroupIdsOf(JsonNode request) {
+        List<String> ids = new ArrayList<>();
+        request.path("SecurityGroupIds").forEach(sg -> ids.add(sg.asText()));
+        return ids;
+    }
+
     /**
-     * One entry per request (same order): the address allocated from the subnet for a request
-     * that gave a SubnetId and no Ip/Ipv6, else null. Skips the four addresses at the bottom of
-     * the CIDR and the last one (AWS reserves them), and any address already taken in the same
-     * subnet by this request list or by another endpoint. Throws when a subnet has none left.
-     * ponytail: IPv4 only; other-endpoint scan is linear; allocated IPs are not reserved in EC2 (a
-     * later RunInstances/CreateNetworkInterface in the subnet can reuse them); and
-     * Associate/DisassociateResolverEndpointIpAddress are not implemented in Floci, so a future
-     * implementation must allocate the same way.
+     * One EC2 network interface per address, which is how AWS backs a resolver endpoint ("Resolver
+     * creates a network interface for each subnet and IP address", Route 53 developer guide), made
+     * the way ECS makes an awsvpc task's: created in the address's subnet with the request's
+     * {@code Ip}, or one EC2 picks, and the endpoint's security groups, then held for the service so
+     * the account cannot delete it from under the endpoint. EC2's allocator then keeps instances,
+     * other interfaces and other endpoints off the address, and refuses an explicit one in use.
+     *
+     * <p>Entries line up with {@code requests}: the interface's id and address, or null where none
+     * is made, for a subnet EC2 does not know (Floci has always accepted those) or an IPv6-only
+     * request. ponytail: Floci's EC2 interfaces are IPv4 only; IPv6 addresses are kept as given.
+     * A refusal deletes the interfaces already made and is raised in Route 53 Resolver's codes.
      */
-    private ArrayNode allocateIps(JsonNode requests, Map<String, Subnet> subnets) {
-        // Addresses are unique per subnet, not per account: two VPCs may reuse a CIDR.
-        Map<String, Set<String>> taken = new HashMap<>();
-        requests.forEach(r -> {
-            if (text(r, "Ip") != null) {
-                taken.computeIfAbsent(text(r, "SubnetId"), k -> new HashSet<>()).add(text(r, "Ip"));
-            }
-        });
-        endpointIpRequestStore.scan(k -> true).forEach(rec -> {
-            JsonNode reqs = rec.path("IpAddressRequests");
-            JsonNode allocs = rec.path("AllocatedIps");
-            for (int i = 0; i < reqs.size(); i++) {
-                Set<String> inSubnet = taken.computeIfAbsent(text(reqs.get(i), "SubnetId"), k -> new HashSet<>());
-                if (text(reqs.get(i), "Ip") != null) {
-                    inSubnet.add(text(reqs.get(i), "Ip"));
-                }
-                if (allocs.path(i).isTextual()) {
-                    inSubnet.add(allocs.get(i).asText());
-                }
-            }
-        });
+    private ArrayNode createEndpointInterfaces(String endpointId, JsonNode requests, Map<String, Subnet> subnets,
+                                               List<String> securityGroupIds, String region) {
         ArrayNode out = objectMapper.createArrayNode();
-        for (JsonNode r : requests) {
-            Subnet subnet = subnets.get(text(r, "SubnetId"));
-            String ip = null;
-            boolean wantsAllocation = subnet != null && subnet.getCidrBlock() != null && text(r, "Ip") == null
-                    && text(r, "Ipv6") == null;
-            if (wantsAllocation) {
-                Set<String> inSubnet = taken.computeIfAbsent(subnet.getSubnetId(), k -> new HashSet<>());
-                Optional<Cidr4> cidr = Cidr4.parse(subnet.getCidrBlock());
-                for (long host = 4; cidr.isPresent() && host < cidr.get().size() - 1 && ip == null; host++) {
-                    String candidate = cidr.get().addressAt(host).orElseThrow();
-                    if (inSubnet.add(candidate)) {
-                        ip = candidate;
-                    }
+        List<String> created = new ArrayList<>();
+        try {
+            for (JsonNode r : requests) {
+                String subnetId = text(r, "SubnetId");
+                String ip = text(r, "Ip");
+                if (!subnets.containsKey(subnetId) || (ip == null && text(r, "Ipv6") != null)) {
+                    out.addNull();
+                    continue;
                 }
-                // ponytail: IPv6 / unparseable CIDR (cidr empty) is not modelled, so only a parsed IPv4
-                // CIDR that ran dry is rejected.
-                if (ip == null && cidr.isPresent()) {
-                    throw new AwsException("InvalidRequestException",
-                            "The subnet " + subnet.getSubnetId() + " has no free IP addresses.", 400);
-                }
+                NetworkInterface eni = ec2Service.createNetworkInterface(region, subnetId,
+                        "Route 53 Resolver: " + endpointId, ip, List.of(), securityGroupIds, List.of());
+                created.add(eni.getNetworkInterfaceId());
+                ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
+                out.addObject()
+                        .put("NetworkInterfaceId", eni.getNetworkInterfaceId())
+                        .put("Ip", eni.getPrivateIpAddress());
             }
-            if (ip == null) {
-                out.addNull();
-            } else {
-                out.add(ip);
-            }
+        } catch (AwsException e) {
+            deleteEndpointInterfaces(region, created);
+            throw asResolverRejection(e);
         }
         return out;
     }
 
+    /**
+     * EC2's refusal in a code CreateResolverEndpoint models. The model names no error for an
+     * address already in use or a subnet with none left, so those take InvalidRequestException
+     * ("The request is invalid"); anything else EC2 refuses here (an address outside the subnet, a
+     * security group it does not know) is a parameter that is not valid.
+     */
+    private static AwsException asResolverRejection(AwsException e) {
+        String code = switch (e.getErrorCode()) {
+            case "InvalidIPAddress.InUse", "InsufficientFreeAddressesInSubnet" -> "InvalidRequestException";
+            default -> INVALID_PARAMETER;
+        };
+        return new AwsException(code, e.getMessage(), 400);
+    }
+
+    /** Releases and deletes the interfaces, the way ECS tears down a task's. One already gone is skipped. */
+    private void deleteEndpointInterfaces(String region, List<String> interfaceIds) {
+        for (String eniId : interfaceIds) {
+            try {
+                ec2Service.releaseNetworkInterfaceFromService(region, eniId);
+                ec2Service.deleteNetworkInterface(region, eniId);
+            } catch (AwsException e) {
+                // Already deleted: nothing left to free.
+            }
+        }
+    }
+
     public ObjectNode deleteResolverEndpoint(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // A record written before endpoints had interfaces has no NetworkInterfaces, so none to delete.
+        endpointIpRequestStore.get(id).ifPresent(record -> {
+            List<String> interfaceIds = new ArrayList<>();
+            record.path("NetworkInterfaces").forEach(eni -> {
+                if (text(eni, "NetworkInterfaceId") != null) {
+                    interfaceIds.add(text(eni, "NetworkInterfaceId"));
+                }
+            });
+            if (ec2Service != null) {
+                deleteEndpointInterfaces(text(record, "Region"), interfaceIds);
+            }
+        });
         endpointStore.delete(id);
         endpointIpRequestStore.delete(id);
         tagStore.delete(text(endpoint, "Arn"));
@@ -366,21 +389,22 @@ public class Route53ResolverService {
     /**
      * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
      * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
-     * the entry and its position in the recorded list, so it is stable across calls. An
-     * address the request left for AWS to pick carries the one allocated from its subnet at
-     * create time, when EC2 knows the subnet; otherwise it has no {@code Ip}.
+     * the entry and its position in the recorded list, so it is stable across calls. {@code Ip}
+     * is the address of the EC2 interface behind the entry; an entry with no interface (see
+     * {@link #createEndpointInterfaces}) has the request's {@code Ip}, or none.
      */
     public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // Read once, so the requests and their interfaces come from the same record.
+        JsonNode record = endpointIpRequestStore.get(id).orElse(null);
+        JsonNode recorded = record == null ? null : record.get("IpAddressRequests");
         // A missing record would otherwise read as an empty list beside a nonzero
         // IpAddressCount; fail loudly with the modeled InternalServiceErrorException instead.
-        JsonNode recorded = endpointIpRequestStore.get(id)
-                .map(node -> node.get("IpAddressRequests"))
-                .filter(JsonNode::isArray)
-                .orElseThrow(() -> new AwsException("InternalServiceErrorException",
-                        "No IP addresses recorded for resolver endpoint: " + id, 400));
-        JsonNode allocatedIps = endpointIpRequestStore.get(id).map(n -> n.path("AllocatedIps"))
-                .orElse(objectMapper.createArrayNode());
+        if (recorded == null || !recorded.isArray()) {
+            throw new AwsException("InternalServiceErrorException",
+                    "No IP addresses recorded for resolver endpoint: " + id, 400);
+        }
+        JsonNode interfaces = record.path("NetworkInterfaces");
         List<ObjectNode> addresses = new ArrayList<>();
         for (int i = 0; i < recorded.size(); i++) {
             JsonNode request = recorded.get(i);
@@ -388,11 +412,10 @@ public class Route53ResolverService {
             // The index keeps repeated entries (two addresses in one subnet, both left for AWS
             // to pick) distinct; the stored list is normalised once at create, so it is stable.
             address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
-            copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
-            JsonNode allocated = allocatedIps.path(i);
-            if (!address.has("Ip") && allocated.isTextual()) {
-                address.put("Ip", allocated.asText());
-            }
+            String ip = text(interfaces.path(i), "Ip");
+            putIfSet(address, "SubnetId", text(request, "SubnetId"));
+            putIfSet(address, "Ip", ip != null ? ip : text(request, "Ip"));
+            putIfSet(address, "Ipv6", text(request, "Ipv6"));
             address.put("Status", "ATTACHED");
             address.put("StatusMessage", "This IP address is operational.");
             address.set("CreationTime", endpoint.get("CreationTime"));
@@ -400,6 +423,12 @@ public class Route53ResolverService {
             addresses.add(address);
         }
         return addresses;
+    }
+
+    private static void putIfSet(ObjectNode target, String field, String value) {
+        if (value != null) {
+            target.put(field, value);
+        }
     }
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {

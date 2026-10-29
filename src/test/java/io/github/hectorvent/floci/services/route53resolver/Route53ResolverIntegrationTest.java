@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.route53resolver;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
@@ -186,103 +187,110 @@ class Route53ResolverIntegrationTest {
     // endpoint's ip_address set, so an unimplemented operation fails every endpoint create.
 
     @Test
-    void createResolverEndpoint_usesSubnetVpcAndAllocatesIpsFromSubnetCidr() {
+    void createResolverEndpoint_backsEachAddressWithAHeldEc2Interface() {
         String vpc = ec2("CreateVpc", "CidrBlock", "10.77.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
         String subA = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1a")
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String subB = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.2.0/28", "AvailabilityZone", "us-east-1b")
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
-        String body = "{\"Name\":\"ep-alloc\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
-                + "\"IpAddresses\":[{\"SubnetId\":\"" + subA + "\"},{\"SubnetId\":\"" + subA + "\"},"
-                + "{\"SubnetId\":\"" + subB + "\"}],\"CreatorRequestId\":\"alloc-";
-        String first = given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body(body + "1\"}")
-                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
-        String second = given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body(body + "2\"}")
-                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
+        String sg = securityGroup(vpc, "ep-iface");
+        // "Ip": null is a request that leaves the address to AWS, the same as one with no Ip.
+        String id = createEndpoint("{\"Name\":\"ep-iface\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"" + sg
+                + "\"],\"IpAddresses\":[{\"SubnetId\":\"" + subA + "\"},{\"SubnetId\":\"" + subA
+                + "\",\"Ip\":\"10.77.1.40\"},{\"SubnetId\":\"" + subB + "\",\"Ip\":null}]}");
 
-        for (String id : List.of(first, second)) {
-            given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.GetResolverEndpoint")
-                    .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
-                    .when().post("/").then().statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.GetResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
+                .when().post("/").then().statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
+        JsonPath listed = JsonPath.from(listIpAddresses(id));
+        for (String subnet : List.of(subA, subB)) {
+            XmlPath enis = describeInterfaces(subnet);
+            List<String> eniIps = new ArrayList<>(enis.getList(ENI_ITEMS + ".privateIpAddress", String.class));
+            List<String> listedIps = new ArrayList<>(
+                    listed.getList("IpAddresses.findAll { it.SubnetId == '" + subnet + "' }.Ip", String.class));
+            Collections.sort(eniIps);
+            Collections.sort(listedIps);
+            assertEquals(subnet.equals(subA) ? 2 : 1, eniIps.size(), subnet);
+            assertEquals(eniIps, listedIps, "ListResolverEndpointIpAddresses must report the interfaces' addresses");
+            assertEquals(List.of(sg), enis.getList(ENI_ITEMS + ".groupSet.item.groupId", String.class)
+                    .stream().distinct().toList());
+            assertEquals(List.of("in-use"), enis.getList(ENI_ITEMS + ".status", String.class)
+                    .stream().distinct().toList());
         }
+        assertTrue(listed.getList("IpAddresses.Ip").contains("10.77.1.40"));
 
-        List<String> allIps = new ArrayList<>();
-        for (String id : List.of(first, second)) {
-            JsonPath ips = JsonPath.from(listIpAddresses(id));
-            for (String subnet : List.of(subA, subB)) {
-                List<String> inSubnet = ips.getList("IpAddresses.findAll { it.SubnetId == '" + subnet + "' }.Ip");
-                inSubnet.forEach(ip -> {
-                    long host = Long.parseLong(ip.substring(ip.lastIndexOf('.') + 1));
-                    long max = subnet.equals(subA) ? 254 : 14;
-                    assertEquals(subnet.equals(subA) ? "10.77.1" : "10.77.2",
-                            ip.substring(0, ip.lastIndexOf('.')), ip);
-                    assertTrue(host >= 4 && host <= max, ip);
-                });
-                allIps.addAll(inSubnet);
-            }
-        }
-        assertEquals(6, allIps.size());
-        assertEquals(6, new HashSet<>(allIps).size(), "addresses must not collide: " + allIps);
+        // The endpoint holds its interfaces, so the account cannot delete one from under it.
+        String held = describeInterfaces(subA).getString(ENI_ITEMS + "[0].networkInterfaceId");
+        given().header("Authorization", EC2_AUTH).formParam("Action", "DeleteNetworkInterface")
+                .formParam("NetworkInterfaceId", held)
+                .when().post("/").then().statusCode(400);
     }
 
     @Test
-    void createResolverEndpoint_replayReturnsSameIps_deleteFreesThem_explicitIpIsKept() {
+    void createResolverEndpoint_explicitIpAnotherEndpointHoldsIsRefused_deleteFreesIt() {
         String vpc = ec2("CreateVpc", "CidrBlock", "10.78.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.78.1.0/28", "AvailabilityZone", "us-east-1a")
+        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.78.1.0/24", "AvailabilityZone", "us-east-1a")
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
-        // 10.78.1.4 is the first allocatable address; claim it explicitly so allocation must step over it.
-        String body = "{\"Name\":\"ep-mix\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
-                + "\"CreatorRequestId\":\"mix-1\",\"IpAddresses\":[{\"SubnetId\":\"" + sub
-                + "\",\"Ip\":\"10.78.1.4\"},{\"SubnetId\":\"" + sub + "\"}]}";
-        String id = createEndpoint(body);
-        List<String> ips = JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip");
-        assertEquals(new HashSet<>(List.of("10.78.1.4", "10.78.1.5")), new HashSet<>(ips));
+        String sg = securityGroup(vpc, "ep-taken");
+        String first = createEndpoint("{\"Name\":\"ep-taken-1\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\""
+                + sg + "\"],\"IpAddresses\":[{\"SubnetId\":\"" + sub + "\",\"Ip\":\"10.78.1.30\"},{\"SubnetId\":\""
+                + sub + "\"}]}");
+        // .20 is free and is made first, so the refusal of .30 has an interface to roll back.
+        String second = "{\"Name\":\"ep-taken-2\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"" + sg
+                + "\"],\"IpAddresses\":[{\"SubnetId\":\"" + sub + "\",\"Ip\":\"10.78.1.30\"},{\"SubnetId\":\""
+                + sub + "\",\"Ip\":\"10.78.1.20\"}]}";
 
-        assertEquals(id, createEndpoint(body));
-        assertEquals(new HashSet<>(ips),
-                new HashSet<>(JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip")));
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
+                .header("Authorization", AUTH_HEADER).body(second)
+                .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        assertEquals(2, describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").size(),
+                "a refused endpoint must leave no interface behind");
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
+                .header("Authorization", AUTH_HEADER).body("{}")
+                .when().post("/").then().statusCode(200)
+                .body("ResolverEndpoints.findAll { it.Name == 'ep-taken-2' }.size()", equalTo(0));
 
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.DeleteResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
+                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + first + "\"}")
                 .when().post("/").then().statusCode(200);
-        String again = createEndpoint(body.replace("mix-1", "mix-2").replace("\"Ip\":\"10.78.1.4\"", "\"Ip\":\"10.78.1.9\""));
-        assertEquals(new HashSet<>(List.of("10.78.1.9", "10.78.1.4")),
-                new HashSet<>(JsonPath.from(listIpAddresses(again)).getList("IpAddresses.Ip")));
-    }
-
-    @Test
-    void createResolverEndpoint_overlappingCidrsInTwoVpcsBothGetAddresses() {
-        for (String n : List.of("a", "b")) {
-            String vpc = ec2("CreateVpc", "CidrBlock", "10.79.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-            String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.79.1.0/28", "AvailabilityZone", "us-east-1a")
-                    .extract().path("CreateSubnetResponse.subnet.subnetId");
-            String id = createEndpoint("{\"Name\":\"ep-overlap-" + n + "\",\"Direction\":\"INBOUND\","
-                    + "\"SecurityGroupIds\":[\"sg-abc123\"],\"CreatorRequestId\":\"overlap-" + n + "\","
-                    + "\"IpAddresses\":[{\"SubnetId\":\"" + sub + "\"},{\"SubnetId\":\"" + sub + "\"}]}");
-            List<String> ips = JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip");
-            assertEquals(new HashSet<>(List.of("10.79.1.4", "10.79.1.5")), new HashSet<>(ips),
-                    "VPC " + n + " must allocate from its own subnet, not skip the other VPC's addresses");
-        }
+        assertTrue(describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").isEmpty(),
+                "deleting the endpoint deletes its interfaces");
+        String again = createEndpoint(second);
+        assertEquals(List.of("10.78.1.20", "10.78.1.30"), JsonPath.from(listIpAddresses(again))
+                .getList("IpAddresses.Ip", String.class).stream().sorted().toList());
     }
 
     @Test
     void createResolverEndpoint_exhaustedSubnetIsRejectedAndStoresNothing() {
         String vpc = ec2("CreateVpc", "CidrBlock", "10.80.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-        // /28 = 16 addresses, minus 4 reserved at the bottom and 1 at the top = 11 allocatable.
+        // /28 = 16 addresses, minus 4 reserved at the bottom and 1 at the top = 11 assignable.
         String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.80.1.0/28", "AvailabilityZone", "us-east-1a")
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
+        String sg = securityGroup(vpc, "ep-exhausted");
         String requests = String.join(",", Collections.nCopies(12, "{\"SubnetId\":\"" + sub + "\"}"));
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
                 .header("Authorization", AUTH_HEADER)
-                .body("{\"Name\":\"ep-exhausted\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"sg-abc123\"],"
-                        + "\"CreatorRequestId\":\"exhausted-1\",\"IpAddresses\":[" + requests + "]}")
+                .body("{\"Name\":\"ep-exhausted\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"" + sg + "\"],"
+                        + "\"IpAddresses\":[" + requests + "]}")
                 .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        assertTrue(describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").isEmpty());
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
                 .header("Authorization", AUTH_HEADER).body("{}")
                 .when().post("/").then().statusCode(200)
                 .body("ResolverEndpoints.findAll { it.Name == 'ep-exhausted' }.size()", equalTo(0));
+    }
+
+    private static final String EC2_AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ec2/aws4_request";
+    private static final String ENI_ITEMS = "DescribeNetworkInterfacesResponse.networkInterfaceSet.item";
+
+    private static String securityGroup(String vpc, String name) {
+        return ec2("CreateSecurityGroup", "GroupName", name, "GroupDescription", name, "VpcId", vpc)
+                .extract().path("CreateSecurityGroupResponse.groupId");
+    }
+
+    private static XmlPath describeInterfaces(String subnet) {
+        return ec2("DescribeNetworkInterfaces", "Filter.1.Name", "subnet-id", "Filter.1.Value.1", subnet)
+                .extract().xmlPath();
     }
 
     private static String createEndpoint(String body) {
@@ -293,7 +301,7 @@ class Route53ResolverIntegrationTest {
 
     private static ValidatableResponse ec2(String action, String... values) {
         RequestSpecification spec = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ec2/aws4_request")
+                .header("Authorization", EC2_AUTH)
                 .formParam("Action", action);
         for (int i = 0; i < values.length; i += 2) {
             spec = spec.formParam(values[i], values[i + 1]);
