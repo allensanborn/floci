@@ -46,6 +46,8 @@ public class DbCluster {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
+    // Null on a cluster persisted before the field existed, and when never set: AWS default 1.
+    private Integer backupRetentionPeriod;
 
     private String dockerVolumeName;
     private String volumeId;
@@ -189,6 +191,9 @@ public class DbCluster {
     public void setAssociatedRoles(List<DbRoleAssociation> associatedRoles) {
         this.associatedRoles = associatedRoles != null ? new ArrayList<>(associatedRoles) : new ArrayList<>();
     }
+
+    public Integer getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(Integer backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }

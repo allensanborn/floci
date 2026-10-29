@@ -10522,6 +10522,21 @@ public class RdsService implements Resettable, ResourceProvider {
         return setHttpEndpoint(effectiveRegion, getDbCluster(clusterId, effectiveRegion), enabled);
     }
 
+    /** Records the backup retention and create-time tags a CreateDBCluster or ModifyDBCluster names; null leaves a field as is. */
+    public synchronized DbCluster applyClusterSettings(String region, String clusterId,
+                                                       Integer backupRetentionPeriod, Map<String, String> tags) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        if (backupRetentionPeriod != null) {
+            cluster.setBackupRetentionPeriod(backupRetentionPeriod);
+        }
+        if (tags != null) {
+            cluster.getTags().putAll(tags);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     private DbCluster setHttpEndpoint(String effectiveRegion, DbCluster cluster, boolean enabled) {
         if (enabled) {
             requireDataApiEngine(engineName(cluster));
