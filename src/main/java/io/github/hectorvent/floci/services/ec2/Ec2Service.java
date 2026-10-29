@@ -4662,22 +4662,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * case the instance keeps it the way it keeps a synthesised address.
      */
     private void claimRequestedPrivateIp(String region, String subnetId, String address) {
+        if (requireRequestedPrivateIpFree(region, subnetId, address)) {
+            vpcNetworkManager.claimPrivateIp(region, subnetId, address);
+        }
+    }
+
+    /**
+     * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
+     * uses it alone: an interface has no container to hold the address on the VPC network, and
+     * DeleteNetworkInterface returns no lease, so one taken here would keep the address from
+     * automatic allocation after the interface is gone. {@link #assignPrivateIp} already steps
+     * around addresses stored interfaces hold. Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * @return whether the address lies in a Docker-backed range, where a lease could be taken
+     */
+    private boolean requireRequestedPrivateIpFree(String region, String subnetId, String address) {
         if (privateIpsTaken(region, subnetId).contains(address)) {
             throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
         }
         if (vpcNetworkManager == null || subnetId == null) {
-            return;
+            return false;
         }
         boolean leasable = vpcNetworkManager.effectiveSubnetCidr(region, subnetId)
                 .filter(cidr -> Ipv4Cidrs.contains(cidr, address + "/32"))
                 .isPresent();
         if (!leasable) {
-            return;
+            return false;
         }
         if (privateIpsInUseInEveryAccount(region, subnetId).contains(address)) {
             throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
         }
-        vpcNetworkManager.claimPrivateIp(region, subnetId, address);
+        return true;
     }
 
     /** {@link #privateIpsInUse}, across every account rather than only the caller's. */
@@ -14427,13 +14442,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         // An explicit address is checked the way RunInstances checks its PrivateIpAddress: it must be
-        // one the subnet can assign, in canonical form, and no other resource may hold it.
+        // one the subnet can assign, in canonical form, and no other resource may hold it. Unlike a
+        // launch it takes no lease on the VPC network (see requireRequestedPrivateIpFree).
         String requestedIp = (privateIpAddress != null && !privateIpAddress.isBlank())
                 ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
         synchronized (privateIpAllocationLock) {
             String eniId = "eni-" + randomHex(17);
             if (requestedIp != null) {
-                claimRequestedPrivateIp(region, subnetId, requestedIp);
+                requireRequestedPrivateIpFree(region, subnetId, requestedIp);
             }
             String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);

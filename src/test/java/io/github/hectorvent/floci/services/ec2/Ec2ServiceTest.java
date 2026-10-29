@@ -4229,6 +4229,49 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aLegacyInterfaceStoredWithAZeroPaddedAddressStillHoldsItsPlainForm() {
+        // An interface persisted before CreateNetworkInterface canonicalised its address can still
+        // carry a zero-padded octet, so the in-use checks must fold it.
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-network-interfaces.json", interfaceStore)));
+        String subnetId = privateIpSubnet(service);
+        NetworkInterface legacy = service.createNetworkInterface("us-east-1", subnetId, "legacy", null,
+                List.of(), List.of(), List.of());
+        legacy.setPrivateIpAddress("10.50.1.050");
+        legacy.getPrivateIpAddresses().getFirst().setPrivateIpAddress("10.50.1.050");
+        interfaceStore.put("us-east-1::" + legacy.getNetworkInterfaceId(), legacy);
+
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                "us-east-1", subnetId, "clash", "10.50.1.50", List.of(), List.of(), List.of())).getErrorCode());
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class,
+                () -> launchWithPrivateIp(service, subnetId, 1, "10.50.1.50")).getErrorCode());
+    }
+
+    @Test
+    void aDeletedInterfacesExplicitAddressGoesBackToTheVpcNetworksAllocator() {
+        // An interface created with its own address takes no lease on the VPC network, so deleting
+        // it leaves nothing behind that would keep automatic allocation off the address.
+        Ec2Service service = realVpcNetworkService(new RequestContext());
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        String first = service.createNetworkInterface("us-east-1", subnetId, null, null,
+                List.of(), List.of(), List.of()).getPrivateIpAddress();
+        int dot = first.lastIndexOf('.');
+        String next = first.substring(0, dot + 1) + (Integer.parseInt(first.substring(dot + 1)) + 1);
+
+        String explicit = service.createNetworkInterface("us-east-1", subnetId, "explicit", next,
+                List.of(), List.of(), List.of()).getNetworkInterfaceId();
+        service.deleteNetworkInterface("us-east-1", explicit);
+
+        assertEquals(next, service.createNetworkInterface("us-east-1", subnetId, null, null,
+                List.of(), List.of(), List.of()).getPrivateIpAddress());
+    }
+
+    @Test
     void createNetworkInterfaceRefusesAnExplicitAddressAnotherInterfaceHolds() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
