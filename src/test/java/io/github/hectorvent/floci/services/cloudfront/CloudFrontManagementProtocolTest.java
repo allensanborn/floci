@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -133,14 +134,14 @@ class CloudFrontManagementProtocolTest {
         given()
             .contentType("application/xml")
             .body("""
-                <CreateRealtimeLogConfigRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                <CreateRealtimeLogConfigRequest xmlns="%s">
                   <Name>%s</Name><SamplingRate>50</SamplingRate>
                   <Fields><Field>timestamp</Field><Field>c-ip</Field><Field>sc-status</Field></Fields>
                   <EndPoints><member><StreamType>Kinesis</StreamType><KinesisStreamConfig>
                     <RoleARN>arn:aws:iam::000000000000:role/r</RoleARN>
                     <StreamARN>arn:aws:kinesis:us-east-1:000000000000:stream/s</StreamARN>
                   </KinesisStreamConfig></member></EndPoints>
-                </CreateRealtimeLogConfigRequest>""".formatted(name))
+                </CreateRealtimeLogConfigRequest>""".formatted(AwsNamespaces.CLOUDFRONT, name))
         .when()
             .post(API + "realtime-log-config")
         .then()
@@ -148,7 +149,7 @@ class CloudFrontManagementProtocolTest {
 
         given()
             .contentType("application/xml")
-            .body("<GetRealtimeLogConfigRequest xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\"><Name>"
+            .body("<GetRealtimeLogConfigRequest xmlns=\"" + AwsNamespaces.CLOUDFRONT + "\"><Name>"
                     + name + "</Name></GetRealtimeLogConfigRequest>")
         .when()
             .post(API + "get-realtime-log-config")
@@ -164,17 +165,17 @@ class CloudFrontManagementProtocolTest {
         given()
             .contentType("application/xml")
             .body("""
-                <UpdateRealtimeLogConfigRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                <UpdateRealtimeLogConfigRequest xmlns="%s">
                   <ARN>arn:aws:cloudfront::000000000000:realtime-log-config/%s</ARN>
                   <SamplingRate>75</SamplingRate>
-                </UpdateRealtimeLogConfigRequest>""".formatted(name))
+                </UpdateRealtimeLogConfigRequest>""".formatted(AwsNamespaces.CLOUDFRONT, name))
         .when()
             .put(API + "realtime-log-config")
         .then()
             .statusCode(200);
         given()
             .contentType("application/xml")
-            .body("<GetRealtimeLogConfigRequest xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\"><Name>"
+            .body("<GetRealtimeLogConfigRequest xmlns=\"" + AwsNamespaces.CLOUDFRONT + "\"><Name>"
                     + name + "</Name></GetRealtimeLogConfigRequest>")
         .when()
             .post(API + "get-realtime-log-config")
