@@ -261,6 +261,30 @@ class Route53ResolverIntegrationTest {
     }
 
     @Test
+    void createResolverEndpoint_anAutomaticAddressDoesNotTakeOneRequestedLaterInTheList() {
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.81.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.81.1.0/24", "AvailabilityZone", "us-east-1a")
+                .extract().path("CreateSubnetResponse.subnet.subnetId");
+        String sg = securityGroup(vpc, "ep-order");
+        // A fresh subnet's first automatic address, which a later entry asks for explicitly.
+        String probe = ec2("CreateNetworkInterface", "SubnetId", sub)
+                .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String first = describeInterfaces(sub).getString(ENI_ITEMS + ".privateIpAddress");
+        ec2("DeleteNetworkInterface", "NetworkInterfaceId", probe);
+        String next = first.substring(0, first.lastIndexOf('.') + 1)
+                + (Integer.parseInt(first.substring(first.lastIndexOf('.') + 1)) + 1);
+
+        for (String auto : List.of("{\"SubnetId\":\"" + sub + "\"}", "{\"SubnetId\":\"" + sub + "\",\"Ip\":null}")) {
+            String id = createEndpoint("{\"Name\":\"ep-order\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\""
+                    + sg + "\"],\"IpAddresses\":[" + auto + ",{\"SubnetId\":\"" + sub + "\",\"Ip\":\"" + next + "\"}]}");
+            assertTrue(JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip").contains(next), auto);
+            given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.DeleteResolverEndpoint")
+                    .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
+                    .when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
     void createResolverEndpoint_exhaustedSubnetIsRejectedAndStoresNothing() {
         String vpc = ec2("CreateVpc", "CidrBlock", "10.80.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
         // /28 = 16 addresses, minus 4 reserved at the bottom and 1 at the top = 11 assignable.

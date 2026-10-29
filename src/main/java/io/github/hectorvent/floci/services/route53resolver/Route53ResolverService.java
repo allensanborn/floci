@@ -317,22 +317,28 @@ public class Route53ResolverService {
     private ArrayNode createEndpointInterfaces(String endpointId, JsonNode requests, Map<String, Subnet> subnets,
                                                List<String> securityGroupIds, String region) {
         ArrayNode out = objectMapper.createArrayNode();
+        requests.forEach(r -> out.addNull());
         List<String> created = new ArrayList<>();
         try {
-            for (JsonNode r : requests) {
-                String subnetId = text(r, "SubnetId");
-                String ip = text(r, "Ip");
-                if (!subnets.containsKey(subnetId) || (ip == null && text(r, "Ipv6") != null)) {
-                    out.addNull();
-                    continue;
+            // Explicit addresses first, so an address EC2 picks for one entry is never one that a
+            // later entry asks for; the stored list keeps the request order.
+            for (boolean explicitPass : new boolean[] {true, false}) {
+                for (int i = 0; i < requests.size(); i++) {
+                    JsonNode r = requests.get(i);
+                    String subnetId = text(r, "SubnetId");
+                    String ip = text(r, "Ip");
+                    if ((ip != null) != explicitPass || !subnets.containsKey(subnetId)
+                            || (ip == null && text(r, "Ipv6") != null)) {
+                        continue;
+                    }
+                    NetworkInterface eni = ec2Service.createNetworkInterface(region, subnetId,
+                            "Route 53 Resolver: " + endpointId, ip, List.of(), securityGroupIds, List.of());
+                    created.add(eni.getNetworkInterfaceId());
+                    ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
+                    out.set(i, objectMapper.createObjectNode()
+                            .put("NetworkInterfaceId", eni.getNetworkInterfaceId())
+                            .put("Ip", eni.getPrivateIpAddress()));
                 }
-                NetworkInterface eni = ec2Service.createNetworkInterface(region, subnetId,
-                        "Route 53 Resolver: " + endpointId, ip, List.of(), securityGroupIds, List.of());
-                created.add(eni.getNetworkInterfaceId());
-                ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
-                out.addObject()
-                        .put("NetworkInterfaceId", eni.getNetworkInterfaceId())
-                        .put("Ip", eni.getPrivateIpAddress());
             }
         } catch (RuntimeException e) {
             // Any failure, not only EC2's refusals, would otherwise leave the interfaces made so far.
