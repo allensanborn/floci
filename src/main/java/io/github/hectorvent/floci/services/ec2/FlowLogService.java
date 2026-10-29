@@ -156,12 +156,31 @@ public class FlowLogService {
                                  String trafficType, String logDestinationType,
                                  String logDestination, String deliverLogsPermissionArn,
                                  String logFormat, int maxAggregationInterval) {
+        return createFlowLog(region, resourceId, resourceType, trafficType, logDestinationType,
+                logDestination, null, deliverLogsPermissionArn, logFormat, maxAggregationInterval);
+    }
+
+    public FlowLog createFlowLog(String region, String resourceId, String resourceType,
+                                 String trafficType, String logDestinationType,
+                                 String logDestination, String logGroupName,
+                                 String deliverLogsPermissionArn,
+                                 String logFormat, int maxAggregationInterval) {
+        String groupName = logGroupName;
+        if (groupName == null && logDestination != null && logDestination.contains(":log-group:")) {
+            groupName = logDestination.substring(logDestination.indexOf(":log-group:") + ":log-group:".length());
+            if (groupName.endsWith(":*")) {
+                groupName = groupName.substring(0, groupName.length() - 2);
+            }
+        }
         FlowLog fl = new FlowLog();
         fl.setFlowLogId("fl-" + randomHex(17));
         fl.setResourceId(resourceId);
         fl.setResourceType(resourceType != null ? resourceType : "VPC");
         fl.setTrafficType(trafficType != null ? trafficType : "ALL");
-        fl.setLogDestinationType(logDestinationType != null ? logDestinationType : "s3");
+        // AWS defaults LogDestinationType to cloud-watch-logs; a log group (or log-group ARN) implies it.
+        fl.setLogDestinationType(logDestinationType != null ? logDestinationType
+                : groupName != null ? "cloud-watch-logs" : "s3");
+        fl.setLogGroupName(groupName);
         fl.setLogDestination(logDestination);
         fl.setDeliverLogsPermissionArn(deliverLogsPermissionArn);
         fl.setBucketName(bucketFromArn(logDestination));
