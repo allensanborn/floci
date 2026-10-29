@@ -3548,7 +3548,18 @@ public class CloudFrontController {
         fn.setName(XmlParser.extractFirst(body, "Name", null));
         fn.setComment(XmlParser.extractFirst(body, "Comment", null));
         fn.setRuntime(XmlParser.extractFirst(body, "Runtime", "cloudfront-js-2.0"));
-        fn.setFunctionCode(XmlParser.extractFirst(body, "FunctionCode", null));
+        // FunctionCode is a blob (base64 in the REST-XML body); store the decoded code.
+        // CloudFormation provisions plain code straight through the service, so it never passes here.
+        String code = XmlParser.extractFirst(body, "FunctionCode", null);
+        if (code != null) {
+            try {
+                code = new String(java.util.Base64.getDecoder().decode(code.trim()),
+                        java.nio.charset.StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidArgument", "FunctionCode is not valid base64.", 400);
+            }
+        }
+        fn.setFunctionCode(code);
         return fn;
     }
 
