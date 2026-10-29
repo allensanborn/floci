@@ -1354,6 +1354,11 @@ public class RdsQueryHandler {
             if (enableHttpEndpoint) {
                 cluster = service.setHttpEndpoint(region, id, true);
             }
+            Integer retention = parseIntegerParam(params, "BackupRetentionPeriod");
+            Map<String, String> createTags = parseTags(params);
+            if (retention != null || !createTags.isEmpty()) {
+                cluster = service.applyClusterSettings(region, id, retention, createTags);
+            }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1473,6 +1478,10 @@ public class RdsQueryHandler {
                     params.getFirst("DBClusterParameterGroupName"), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
+            }
+            Integer retention = parseIntegerParam(params, "BackupRetentionPeriod");
+            if (retention != null) {
+                cluster = service.applyClusterSettings(region, id, retention, null);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3256,6 +3265,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
+           .elem("BackupRetentionPeriod",
+                   c.getBackupRetentionPeriod() != null ? c.getBackupRetentionPeriod() : 1)
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
            .start("VpcSecurityGroups")
@@ -3308,6 +3319,9 @@ public class RdsQueryHandler {
         }
         xml.end("DBClusterMembers");
         writeAssociatedRoles(xml, c.getAssociatedRoles(), "DBClusterRole");
+        xml.start("TagList");
+        writeTags(xml, c.getTags());
+        xml.end("TagList");
         return xml.build();
     }
 
