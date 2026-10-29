@@ -146,6 +146,81 @@ class RdsParameterGroupWireEncodingIntegrationTest {
                 "rds.force_ssl", "shared_preload_libraries");
     }
 
+    private static String applyMethodOf(String describeAction, String nameKey, String group, String param) {
+        return query(describeAction).formParam(nameKey, group)
+                .when().post("/").then().statusCode(200).extract().xmlPath()
+                .getString("**.find { it.ParameterName == '" + param + "' }.ApplyMethod");
+    }
+
+    /**
+     * Copy carries a pending-reboot ApplyMethod to the copy; a selected reset and ResetAllParameters
+     * each leave no stale method behind, so a re-modify without ApplyMethod reads back immediate.
+     * Everything is read back through Describe, not the mutating call's own response.
+     */
+    private static void assertApplyMethodLifecycle(String kind, String family, String param, String value) {
+        String groupKey = "DB" + kind + "ParameterGroupName";
+        String describe = "DescribeDB" + kind + "Parameters";
+        String src = "lifecycle-src" + kind.toLowerCase();
+        String copy = "lifecycle-copy" + kind.toLowerCase();
+        query("CreateDB" + kind + "ParameterGroup").formParam(groupKey, src)
+                .formParam("DBParameterGroupFamily", family).formParam("Description", "lifecycle")
+                .when().post("/").then().statusCode(200);
+        query("ModifyDB" + kind + "ParameterGroup").formParam(groupKey, src)
+                .formParam("Parameters.Parameter.1.ParameterName", param)
+                .formParam("Parameters.Parameter.1.ParameterValue", value)
+                .formParam("Parameters.Parameter.1.ApplyMethod", "pending-reboot")
+                .when().post("/").then().statusCode(200);
+
+        query("CopyDB" + kind + "ParameterGroup")
+                .formParam("SourceDB" + kind + "ParameterGroupIdentifier", src)
+                .formParam("TargetDB" + kind + "ParameterGroupIdentifier", copy)
+                .formParam("TargetDB" + kind + "ParameterGroupDescription", "lifecycle copy")
+                .when().post("/").then().statusCode(200);
+        assertEquals("pending-reboot", applyMethodOf(describe, groupKey, copy, param), "copy");
+
+        // Selected reset, then re-modify with no ApplyMethod.
+        query("ResetDB" + kind + "ParameterGroup").formParam(groupKey, copy)
+                .formParam("Parameters.Parameter.1.ParameterName", param)
+                .formParam("Parameters.Parameter.1.ApplyMethod", "pending-reboot")
+                .when().post("/").then().statusCode(200);
+        query("ModifyDB" + kind + "ParameterGroup").formParam(groupKey, copy)
+                .formParam("Parameters.Parameter.1.ParameterName", param)
+                .formParam("Parameters.Parameter.1.ParameterValue", value)
+                .when().post("/").then().statusCode(200);
+        assertEquals("immediate", applyMethodOf(describe, groupKey, copy, param), "after selected reset");
+
+        // ResetAllParameters from a pending-reboot state, then re-modify with no ApplyMethod.
+        query("ModifyDB" + kind + "ParameterGroup").formParam(groupKey, copy)
+                .formParam("Parameters.Parameter.1.ParameterName", param)
+                .formParam("Parameters.Parameter.1.ParameterValue", value)
+                .formParam("Parameters.Parameter.1.ApplyMethod", "pending-reboot")
+                .when().post("/").then().statusCode(200);
+        query("ResetDB" + kind + "ParameterGroup").formParam(groupKey, copy)
+                .formParam("ResetAllParameters", "true")
+                .when().post("/").then().statusCode(200);
+        query("ModifyDB" + kind + "ParameterGroup").formParam(groupKey, copy)
+                .formParam("Parameters.Parameter.1.ParameterName", param)
+                .formParam("Parameters.Parameter.1.ParameterValue", value)
+                .when().post("/").then().statusCode(200);
+        assertEquals("immediate", applyMethodOf(describe, groupKey, copy, param), "after reset all");
+
+        for (String g : new String[] {src, copy}) {
+            query("DeleteDB" + kind + "ParameterGroup").formParam(groupKey, g).when().post("/");
+        }
+    }
+
+    @Test
+    @Order(5)
+    void dbParameterGroupApplyMethodSurvivesCopyAndIsClearedByReset() {
+        assertApplyMethodLifecycle("", "postgres15", "work_mem", "65536");
+    }
+
+    @Test
+    @Order(6)
+    void dbClusterParameterGroupApplyMethodSurvivesCopyAndIsClearedByReset() {
+        assertApplyMethodLifecycle("Cluster", "aurora-postgresql15", "shared_preload_libraries", "pg_stat_statements");
+    }
+
     @Test
     @Order(9)
     void cleanUp() {
