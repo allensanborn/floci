@@ -689,6 +689,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     .collect(Collectors.toList());
         }
         if (listenerArns != null && !listenerArns.isEmpty()) {
+            listenerArns.forEach(a -> requireListener(region, a));
             Set<String> arnSet = new HashSet<>(listenerArns);
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
@@ -899,8 +900,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
         if (ruleArns != null && !ruleArns.isEmpty()) {
             return ruleArns.stream()
-                    .map(regionRules::get)
-                    .filter(Objects::nonNull)
+                    .map(a -> requireRule(region, a))
                     .collect(Collectors.toList());
         }
         if (listenerArn != null && !listenerArn.isEmpty()) {
