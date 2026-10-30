@@ -228,7 +228,7 @@ class MskControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("clusterInfo.enhancedMonitoring", equalTo("DEFAULT"))
-            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS_PLAINTEXT"))
+            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS"))
             .body("clusterInfo.encryptionInfo.encryptionInTransit.inCluster", equalTo(true));
     }
 
