@@ -88,11 +88,11 @@ containers, not to processes on the host.
 | Operation | Notes |
 |-----------|-------|
 | `CreateHttpNamespace` | Creates an `HTTP` namespace; returns an operation id |
-| `CreatePublicDnsNamespace` | Creates a `DNS_PUBLIC` namespace with a synthetic `HostedZoneId` |
-| `CreatePrivateDnsNamespace` | Creates a `DNS_PRIVATE` namespace; requires `Vpc`, assigns a `HostedZoneId` |
+| `CreatePublicDnsNamespace` | Creates a `DNS_PUBLIC` namespace and a public Route 53 hosted zone, reported as `HostedZoneId` |
+| `CreatePrivateDnsNamespace` | Creates a `DNS_PRIVATE` namespace and a private Route 53 hosted zone associated with `Vpc` (required), reported as `HostedZoneId` |
 | `GetNamespace` | Returns a namespace by `Id` |
 | `ListNamespaces` | Lists namespaces in the current region |
-| `DeleteNamespace` | Deletes an empty namespace; fails with `ResourceInUse` if it still has services |
+| `DeleteNamespace` | Deletes an empty namespace and its hosted zone; fails with `ResourceInUse` if it still has services, `HostedZoneNotEmpty` if the zone holds records you added |
 | `CreateService` | Creates a service (optionally under a namespace), tracks revision and instance count |
 | `GetService` | Returns a service by `Id` |
 | `ListServices` | Lists services, optionally filtered by `NamespaceId` |
