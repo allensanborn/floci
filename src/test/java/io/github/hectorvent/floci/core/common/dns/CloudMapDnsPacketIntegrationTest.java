@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -82,6 +83,7 @@ class CloudMapDnsPacketIntegrationTest {
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_IPV4", "172.31.0.7"), REGION);
         String zoneId = cloudMapService.getNamespace(namespaceId).getHostedZoneId();
+        List<Map<String, Object>> txts = new ArrayList<>();
         for (String txtName : List.of("both." + namespace, "txtonly." + namespace)) {
             ResourceRecordSet txt = new ResourceRecordSet();
             txt.setName(txtName);
@@ -89,8 +91,17 @@ class CloudMapDnsPacketIntegrationTest {
             txt.setTtl(60L);
             txt.setRecords(List.of(new ResourceRecord("\"owner=test\"")));
             route53Service.changeResourceRecordSets(zoneId, List.of(Map.of("action", "CREATE", "rrs", txt)), null);
+            txts.add(Map.of("action", "DELETE", "rrs", txt));
         }
+        try {
+            assertBothSourceOrdersResolve(namespace);
+        } finally {
+            // The namespace's zone must hold only its SOA and NS again, or DeleteNamespace fails.
+            route53Service.changeResourceRecordSets(zoneId, txts, null);
+        }
+    }
 
+    private void assertBothSourceOrdersResolve(String namespace) throws Exception {
         for (List<DnsRecordSource> sources : List.of(
                 List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
                 List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
