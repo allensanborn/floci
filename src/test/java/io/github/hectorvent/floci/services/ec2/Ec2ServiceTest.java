@@ -4629,6 +4629,25 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void anAutoAssignedPrimaryEqualToARequestedSecondaryIsListedOnceAsPrimary() {
+        // The secondary is free and not stored yet, so the network may hand the same address out
+        // as the primary; the interface must not then list it a second time as a secondary.
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.10"));
+
+        String eniId = service.createNetworkInterface("us-east-1", subnetId, "overlap", null,
+                List.of("10.50.1.10"), List.of(), List.of()).getNetworkInterfaceId();
+
+        NetworkInterface stored = service.describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
+                .networkInterfaces().getFirst();
+        assertEquals("10.50.1.10", stored.getPrivateIpAddress());
+        assertEquals(List.of(Map.entry("10.50.1.10", true)), stored.getPrivateIpAddresses().stream()
+                .map(a -> Map.entry(a.getPrivateIpAddress(), a.isPrimary())).toList());
+    }
+
+    @Test
     void anAddressAnotherAccountHoldsIsNotHandedOutWhenTheWalkRunsTheNetworkDry() {
         // The walk skips the only address the shared network still offers, which another account's
         // interface holds, and the synthesised fallback's own scan sees only the caller's account.
