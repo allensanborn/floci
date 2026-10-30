@@ -65,6 +65,24 @@ class RdsParameterGroupTagIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void describingAnUnknownParameterGroupIsNotFoundButAKnownOneIsReturned() {
+        query("DescribeDBParameterGroups")
+                .formParam("DBParameterGroupName", "no-such-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("<Code>DBParameterGroupNotFound</Code>"));
+
+        query("DescribeDBParameterGroups")
+                .formParam("DBParameterGroupName", PG)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DBParameterGroupName>" + PG + "</DBParameterGroupName>"));
+    }
+
+    @Test
     @Order(1)
     void aClusterParameterGroupIsTaggableTheSameWay() {
         query("CreateDBClusterParameterGroup")

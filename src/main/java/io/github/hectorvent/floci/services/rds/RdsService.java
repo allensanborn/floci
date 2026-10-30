@@ -7022,7 +7022,11 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         if (filterName != null && !filterName.isBlank()) {
             DbParameterGroup group = findParameterGroupForRegion(filterName, effectiveRegion);
-            return group != null ? List.of(group) : List.of();
+            if (group == null) {
+                throw new AwsException("DBParameterGroupNotFound",
+                        "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
+            }
+            return List.of(group);
         }
         Map<String, DbParameterGroup> unique = new LinkedHashMap<>();
         List<DbParameterGroup> storedGroups;
