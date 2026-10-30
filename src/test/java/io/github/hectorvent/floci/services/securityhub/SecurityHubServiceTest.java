@@ -61,6 +61,25 @@ class SecurityHubServiceTest {
     }
 
     @Test
+    void aNonBooleanEnableDefaultStandardsIsRejectedAndLeavesTheHubDisabled() throws Exception {
+        for (String value : new String[] {"\"false\"", "{}", "0"}) {
+            AwsException error = assertThrows(AwsException.class, () -> service.enableSecurityHub(REGION,
+                    objectMapper.readTree("{\"EnableDefaultStandards\": " + value + "}")), value);
+            assertEquals("InvalidInputException", error.getErrorCode(), value);
+            assertFalse(service.state(REGION).isEnabled(), value);
+        }
+    }
+
+    @Test
+    void anExplicitlyTrueOrNullEnableDefaultStandardsSubscribesTheDefaults() throws Exception {
+        for (String value : new String[] {"true", "null"}) {
+            service.clear();
+            service.enableSecurityHub(REGION, objectMapper.readTree("{\"EnableDefaultStandards\": " + value + "}"));
+            assertEquals(2, service.enabledStandards(REGION, null).size(), value);
+        }
+    }
+
+    @Test
     void aBatchDisableWithAnUnknownArnRemovesNothing() throws Exception {
         service.enableSecurityHub(REGION, objectMapper.readTree("{}"));
         Map<String, String> before = service.enabledStandards(REGION, null);

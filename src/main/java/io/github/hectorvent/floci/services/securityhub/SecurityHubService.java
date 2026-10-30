@@ -98,14 +98,17 @@ public class SecurityHubService implements Resettable {
             throw invalid("ControlFindingGenerator must be SECURITY_CONTROL or STANDARD_CONTROL.");
         }
         validateTags(request == null ? null : request.get("Tags"));
+        JsonNode defaults = request == null ? null : request.get("EnableDefaultStandards");
+        if (defaults != null && !defaults.isNull() && !defaults.isBoolean()) {
+            throw invalid("EnableDefaultStandards must be a boolean.");
+        }
         state.setEnabled(true);
         if (controlFindingGenerator != null) {
             state.setControlFindingGenerator(controlFindingGenerator);
         }
         state.setHubTags(readTags(request == null ? null : request.get("Tags")));
         // EnableDefaultStandards is true unless the caller says otherwise, as on AWS.
-        JsonNode defaults = request == null ? null : request.get("EnableDefaultStandards");
-        if (defaults == null || defaults.isNull() || defaults.asBoolean(true)) {
+        if (defaults == null || defaults.isNull() || defaults.booleanValue()) {
             for (Standard standard : STANDARDS) {
                 if (standard.enabledByDefault()) {
                     state.getStandardsSubscriptions().put(subscriptionArn(region, standard), standardsArn(region, standard));
