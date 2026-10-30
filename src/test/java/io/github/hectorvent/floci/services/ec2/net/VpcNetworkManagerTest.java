@@ -162,6 +162,23 @@ class VpcNetworkManagerTest {
     }
 
     @Test
+    void bothSpellingsOfAPredecessorsNetworkGoWithAVpcThisRunNeverMaterialised() {
+        // An upgrade plus another restart can leave both: the legacy bridge on a fallback CIDR and
+        // the current-named one on the declared CIDR. Neither may be forgotten.
+        String legacyName = "floci-vpc-4650-us-east-1-vpc-1";
+        String currentName = manager.networkName(REGION, "vpc-1");
+        existingNetwork(legacyName, "10.200.0.0/16", ourLabels("vpc-1", "4650"));
+        existingNetwork(currentName, "10.0.0.0/16", ourLabels("vpc-1", "4650"));
+        manager.reconcileOrphans((region, vpcId) -> true);
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+
+        manager.deleteVpcNetwork(REGION, "vpc-1");
+
+        assertEquals(2, removedNetworks.size(), "each removed once: " + removedNetworks);
+        assertEquals(Set.of(legacyName, currentName), Set.copyOf(removedNetworks));
+    }
+
+    @Test
     void aVpcThisRunMaterialisedNextToItsPredecessorsLegacyNetworkTakesBothWithIt() {
         // An instance started after the restart: this run created the computed-name network while
         // the legacy-named one from before still exists. Deleting the VPC removes both.

@@ -845,13 +845,14 @@ public class VpcNetworkManager {
         // A network this process never materialised can still exist: one a previous run created
         // for a VPC none of whose instances has started since. Startup reconciliation noted it,
         // under its own name, which an older version spelled differently from vpc.networkName.
-        String previousRunNetwork = networksFromPreviousRun.remove(key(region, vpcId));
+        // An upgrade can leave both spellings behind, so every one noted is removed.
+        Set<String> previousRunNetworks = networksFromPreviousRun.remove(key(region, vpcId));
         Set<String> networkNames = new LinkedHashSet<>();
         if (vpc.created) {
             networkNames.add(vpc.networkName);
         }
-        if (previousRunNetwork != null) {
-            networkNames.add(previousRunNetwork);
+        if (previousRunNetworks != null) {
+            networkNames.addAll(previousRunNetworks);
         }
         if (networkNames.isEmpty()) {
             return;
@@ -888,8 +889,8 @@ public class VpcNetworkManager {
 
     // ─── Startup reconciliation ──────────────────────────────────────────────
 
-    /** Network name by VPC, for VPCs still declared at startup whose network a previous run created. */
-    private final Map<String, String> networksFromPreviousRun = new ConcurrentHashMap<>();
+    /** Network names by VPC, for VPCs still declared at startup whose networks a previous run created. */
+    private final Map<String, Set<String>> networksFromPreviousRun = new ConcurrentHashMap<>();
 
     /**
      * Removes VPC networks this Floci left behind on a previous run.
@@ -933,7 +934,8 @@ public class VpcNetworkManager {
                 String vpcId = ALIASES.labelValue(labels, ContainerStorageHelper.RESOURCE_ID_LABEL);
                 String region = ALIASES.labelValue(labels, ContainerStorageHelper.REGION_LABEL);
                 if (vpcId != null && region != null && stillDeclared.test(region, vpcId)) {
-                    networksFromPreviousRun.put(key(region, vpcId), network.getName());
+                    networksFromPreviousRun.computeIfAbsent(key(region, vpcId), k -> ConcurrentHashMap.newKeySet())
+                            .add(network.getName());
                     continue;
                 }
                 if (!reap) {
