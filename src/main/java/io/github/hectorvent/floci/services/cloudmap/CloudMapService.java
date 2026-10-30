@@ -206,6 +206,9 @@ public class CloudMapService {
                 if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
                     throw e;
                 }
+                // Already deleted through Route 53; nothing is orphaned, so the namespace still goes.
+                LOG.debugv("Hosted zone {0} of Cloud Map namespace {1} was already deleted",
+                        ns.getHostedZoneId(), id);
             }
         }
         namespaceStore.delete(id);
