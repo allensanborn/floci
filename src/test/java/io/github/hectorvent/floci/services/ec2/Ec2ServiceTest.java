@@ -2395,6 +2395,39 @@ class Ec2ServiceTest {
         assertEquals(1, retry.getInstances().size());
     }
 
+    @Test
+    void aServiceHeldInterfaceCannotBeAttachedToOrLaunchedWithAnInstance() {
+        // AWS: a requester-managed interface cannot be attached or detached, nor specified when
+        // launching an instance (EC2 user guide, Requester-managed network interfaces).
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of())
+                .getFirst().getSubnetId();
+        String eniId = service.createNetworkInterface("us-east-1", subnetId, null,
+                null, List.of(), List.of(), List.of()).getNetworkInterfaceId();
+        String instanceId = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnetId, null, List.of(), null, null)
+                .getInstances().getFirst().getInstanceId();
+        // A mock launch finishes on the next read; AttachNetworkInterface needs it running.
+        service.describeInstances("us-east-1", List.of(instanceId), Map.of());
+        service.holdNetworkInterfaceForService("us-east-1", eniId);
+
+        AwsException attach = assertThrows(AwsException.class,
+                () -> service.attachNetworkInterface("us-east-1", eniId, instanceId, 1));
+        AwsException launch = assertThrows(AwsException.class,
+                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                        List.of(), null, null, List.of(), null, null, null, eniId, 0, null, null, null, null,
+                        false, null, null, null, false, null));
+
+        assertEquals("InvalidNetworkInterface.InUse", attach.getErrorCode());
+        assertEquals("InvalidNetworkInterface.InUse", launch.getErrorCode());
+        assertNull(readInterface(service, eniId).getAttachment());
+
+        service.releaseNetworkInterfaceFromService("us-east-1", eniId);
+        assertDoesNotThrow(() -> service.attachNetworkInterface("us-east-1", eniId, instanceId, 1));
+    }
+
     /**
      * An interface a service holds on the caller's behalf, an ECS task's ENI being the one this
      * emulator allocates, is {@code in-use}: DescribeNetworkInterfaces documents an unattached
