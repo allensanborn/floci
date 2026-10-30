@@ -2715,6 +2715,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             putTags(region, attachmentId, new ArrayList<>(attachmentTags));
         }
         transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+        String propagationTableId = gateway.getOptions().getPropagationDefaultRouteTableId();
+        if ("enable".equals(gateway.getOptions().getDefaultRouteTablePropagation()) && propagationTableId != null) {
+            TransitGatewayRouteTablePropagation propagation = new TransitGatewayRouteTablePropagation();
+            propagation.setTransitGatewayRouteTableId(propagationTableId);
+            propagation.setTransitGatewayAttachmentId(attachmentId);
+            propagation.setResourceId(vpcId);
+            propagation.setResourceType("vpc");
+            propagation.setState("enabled");
+            propagation.setRegion(region);
+            transitGatewayPropagations.put(propagationKey(region, propagationTableId, attachmentId), propagation);
+        }
         return attachment;
     }
 
