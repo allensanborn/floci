@@ -14860,7 +14860,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * Whether an instance holds the interface, or a service does ({@link #holdNetworkInterfaceForService}
      * leaves no attachment, only the status). AWS lets the account neither attach a service's
-     * requester-managed interface nor launch an instance with it.
+     * requester-managed interface nor launch an instance with it, but documents no error code for
+     * either; callers answer with Floci's existing {@code InvalidNetworkInterface.InUse}.
      */
     private static boolean isTaken(NetworkInterface ni) {
         return ni.getAttachment() != null || "in-use".equals(ni.getStatus());

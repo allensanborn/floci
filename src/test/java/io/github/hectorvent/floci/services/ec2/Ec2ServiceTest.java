@@ -2399,6 +2399,8 @@ class Ec2ServiceTest {
     void aServiceHeldInterfaceCannotBeAttachedToOrLaunchedWithAnInstance() {
         // AWS: a requester-managed interface cannot be attached or detached, nor specified when
         // launching an instance (EC2 user guide, Requester-managed network interfaces).
+        // The guide names no error code; InvalidNetworkInterface.InUse is Floci's existing one for an
+        // interface in use.
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
                 new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
