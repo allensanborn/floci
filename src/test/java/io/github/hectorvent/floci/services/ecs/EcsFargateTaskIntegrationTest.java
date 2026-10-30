@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -133,6 +134,60 @@ class EcsFargateTaskIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body(containsString("InvalidNetworkInterfaceID.NotFound"));
+    }
+
+    @Test
+    void anAwsvpcTasksEniCanBeNeitherAttachedToNorLaunchedWithAnInstance() {
+        // AWS: a requester-managed interface cannot be attached, nor specified when launching an
+        // instance (EC2 user guide, Requester-managed network interfaces). The guide names no error
+        // code; InvalidNetworkInterface.InUse is Floci's existing one for an interface in use.
+        String family = seed("fargate-task-eni-taken");
+        Response task = runTask(family, "");
+        String eniId = attachmentDetail(task, "networkInterfaceId");
+        String instanceId = ec2("RunInstances", "test", "us-east-1")
+                .formParam("ImageId", "ami-1234567890abcdef0")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+        // A mock launch finishes on the next read; AttachNetworkInterface needs it running.
+        ec2("DescribeInstances", "test", "us-east-1").formParam("InstanceId.1", instanceId)
+                .when().post("/").then().statusCode(200);
+
+        ec2("AttachNetworkInterface", "test", "us-east-1")
+                .formParam("NetworkInterfaceId", eniId)
+                .formParam("InstanceId", instanceId)
+                .formParam("DeviceIndex", "1")
+                .when().post("/")
+                .then().statusCode(400)
+                .body(containsString("InvalidNetworkInterface.InUse"));
+        ec2("RunInstances", "test", "us-east-1")
+                .formParam("ImageId", "ami-1234567890abcdef0")
+                .formParam("InstanceType", "t3.micro")
+                .formParam("MinCount", "1")
+                .formParam("MaxCount", "1")
+                .formParam("NetworkInterface.1.NetworkInterfaceId", eniId)
+                .formParam("NetworkInterface.1.DeviceIndex", "0")
+                .when().post("/")
+                .then().statusCode(400)
+                .body(containsString("InvalidNetworkInterface.InUse"));
+
+        // Still the task's: nothing attached it, and stopping the task still releases it.
+        ec2("DescribeNetworkInterfaces", "test", "us-east-1").formParam("NetworkInterfaceId.1", eniId)
+                .when().post("/")
+                .then().statusCode(200)
+                .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.status", equalTo("in-use"))
+                .body(not(containsString("<attachment>")));
+        call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\""
+                + task.jsonPath().getString("tasks[0].taskArn") + "\"}", 200);
+        ec2("DescribeNetworkInterfaces", "test", "us-east-1").formParam("NetworkInterfaceId.1", eniId)
+                .when().post("/")
+                .then().statusCode(400)
+                .body(containsString("InvalidNetworkInterfaceID.NotFound"));
+        ec2("TerminateInstances", "test", "us-east-1").formParam("InstanceId.1", instanceId)
+                .when().post("/").then().statusCode(200);
     }
 
     private static String attachmentDetail(Response response, String name) {

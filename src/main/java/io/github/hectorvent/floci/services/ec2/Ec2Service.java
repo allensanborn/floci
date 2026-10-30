@@ -14512,7 +14512,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
+        if (isTaken(ni)) {
             throw new AwsException("InvalidParameterValue",
                     "Network interface '" + networkInterfaceId + "' is currently in use", 400);
         }
@@ -14565,7 +14565,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
                                                               String instanceId, int deviceIndex) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null) {
+        if (isTaken(ni)) {
             throw new AwsException("InvalidNetworkInterface.InUse",
                     "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
         }
@@ -14850,11 +14850,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     NetworkInterface takeNetworkInterfaceForLaunch(String region, String networkInterfaceId) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null) {
+        if (isTaken(ni)) {
             throw new AwsException("InvalidNetworkInterface.InUse",
                     "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
         }
         return ni;
+    }
+
+    /**
+     * Whether an instance holds the interface, or a service does ({@link #holdNetworkInterfaceForService}
+     * leaves no attachment, only the status). AWS lets the account neither attach a service's
+     * requester-managed interface nor launch an instance with it, but documents no error code for
+     * either; callers answer with Floci's existing {@code InvalidNetworkInterface.InUse}.
+     */
+    private static boolean isTaken(NetworkInterface ni) {
+        return ni.getAttachment() != null || "in-use".equals(ni.getStatus());
     }
 
     // ─── Pagination token encoding / decoding ──────────────────────────────────
