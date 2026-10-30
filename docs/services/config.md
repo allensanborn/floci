@@ -73,6 +73,14 @@
 | `DescribeAggregationAuthorizations` | List aggregation authorizations, paginated via `Limit`/`NextToken` |
 | `DeleteAggregationAuthorization` | Revoke an aggregation authorization |
 
+### Configuration Aggregators
+
+| Action | Description |
+|---|---|
+| `PutConfigurationAggregator` | Create or update (same ARN, `LastUpdatedTime` moves) an aggregator from exactly one of `AccountAggregationSources` or `OrganizationAggregationSource`; creation `Tags` are visible through the tagging actions |
+| `DescribeConfigurationAggregators` | List aggregators, optionally by name (unknown name fails with `NoSuchConfigurationAggregatorException`), paginated via `Limit`/`NextToken` |
+| `DeleteConfigurationAggregator` | Delete an aggregator and its tags |
+
 ### Tagging
 
 | Action | Description |

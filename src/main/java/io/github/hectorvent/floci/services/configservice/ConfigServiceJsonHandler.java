@@ -4,18 +4,21 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.configservice.model.AccountAggregationSource;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.ComplianceByConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ComplianceByResource;
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleEvaluationStatus;
+import io.github.hectorvent.floci.services.configservice.model.ConfigurationAggregator;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePackStatusDetail;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResult;
+import io.github.hectorvent.floci.services.configservice.model.OrganizationAggregationSource;
 import io.github.hectorvent.floci.services.configservice.model.RetentionConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -73,6 +76,9 @@ public class ConfigServiceJsonHandler {
             case "PutAggregationAuthorization" -> putAggregationAuthorization(request, region);
             case "DescribeAggregationAuthorizations" -> describeAggregationAuthorizations(request, region);
             case "DeleteAggregationAuthorization" -> deleteAggregationAuthorization(request, region);
+            case "PutConfigurationAggregator" -> putConfigurationAggregator(request, region);
+            case "DescribeConfigurationAggregators" -> describeConfigurationAggregators(request, region);
+            case "DeleteConfigurationAggregator" -> deleteConfigurationAggregator(request, region);
             case "TagResource" -> tagResource(request, region);
             case "UntagResource" -> untagResource(request, region);
             case "ListTagsForResource" -> listTagsForResource(request, region);
@@ -331,6 +337,32 @@ public class ConfigServiceJsonHandler {
         service.deleteAggregationAuthorization(region,
                 req.path("AuthorizedAccountId").asText(null),
                 req.path("AuthorizedAwsRegion").asText(null));
+        return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    // --- Configuration Aggregators ---
+
+    private Response putConfigurationAggregator(JsonNode req, String region) throws Exception {
+        JsonNode accounts = req.path("AccountAggregationSources");
+        JsonNode org = req.path("OrganizationAggregationSource");
+        ConfigurationAggregator aggregator = service.putConfigurationAggregator(region,
+                req.path("ConfigurationAggregatorName").asText(null),
+                accounts.isArray() ? Arrays.asList(mapper.treeToValue(accounts, AccountAggregationSource[].class)) : null,
+                org.isObject() ? mapper.treeToValue(org, OrganizationAggregationSource.class) : null,
+                extractCreationTags(req));
+        ObjectNode resp = mapper.createObjectNode();
+        resp.set("ConfigurationAggregator", mapper.valueToTree(aggregator));
+        return Response.ok(resp).build();
+    }
+
+    private Response describeConfigurationAggregators(JsonNode req, String region) {
+        return Response.ok(pagedResponse("ConfigurationAggregators", service.describeConfigurationAggregators(region,
+                extractStringList(req, "ConfigurationAggregatorNames"),
+                extractLimit(req, "Limit"), extractNextToken(req)))).build();
+    }
+
+    private Response deleteConfigurationAggregator(JsonNode req, String region) {
+        service.deleteConfigurationAggregator(region, req.path("ConfigurationAggregatorName").asText(null));
         return Response.ok(mapper.createObjectNode()).build();
     }
 

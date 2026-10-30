@@ -160,7 +160,7 @@ class AwsConfigServiceTaggingTest {
     @Test
     void anArnOfAKindFlociDoesNotModelIsPassedThrough() {
         AwsConfigService service = service();
-        String arn = "arn:aws:config:us-east-1:000000000000:config-aggregator/config-aggregator-abc123";
+        String arn = "arn:aws:config:us-east-1:000000000000:stored-query/q-abc123";
 
         service.tagResource(REGION, arn, ENV_PROD);
 
