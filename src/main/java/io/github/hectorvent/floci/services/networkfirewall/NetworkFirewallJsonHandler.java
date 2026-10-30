@@ -53,6 +53,11 @@ public class NetworkFirewallJsonHandler {
             case "DescribeLoggingConfiguration" -> ok(service.describeLoggingConfiguration(
                     textOrNull(request, "FirewallArn"), textOrNull(request, "FirewallName")));
             case "AssociateFirewallPolicy" -> ok(service.associateFirewallPolicy(request, region, accountId));
+            case "TagResource" -> ok(service.tagResource(
+                    textOrNull(request, "ResourceArn"), request.get("Tags")));
+            case "UntagResource" -> ok(service.untagResource(
+                    textOrNull(request, "ResourceArn"), request.get("TagKeys")));
+            case "ListTagsForResource" -> ok(service.listTagsForResource(textOrNull(request, "ResourceArn")));
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: NetworkFirewall_20201112." + action))

@@ -40,6 +40,9 @@ subnets. Floci does not run a packet-inspection data plane.
 | `UpdateLoggingConfiguration` | Creates or updates the firewall's logging configuration. |
 | `DescribeLoggingConfiguration` | Returns the firewall's logging configuration. |
 | `AssociateFirewallPolicy` | Sets Firewall.FirewallPolicyArn on the stored firewall. |
+| `TagResource` | Adds or replaces tags on a rule group, firewall policy or firewall. |
+| `UntagResource` | Removes tags by key from a rule group, firewall policy or firewall. |
+| `ListTagsForResource` | Lists a resource's tags; pagination is not implemented. |
 <!-- floci:actions:end -->
 
 ## Limitations

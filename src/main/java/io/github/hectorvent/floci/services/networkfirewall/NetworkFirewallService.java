@@ -13,11 +13,13 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.StreamSupport;
 
 @ApplicationScoped
@@ -502,6 +504,78 @@ public class NetworkFirewallService {
         ObjectNode firewall = require(firewalls, arn, name, "Firewall", "FirewallArn", "FirewallName");
         loggingConfigurations.delete(firewall.path("FirewallArn").asText());
         return objectMapper.createObjectNode();
+    }
+
+    public synchronized ObjectNode tagResource(String arn, JsonNode tags) {
+        if (tags == null || !tags.isArray()) {
+            throw new AwsException("InvalidRequestException", "Tags is required.", 400);
+        }
+        return mutateTags(arn, list -> {
+            for (JsonNode tag : tags) {
+                list.removeIf(existing -> existing.path("Key").asText().equals(tag.path("Key").asText()));
+                list.add(tag.deepCopy());
+            }
+        });
+    }
+
+    public synchronized ObjectNode untagResource(String arn, JsonNode tagKeys) {
+        if (tagKeys == null || !tagKeys.isArray()) {
+            throw new AwsException("InvalidRequestException", "TagKeys is required.", 400);
+        }
+        return mutateTags(arn, list -> {
+            for (JsonNode key : tagKeys) {
+                list.removeIf(existing -> existing.path("Key").asText().equals(key.asText()));
+            }
+        });
+    }
+
+    // ponytail: no pagination, the full tag list is always returned; add NextToken if a client needs it.
+    public synchronized ObjectNode listTagsForResource(String arn) {
+        requireResourceArn(arn);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode tags = result.putArray("Tags");
+        for (StorageBackend<String, ObjectNode> store : List.of(ruleGroups, firewallPolicies, firewalls)) {
+            ObjectNode stored = store.get(arn).orElse(null);
+            if (stored != null) {
+                tags.addAll((ArrayNode) tagHolder(stored).withArray("Tags").deepCopy());
+                return result;
+            }
+        }
+        throw notFound("Resource", arn);
+    }
+
+    private ObjectNode mutateTags(String arn, Consumer<List<JsonNode>> change) {
+        requireResourceArn(arn);
+        for (StorageBackend<String, ObjectNode> store : List.of(ruleGroups, firewallPolicies, firewalls)) {
+            ObjectNode stored = store.get(arn).orElse(null);
+            if (stored != null) {
+                ObjectNode holder = tagHolder(stored);
+                List<JsonNode> list = new ArrayList<>();
+                holder.withArray("Tags").forEach(list::add);
+                change.accept(list);
+                ArrayNode updated = holder.putArray("Tags");
+                list.forEach(updated::add);
+                store.put(arn, stored);
+                return objectMapper.createObjectNode();
+            }
+        }
+        throw notFound("Resource", arn);
+    }
+
+    private static void requireResourceArn(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ResourceArn is required.", 400);
+        }
+    }
+
+    /** Rule groups and policies keep tags on their *Response member, a firewall on itself. */
+    private static ObjectNode tagHolder(ObjectNode stored) {
+        for (String field : List.of("RuleGroupResponse", "FirewallPolicyResponse")) {
+            if (stored.path(field) instanceof ObjectNode response) {
+                return response;
+            }
+        }
+        return stored;
     }
 
     public ObjectNode findFirewall(String arn) {

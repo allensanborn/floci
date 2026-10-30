@@ -1117,6 +1117,79 @@ class NetworkFirewallIntegrationTest {
         return "arn:aws:network-firewall:us-east-1:723679240095:firewall/" + name;
     }
 
+    @Test
+    void tagResource_onRuleGroup_isVisibleToListAndDescribe_andUntagRemovesIt() {
+        String name = "tagged-rule-group";
+        String arn = "arn:aws:network-firewall:us-east-1:723679240095:stateful-rulegroup/" + name;
+        call("CreateRuleGroup", "{\"RuleGroupName\":\"" + name + "\",\"Type\":\"STATEFUL\","
+                + "\"Capacity\":100,\"Tags\":[{\"Key\":\"a\",\"Value\":\"1\"}],"
+                + "\"RuleGroup\":{\"RulesSource\":{\"RulesString\":\"pass ip any any\"}}}")
+            .statusCode(200);
+
+        call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":["
+                + "{\"Key\":\"a\",\"Value\":\"2\"},{\"Key\":\"b\",\"Value\":\"3\"}]}")
+            .statusCode(200);
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.find { it.Key == 'a' }.Value", equalTo("2"))
+            .body("Tags.find { it.Key == 'b' }.Value", equalTo("3"));
+        call("DescribeRuleGroup", "{\"RuleGroupArn\":\"" + arn + "\"}")
+            .body("RuleGroupResponse.Tags.size()", equalTo(2));
+
+        call("UntagResource", "{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":[\"a\"]}")
+            .statusCode(200);
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+            .statusCode(200)
+            .body("Tags.size()", equalTo(1))
+            .body("Tags[0].Key", equalTo("b"));
+    }
+
+    @Test
+    void tagResource_onPolicyAndFirewall_updatesWhatDescribeReturns() {
+        String policyArn = "arn:aws:network-firewall:us-east-1:723679240095:firewall-policy/tag-policy";
+        call("CreateFirewallPolicy", "{\"FirewallPolicyName\":\"tag-policy\","
+                + "\"FirewallPolicy\":{\"StatelessDefaultActions\":[\"aws:pass\"],"
+                + "\"StatelessFragmentDefaultActions\":[\"aws:pass\"]}}").statusCode(200);
+        call("TagResource", "{\"ResourceArn\":\"" + policyArn + "\",\"Tags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}")
+            .statusCode(200);
+        call("DescribeFirewallPolicy", "{\"FirewallPolicyArn\":\"" + policyArn + "\"}")
+            .body("FirewallPolicyResponse.Tags[0].Key", equalTo("k"));
+
+        String fwArn = "arn:aws:network-firewall:us-east-1:723679240095:firewall/tag-fw";
+        call("CreateFirewall", "{\"FirewallName\":\"tag-fw\",\"FirewallPolicyArn\":\"" + policyArn + "\","
+                + "\"VpcId\":\"vpc-0123456789abcdef0\","
+                + "\"SubnetMappings\":[{\"SubnetId\":\"subnet-def00000000000002\"}]}").statusCode(200);
+        call("TagResource", "{\"ResourceArn\":\"" + fwArn + "\",\"Tags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}")
+            .statusCode(200);
+        call("DescribeFirewall", "{\"FirewallArn\":\"" + fwArn + "\"}")
+            .body("Firewall.Tags[0].Value", equalTo("v"));
+        call("UntagResource", "{\"ResourceArn\":\"" + fwArn + "\",\"TagKeys\":[\"k\"]}").statusCode(200);
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + fwArn + "\"}")
+            .body("Tags.size()", equalTo(0));
+    }
+
+    @Test
+    void tagOperations_onUnknownArn_returnResourceNotFound() {
+        String arn = "arn:aws:network-firewall:us-east-1:723679240095:firewall/nope";
+        call("TagResource", "{\"ResourceArn\":\"" + arn + "\",\"Tags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}")
+            .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        call("UntagResource", "{\"ResourceArn\":\"" + arn + "\",\"TagKeys\":[\"k\"]}")
+            .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+            .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void tagOperations_withoutResourceArn_areInvalidRequests() {
+        call("TagResource", "{\"Tags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}")
+            .statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        call("UntagResource", "{\"TagKeys\":[\"k\"]}")
+            .statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        call("ListTagsForResource", "{}")
+            .statusCode(400).body("__type", equalTo("InvalidRequestException"));
+    }
+
     private static ValidatableResponse call(String action, String body) {
         return given()
             .contentType(CONTENT_TYPE)
