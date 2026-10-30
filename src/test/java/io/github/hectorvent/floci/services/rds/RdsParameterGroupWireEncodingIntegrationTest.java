@@ -221,6 +221,43 @@ class RdsParameterGroupWireEncodingIntegrationTest {
         assertApplyMethodLifecycle("Cluster", "aurora-postgresql15", "shared_preload_libraries", "pg_stat_statements");
     }
 
+    /**
+     * The RDS model's ApplyMethod enum is {@code immediate | pending-reboot}; anything else, including
+     * a different case, is refused with InvalidParameterValue and leaves the stored parameter untouched.
+     */
+    private static void assertInvalidApplyMethodRejected(String kind, String group, String prefix,
+                                                         String param, String storedValue, String storedMethod) {
+        String groupKey = "DB" + kind + "ParameterGroupName";
+        String describe = "DescribeDB" + kind + "Parameters";
+        for (String bad : new String[] {"later", "Immediate", "PENDING-REBOOT", ""}) {
+            query("ModifyDB" + kind + "ParameterGroup").formParam(groupKey, group)
+                    .formParam(prefix + ".1.ParameterName", param)
+                    .formParam(prefix + ".1.ParameterValue", "999")
+                    .formParam(prefix + ".1.ApplyMethod", bad)
+            .when().post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+        }
+        XmlPath xml = query(describe).formParam(groupKey, group)
+                .when().post("/").then().statusCode(200).extract().xmlPath();
+        String find = "**.find { it.ParameterName == '" + param + "' }.";
+        assertEquals(storedValue, xml.getString(find + "ParameterValue"), param);
+        assertEquals(storedMethod, xml.getString(find + "ApplyMethod"), param);
+    }
+
+    @Test
+    @Order(7)
+    void modifyDbParameterGroupRejectsUnknownApplyMethod() {
+        assertInvalidApplyMethodRejected("", PG, "Parameters.Parameter", "work_mem", "65536", "pending-reboot");
+    }
+
+    @Test
+    @Order(8)
+    void modifyDbClusterParameterGroupRejectsUnknownApplyMethod() {
+        assertInvalidApplyMethodRejected("Cluster", CLUSTER_PG, "Parameters.member", "rds.force_ssl", "1", "immediate");
+    }
+
     @Test
     @Order(9)
     void cleanUp() {
