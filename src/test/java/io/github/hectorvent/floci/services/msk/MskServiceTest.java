@@ -373,8 +373,42 @@ class MskServiceTest {
         MskCluster cluster = mskService.createCluster(request);
 
         assertEquals("DEFAULT", cluster.getEnhancedMonitoring());
+        assertEquals("TLS", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertTrue(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+    }
+
+    @Test
+    void createClusterKeepsExplicitTlsPlaintextAndDefaultsInCluster() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("tls-plaintext-cluster");
+        request.setKafkaVersion("3.6.0");
+        EncryptionInTransit inTransit = new EncryptionInTransit();
+        inTransit.setClientBroker("TLS_PLAINTEXT");
+        EncryptionInfo encryptionInfo = new EncryptionInfo();
+        encryptionInfo.setEncryptionInTransit(inTransit);
+        request.setEncryptionInfo(encryptionInfo);
+
+        MskCluster cluster = mskService.createCluster(request);
+
         assertEquals("TLS_PLAINTEXT", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
         assertTrue(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+    }
+
+    @Test
+    void createClusterDefaultsClientBrokerWhenOnlyInClusterIsGiven() {
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setClusterName("incluster-only-cluster");
+        request.setKafkaVersion("3.6.0");
+        EncryptionInTransit inTransit = new EncryptionInTransit();
+        inTransit.setInCluster(false);
+        EncryptionInfo encryptionInfo = new EncryptionInfo();
+        encryptionInfo.setEncryptionInTransit(inTransit);
+        request.setEncryptionInfo(encryptionInfo);
+
+        MskCluster cluster = mskService.createCluster(request);
+
+        assertEquals("TLS", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertFalse(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
     }
 
     @Test

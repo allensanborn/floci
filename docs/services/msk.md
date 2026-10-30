@@ -78,7 +78,7 @@ Two details worth knowing:
   `configurationRevision`, which is where the Terraform AWS provider reads it from.
 - Members AWS defaults server-side are defaulted here too, so a `terraform plan` converges:
   `enhancedMonitoring` becomes `DEFAULT`, and `encryptionInfo.encryptionInTransit` becomes
-  `clientBroker: TLS_PLAINTEXT` / `inCluster: true` when the request omits them.
+  `clientBroker: TLS` / `inCluster: true` when the request omits them.
 
 ### Serverless clusters
 
