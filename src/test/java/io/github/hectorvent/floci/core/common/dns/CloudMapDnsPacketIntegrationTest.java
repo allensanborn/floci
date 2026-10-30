@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common.dns;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapDnsRecordSource;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.github.hectorvent.floci.services.route53.Route53DnsRecordSource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -36,6 +37,9 @@ class CloudMapDnsPacketIntegrationTest {
     CloudMapDnsRecordSource cloudMapDnsRecordSource;
 
     @Inject
+    Route53DnsRecordSource route53DnsRecordSource;
+
+    @Inject
     Vertx vertx;
 
     @Test
@@ -56,6 +60,38 @@ class CloudMapDnsPacketIntegrationTest {
         assertEquals(15, packet.getInt(request.length + 6));
         assertArrayEquals(new byte[]{(byte) 172, 31, 0, 6},
                 Arrays.copyOfRange(response, request.length + 12, request.length + 16));
+    }
+
+    /**
+     * The namespace's Route 53 zone covers the same names, and answers NXDOMAIN for a name it
+     * has no record for. With that source consulted first, Cloud Map must still win.
+     */
+    @Test
+    void cloudMapInstanceResolvesWhenTheRoute53ZoneSourceIsConsultedFirst() throws Exception {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("both", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.7"), REGION);
+
+        for (List<DnsRecordSource> sources : List.of(
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
+                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+            byte[] request = buildQuery("both." + namespace, (short) 1);
+            byte[] response = query(new EmbeddedDnsServer(List.of(), sources), request);
+            ByteBuffer packet = ByteBuffer.wrap(response);
+
+            assertEquals(0, packet.getShort(2) & 0x000F);
+            assertEquals(1, packet.getShort(6));
+            assertArrayEquals(new byte[]{(byte) 172, 31, 0, 7},
+                    Arrays.copyOfRange(response, request.length + 12, request.length + 16));
+        }
+        // A name neither source has is still NXDOMAIN.
+        byte[] missing = query(new EmbeddedDnsServer(List.of(),
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource)),
+                buildQuery("nothere." + namespace, (short) 1));
+        assertEquals(3, ByteBuffer.wrap(missing).getShort(2) & 0x000F);
     }
 
     @Test
