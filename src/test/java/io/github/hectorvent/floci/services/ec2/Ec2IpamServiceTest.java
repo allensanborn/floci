@@ -17,7 +17,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -265,9 +267,46 @@ class Ec2IpamServiceTest {
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
         IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
                 REGION, null, "ipv4", null);
-        assertEquals(1, service.describeIpamPools(REGION, List.of(pool.getIpamPoolId())).size());
+        assertEquals(1, service.describeIpamPools(REGION, List.of(pool.getIpamPoolId()), List.of()).size());
         assertThrows(AwsException.class,
-                () -> service.describeIpamPools(REGION, List.of("ipam-pool-doesnotexist")));
+                () -> service.describeIpamPools(REGION, List.of("ipam-pool-doesnotexist"), List.of()));
+    }
+
+    @Test
+    void describeIpamPoolsFiltersOnTags() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", null);
+        // no API path tags a pool yet, so seed the stored object directly
+        pool.getTags().add(new Tag("Env", "prod"));
+        assertEquals(1, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag:Env", List.of("prod")))).size());
+        assertEquals(0, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag:Env", List.of("dev")))).size());
+        assertEquals(1, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag-key", List.of("Env")))).size());
+    }
+
+    @Test
+    void describeIpamPoolsFiltersOnDepthNetmaskAndUnmodelledNames() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        IpamPool top = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", null);
+        IpamPool child = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, top.getIpamPoolId(), "ipv4", null);
+        child.setAllocationMinNetmaskLength(24);
+        String scope = ipam.getPrivateDefaultScopeId();
+        List<Map.Entry<String, List<String>>> inScope = List.of(Map.entry("ipam-scope-id", List.of(scope)));
+        BiFunction<String, String, Integer> count = (name, value) ->
+                service.describeIpamPools(REGION, List.of(), List.of(inScope.get(0),
+                        Map.entry(name, List.of(value)))).size();
+        assertEquals(1, count.apply("pool-depth", "1"));
+        assertEquals(1, count.apply("pool-depth", "2"));
+        assertEquals(0, count.apply("pool-depth", "3"));
+        assertEquals(1, count.apply("allocation-min-netmask-length", "24"));
+        assertEquals(0, count.apply("publicly-advertisable", "true"));
+        assertEquals(0, count.apply("aws-service", "ec2"));
+        assertThrows(AwsException.class, () -> count.apply("no-such-filter", "x"));
     }
 
     @Test
@@ -335,7 +374,7 @@ class Ec2IpamServiceTest {
     void allocateSkipsSpaceProvisionedToChildPools() {
         IpamPool parent = poolWith("10.0.0.0/16");
         IpamPool child = service.createIpamPool(REGION,
-                service.describeIpamPools(REGION, List.of(parent.getIpamPoolId()))
+                service.describeIpamPools(REGION, List.of(parent.getIpamPoolId()), List.of())
                         .get(0).getIpamScopeId(),
                 REGION, parent.getIpamPoolId(), "ipv4", "child");
         service.provisionIpamPoolCidr(REGION, child.getIpamPoolId(), "10.0.0.0/24");
@@ -432,7 +471,7 @@ class Ec2IpamServiceTest {
                 REGION, null, "ipv4", "second", "000000000000", "pool-token");
 
         assertEquals(first.getIpamPoolId(), replay.getIpamPoolId());
-        assertEquals(1, service.describeIpamPools(REGION, List.of()).size());
+        assertEquals(1, service.describeIpamPools(REGION, List.of(), List.of()).size());
     }
 
     @Test
@@ -627,7 +666,7 @@ class Ec2IpamServiceTest {
                 () -> service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION,
                         null, "ipv5", "bad address family"));
         assertEquals("InvalidParameterValue", error.getErrorCode());
-        assertTrue(service.describeIpamPools(REGION, List.of()).isEmpty(),
+        assertTrue(service.describeIpamPools(REGION, List.of(), List.of()).isEmpty(),
                 "a rejected CreateIpamPool must not have stored a pool");
     }
 

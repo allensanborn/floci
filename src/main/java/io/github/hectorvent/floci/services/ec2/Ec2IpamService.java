@@ -554,22 +554,80 @@ public class Ec2IpamService {
         return findScope(ipamScopeId).orElseThrow(() -> scopeNotFound(ipamScopeId)).ipam().getIpamId();
     }
 
-    public List<IpamPool> describeIpamPools(String region, List<String> ipamPoolIds) {
+    /** DescribeIpamPools filter names, tag:&lt;key&gt; being admitted through tag-key. The names for
+     *  fields a pool does not carry (aws-service, publicly-advertisable) match no pool for a
+     *  concrete value, rather than every pool. */
+    private static final Set<String> POOL_FILTERS = Set.of(
+            "address-family", "allocation-default-netmask-length", "allocation-max-netmask-length",
+            "allocation-min-netmask-length", "auto-import", "aws-service", "description", "ipam-arn",
+            "ipam-pool-id", "ipam-region", "ipam-scope-arn", "ipam-scope-id", "ipam-scope-type",
+            "locale", "pool-depth", "publicly-advertisable", "source-ipam-pool-id", "state", "tag-key");
+
+    public List<IpamPool> describeIpamPools(String region, List<String> ipamPoolIds,
+                                            List<Map.Entry<String, List<String>>> filters) {
+        Ec2Service.requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(), POOL_FILTERS);
+        List<IpamPool> candidates;
         if (ipamPoolIds != null && !ipamPoolIds.isEmpty()) {
-            List<IpamPool> result = new ArrayList<>();
+            candidates = new ArrayList<>();
             for (String id : ipamPoolIds) {
-                result.add(requirePool(region, id));
+                candidates.add(requirePool(region, id));
             }
-            return result;
-        }
-        List<IpamPool> result = new ArrayList<>();
-        for (IpamPool pool : pools.scan(k -> true)) {
-            if (region != null && pool.getRegion() != null && !region.equals(pool.getRegion())) {
-                continue;
+        } else {
+            candidates = new ArrayList<>();
+            for (IpamPool pool : pools.scan(k -> true)) {
+                if (region == null || pool.getRegion() == null || region.equals(pool.getRegion())) {
+                    candidates.add(pool);
+                }
             }
-            result.add(pool);
         }
-        return result;
+        return candidates.stream()
+                .filter(pool -> filters.stream().allMatch(f -> matchesPoolFilter(pool, f.getKey(), f.getValue())))
+                .toList();
+    }
+
+    private boolean matchesPoolFilter(IpamPool pool, String name, List<String> values) {
+        if (name.startsWith("tag:")) {
+            String key = name.substring("tag:".length());
+            return pool.getTags().stream().anyMatch(t -> key.equals(t.getKey())
+                    && Ec2Service.matchesFilterValue(values, t.getValue()));
+        }
+        if ("tag-key".equals(name)) {
+            return pool.getTags().stream().anyMatch(t -> Ec2Service.matchesFilterValue(values, t.getKey()));
+        }
+        Optional<ScopeOfIpam> scope = findScope(pool.getIpamScopeId());
+        String value = switch (name) {
+            case "address-family" -> pool.getAddressFamily();
+            case "allocation-default-netmask-length" -> str(pool.getAllocationDefaultNetmaskLength());
+            case "allocation-max-netmask-length" -> str(pool.getAllocationMaxNetmaskLength());
+            case "allocation-min-netmask-length" -> str(pool.getAllocationMinNetmaskLength());
+            case "auto-import" -> String.valueOf(pool.isAutoImport());
+            case "description" -> pool.getDescription();
+            case "ipam-arn" -> scope.map(s -> s.ipam().getIpamArn()).orElse(null);
+            case "ipam-pool-id" -> pool.getIpamPoolId();
+            case "ipam-region" -> scope.map(s -> s.ipam().getRegion()).orElse(null);
+            case "ipam-scope-arn" -> scope.map(s -> s.scope().getIpamScopeArn()).orElse(null);
+            case "ipam-scope-id" -> pool.getIpamScopeId();
+            case "ipam-scope-type" -> scope.map(s -> s.scope().getScopeType()).orElse(null);
+            case "locale" -> pool.getLocale();
+            case "pool-depth" -> String.valueOf(poolDepth(pool));
+            case "source-ipam-pool-id" -> pool.getSourceIpamPoolId();
+            case "state" -> pool.getState();
+            default -> null; // aws-service, publicly-advertisable: not modelled, no pool matches
+        };
+        return Ec2Service.matchesFilterValue(values, value);
+    }
+
+    private static String str(Integer n) {
+        return n == null ? null : String.valueOf(n);
+    }
+
+    /** 1 for a top-level pool, the source pool's depth + 1 otherwise. */
+    private int poolDepth(IpamPool pool) {
+        int depth = 1;
+        for (IpamPool p = pool; p.getSourceIpamPoolId() != null && depth < 20; depth++) {
+            p = requirePool(p.getRegion(), p.getSourceIpamPoolId());
+        }
+        return depth;
     }
 
     public IpamPool deleteIpamPool(String region, String ipamPoolId) {
