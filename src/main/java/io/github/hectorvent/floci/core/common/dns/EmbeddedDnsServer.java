@@ -406,17 +406,18 @@ public class EmbeddedDnsServer {
             return Optional.empty();
         }
         // Two sources can own the same zone (a Cloud Map namespace and the Route 53 zone behind it),
-        // and bean order is unspecified. An NXDOMAIN only means "not mine", so it must not win
-        // over another source's real answer; it is returned only if no source has one.
-        Optional<DnsAnswer> nxDomain = Optional.empty();
+        // and bean order is unspecified. An empty answer (NXDOMAIN, or NODATA for a name holding only
+        // other types) only speaks for that source, so it must not win over another source's records;
+        // it is returned only if no source has any, an existing name preferred over NXDOMAIN.
+        Optional<DnsAnswer> empty = Optional.empty();
         for (DnsRecordSource source : recordSources) {
             try {
                 Optional<DnsAnswer> answer = authoritative ? source.resolveAuthoritative(name, type)
                         : source.resolve(name, type);
                 if (answer != null && answer.isPresent()) {
-                    if (!answer.get().nameExists() && answer.get().isEmpty()) {
-                        if (nxDomain.isEmpty()) {
-                            nxDomain = answer;
+                    if (answer.get().isEmpty()) {
+                        if (empty.isEmpty() || (!empty.get().nameExists() && answer.get().nameExists())) {
+                            empty = answer;
                         }
                         continue;
                     }
@@ -427,7 +428,7 @@ public class EmbeddedDnsServer {
                         source.getClass().getSimpleName(), name, e.getMessage());
             }
         }
-        return nxDomain;
+        return empty;
     }
 
     byte[] buildEmptyResponse(byte[] query, short txId, int questionOffset, int questionEnd, int responseCode) {
