@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.configservice.model.AccountAggregationSource;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.Compliance;
 import io.github.hectorvent.floci.services.configservice.model.ComplianceByConfigRule;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.configservice.model.ComplianceSummary
 import io.github.hectorvent.floci.services.configservice.model.ConfigEvaluation;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleEvaluationStatus;
+import io.github.hectorvent.floci.services.configservice.model.ConfigurationAggregator;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorder;
 import io.github.hectorvent.floci.services.configservice.model.ConfigurationRecorderStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
@@ -25,6 +27,7 @@ import io.github.hectorvent.floci.services.configservice.model.EvaluationModeCon
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResult;
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResultIdentifier;
 import io.github.hectorvent.floci.services.configservice.model.EvaluationResultQualifier;
+import io.github.hectorvent.floci.services.configservice.model.OrganizationAggregationSource;
 import io.github.hectorvent.floci.services.configservice.model.RetentionConfiguration;
 import io.github.hectorvent.floci.services.configservice.model.SourceDetail;
 import jakarta.annotation.PostConstruct;
@@ -90,6 +93,8 @@ public class AwsConfigService {
     private Map<String, Map<String, ConformancePack>> conformancePacks = new ConcurrentHashMap<>();
     // region -> authorizationKey("accountId|region") -> authorization (nested)
     private Map<String, Map<String, AggregationAuthorization>> aggregationAuthorizations = new ConcurrentHashMap<>();
+    // account|region -> aggregatorName -> aggregator (nested)
+    private Map<String, Map<String, ConfigurationAggregator>> configurationAggregators = new ConcurrentHashMap<>();
     // region -> ruleName -> resourceKey("Type|Id") -> evaluation (doubly nested)
     private Map<String, Map<String, Map<String, ConfigEvaluation>>> evaluations = new ConcurrentHashMap<>();
 
@@ -135,6 +140,8 @@ public class AwsConfigService {
                 new TypeReference<Map<String, Map<String, ConformancePack>>>() {});
         this.aggregationAuthorizations = storageBacked("config-aggregation-authorizations.json",
                 new TypeReference<Map<String, Map<String, AggregationAuthorization>>>() {});
+        this.configurationAggregators = storageBacked("config-aggregators.json",
+                new TypeReference<Map<String, Map<String, ConfigurationAggregator>>>() {});
         this.evaluations = storageBacked("config-evaluations.json",
                 new TypeReference<Map<String, Map<String, Map<String, ConfigEvaluation>>>>() {});
         this.configurationRecorders = storageBacked("config-recorders.json",
@@ -154,6 +161,7 @@ public class AwsConfigService {
         normalizeRegionMaps(configRules);
         normalizeRegionMaps(conformancePacks);
         normalizeRegionMaps(aggregationAuthorizations);
+        normalizeRegionMaps(configurationAggregators);
         normalizeRegionMaps(tags);
         normalizeEvaluationMaps();
     }
@@ -1019,6 +1027,111 @@ public class AwsConfigService {
         }
     }
 
+    // --- Configuration Aggregators ---
+
+    private static final Pattern AGGREGATOR_NAME_PATTERN = Pattern.compile("[\\w\\-]{1,256}");
+
+    /** Put is an upsert: a second Put with the same name keeps the ARN and CreationTime and moves
+     *  LastUpdatedTime. Tags apply at creation only, like the other taggable Config resources.
+     *  Validation follows config/2014-11-12: name {@code [\w\-]+} (1-256), at most one
+     *  AccountAggregationSource, each with at least one 12 digit AccountId, and exactly one of
+     *  AccountAggregationSources and OrganizationAggregationSource (the model's operation
+     *  documentation says to specify one or the other). */
+    public ConfigurationAggregator putConfigurationAggregator(String region, String name,
+            List<AccountAggregationSource> accountSources, OrganizationAggregationSource orgSource,
+            List<Map<String, String>> tagList) {
+        if (name == null || !AGGREGATOR_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ConfigurationAggregatorName must be 1-256 characters of letters, digits, '_' or '-'.", 400);
+        }
+        boolean hasAccounts = accountSources != null && !accountSources.isEmpty();
+        if (hasAccounts == (orgSource != null)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Specify exactly one of AccountAggregationSources or OrganizationAggregationSource.", 400);
+        }
+        if (hasAccounts) {
+            if (accountSources.size() > 1) {
+                throw new AwsException("InvalidParameterValueException",
+                        "AccountAggregationSources must contain at most 1 item.", 400);
+            }
+            List<String> ids = accountSources.get(0).accountIds();
+            if (ids == null || ids.isEmpty() || !ids.stream()
+                    .allMatch(id -> id != null && AUTHORIZED_ACCOUNT_ID_PATTERN.matcher(id).matches())) {
+                throw new AwsException("InvalidParameterValueException",
+                        "AccountIds must contain at least one 12 digit AWS account ID.", 400);
+            }
+        } else if (isBlank(orgSource.roleArn())) {
+            throw new AwsException("InvalidParameterValueException",
+                    "OrganizationAggregationSource requires a RoleArn.", 400);
+        }
+        synchronized (lockFor(aggregatorLockKey(region, name))) {
+            Map<String, ConfigurationAggregator> store = aggregatorsFor(region);
+            ConfigurationAggregator existing = store.get(name);
+            long now = now();
+            ConfigurationAggregator aggregator = existing != null
+                    ? new ConfigurationAggregator(name, existing.configurationAggregatorArn(),
+                            hasAccounts ? accountSources : null, orgSource, existing.creationTime(), now)
+                    : new ConfigurationAggregator(name,
+                            AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                                    "config-aggregator/config-aggregator-" + shortId()).toString(),
+                            hasAccounts ? accountSources : null, orgSource, now, now);
+            if (existing == null && tagList != null && !tagList.isEmpty()) {
+                applyTags(aggregator.configurationAggregatorArn(), tagList);
+            }
+            store.put(name, aggregator);
+            persistRegion(configurationAggregators, runtimeKey(region));
+            return aggregator;
+        }
+    }
+
+    public Paged<ConfigurationAggregator> describeConfigurationAggregators(String region, List<String> names,
+            Integer limit, String nextToken) {
+        if (names != null && names.size() > 10) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ConfigurationAggregatorNames must contain at most 10 items.", 400);
+        }
+        Map<String, ConfigurationAggregator> store = aggregatorsFor(region);
+        List<ConfigurationAggregator> result = new ArrayList<>();
+        if (names == null || names.isEmpty()) {
+            result.addAll(store.values());
+        } else {
+            for (String name : names) {
+                ConfigurationAggregator aggregator = store.get(name);
+                if (aggregator == null) {
+                    throw noSuchAggregator(name);
+                }
+                result.add(aggregator);
+            }
+        }
+        result.sort(Comparator.comparing(ConfigurationAggregator::configurationAggregatorName));
+        return paginate(result, limit, nextToken, 10, 100, "InvalidLimitException");
+    }
+
+    public void deleteConfigurationAggregator(String region, String name) {
+        synchronized (lockFor(aggregatorLockKey(region, name))) {
+            ConfigurationAggregator removed = aggregatorsFor(region).remove(name);
+            if (removed == null) {
+                throw noSuchAggregator(name);
+            }
+            persistRegion(configurationAggregators, runtimeKey(region));
+            tags.remove(removed.configurationAggregatorArn());
+        }
+    }
+
+    private static AwsException noSuchAggregator(String name) {
+        return new AwsException("NoSuchConfigurationAggregatorException",
+                "The configuration aggregator does not exist. Check the configuration aggregator name and try again.",
+                400);
+    }
+
+    private Map<String, ConfigurationAggregator> aggregatorsFor(String region) {
+        return configurationAggregators.computeIfAbsent(runtimeKey(region), r -> new ConcurrentHashMap<>());
+    }
+
+    private String aggregatorLockKey(String region, String name) {
+        return "config-aggregator|" + runtimeKey(region) + "|" + name;
+    }
+
     // --- Tagging ---
 
     /** TagResource, UntagResource and ListTagsForResource each model ResourceNotFoundException.
@@ -1089,6 +1202,18 @@ public class AwsConfigService {
                     AggregationAuthorization authorization = authorizationsFor(region)
                             .get(authorizationKey(authorizedAccountId, authorizedAwsRegion));
                     return authorization != null && arn.equals(authorization.aggregationAuthorizationArn());
+                };
+            }
+            case "config-aggregator" -> {
+                // An aggregator ARN carries its id, not its name, and the lock is keyed by name.
+                String aggregatorName = aggregatorsFor(region).values().stream()
+                        .filter(a -> arn.equals(a.configurationAggregatorArn()))
+                        .map(ConfigurationAggregator::configurationAggregatorName)
+                        .findFirst().orElse("");
+                lockKey = aggregatorLockKey(region, aggregatorName);
+                exists = () -> {
+                    ConfigurationAggregator a = aggregatorsFor(region).get(aggregatorName);
+                    return a != null && arn.equals(a.configurationAggregatorArn());
                 };
             }
             case "config-rule" -> {
