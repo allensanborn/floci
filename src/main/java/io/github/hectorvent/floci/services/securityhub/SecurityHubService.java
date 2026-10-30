@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -132,6 +131,8 @@ public class SecurityHubService implements Resettable {
                     "CIS AWS Foundations Benchmark v1.4.0", false, false),
             new Standard("standards/cis-aws-foundations-benchmark/v/3.0.0",
                     "CIS AWS Foundations Benchmark v3.0.0", false, false),
+            new Standard("standards/cis-aws-foundations-benchmark/v/5.0.0",
+                    "CIS AWS Foundations Benchmark v5.0.0", false, false),
             new Standard("standards/nist-800-53/v/5.0.0",
                     "NIST Special Publication 800-53 Revision 5", false, false),
             new Standard("standards/pci-dss/v/3.2.1", "PCI DSS v3.2.1", false, false),
@@ -141,13 +142,13 @@ public class SecurityHubService implements Resettable {
 
     public String standardsArn(String region, Standard standard) {
         return standard.global()
-                ? AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "securityhub", "", standard.path()).toString()
-                : AwsArnUtils.Arn.of("securityhub", region, "", standard.path()).toString();
+                ? AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "securityhub", "", standard.path()).toString()
+                : regionResolver.buildArn("securityhub", region, "", standard.path());
     }
 
     public String subscriptionArn(String region, Standard standard) {
-        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(),
-                "subscription/" + standard.path().substring(standard.path().indexOf('/') + 1)).toString();
+        return regionResolver.buildArn("securityhub", region,
+                "subscription/" + standard.path().substring(standard.path().indexOf('/') + 1));
     }
 
     /** BatchEnableStandards: subscribes each requested standard; enabling one twice is not an error. */
@@ -265,8 +266,8 @@ public class SecurityHubService implements Resettable {
         }
         String mode = requireLinkingMode(request);
         JsonNode regions = validateAggregatorRegions(mode, request.get("Regions"));
-        state.setAggregatorArn(AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(),
-                "finding-aggregator/" + UUID.randomUUID()).toString());
+        state.setAggregatorArn(regionResolver.buildArn("securityhub", region,
+                "finding-aggregator/" + UUID.randomUUID()));
         state.setRegionLinkingMode(mode);
         state.setRegions(regions);
         save(region, state);
@@ -635,11 +636,11 @@ public class SecurityHubService implements Resettable {
     }
 
     public String hubArn(String region) {
-        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "hub/default").toString();
+        return regionResolver.buildArn("securityhub", region, "hub/default");
     }
 
     public String policyArn(String region, String id) {
-        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "configuration-policy/" + id).toString();
+        return regionResolver.buildArn("securityhub", region, "configuration-policy/" + id);
     }
 
     private static SecurityHubState copyConfigurationState(SecurityHubState source) {
