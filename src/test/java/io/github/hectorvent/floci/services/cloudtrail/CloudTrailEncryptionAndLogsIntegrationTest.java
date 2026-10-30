@@ -24,6 +24,9 @@ class CloudTrailEncryptionAndLogsIntegrationTest {
     private static final String KEY = "arn:aws:kms:us-east-1:000000000000:key/0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7";
     private static final String GROUP = "arn:aws:logs:us-east-1:000000000000:log-group:/trail:*";
     private static final String ROLE = "arn:aws:iam::000000000000:role/trail-to-logs";
+    private static final String KEY2 = "arn:aws:kms:us-east-1:000000000000:key/9a8b7c6d-5e4f-3a2b-1c0d-e9f8a7b6c5d4";
+    private static final String GROUP2 = "arn:aws:logs:us-east-1:000000000000:log-group:/trail-2:*";
+    private static final String ROLE2 = "arn:aws:iam::000000000000:role/trail-to-logs-2";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -64,5 +67,74 @@ class CloudTrailEncryptionAndLogsIntegrationTest {
                 + GROUP + "\"}")
                 .statusCode(400)
                 .body(containsString("InvalidCloudWatchLogsRoleArnException"));
+    }
+
+    private static ValidatableResponse describe(String name) {
+        return call("DescribeTrails", "{\"trailNameList\":[\"" + name + "\"]}").statusCode(200);
+    }
+
+    private static void createWithEverything(String name) {
+        call("CreateTrail", "{\"Name\":\"" + name + "\",\"S3BucketName\":\"b\",\"KmsKeyId\":\"" + KEY
+                + "\",\"CloudWatchLogsLogGroupArn\":\"" + GROUP + "\",\"CloudWatchLogsRoleArn\":\"" + ROLE + "\"}")
+                .statusCode(200);
+    }
+
+    @Test
+    void updateTrailSetsThenReplacesTheKmsKey() {
+        call("CreateTrail", "{\"Name\":\"kms-upd\",\"S3BucketName\":\"b\"}").statusCode(200);
+
+        call("UpdateTrail", "{\"Name\":\"kms-upd\",\"KmsKeyId\":\"" + KEY + "\"}").statusCode(200);
+        describe("kms-upd").body("trailList[0].KmsKeyId", equalTo(KEY));
+
+        call("UpdateTrail", "{\"Name\":\"kms-upd\",\"KmsKeyId\":\"" + KEY2 + "\"}").statusCode(200);
+        describe("kms-upd").body("trailList[0].KmsKeyId", equalTo(KEY2));
+    }
+
+    @Test
+    void updateTrailSetsThenReplacesCloudWatchLogsDelivery() {
+        call("CreateTrail", "{\"Name\":\"cwl-upd\",\"S3BucketName\":\"b\"}").statusCode(200);
+
+        call("UpdateTrail", "{\"Name\":\"cwl-upd\",\"CloudWatchLogsLogGroupArn\":\"" + GROUP
+                + "\",\"CloudWatchLogsRoleArn\":\"" + ROLE + "\"}").statusCode(200);
+        describe("cwl-upd")
+                .body("trailList[0].CloudWatchLogsLogGroupArn", equalTo(GROUP))
+                .body("trailList[0].CloudWatchLogsRoleArn", equalTo(ROLE));
+
+        call("UpdateTrail", "{\"Name\":\"cwl-upd\",\"CloudWatchLogsLogGroupArn\":\"" + GROUP2
+                + "\",\"CloudWatchLogsRoleArn\":\"" + ROLE2 + "\"}").statusCode(200);
+        describe("cwl-upd")
+                .body("trailList[0].CloudWatchLogsLogGroupArn", equalTo(GROUP2))
+                .body("trailList[0].CloudWatchLogsRoleArn", equalTo(ROLE2));
+    }
+
+    @Test
+    void updateTrailClearsBothCloudWatchLogsSettings() {
+        createWithEverything("cwl-clear");
+
+        call("UpdateTrail", "{\"Name\":\"cwl-clear\",\"CloudWatchLogsLogGroupArn\":\"\","
+                + "\"CloudWatchLogsRoleArn\":\"\"}").statusCode(200);
+        describe("cwl-clear")
+                .body("trailList[0].CloudWatchLogsLogGroupArn", nullValue())
+                .body("trailList[0].CloudWatchLogsRoleArn", nullValue())
+                .body("trailList[0].KmsKeyId", equalTo(KEY));
+    }
+
+    @Test
+    void updateTrailRefusesAHalfClearedPairAndKeepsTheTrail() {
+        createWithEverything("cwl-half");
+
+        call("UpdateTrail", "{\"Name\":\"cwl-half\",\"CloudWatchLogsLogGroupArn\":\"\","
+                + "\"CloudWatchLogsRoleArn\":\"" + ROLE2 + "\",\"KmsKeyId\":\"" + KEY2 + "\"}")
+                .statusCode(400)
+                .body(containsString("InvalidCloudWatchLogsLogGroupArnException"));
+        call("UpdateTrail", "{\"Name\":\"cwl-half\",\"CloudWatchLogsLogGroupArn\":\"" + GROUP2
+                + "\",\"CloudWatchLogsRoleArn\":\"\",\"KmsKeyId\":\"" + KEY2 + "\"}")
+                .statusCode(400)
+                .body(containsString("InvalidCloudWatchLogsRoleArnException"));
+
+        describe("cwl-half")
+                .body("trailList[0].KmsKeyId", equalTo(KEY))
+                .body("trailList[0].CloudWatchLogsLogGroupArn", equalTo(GROUP))
+                .body("trailList[0].CloudWatchLogsRoleArn", equalTo(ROLE));
     }
 }
