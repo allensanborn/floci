@@ -4,8 +4,6 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.path.xml.XmlPath;
-import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +12,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
@@ -188,10 +187,15 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_backsEachAddressWithAHeldEc2Interface() {
-        String vpc = ec2("CreateVpc", "CidrBlock", "10.77.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-        String subA = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1a")
+        String vpc = ec2("CreateVpc", "AKID", "us-east-1").formParam("CidrBlock", "10.77.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String subA = ec2("CreateSubnet", "AKID", "us-east-1").formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.77.1.0/24").formParam("AvailabilityZone", "us-east-1a")
+                .post("/").then().statusCode(200)
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
-        String subB = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.77.2.0/28", "AvailabilityZone", "us-east-1b")
+        String subB = ec2("CreateSubnet", "AKID", "us-east-1").formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.77.2.0/28").formParam("AvailabilityZone", "us-east-1b")
+                .post("/").then().statusCode(200)
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String sg = securityGroup(vpc, "ep-iface");
         // "Ip": null is a request that leaves the address to AWS, the same as one with no Ip.
@@ -221,15 +225,18 @@ class Route53ResolverIntegrationTest {
 
         // The endpoint holds its interfaces, so the account cannot delete one from under it.
         String held = describeInterfaces(subA).getString(ENI_ITEMS + "[0].networkInterfaceId");
-        given().header("Authorization", EC2_AUTH).formParam("Action", "DeleteNetworkInterface")
+        ec2("DeleteNetworkInterface", "AKID", "us-east-1")
                 .formParam("NetworkInterfaceId", held)
                 .when().post("/").then().statusCode(400);
     }
 
     @Test
     void createResolverEndpoint_explicitIpAnotherEndpointHoldsIsRefused_deleteFreesIt() {
-        String vpc = ec2("CreateVpc", "CidrBlock", "10.78.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.78.1.0/24", "AvailabilityZone", "us-east-1a")
+        String vpc = ec2("CreateVpc", "AKID", "us-east-1").formParam("CidrBlock", "10.78.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String sub = ec2("CreateSubnet", "AKID", "us-east-1").formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.78.1.0/24").formParam("AvailabilityZone", "us-east-1a")
+                .post("/").then().statusCode(200)
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String sg = securityGroup(vpc, "ep-taken");
         String first = createEndpoint("{\"Name\":\"ep-taken-1\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\""
@@ -262,15 +269,20 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_anAutomaticAddressDoesNotTakeOneRequestedLaterInTheList() {
-        String vpc = ec2("CreateVpc", "CidrBlock", "10.81.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
-        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.81.1.0/24", "AvailabilityZone", "us-east-1a")
+        String vpc = ec2("CreateVpc", "AKID", "us-east-1").formParam("CidrBlock", "10.81.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
+        String sub = ec2("CreateSubnet", "AKID", "us-east-1").formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.81.1.0/24").formParam("AvailabilityZone", "us-east-1a")
+                .post("/").then().statusCode(200)
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String sg = securityGroup(vpc, "ep-order");
         // A fresh subnet's first automatic address, which a later entry asks for explicitly.
-        String probe = ec2("CreateNetworkInterface", "SubnetId", sub)
+        String probe = ec2("CreateNetworkInterface", "AKID", "us-east-1").formParam("SubnetId", sub)
+                .post("/").then().statusCode(200)
                 .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
         String first = describeInterfaces(sub).getString(ENI_ITEMS + ".privateIpAddress");
-        ec2("DeleteNetworkInterface", "NetworkInterfaceId", probe);
+        ec2("DeleteNetworkInterface", "AKID", "us-east-1").formParam("NetworkInterfaceId", probe)
+                .post("/").then().statusCode(200);
         String next = first.substring(0, first.lastIndexOf('.') + 1)
                 + (Integer.parseInt(first.substring(first.lastIndexOf('.') + 1)) + 1);
 
@@ -286,9 +298,12 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_exhaustedSubnetIsRejectedAndStoresNothing() {
-        String vpc = ec2("CreateVpc", "CidrBlock", "10.80.0.0/16").extract().path("CreateVpcResponse.vpc.vpcId");
+        String vpc = ec2("CreateVpc", "AKID", "us-east-1").formParam("CidrBlock", "10.80.0.0/16")
+                .post("/").then().statusCode(200).extract().path("CreateVpcResponse.vpc.vpcId");
         // /28 = 16 addresses, minus 4 reserved at the bottom and 1 at the top = 11 assignable.
-        String sub = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.80.1.0/28", "AvailabilityZone", "us-east-1a")
+        String sub = ec2("CreateSubnet", "AKID", "us-east-1").formParam("VpcId", vpc)
+                .formParam("CidrBlock", "10.80.1.0/28").formParam("AvailabilityZone", "us-east-1a")
+                .post("/").then().statusCode(200)
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String sg = securityGroup(vpc, "ep-exhausted");
         String requests = String.join(",", Collections.nCopies(12, "{\"SubnetId\":\"" + sub + "\"}"));
@@ -304,16 +319,17 @@ class Route53ResolverIntegrationTest {
                 .body("ResolverEndpoints.findAll { it.Name == 'ep-exhausted' }.size()", equalTo(0));
     }
 
-    private static final String EC2_AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/ec2/aws4_request";
     private static final String ENI_ITEMS = "DescribeNetworkInterfacesResponse.networkInterfaceSet.item";
 
     private static String securityGroup(String vpc, String name) {
-        return ec2("CreateSecurityGroup", "GroupName", name, "GroupDescription", name, "VpcId", vpc)
+        return ec2("CreateSecurityGroup", "AKID", "us-east-1").formParam("GroupName", name)
+                .formParam("GroupDescription", name).formParam("VpcId", vpc).post("/").then().statusCode(200)
                 .extract().path("CreateSecurityGroupResponse.groupId");
     }
 
     private static XmlPath describeInterfaces(String subnet) {
-        return ec2("DescribeNetworkInterfaces", "Filter.1.Name", "subnet-id", "Filter.1.Value.1", subnet)
+        return ec2("DescribeNetworkInterfaces", "AKID", "us-east-1").formParam("Filter.1.Name", "subnet-id")
+                .formParam("Filter.1.Value.1", subnet).post("/").then().statusCode(200)
                 .extract().xmlPath();
     }
 
@@ -321,16 +337,6 @@ class Route53ResolverIntegrationTest {
         return given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
                 .header("Authorization", AUTH_HEADER).body(body)
                 .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
-    }
-
-    private static ValidatableResponse ec2(String action, String... values) {
-        RequestSpecification spec = given()
-                .header("Authorization", EC2_AUTH)
-                .formParam("Action", action);
-        for (int i = 0; i < values.length; i += 2) {
-            spec = spec.formParam(values[i], values[i + 1]);
-        }
-        return spec.when().post("/").then().statusCode(200);
     }
 
     private static String listIpAddresses(String endpointId) {

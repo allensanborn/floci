@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
@@ -118,7 +119,7 @@ class Route53ResolverEndpointInterfacesTest {
             }
         });
         delete.start();
-        delete.join(300);
+        ThreadStates.awaitBlockedOrDone(delete);
         release.countDown();
         create.join(10_000);
         delete.join(10_000);
