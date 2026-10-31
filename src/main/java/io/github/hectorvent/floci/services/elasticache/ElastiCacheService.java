@@ -2118,11 +2118,18 @@ public class ElastiCacheService implements ResourceProvider {
      * first request that seeded it; region-scope the user store if per-region ARNs matter.
      */
     private void ensureDefaultUser() {
-        if (users.get(DEFAULT_USER_ID).isEmpty()) {
-            ElastiCacheUser user = new ElastiCacheUser(DEFAULT_USER_ID, DEFAULT_USER_ID, AuthMode.NO_AUTH,
-                    List.of(), "on ~* +@all", "redis", "active", Instant.now());
-            user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + DEFAULT_USER_ID));
-            users.put(DEFAULT_USER_ID, user);
+        if (users.get(DEFAULT_USER_ID).isPresent()) {
+            return;
+        }
+        // re-checked under the lock ModifyUser holds, so a racing seed cannot overwrite its change
+        synchronized (userGroupLock) {
+            if (users.get(DEFAULT_USER_ID).isEmpty()) {
+                ElastiCacheUser user = new ElastiCacheUser(DEFAULT_USER_ID, DEFAULT_USER_ID, AuthMode.NO_AUTH,
+                        List.of(), "on ~* +@all", "redis", "active", Instant.now());
+                user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(),
+                        "user:" + DEFAULT_USER_ID));
+                users.put(DEFAULT_USER_ID, user);
+            }
         }
     }
 
