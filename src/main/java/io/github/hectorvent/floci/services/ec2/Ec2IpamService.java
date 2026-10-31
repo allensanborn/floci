@@ -23,12 +23,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -580,12 +582,30 @@ public class Ec2IpamService {
                 }
             }
         }
+        // scope/IPAM looked up only for the filters that need it, once per scope per request
+        Map<String, Optional<ScopeOfIpam>> scopes = new HashMap<>();
         return candidates.stream()
-                .filter(pool -> filters.stream().allMatch(f -> matchesPoolFilter(pool, f.getKey(), f.getValue())))
+                .filter(pool -> filters.stream().allMatch(f -> matchesPoolFilter(pool, f.getKey(), f.getValue(),
+                        () -> scopes.computeIfAbsent(pool.getIpamScopeId(), id -> scopeOfPool(pool)))))
                 .toList();
     }
 
-    private boolean matchesPoolFilter(IpamPool pool, String name, List<String> values) {
+    /** The pool's scope, resolved from the IPAM that owns the pool, which for a RAM-shared pool
+     *  lives in another account's partition than the caller's. Empty when that IPAM is gone. */
+    private Optional<ScopeOfIpam> scopeOfPool(IpamPool pool) {
+        Ipam ipam;
+        try {
+            ipam = requireOwnedIpam(pool.getRegion(), pool.getIpamId()).ipam();
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
+        return ipam.getScopes().stream()
+                .filter(s -> s.getIpamScopeId().equals(pool.getIpamScopeId()))
+                .findFirst().map(s -> new ScopeOfIpam(ipam, s));
+    }
+
+    private boolean matchesPoolFilter(IpamPool pool, String name, List<String> values,
+                                      Supplier<Optional<ScopeOfIpam>> scopeLookup) {
         if (name.startsWith("tag:")) {
             String key = name.substring("tag:".length());
             return pool.getTags().stream().anyMatch(t -> key.equals(t.getKey())
@@ -594,7 +614,6 @@ public class Ec2IpamService {
         if ("tag-key".equals(name)) {
             return pool.getTags().stream().anyMatch(t -> Ec2Service.matchesFilterValue(values, t.getKey()));
         }
-        Optional<ScopeOfIpam> scope = findScope(pool.getIpamScopeId());
         String value = switch (name) {
             case "address-family" -> pool.getAddressFamily();
             case "allocation-default-netmask-length" -> str(pool.getAllocationDefaultNetmaskLength());
@@ -602,12 +621,12 @@ public class Ec2IpamService {
             case "allocation-min-netmask-length" -> str(pool.getAllocationMinNetmaskLength());
             case "auto-import" -> String.valueOf(pool.isAutoImport());
             case "description" -> pool.getDescription();
-            case "ipam-arn" -> scope.map(s -> s.ipam().getIpamArn()).orElse(null);
+            case "ipam-arn" -> scopeLookup.get().map(s -> s.ipam().getIpamArn()).orElse(null);
             case "ipam-pool-id" -> pool.getIpamPoolId();
-            case "ipam-region" -> scope.map(s -> s.ipam().getRegion()).orElse(null);
-            case "ipam-scope-arn" -> scope.map(s -> s.scope().getIpamScopeArn()).orElse(null);
+            case "ipam-region" -> scopeLookup.get().map(s -> s.ipam().getRegion()).orElse(null);
+            case "ipam-scope-arn" -> scopeLookup.get().map(s -> s.scope().getIpamScopeArn()).orElse(null);
             case "ipam-scope-id" -> pool.getIpamScopeId();
-            case "ipam-scope-type" -> scope.map(s -> s.scope().getScopeType()).orElse(null);
+            case "ipam-scope-type" -> scopeLookup.get().map(s -> s.scope().getScopeType()).orElse(null);
             case "locale" -> pool.getLocale();
             case "pool-depth" -> String.valueOf(poolDepth(pool));
             case "source-ipam-pool-id" -> pool.getSourceIpamPoolId();
@@ -621,11 +640,17 @@ public class Ec2IpamService {
         return n == null ? null : String.valueOf(n);
     }
 
-    /** 1 for a top-level pool, the source pool's depth + 1 otherwise. */
+    /** 1 for a top-level pool, the source pool's depth + 1 otherwise. DeleteIpamPool can remove a
+     *  parent that still has children, so the chain stops at a missing ancestor: an orphan counts
+     *  as top-level rather than failing the whole DescribeIpamPools request. */
     private int poolDepth(IpamPool pool) {
         int depth = 1;
         for (IpamPool p = pool; p.getSourceIpamPoolId() != null && depth < 20; depth++) {
-            p = requirePool(p.getRegion(), p.getSourceIpamPoolId());
+            try {
+                p = requirePool(p.getRegion(), p.getSourceIpamPoolId());
+            } catch (AwsException e) {
+                break;
+            }
         }
         return depth;
     }

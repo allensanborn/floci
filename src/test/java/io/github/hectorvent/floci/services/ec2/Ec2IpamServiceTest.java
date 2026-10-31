@@ -25,7 +25,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class Ec2IpamServiceTest {
@@ -555,6 +560,55 @@ class Ec2IpamServiceTest {
 
         caller.set(workloadAccount);
         return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool);
+    }
+
+    @Test
+    void describingASharedPoolFiltersOnTheOwnersScopeAndIpam() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        List<String> id = List.of(fixture.pool().getIpamPoolId());
+        String scopeArn = fixture.ipam().getScopes().stream()
+                .filter(s -> s.getIpamScopeId().equals(fixture.pool().getIpamScopeId()))
+                .findFirst().orElseThrow().getIpamScopeArn();
+        BiFunction<String, String, Integer> count = (name, value) -> fixture.service()
+                .describeIpamPools(REGION, id, List.of(Map.entry(name, List.of(value)))).size();
+        assertEquals(1, count.apply("ipam-scope-type", "private"));
+        assertEquals(1, count.apply("ipam-scope-arn", scopeArn));
+        assertEquals(1, count.apply("ipam-arn", fixture.ipam().getIpamArn()));
+        assertEquals(1, count.apply("ipam-region", REGION));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void poolFieldFiltersDoNotScanTheIpamStore() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultAccountId()).thenReturn("000000000000");
+        InMemoryStorage<String, Ipam> ipams = spy(new InMemoryStorage<>());
+        Ec2IpamService spied = new Ec2IpamService(config,
+                ipams, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        Ipam ipam = spied.createIpam(REGION, null, List.of(REGION));
+        spied.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION, null, "ipv4", "d");
+        clearInvocations(ipams);
+        assertEquals(1, spied.describeIpamPools(REGION, List.of(), List.of(
+                Map.entry("locale", List.of(REGION)), Map.entry("description", List.of("d")),
+                Map.entry("address-family", List.of("ipv4")))).size());
+        verify(ipams, never()).scan(any());
+    }
+
+    @Test
+    void poolDepthFilterSurvivesADeletedParent() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        String scope = ipam.getPrivateDefaultScopeId();
+        IpamPool top = service.createIpamPool(REGION, scope, REGION, null, "ipv4", null);
+        IpamPool mid = service.createIpamPool(REGION, scope, REGION, top.getIpamPoolId(), "ipv4", null);
+        IpamPool leaf = service.createIpamPool(REGION, scope, REGION, mid.getIpamPoolId(), "ipv4", null);
+        service.deleteIpamPool(REGION, top.getIpamPoolId());
+        // depth counts the ancestors still present: mid is now top-level, leaf sits under it
+        List<IpamPool> depth1 = service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("pool-depth", List.of("1"))));
+        assertEquals(List.of(mid.getIpamPoolId()), depth1.stream().map(IpamPool::getIpamPoolId).toList());
+        List<IpamPool> depth2 = service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("pool-depth", List.of("2"))));
+        assertEquals(List.of(leaf.getIpamPoolId()), depth2.stream().map(IpamPool::getIpamPoolId).toList());
     }
 
     @Test
