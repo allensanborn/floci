@@ -661,6 +661,54 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void everyAccountHasTheBuiltInDefaultUser() {
+        ElastiCacheUser user = service.getUser("default");
+        assertEquals("default", user.getUserName());
+        assertEquals("redis", user.getEngine());
+        assertEquals("active", user.getStatus());
+        assertEquals("on ~* +@all", user.getAccessString());
+        assertEquals(AuthMode.NO_AUTH, user.getAuthMode());
+        assertEquals("arn:aws:elasticache:us-east-1:000000000000:user:default", user.getArn());
+        assertTrue(service.listUsers(null, null).stream().anyMatch(u -> "default".equals(u.getUserId())));
+        assertEquals(1, service.listUsers("default", null).size());
+        assertTrue(service.listUsers(null, "redis").stream().anyMatch(u -> "default".equals(u.getUserId())));
+        assertEquals("UserAlreadyExists", assertThrows(AwsException.class, () -> service.createUser(
+                "default", "default", AuthMode.NO_AUTH, List.of(), "on ~* +@all", "redis")).getErrorCode());
+    }
+
+    @Test
+    void theBuiltInDefaultUserJoinsARedisUserGroupAndCannotBeDeleted() {
+        service.createUser("app-user", "app", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis");
+        service.createUserGroup("with-default", "redis", List.of("default", "app-user"), "us-east-1");
+        assertEquals(Set.of("default", "app-user"), service.getUserGroup("with-default").getUserIds());
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteUser("default"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("default", service.getUser("default").getUserId());
+        assertTrue(service.getUserGroup("with-default").getUserIds().contains("default"));
+
+        // a custom user named default still replaces the built-in one in a group
+        service.createUser("my-default", "default", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis");
+        service.createUserGroup("custom-default", "redis", List.of("my-default"), "us-east-1");
+        assertEquals("DuplicateUserName", assertThrows(AwsException.class, () -> service.createUserGroup(
+                "both-defaults", "redis", List.of("default", "my-default"), "us-east-1")).getErrorCode());
+    }
+
+    @Test
+    void theBuiltInDefaultUserIsSeparatePerAccount() {
+        AtomicReference<String> account = new AtomicReference<>("111111111111");
+        ElastiCacheService svc = serviceWith(storageFollowing(account), containerManager, proxyManager,
+                clusterFormation);
+        svc.modifyUser("default", AuthMode.PASSWORD, List.of("secret"), null, null, null);
+        assertEquals(AuthMode.PASSWORD, svc.getUser("default").getAuthMode());
+
+        account.set("222222222222");
+        assertEquals(AuthMode.NO_AUTH, svc.getUser("default").getAuthMode());
+        assertEquals(1, svc.listUsers(null, null).size());
+    }
+
+    @Test
     void singleArgAuthFallsBackToGroupAuthToken() {
         service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, "group-token", "us-east-1");
 
