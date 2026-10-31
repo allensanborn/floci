@@ -318,6 +318,15 @@ class Ec2TransitGatewayVpcAttachmentIntegrationTest {
         assertThat(body, containsString("<resourceType>vpc</resourceType>"));
         assertThat(body, containsString("<state>enabled</state>"));
 
+        String attachedVpc = given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", attachment)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeTransitGatewayVpcAttachmentsResponse.transitGatewayVpcAttachments.item.vpcId");
+        assertThat(body, containsString("<resourceId>" + attachedVpc + "</resourceId>"));
+
         given()
             .formParam("Action", "DeleteTransitGatewayVpcAttachment")
             .formParam("TransitGatewayAttachmentId", attachment)
