@@ -93,6 +93,7 @@ import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -598,6 +599,50 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
         assertTrue(execs.stream().noneMatch(cmd -> Arrays.equals(cmd,
                 Ec2ContainerManager.metadataProxyInstallCommand())), "no IMDS setup exec for a protected start");
+    }
+
+    @Test
+    void startRunsTheImdsProxyAgainOnceItsDependenciesInstall() throws Exception {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
+        DockerClient dockerClient = mock(DockerClient.class);
+        List<String[]> execs = recordExecs(dockerClient);
+        // Unlike recordExecs alone, every exec here completes with exit 0, so the install
+        // succeeds and the setup goes on to start the proxy.
+        ExecCreateCmd execCreate = dockerClient.execCreateCmd(TEST_CONTAINER_ID);
+        ExecCreateCmdResponse created = mock(ExecCreateCmdResponse.class);
+        when(created.getId()).thenReturn("imds-exec");
+        doReturn(created).when(execCreate).exec();
+        ExecStartCmd execStart = mock(ExecStartCmd.class);
+        when(dockerClient.execStartCmd("imds-exec")).thenReturn(execStart);
+        when(execStart.exec(any())).thenAnswer(invocation -> {
+            ResultCallback<?> callback = invocation.getArgument(0);
+            callback.onComplete();
+            return callback;
+        });
+        InspectExecCmd inspectExec = mock(InspectExecCmd.class);
+        InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
+        when(inspectExecResponse.getExitCodeLong()).thenReturn(0L);
+        when(inspectExec.exec()).thenReturn(inspectExecResponse);
+        when(dockerClient.inspectExecCmd("imds-exec")).thenReturn(inspectExec);
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
+                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
+        when(inspect.exec()).thenReturn(response);
+        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, mock(Ec2MetadataServer.class));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-imds-proxy-restart");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("10.0.1.10");
+
+        manager.start(instance);
+
+        // The mocked resolver and config hand the setup a null host and port 0.
+        String[] proxyStart = Ec2ContainerManager.metadataProxyStartCommand(null, 0);
+        awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd, proxyStart)), Duration.ofSeconds(5));
     }
 
     /** Records every command exec'd in the test container; each exec then fails, which start tolerates. */
