@@ -631,7 +631,16 @@ class Ec2ContainerManagerTest {
         when(dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
         InspectContainerResponse response = vpcAttachedInspectResponse("10.0.1.10", "172.17.0.9");
         when(inspect.exec()).thenReturn(response);
-        Ec2ContainerManager manager = managerWith(lifecycleManager, dockerClient, mock(Ec2MetadataServer.class));
+        DockerHostResolver hostResolver = mock(DockerHostResolver.class);
+        when(hostResolver.resolve()).thenReturn("floci-imds-host");
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().imdsPort()).thenReturn(9169);
+        Ec2ContainerManager manager = new Ec2ContainerManager(
+                mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class), hostResolver, dockerClient, mock(PortAllocator.class), config,
+                mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class), mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-imds-proxy-restart");
@@ -640,8 +649,7 @@ class Ec2ContainerManagerTest {
 
         manager.start(instance);
 
-        // The mocked resolver and config hand the setup a null host and port 0.
-        String[] proxyStart = Ec2ContainerManager.metadataProxyStartCommand(null, 0);
+        String[] proxyStart = Ec2ContainerManager.metadataProxyStartCommand("floci-imds-host", 9169);
         awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd, proxyStart)), Duration.ofSeconds(5));
     }
 
