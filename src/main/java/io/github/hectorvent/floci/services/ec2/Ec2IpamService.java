@@ -597,6 +597,8 @@ public class Ec2IpamService {
         try {
             ipam = requireOwnedIpam(pool.getRegion(), pool.getIpamId()).ipam();
         } catch (AwsException e) {
+            LOG.debugv("IPAM {0} of pool {1} not found; scope filters match nothing: {2}",
+                    pool.getIpamId(), pool.getIpamPoolId(), e.getErrorCode());
             return Optional.empty();
         }
         return ipam.getScopes().stream()
@@ -649,6 +651,8 @@ public class Ec2IpamService {
             try {
                 p = requirePool(p.getRegion(), p.getSourceIpamPoolId());
             } catch (AwsException e) {
+                LOG.debugv("Source pool {0} of {1} not found; treating {1} as top-level: {2}",
+                        p.getSourceIpamPoolId(), p.getIpamPoolId(), e.getErrorCode());
                 break;
             }
         }
