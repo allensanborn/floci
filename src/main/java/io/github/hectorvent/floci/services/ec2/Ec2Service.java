@@ -9986,8 +9986,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return matchesTagFilter(image.getTags(), name, values, Ec2Service::matchesFilterValue);
     }
 
-    private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
-                                     BiPredicate<List<String>, String> valueMatcher) {
+    static boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
+                                    BiPredicate<List<String>, String> valueMatcher) {
         List<Tag> tags = resourceTags == null ? List.of() : resourceTags;
         if (filterName.startsWith("tag:")) {
             String key = filterName.substring("tag:".length());

@@ -608,13 +608,8 @@ public class Ec2IpamService {
 
     private boolean matchesPoolFilter(IpamPool pool, String name, List<String> values,
                                       Supplier<Optional<ScopeOfIpam>> scopeLookup) {
-        if (name.startsWith("tag:")) {
-            String key = name.substring("tag:".length());
-            return pool.getTags().stream().anyMatch(t -> key.equals(t.getKey())
-                    && Ec2Service.matchesFilterValue(values, t.getValue()));
-        }
-        if ("tag-key".equals(name)) {
-            return pool.getTags().stream().anyMatch(t -> Ec2Service.matchesFilterValue(values, t.getKey()));
+        if (name.startsWith("tag:") || "tag-key".equals(name)) {
+            return Ec2Service.matchesTagFilter(pool.getTags(), name, values, Ec2Service::matchesFilterValue);
         }
         String value = switch (name) {
             case "address-family" -> pool.getAddressFamily();

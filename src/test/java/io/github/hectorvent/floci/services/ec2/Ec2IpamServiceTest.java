@@ -290,6 +290,14 @@ class Ec2IpamServiceTest {
                 List.of(Map.entry("tag:Env", List.of("dev")))).size());
         assertEquals(1, service.describeIpamPools(REGION, List.of(),
                 List.of(Map.entry("tag-key", List.of("Env")))).size());
+        assertEquals(0, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag-key", List.of("Team")))).size());
+        assertEquals(1, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag:Env", List.of("pr*")))).size());
+        // a pool restored with a null tag list matches no tag filter instead of failing the request
+        pool.setTags(null);
+        assertEquals(0, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag:Env", List.of("prod")))).size());
     }
 
     @Test
