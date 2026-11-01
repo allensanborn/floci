@@ -2324,6 +2324,7 @@ public class ApiGatewayController {
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
         node.put("apiKeyRequired", m.isApiKeyRequired());
+        if (m.getOperationName() != null) node.put("operationName", m.getOperationName());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
         if (m.getAuthorizationScopes() != null && !m.getAuthorizationScopes().isEmpty()) {
             node.set("authorizationScopes", objectMapper.valueToTree(m.getAuthorizationScopes()));

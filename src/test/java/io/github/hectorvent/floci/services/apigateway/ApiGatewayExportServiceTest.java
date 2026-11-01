@@ -143,7 +143,7 @@ class ApiGatewayExportServiceTest {
     void unusedAuthorizerDoesNotBlockDefaultExportImportOrOverwrite(String kind, String format) {
         String apiId = protectedApi(kind);
         String rootId = service.getResources(REGION, apiId).get(0).getId();
-        service.putMethod(REGION, apiId, rootId, "GET", Map.of("authorizationType", "NONE"));
+        service.putMethodReplacing(REGION, apiId, rootId, "GET", Map.of("authorizationType", "NONE"));
         service.createDeployment(REGION, apiId, Map.of("stageName", "dev"));
         JsonNode document = service.exportRestApi(REGION, apiId, "dev", format, null);
         String restoredId = service.importRestApi(REGION, document.toString()).getId();

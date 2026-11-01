@@ -539,7 +539,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
         req.put("apiKeyRequired", Boolean.parseBoolean(ctx.resolveOrDefault(props, "ApiKeyRequired", "false")));
 
-        apiGatewayService.putMethod(region, apiId, resourceId, httpMethod, req);
+        apiGatewayService.putMethodReplacing(region, apiId, resourceId, httpMethod, req);
         // putMethod upper-cases the method, so a change of case alone names the same method. The
         // prior id stays, or the cleanup would delete the method as the one this update replaced.
         String physicalId = apiId + "-" + resourceId + "-" + httpMethod;
