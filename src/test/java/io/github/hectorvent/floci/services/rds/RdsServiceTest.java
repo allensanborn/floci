@@ -10839,7 +10839,7 @@ class RdsServiceTest {
                 "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of(), null, null, true,
                 new DbInstanceSettings(null, null, 0, null, null, null));
-        rdsService.createDbInstance("maria", "mariadb", "11.2", "admin", "password", "appdb",
+        rdsService.createDbInstance("mssql", "sqlserver-se", "15.00", "admin", "Password123!", null,
                 "db.t3.micro", 20, false, null, null, null, null, false);
 
         AwsException noSource = assertThrows(AwsException.class, () ->
@@ -10856,8 +10856,9 @@ class RdsServiceTest {
         assertTrue(backupsOff.getMessage().contains("Automated backups are not enabled"));
 
         AwsException otherEngine = assertThrows(AwsException.class, () ->
-                rdsService.createDbInstanceReadReplica(replicaRequest("r", "maria"), null));
+                rdsService.createDbInstanceReadReplica(replicaRequest("r", "mssql"), null));
         assertEquals("InvalidDBInstanceState", otherEngine.getErrorCode());
+        assertTrue(otherEngine.getMessage().contains("not supported for engine SQLSERVER"));
 
         AwsException replicaMode = assertThrows(AwsException.class, () ->
                 rdsService.createDbInstanceReadReplica(new ReadReplicaRequest("r", "primary",
@@ -10883,6 +10884,35 @@ class RdsServiceTest {
                     rdsService.createDbInstanceReadReplica(replicaRequest("r", source), null));
             assertEquals("DBInstanceNotFound", notFound.getErrorCode(), source);
         }
+    }
+
+    @Test
+    void createReadReplicaCopiesMysqlAndMariadbSourcesWithTheirOwnDumpTools() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 3306));
+        rdsService.createDbInstance("my", "mysql", "8.0.36", "admin", "secret", "appdb",
+                "db.t3.micro", 20, false, null, null, null, null, false);
+        rdsService.createDbInstance("maria", "mariadb", "11.2", "admin", "secret", "appdb",
+                "db.t3.micro", 20, false, null, null, null, null, false);
+        when(containerManager.createMysqlSnapshot("cont-my", DatabaseEngine.MYSQL, "admin", "secret"))
+                .thenReturn("MYDUMP");
+        when(containerManager.createMysqlSnapshot("cont-maria", DatabaseEngine.MARIADB, "admin", "secret"))
+                .thenReturn("MARIADUMP");
+
+        DbInstance my = rdsService.createDbInstanceReadReplica(replicaRequest("my-replica", "my"), null);
+        DbInstance maria = rdsService.createDbInstanceReadReplica(replicaRequest("maria-replica", "maria"), null);
+
+        assertEquals(DatabaseEngine.MYSQL, my.getEngine());
+        assertEquals(DbInstanceStatus.AVAILABLE, my.getStatus());
+        assertEquals("my", rdsService.getDbInstance("my-replica").getReadReplicaSourceDbInstanceIdentifier());
+        assertEquals(List.of("my-replica"), rdsService.getDbInstance("my").getReadReplicaDbInstanceIdentifiers());
+        assertEquals(DatabaseEngine.MARIADB, maria.getEngine());
+        verify(containerManager).restoreMysqlSnapshot(
+                "cont-my-replica", DatabaseEngine.MYSQL, "admin", "secret", "MYDUMP");
+        verify(containerManager).restoreMysqlSnapshot(
+                "cont-maria-replica", DatabaseEngine.MARIADB, "admin", "secret", "MARIADUMP");
+        verify(containerManager, never()).createPostgresSnapshot(any(), any());
     }
 
     @Test

@@ -1211,10 +1211,96 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        restoreDump(containerId, postgresRestoreScript(), sqlDump,
+                new String[]{"sh", "/tmp/restore.sh", effectiveUser}, "psql");
+    }
 
+    /**
+     * Dumps every user schema of a MySQL or MariaDB instance as its master user. The {@code mysql}
+     * system schema stays out of the dump, so restoring it never replaces the target's own grants:
+     * the master user and the auth proxy keep the credentials the target was created with.
+     */
+    public String createMysqlSnapshot(String containerId, DatabaseEngine engine,
+                                      String masterUsername, String masterPassword) {
+        String[] cmd = {"sh", "-c", mysqlDumpScript(engine), "sh",
+                mysqlEffectiveUser(masterUsername), masterPassword};
         try (Lease _ = holdContainer(containerId)) {
-            String restoreScript = postgresRestoreScript();
+            ContainerExec.Result result = execInContainer(containerId, cmd, 120);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException(mysqlDumpClient(engine) + " failed with exit code "
+                        + result.exitCode() + ": " + result.stderr());
+            }
+            return result.stdout();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create " + engine + " snapshot", e);
+        }
+    }
 
+    public void restoreMysqlSnapshot(String containerId, DatabaseEngine engine,
+                                     String masterUsername, String masterPassword, String sqlDump) {
+        restoreDump(containerId, mysqlRestoreScript(engine), sqlDump,
+                new String[]{"sh", "/tmp/restore.sh", mysqlEffectiveUser(masterUsername), masterPassword},
+                mysqlClient(engine));
+    }
+
+    /** A blank master user means root, whose password the images set to the master password. */
+    static String mysqlEffectiveUser(String masterUsername) {
+        return (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "root";
+    }
+
+    /** MariaDB images at or above 10.4 (Floci's floor is 10.11) ship only the mariadb-named clients. */
+    static String mysqlClient(DatabaseEngine engine) {
+        return engine == DatabaseEngine.MARIADB ? "mariadb" : "mysql";
+    }
+
+    static String mysqlDumpClient(DatabaseEngine engine) {
+        return engine == DatabaseEngine.MARIADB ? "mariadb-dump" : "mysqldump";
+    }
+
+    /**
+     * Run as {@code sh -c <script> sh <user> <password>}. The password travels in MYSQL_PWD, so it
+     * is never word-split or echoed in a client warning. TCP to 127.0.0.1 matches the master
+     * user's {@code '%'} host on both images.
+     */
+    static String mysqlDumpScript(DatabaseEngine engine) {
+        String client = mysqlClient(engine);
+        // ponytail: schema names are word-split into --databases; a name containing whitespace
+        // would break the dump. Switch to a per-schema loop if that ever matters.
+        return """
+                set -e
+                export MYSQL_PWD="$2"
+                DBS=$(%s -h127.0.0.1 -u"$1" -N -B -e "SELECT schema_name FROM information_schema.schemata \
+                WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')")
+                [ -n "$DBS" ] || exit 0
+                exec %s -h127.0.0.1 -u"$1" --single-transaction --routines --triggers --events \
+                  --databases $DBS
+                """.formatted(client, mysqlDumpClient(engine));
+    }
+
+    /**
+     * Exits 2 until the target's server accepts TCP connections, which {@link #restoreDump} retries.
+     * The images' first-boot temporary server runs with networking off, so a TCP answer means the
+     * real server is up and the master user's grants are in place.
+     */
+    static String mysqlRestoreScript(DatabaseEngine engine) {
+        String client = mysqlClient(engine);
+        return """
+                #!/bin/sh
+                export MYSQL_PWD="$2"
+                %s -h127.0.0.1 -u"$1" -e "SELECT 1" >/dev/null 2>&1 || exit 2
+                %s -h127.0.0.1 -u"$1" < /tmp/dump.sql
+                """.formatted(client, client);
+    }
+
+    /**
+     * Copies {@code dump.sql} and {@code restore.sh} into the container's /tmp and runs
+     * {@code cmd}, retrying for up to a minute while it exits 2 (server not accepting connections).
+     */
+    private void restoreDump(String containerId, String restoreScript, String sqlDump, String[] cmd,
+                             String client) {
+        try (Lease _ = holdContainer(containerId)) {
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
                 tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
@@ -1225,10 +1311,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
             byte[] archive = bos.toByteArray();
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
-                    "/tmp", "postgres-restore", out -> out.write(archive),
+                    "/tmp", client + "-restore", out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
-
-            String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
 
             ContainerExec.Result result = null;
             for (int i = 0; i < 60; i++) {
@@ -1243,19 +1327,19 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     Thread.sleep(1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
+                    throw new RuntimeException("Interrupted while restoring " + client + " snapshot", ie);
                 }
             }
 
             if (result == null || result.exitCode() != 0) {
                 String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException("psql restore failed with exit code "
+                throw new RuntimeException(client + " restore failed with exit code "
                         + (result != null ? result.exitCode() : -1) + ": " + errMsg);
             }
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("Failed to restore postgres snapshot", e);
+            throw new RuntimeException("Failed to restore " + client + " snapshot", e);
         }
     }
 
