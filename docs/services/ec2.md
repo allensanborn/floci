@@ -30,6 +30,11 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+It also includes the Graviton3 `m7g.medium`, `m7g.large`, `m7g.xlarge` and `m7g.2xlarge`
+types (1, 2, 4 and 8 vCPUs with 4 GiB of memory per vCPU, arm64, EBS-only, encryption in
+transit supported), with the interface and per-interface IPv4 limits of the
+[AWS general purpose specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html).
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
