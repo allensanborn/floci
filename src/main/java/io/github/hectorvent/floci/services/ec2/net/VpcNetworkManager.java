@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2.net;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
@@ -102,6 +103,7 @@ public class VpcNetworkManager {
     public static final String SERVICE_VALUE = "ec2";
     private static final ContainerStorageHelper.LabelAliases ALIASES = ContainerStorageHelper.NETWORK_LABEL_ALIASES;
     private static final String NAMESPACE_LABEL = "floci_namespace";
+    static final int FLOCI_GATEWAY_PRIORITY = -1;
 
     /**
      * Instance addresses start here inside each subnet slice. AWS reserves the first four
@@ -742,9 +744,14 @@ public class VpcNetworkManager {
             return;
         }
         try {
+            // Below the default priority of 0, so this network never takes Floci's default
+            // route. At equal priority Docker may move the default gateway to whichever network
+            // it prefers, and a published port stops answering once replies leave by the VPC
+            // bridge, so the response to the request in flight is lost.
             dockerClient.connectToNetworkCmd()
                     .withContainerId(containerId)
                     .withNetworkId(vpc.networkName)
+                    .withContainerNetwork(new GatewayPriorityNetwork(FLOCI_GATEWAY_PRIORITY))
                     .exec();
             vpc.flociContainerId = containerId;
             LOG.infov("Attached Floci container {0} to VPC network {1}", containerId, vpc.networkName);
@@ -1060,6 +1067,23 @@ public class VpcNetworkManager {
 
     private static String key(String region, String id) {
         return region + "::" + id;
+    }
+
+    /**
+     * docker-java's {@link ContainerNetwork} has no {@code GwPriority} (Engine API 1.48). Engines
+     * older than that ignore the field, which leaves them where they were before it was sent.
+     */
+    static final class GatewayPriorityNetwork extends ContainerNetwork {
+        @JsonProperty("GwPriority")
+        private final int gwPriority;
+
+        GatewayPriorityNetwork(int gwPriority) {
+            this.gwPriority = gwPriority;
+        }
+
+        int getGwPriority() {
+            return gwPriority;
+        }
     }
 
     private static final class VpcBinding {
