@@ -1539,6 +1539,46 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void mysqlSnapshotUsesTheEngineClientsAndDefaultsToRoot() {
+        assertEquals("mysql", RdsContainerManager.mysqlClient(DatabaseEngine.MYSQL));
+        assertEquals("mariadb", RdsContainerManager.mysqlClient(DatabaseEngine.MARIADB));
+        assertEquals("mysqldump", RdsContainerManager.mysqlDumpClient(DatabaseEngine.MYSQL));
+        assertEquals("mariadb-dump", RdsContainerManager.mysqlDumpClient(DatabaseEngine.MARIADB));
+        assertEquals("admin", RdsContainerManager.mysqlEffectiveUser("admin"));
+        assertEquals("root", RdsContainerManager.mysqlEffectiveUser(" "));
+        assertEquals("root", RdsContainerManager.mysqlEffectiveUser(null));
+
+        String maria = RdsContainerManager.mysqlDumpScript(DatabaseEngine.MARIADB);
+        assertTrue(maria.contains("exec mariadb-dump "));
+        assertTrue(maria.contains("$(mariadb "));
+        assertFalse(maria.contains("mysql -h"));
+        assertTrue(RdsContainerManager.mysqlRestoreScript(DatabaseEngine.MARIADB)
+                .contains("mariadb -h127.0.0.1 -u\"$1\" < /tmp/dump.sql"));
+    }
+
+    @Test
+    void mysqlDumpScriptCopiesUserSchemasButNotTheGrantTables() {
+        String script = RdsContainerManager.mysqlDumpScript(DatabaseEngine.MYSQL);
+
+        assertTrue(script.contains("export MYSQL_PWD=\"$2\""), "password via env, not argv");
+        assertTrue(script.contains("NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')"),
+                "the mysql schema holds the target's grants and must not be dumped");
+        assertTrue(script.contains("exec mysqldump -h127.0.0.1 -u\"$1\" --single-transaction --routines "
+                + "--triggers --events"));
+        assertTrue(script.contains("--databases $DBS"));
+        assertFalse(script.contains("--all-databases"));
+    }
+
+    @Test
+    void mysqlRestoreScriptExitsTwoUntilTheServerAcceptsTcp() {
+        String script = RdsContainerManager.mysqlRestoreScript(DatabaseEngine.MYSQL);
+
+        assertTrue(script.contains("mysql -h127.0.0.1 -u\"$1\" -e \"SELECT 1\" >/dev/null 2>&1 || exit 2"),
+                "exit 2 is what the restore loop retries on");
+        assertTrue(script.contains("mysql -h127.0.0.1 -u\"$1\" < /tmp/dump.sql"));
+    }
+
+    @Test
     void restoreScriptInterpolatesUser() {
         String script = RdsContainerManager.postgresRestoreScript();
 
