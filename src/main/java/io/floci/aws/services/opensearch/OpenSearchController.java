@@ -627,7 +627,7 @@ public class OpenSearchController {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private ObjectNode toDomainStatusNode(Domain domain) {
+    ObjectNode toDomainStatusNode(Domain domain) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ARN", domain.getArn());
         node.put("DomainId", domain.getDomainId());
@@ -636,6 +636,9 @@ public class OpenSearchController {
         node.put("Created", !domain.isProcessing());
         node.put("Processing", domain.isProcessing());
         node.put("Deleted", domain.isDeleted());
+        // The Terraform AWS provider's create waiter polls this, not Processing.
+        node.put("DomainProcessingStatus",
+                domain.isDeleted() ? "Deleting" : domain.isProcessing() ? "Creating" : "Active");
         String endpoint = domain.getEndpoint() != null ? domain.getEndpoint() : "";
         if (domain.getVpcOptions() == null) {
             node.put("Endpoint", endpoint);

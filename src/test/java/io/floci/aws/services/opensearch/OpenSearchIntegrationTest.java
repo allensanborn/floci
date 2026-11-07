@@ -33,6 +33,7 @@ class OpenSearchIntegrationTest {
             .body("DomainStatus.EngineVersion", equalTo("OpenSearch_2.11"))
             .body("DomainStatus.Processing", equalTo(false))
             .body("DomainStatus.Deleted", equalTo(false))
+            .body("DomainStatus.DomainProcessingStatus", equalTo("Active"))
             .body("DomainStatus.ARN", containsString("arn:aws:es:"))
             .body("DomainStatus.ARN", containsString(DOMAIN_NAME));
     }
@@ -562,7 +563,8 @@ class OpenSearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("DomainStatus.DomainName", equalTo(DOMAIN_NAME))
-            .body("DomainStatus.Deleted", equalTo(true));
+            .body("DomainStatus.Deleted", equalTo(true))
+            .body("DomainStatus.DomainProcessingStatus", equalTo("Deleting"));
     }
 
     @Test
