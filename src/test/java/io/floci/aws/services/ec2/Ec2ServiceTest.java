@@ -8656,7 +8656,7 @@ class Ec2ServiceTest {
                 String what = attachment ? "attachment" : "gateway";
                 if (attachment) {
                     assertTrue(service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of())
-                            .isEmpty(), what + " trial " + trial + ": tagging put the deleted record back");
+                            .stream().allMatch(a -> "deleted".equals(a.getState())), what + " trial " + trial + ": tagging put the deleted record back");
                 } else {
                     assertTrue(service.describeTransitGateways("us-east-1", List.of(), Map.of()).stream()
                                     .noneMatch(g -> g.getTransitGatewayId().equals(target)),
@@ -8690,6 +8690,29 @@ class Ec2ServiceTest {
         service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
         service.deleteSubnet("us-east-1", fixture[2]);
         service.deleteVpc("us-east-1", fixture[1]);
+    }
+
+    /**
+     * AWS keeps a deleted attachment describable; the provider's delete waiter polls for it. It
+     * must hold nothing, though: the gateway deletes, the VPC re-attaches, and it cannot be
+     * deleted or modified again.
+     */
+    @Test
+    void aDeletedVpcAttachmentStaysDescribableButReleasesEverything() {
+        Ec2Service service = prefixListService();
+        String[] fixture = attachmentFixture(service);
+        String attachmentId = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                fixture[1], List.of(fixture[2]), null, List.of()).getTransitGatewayAttachmentId();
+        service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
+
+        List<TransitGatewayVpcAttachment> described =
+                service.describeTransitGatewayVpcAttachments("us-east-1", List.of(attachmentId), Map.of());
+        assertEquals(List.of("deleted"), described.stream().map(TransitGatewayVpcAttachment::getState).toList());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId)).getErrorCode());
+
+        service.createTransitGatewayVpcAttachment("us-east-1", fixture[0], fixture[1],
+                List.of(fixture[2]), null, List.of());
     }
 
     /**
