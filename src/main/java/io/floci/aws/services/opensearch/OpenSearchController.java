@@ -627,7 +627,7 @@ public class OpenSearchController {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private ObjectNode toDomainStatusNode(Domain domain) {
+    ObjectNode toDomainStatusNode(Domain domain) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("ARN", domain.getArn());
         node.put("DomainId", domain.getDomainId());
