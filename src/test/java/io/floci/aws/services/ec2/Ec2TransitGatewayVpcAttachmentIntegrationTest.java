@@ -198,6 +198,16 @@ class Ec2TransitGatewayVpcAttachmentIntegrationTest {
         assertThat(body, not(containsString("subnetIds")));
         assertThat(body, not(containsString("tagSet")));
 
+        // Still describable, as the provider's delete waiter needs; only the state changed.
+        given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", attachmentId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayVpcAttachmentsResponse.transitGatewayVpcAttachments.item.state",
+                    equalTo("deleted"));
+
         given()
             .formParam("Action", "DeleteTransitGateway")
             .formParam("TransitGatewayId", transitGatewayId)
