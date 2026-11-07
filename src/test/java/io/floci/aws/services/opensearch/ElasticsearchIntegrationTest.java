@@ -67,6 +67,7 @@ class ElasticsearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("DomainStatus.ElasticsearchVersion", equalTo("7.10"))
+            .body("DomainStatus.DomainProcessingStatus", equalTo("Active"))
             .body("DomainStatus.ElasticsearchClusterConfig.InstanceType", equalTo("t3.small.elasticsearch"))
             .body("DomainStatus.EBSOptions.VolumeSize", equalTo(20));
     }
