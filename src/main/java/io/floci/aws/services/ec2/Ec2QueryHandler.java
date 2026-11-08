@@ -5543,7 +5543,7 @@ public class Ec2QueryHandler {
             if (eni.getAttachTime() != null) {
                 xml.elem("attachTime", eni.getAttachTime());
             }
-            xml.elem("deleteOnTermination", "true")
+            xml.elem("deleteOnTermination", String.valueOf(eni.isDeleteOnTermination()))
                     .end("attachment")
                     .start("privateIpAddressesSet")
                     .start("item")

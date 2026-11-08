@@ -376,6 +376,38 @@ class Ec2NetworkInterfaceIntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.attachment.instanceId",
                     equalTo(overrideInstanceId));
+
+        // DescribeInstances must agree with it: a supplied interface is not deleted with the
+        // instance, and a provider that reads true here plans to replace the instance.
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", overrideInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.deleteOnTermination", equalTo("false"));
+    }
+
+    @Test
+    @Order(27)
+    void aLaunchCreatedInterfaceIsDeletedWithTheInstance() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.networkInterfaceSet.item"
+                    + ".attachment.deleteOnTermination", equalTo("true"));
     }
 
     @Test

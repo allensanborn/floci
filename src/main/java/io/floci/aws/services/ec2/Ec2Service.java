@@ -4269,6 +4269,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             launchAttachment.setInstanceOwnerId(callerAccountId());
                             launchAttachment.setAttachTime(eni.getAttachTime());
                             launchAttachment.setDeleteOnTermination(false);
+                            eni.setDeleteOnTermination(false);
                             suppliedEni.setAttachment(launchAttachment);
                             suppliedEni.setStatus("in-use");
                             networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
@@ -15460,6 +15461,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         attached.setAttachmentId(attachment.getAttachmentId());
         attached.setDeviceIndex(deviceIndex);
         attached.setAttachTime(attachment.getAttachTime());
+        attached.setDeleteOnTermination(attachment.isDeleteOnTermination());
         inst.getNetworkInterfaces().add(attached);
         instances.put(key(region, instanceId), inst);
         return attachment;
