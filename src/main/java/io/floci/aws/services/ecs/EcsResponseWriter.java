@@ -280,13 +280,15 @@ public class EcsResponseWriter {
             n.set("portMappings", pms);
         }
 
-        if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
+        // An explicit [] is echoed, not dropped: the Terraform provider keeps it in state and
+        // would otherwise plan "+ command = []" and replace the task definition.
+        if (def.getEntryPoint() != null) {
             n.set("entryPoint", stringArray(def.getEntryPoint()));
         }
-        if (def.getCommand() != null && !def.getCommand().isEmpty()) {
+        if (def.getCommand() != null) {
             n.set("command", stringArray(def.getCommand()));
         }
-        if (def.getEnvironment() != null && !def.getEnvironment().isEmpty()) {
+        if (def.getEnvironment() != null) {
             n.set("environment", keyValuePairsNode(def.getEnvironment()));
         }
         if (def.getEnvironmentFiles() != null && !def.getEnvironmentFiles().isEmpty()) {

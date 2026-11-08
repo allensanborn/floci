@@ -112,4 +112,29 @@ class EcsJsonHandlerCommandEntryPointTest {
         assertTrue(container.path("entryPoint").isMissingNode(), "entryPoint must stay absent");
         assertTrue(container.path("command").isMissingNode(), "command must stay absent");
     }
+
+    @Test
+    void explicitEmptyCommandEntryPointAndEnvironmentAreEchoed() throws Exception {
+        // The Terraform AWS provider keeps these as [] in state and plans "+ command = []"
+        // (forcing replacement) when the read-back drops them.
+        String requestJson = """
+                {
+                  "family": "empty-lists-family",
+                  "containerDefinitions": [
+                    {"name": "app", "image": "alpine:latest",
+                     "command": [], "entryPoint": [], "environment": []}
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode container = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0);
+
+        for (String key : List.of("command", "entryPoint", "environment")) {
+            assertTrue(container.path(key).isArray() && container.path(key).isEmpty(),
+                    key + " must be echoed as []");
+        }
+    }
 }
