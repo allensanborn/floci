@@ -167,6 +167,18 @@ public class FlowLogService {
                                  String logDestination, String logGroupName,
                                  String deliverLogsPermissionArn,
                                  String logFormat, int maxAggregationInterval) {
+        return createFlowLog(region, resourceId, resourceType, trafficType, logDestinationType,
+                logDestination, logGroupName, deliverLogsPermissionArn, logFormat, maxAggregationInterval,
+                null, null, null);
+    }
+
+    public FlowLog createFlowLog(String region, String resourceId, String resourceType,
+                                 String trafficType, String logDestinationType,
+                                 String logDestination, String logGroupName,
+                                 String deliverLogsPermissionArn,
+                                 String logFormat, int maxAggregationInterval,
+                                 String fileFormat, Boolean hiveCompatiblePartitions,
+                                 Boolean perHourPartition) {
         String groupName = logGroupName != null ? logGroupName : logGroupFromArn(logDestination);
         FlowLog fl = new FlowLog();
         fl.setFlowLogId("fl-" + randomHex(17));
@@ -180,6 +192,13 @@ public class FlowLogService {
         fl.setBucketName(bucketFromArn(logDestination));
         fl.setLogFormat(logFormat);
         fl.setMaxAggregationInterval(maxAggregationInterval);
+        // AWS reports options only for an s3 destination, with plain-text/false/false when none were sent.
+        boolean s3 = "s3".equals(fl.getLogDestinationType());
+        if (s3 || fileFormat != null || hiveCompatiblePartitions != null || perHourPartition != null) {
+            fl.setDestinationFileFormat(fileFormat != null ? fileFormat : "plain-text");
+            fl.setHiveCompatiblePartitions(Boolean.TRUE.equals(hiveCompatiblePartitions));
+            fl.setPerHourPartition(Boolean.TRUE.equals(perHourPartition));
+        }
         fl.setRegion(region);
         fl.setAccountId(ec2Service.callerAccountId());
         flowLogs.put(fl.getFlowLogId(), fl);

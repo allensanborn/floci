@@ -29,6 +29,9 @@ public class FlowLog {
     private String deliverLogsPermissionArn; // IAM role ARN used for cloud-watch-logs delivery
     private String bucketName;       // resolved bucket name from the ARN
     private String logFormat;        // optional custom format string (default format used if null)
+    private String destinationFileFormat;        // plain-text | parquet; null when the destination takes no options
+    private Boolean hiveCompatiblePartitions;
+    private Boolean perHourPartition;
     private int maxAggregationInterval = 600; // seconds (60 or 600)
     private String region;
     private String accountId;
@@ -67,6 +70,15 @@ public class FlowLog {
 
     public String getLogFormat() { return logFormat; }
     public void setLogFormat(String logFormat) { this.logFormat = logFormat; }
+
+    public String getDestinationFileFormat() { return destinationFileFormat; }
+    public void setDestinationFileFormat(String destinationFileFormat) { this.destinationFileFormat = destinationFileFormat; }
+
+    public Boolean getHiveCompatiblePartitions() { return hiveCompatiblePartitions; }
+    public void setHiveCompatiblePartitions(Boolean hiveCompatiblePartitions) { this.hiveCompatiblePartitions = hiveCompatiblePartitions; }
+
+    public Boolean getPerHourPartition() { return perHourPartition; }
+    public void setPerHourPartition(Boolean perHourPartition) { this.perHourPartition = perHourPartition; }
 
     public int getMaxAggregationInterval() { return maxAggregationInterval; }
     public void setMaxAggregationInterval(int maxAggregationInterval) { this.maxAggregationInterval = maxAggregationInterval; }
