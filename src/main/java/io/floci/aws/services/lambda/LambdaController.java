@@ -697,7 +697,6 @@ public class LambdaController {
         Object weights = rc.get("AdditionalVersionWeights");
         if (!(weights instanceof Map)) return null;
         Map<String, Object> raw = (Map<String, Object>) weights;
-        if (raw.isEmpty()) return null;
         Map<String, Double> result = new HashMap<>();
         raw.forEach((k, v) -> result.put(k, ((Number) v).doubleValue()));
         return result;
