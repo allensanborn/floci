@@ -250,7 +250,8 @@ public class Route53Service implements Resettable {
 
     public synchronized CreateZoneResult createHostedZone(String name, String callerReference, String comment,
                                                            VpcAssociation vpcAssociation, String delegationSetId) {
-        String normalizedName = normalizeName(name);
+        // Route 53 stores alphabetic characters of a domain name lowercased
+        String normalizedName = normalizeRecordName(name);
 
         for (HostedZone existing : zoneStore.scan(k -> true)) {
             if (existing.getCallerReference().equals(callerReference)) {
