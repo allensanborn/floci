@@ -68,6 +68,17 @@ class Ec2FlowLogDestinationOptionsIntegrationTest {
     }
 
     @Test
+    void partialOptionsDefaultTheRest() {
+        String flowLogId = createS3FlowLog("DestinationOptions.FileFormat", "parquet");
+
+        ec2("DescribeFlowLogs", "FlowLogId.1", flowLogId)
+            .statusCode(200)
+            .body(ITEM + ".fileFormat", equalTo("parquet"))
+            .body(ITEM + ".hiveCompatiblePartitions", equalTo("false"))
+            .body(ITEM + ".perHourPartition", equalTo("false"));
+    }
+
+    @Test
     void anS3FlowLogWithoutOptionsReportsTheDefaults() {
         String flowLogId = createS3FlowLog();
 

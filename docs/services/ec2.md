@@ -1255,7 +1255,7 @@ Validation matches AWS behavior:
 
 | Action | Description |
 |--------|-------------|
-| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. A `vpc-flow-log` `TagSpecification` tags each one, and `DescribeFlowLogs` returns the tags. |
+| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. A `vpc-flow-log` `TagSpecification` tags each one, and `DescribeFlowLogs` returns the tags. `DestinationOptions` (`FileFormat`, `HiveCompatiblePartitions`, `PerHourPartition`) are stored and returned by `DescribeFlowLogs`; an `s3` flow log created without them reports `plain-text`, `false`, `false`, and a `cloud-watch-logs` flow log omits the element. |
 | DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
 | DeleteFlowLogs | Deletes the named flow logs. |
 
