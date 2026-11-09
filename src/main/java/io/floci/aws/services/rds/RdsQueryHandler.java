@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
@@ -1385,6 +1386,12 @@ public class RdsQueryHandler {
             if (backupRetentionPeriodParam != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
             }
+            if (params.getFirst("PreferredBackupWindow") != null || params.getFirst("PreferredMaintenanceWindow") != null
+                    || hasMemberKeys(params, "VpcSecurityGroupIds")) {
+                cluster = service.setClusterWindowsAndSecurityGroups(region, id,
+                        params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                        hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null);
+            }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1513,6 +1520,12 @@ public class RdsQueryHandler {
             }
             if (modifyBackupRetentionPeriod != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
+            }
+            if (params.getFirst("PreferredBackupWindow") != null || params.getFirst("PreferredMaintenanceWindow") != null
+                    || hasMemberKeys(params, "VpcSecurityGroupIds")) {
+                cluster = service.setClusterWindowsAndSecurityGroups(region, id,
+                        params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                        hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3293,7 +3306,7 @@ public class RdsQueryHandler {
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .elem("DeletionProtection", i.isDeletionProtection())
-           .raw(vpcSecurityGroupsXml(i))
+           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds()))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -3375,10 +3388,10 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    private String vpcSecurityGroupsXml(DbInstance i) {
-        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
+    private String vpcSecurityGroupsXml(List<String> ids) {
+        List<String> groupIds = ids.isEmpty()
                 ? List.of("sg-00000000")
-                : i.getVpcSecurityGroupIds();
+                : ids;
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
         for (String groupId : groupIds) {
             xml.start("VpcSecurityGroupMembership")
@@ -3525,14 +3538,11 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+           .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
         if (clusterParameterGroup != null) {
