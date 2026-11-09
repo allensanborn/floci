@@ -304,7 +304,10 @@ host port; for example, requesting `5432` with the default
 
 Set `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT=true` to make `Describe*` report the requested `Port`
 instead (for example so Terraform's `port` does not show a diff). The proxy still listens in the proxy
-range, so connect to that port; a restore without `Port` reports the proxy port.
+range, so connect to that port; a restore without `Port` reports the proxy port. With the flag on, IAM
+authentication tokens bind to the advertised port, while the managed master-user secret carries the
+connectable (proxy) port. A cluster member created without its own `Port` reports its cluster's
+requested port, as AWS does.
 
 When Docker publishes RDS proxy ports dynamically, set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to the
 hostname used by clients. Floci inspects its own container through the Docker socket and returns the
