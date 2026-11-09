@@ -816,6 +816,7 @@ public class Ec2QueryHandler {
         // the instance's primary interface (network_interface { network_interface_id = ... }).
         String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
         int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
+        Boolean networkInterfaceDeleteOnTermination = boolParam(p, "NetworkInterface.1.DeleteOnTermination");
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
         // With a primary interface spec the groups travel on it: Terraform's aws_instance sends that
@@ -948,7 +949,8 @@ public class Ec2QueryHandler {
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType), privateIpAddress, capacitySpecification);
+                "spot".equals(marketType), privateIpAddress, capacitySpecification,
+                networkInterfaceDeleteOnTermination);
 
         // The request's EbsOptimized wins over a launch template's. Applied after the launch, on this
         // API path only: CloudFormation, Auto Scaling and Fleet launches still read false. Passing it
@@ -5543,7 +5545,7 @@ public class Ec2QueryHandler {
             if (eni.getAttachTime() != null) {
                 xml.elem("attachTime", eni.getAttachTime());
             }
-            xml.elem("deleteOnTermination", "true")
+            xml.elem("deleteOnTermination", String.valueOf(eni.isDeleteOnTermination()))
                     .end("attachment")
                     .start("privateIpAddressesSet")
                     .start("item")

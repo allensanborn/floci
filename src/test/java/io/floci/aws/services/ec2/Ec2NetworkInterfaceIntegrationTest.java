@@ -376,6 +376,90 @@ class Ec2NetworkInterfaceIntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.attachment.instanceId",
                     equalTo(overrideInstanceId));
+
+        // DescribeInstances must agree with it: a supplied interface is not deleted with the
+        // instance, and a provider that reads true here plans to replace the instance.
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", overrideInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.deleteOnTermination", equalTo("false"));
+    }
+
+    @Test
+    @Order(27)
+    void aLaunchCreatedInterfaceIsDeletedWithTheInstance() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.networkInterfaceSet.item"
+                    + ".attachment.deleteOnTermination", equalTo("true"));
+    }
+
+    @Test
+    @Order(28)
+    void anExplicitDeleteOnTerminationOnASuppliedInterfaceIsHonoured() {
+        String eni = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        String id = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-amazonlinux2023")
+            .formParam("InstanceType", "t2.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("NetworkInterface.1.NetworkInterfaceId", eni)
+            .formParam("NetworkInterface.1.DeviceIndex", "0")
+            .formParam("NetworkInterface.1.DeleteOnTermination", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.deleteOnTermination", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", eni)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.attachment.deleteOnTermination",
+                    equalTo("true"));
     }
 
     @Test
@@ -471,7 +555,10 @@ class Ec2NetworkInterfaceIntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item."
-                    + "networkInterfaceSet.item.networkInterfaceId", hasItem(eni));
+                    + "networkInterfaceSet.item.networkInterfaceId", hasItem(eni))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.networkInterfaceSet.item"
+                    + ".find { it.networkInterfaceId == '" + eni + "' }.attachment.deleteOnTermination",
+                    equalTo("false"));
 
         // ... and the device index it now occupies is refused to a second interface.
         String second = given()
