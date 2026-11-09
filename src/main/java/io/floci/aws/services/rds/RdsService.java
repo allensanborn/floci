@@ -11550,6 +11550,24 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    /** Stores the windows and security groups a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
+    public synchronized DbCluster setClusterWindowsAndSecurityGroups(String region, String clusterId,
+            String backupWindow, String maintenanceWindow, List<String> vpcSecurityGroupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        if (backupWindow != null) {
+            cluster.setPreferredBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            cluster.setPreferredMaintenanceWindow(maintenanceWindow);
+        }
+        if (vpcSecurityGroupIds != null) {
+            cluster.setVpcSecurityGroupIds(new ArrayList<>(vpcSecurityGroupIds));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     /** Stores the KmsKeyId a CreateDBCluster request carries, which {@code createDbCluster} has no argument for. */
     public synchronized DbCluster setNewDbClusterKmsKeyId(String region, String clusterId, String kmsKeyId) {
         String effectiveRegion = effectiveRegion(region);

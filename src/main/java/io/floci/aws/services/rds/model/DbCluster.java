@@ -48,6 +48,10 @@ public class DbCluster {
     private boolean storageEncrypted;
     private int backupRetentionPeriod = 1;
     private String kmsKeyId;
+    // Null until CreateDBCluster or ModifyDBCluster names them; the emitted XML then falls back to defaults.
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
 
     private String dockerVolumeName;
     private String volumeId;
@@ -205,6 +209,17 @@ public class DbCluster {
 
     public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
     public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) {
+        this.preferredMaintenanceWindow = preferredMaintenanceWindow;
+    }
+
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) { this.vpcSecurityGroupIds = vpcSecurityGroupIds; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
