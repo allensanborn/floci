@@ -99,6 +99,15 @@ class Route53ServiceTest {
     }
 
     @Test
+    void hostedZonesByNameMatchesAMixedCaseQueryAgainstLowercaseStoredNames() {
+        Route53Service service = newService();
+        String id = service.createHostedZone("zone.example.com", "mixed-query", null, null).zone().getId();
+
+        assertEquals(List.of(id), service.listHostedZonesByName("Zone.Example.COM", 0).stream()
+                .map(HostedZone::getId).toList());
+    }
+
+    @Test
     void reversedDnsNameKeepsAnEscapedDotInsideItsLabel() {
         assertEquals("com.example.a\\.b.", Route53Service.reversedDnsName("a\\.b.example.com."));
     }

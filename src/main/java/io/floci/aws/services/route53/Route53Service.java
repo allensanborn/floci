@@ -379,7 +379,7 @@ public class Route53Service implements Resettable {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
         }
         if (dnsName != null && !dnsName.isEmpty()) {
-            String startName = reversedDnsName(normalizeName(dnsName));
+            String startName = reversedDnsName(dnsName);
             all.removeIf(zone -> {
                 int comparison = reversedDnsName(zone.getName()).compareTo(startName);
                 return comparison < 0 || (comparison == 0 && hostedZoneId != null && !hostedZoneId.isEmpty()
@@ -391,7 +391,7 @@ public class Route53Service implements Resettable {
     }
 
     static String reversedDnsName(String name) {
-        String normalized = normalizeName(name);
+        String normalized = normalizeRecordName(name);
         List<String> labels = new ArrayList<>();
         int labelStart = 0;
         boolean escaped = false;

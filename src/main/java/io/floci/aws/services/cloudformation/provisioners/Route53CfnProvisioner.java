@@ -627,9 +627,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
      * resolves.
      */
     private String zoneIdByName(String owner, String zoneName) {
-        String normalized = zoneName.endsWith(".") ? zoneName : zoneName + ".";
+        String normalized = Route53Service.normalizeRecordName(zoneName);
         List<HostedZone> matches = route53Service.listHostedZonesByName(zoneName, 0).stream()
-                .filter(zone -> normalized.equals(zone.getName()))
+                .filter(zone -> normalized.equals(Route53Service.normalizeRecordName(zone.getName())))
                 .toList();
         if (matches.size() == 1) {
             return matches.get(0).getId();

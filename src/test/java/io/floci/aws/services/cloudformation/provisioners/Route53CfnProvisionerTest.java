@@ -454,6 +454,27 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
+    void recordSetMatchesAMixedCaseHostedZoneNameAgainstTheLowercaseStoredZone() {
+        Route53Service service = mock(Route53Service.class);
+        // Route 53 stores zone names lowercased, so a template's mixed-case HostedZoneName must still match.
+        when(service.listHostedZonesByName("Example.COM.", 0)).thenReturn(List.of(
+                new HostedZone("Z999", "example.com.", "caller", null, (VpcAssociation) null)));
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode props = mapper.createObjectNode()
+                .put("HostedZoneName", "Example.COM.")
+                .put("Name", "www.example.com")
+                .put("Type", "A");
+        ProvisionContext context = new ProvisionContext(recordEngine(), "us-east-1", "623666680275", "dns-stack");
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+
+        new Route53CfnProvisioner(service).provision(resource, props, context);
+
+        verify(service).changeResourceRecordSets(eq("Z999"), any(), any());
+    }
+
+    @Test
     void recordSetRejectsAHostedZoneNameThatMatchesNoZone() {
         Route53Service service = mock(Route53Service.class);
         // The paginator returns a later-sorting zone, but none whose name actually equals the request.
