@@ -1658,6 +1658,66 @@ class RdsServiceTest {
     }
 
     @Test
+    void advertiseRequestedPortReportsRequestedInstancePortAndKeepsProxyInRange() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+
+        DbInstance instance = createInstanceWithPort("advertised", 5432);
+
+        assertEquals(5432, instance.getEndpoint().port());
+        assertTrue(instance.getProxyPort() >= 7000 && instance.getProxyPort() <= 7099);
+        assertEquals(5432, rdsService.getDbInstance("advertised").getEndpoint().port());
+    }
+
+    @Test
+    void advertiseRequestedPortReportsRequestedClusterPort() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+
+        rdsService.createDbCluster("advertised-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+
+        DbCluster cluster = rdsService.getDbCluster("advertised-cluster");
+        assertEquals(3306, cluster.getEndpoint().port());
+        assertEquals(3306, cluster.getReaderEndpoint().port());
+        assertTrue(cluster.getProxyPort() >= 7000 && cluster.getProxyPort() <= 7099);
+    }
+
+    @Test
+    void requestedPortOutsideProxyRangeIsReportedAsProxyPortWhenFlagOff() {
+        DbInstance instance = createInstanceWithPort("not-advertised", 5432);
+
+        assertEquals(instance.getProxyPort(), instance.getEndpoint().port());
+    }
+
+    @Test
+    void advertisedRequestedPortSurvivesRestart() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> clusters = new InMemoryStorage<>();
+        RdsService first = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        first.createDbInstance("restart-instance", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        first.createDbCluster("restart-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+
+        RdsService restarted = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        assertEquals(5432, restarted.getDbInstance("restart-instance").getEndpoint().port());
+        assertEquals(3306, restarted.getDbCluster("restart-cluster").getEndpoint().port());
+    }
+
+    private DbInstance createInstanceWithPort(String id, int port) {
+        return rdsService.createDbInstance(id, "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, port);
+    }
+
+    @Test
     void failedInstanceStorageDeleteRetainsRecordAndPortForRetry() {
         when(rdsConfig.proxyMaxPort()).thenReturn(7000);
         InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
