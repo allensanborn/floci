@@ -3964,6 +3964,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                     List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
                                     String privateIpAddress,
                                     LaunchTemplateData.CapacityReservationSpecification capacitySpecification) {
+        return runInstances(region, imageId, instanceType, minCount, maxCount, keyName,
+                securityGroupIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, availabilityZone,
+                metadataOptions, creditSpecificationCpuCredits, encodedUserData, dryRun, hostId, tenancy,
+                blockDeviceMappings, spot, privateIpAddress, capacitySpecification, null);
+    }
+
+    public Reservation runInstances(String region, String imageId, String instanceType,
+                                    int minCount, int maxCount, String keyName,
+                                    List<String> securityGroupIds, String subnetId,
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn,
+                                    Boolean associatePublicIp, String networkInterfaceId,
+                                    int networkInterfaceDeviceIndex, String availabilityZone,
+                                    LaunchTemplateData.MetadataOptions metadataOptions,
+                                    String creditSpecificationCpuCredits, String encodedUserData, boolean dryRun,
+                                    String hostId, String tenancy,
+                                    List<LaunchTemplateData.BlockDeviceMapping> blockDeviceMappings, boolean spot,
+                                    String privateIpAddress,
+                                    LaunchTemplateData.CapacityReservationSpecification capacitySpecification,
+                                    Boolean networkInterfaceDeleteOnTermination) {
         String capacityPreference = capacitySpecification == null
                 || capacitySpecification.getCapacityReservationPreference() == null ? "open"
                 : capacitySpecification.getCapacityReservationPreference();
@@ -4253,6 +4274,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         if (inst.getLaunchTime() != null) {
                             eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
                         }
+                        // AWS defaults it to false for an interface the caller supplied, true for one
+                        // the launch creates; an explicit request value wins either way.
+                        eni.setDeleteOnTermination(networkInterfaceDeleteOnTermination != null
+                                ? networkInterfaceDeleteOnTermination : suppliedEni == null);
                         inst.getNetworkInterfaces().add(eni);
                         if (suppliedEni != null) {
                             // The standalone record stays authoritative rather than being folded into the
@@ -4268,8 +4293,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             launchAttachment.setInstanceId(instanceId);
                             launchAttachment.setInstanceOwnerId(callerAccountId());
                             launchAttachment.setAttachTime(eni.getAttachTime());
-                            launchAttachment.setDeleteOnTermination(false);
-                            eni.setDeleteOnTermination(false);
+                            launchAttachment.setDeleteOnTermination(eni.isDeleteOnTermination());
                             suppliedEni.setAttachment(launchAttachment);
                             suppliedEni.setStatus("in-use");
                             networkInterfaces.put(key(region, suppliedEni.getNetworkInterfaceId()), suppliedEni);
