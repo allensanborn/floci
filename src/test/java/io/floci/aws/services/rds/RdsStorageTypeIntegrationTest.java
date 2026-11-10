@@ -96,6 +96,41 @@ class RdsStorageTypeIntegrationTest {
         }
     }
 
+    private static List<String> described(String id, String field) {
+        return query("DescribeDBInstances").formParam("DBInstanceIdentifier", id).post("/").xmlPath().getList(
+                "DescribeDBInstancesResponse.DescribeDBInstancesResult.DBInstances.DBInstance." + field);
+    }
+
+    @Test
+    void iopsAndStorageThroughputAreStoredAndTheGp3BaselineFillsOmissions() {
+        String gp2 = "storage-iops-gp2";
+        String gp3 = "storage-iops-gp3";
+        String io1 = "storage-iops-io1";
+        try {
+            create(gp2).formParam("StorageType", "gp2").post("/").then().statusCode(200);
+            create(gp3).formParam("StorageType", "gp3").post("/").then().statusCode(200);
+            create(io1).formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            assertAll(() -> assertTrue(described(gp2, "Iops").isEmpty()),
+                    () -> assertTrue(described(gp2, "StorageThroughput").isEmpty()),
+                    () -> assertEquals(List.of("3000"), described(gp3, "Iops")),
+                    () -> assertEquals(List.of("125"), described(gp3, "StorageThroughput")),
+                    () -> assertEquals(List.of("2000"), described(io1, "Iops")),
+                    () -> assertTrue(described(io1, "StorageThroughput").isEmpty()));
+
+            Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", gp3)
+                    .formParam("Iops", "6000").formParam("StorageThroughput", "250").post("/");
+            assertEquals(200, changed.statusCode(), changed.asString());
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", gp3)
+                    .formParam("BackupRetentionPeriod", "3").post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(List.of("6000"), described(gp3, "Iops")),
+                    () -> assertEquals(List.of("250"), described(gp3, "StorageThroughput")));
+        } finally {
+            delete(gp2);
+            delete(gp3);
+            delete(io1);
+        }
+    }
+
     @Test
     void modifyChangesTheTypeAndOmissionKeepsIt() {
         String id = "storage-type-modify";

@@ -882,7 +882,9 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
                 params.getFirst("StorageType"),
                 params.getFirst("CACertificateIdentifier"),
-                params.getFirst("LicenseModel"));
+                params.getFirst("LicenseModel"),
+                optionalInt(params.getFirst("Iops")),
+                optionalInt(params.getFirst("StorageThroughput")));
     }
 
     /**
@@ -3285,6 +3287,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("StorageType", i.getStorageType())
+           .elem("Iops", iops(i))
+           .elem("StorageThroughput", storageThroughput(i))
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
@@ -3375,6 +3379,18 @@ public class RdsQueryHandler {
                     .end("StatusInfos");
         }
         return xml.build();
+    }
+
+    // ponytail: the gp3 baseline below 400 GiB; the 12000 IOPS / 500 MiB/s tier above it is not modelled
+    private static String iops(DbInstance i) {
+        Integer v = i.getIops() != null ? i.getIops() : "gp3".equals(i.getStorageType()) ? 3000 : null;
+        return v == null ? null : v.toString();
+    }
+
+    private static String storageThroughput(DbInstance i) {
+        Integer v = i.getStorageThroughput() != null ? i.getStorageThroughput()
+                : "gp3".equals(i.getStorageType()) ? 125 : null;
+        return v == null ? null : v.toString();
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {
