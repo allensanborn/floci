@@ -66,6 +66,32 @@ class ApiGatewayV2IntegrationDescriptionTest {
     }
 
     @Test
+    void membersReturnedViaJson11() {
+        String amzJson = "application/x-amz-json-1.1";
+        String auth = "AWS4-HMAC-SHA256 Credential=test/20260519/us-east-1/apigatewayv2/aws4_request";
+        String apiId = given().contentType(amzJson)
+                .header("X-Amz-Target", "AmazonApiGatewayV2.CreateApi").header("Authorization", auth)
+                .body("{\"Name\":\"int-desc-json11\",\"ProtocolType\":\"HTTP\"}")
+                .when().post("/")
+                .then().statusCode(201).extract().path("ApiId");
+
+        String integrationId = given().contentType(amzJson)
+                .header("X-Amz-Target", "AmazonApiGatewayV2.CreateIntegration").header("Authorization", auth)
+                .body("{\"ApiId\":\"" + apiId + "\",\"IntegrationType\":\"HTTP_PROXY\","
+                        + "\"IntegrationUri\":\"https://example.com\",\"Description\":\"growth\"}")
+                .when().post("/")
+                .then().statusCode(201).extract().path("IntegrationId");
+
+        given().contentType(amzJson)
+                .header("X-Amz-Target", "AmazonApiGatewayV2.GetIntegration").header("Authorization", auth)
+                .body("{\"ApiId\":\"" + apiId + "\",\"IntegrationId\":\"" + integrationId + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo("growth"))
+                .body("ConnectionType", equalTo("INTERNET"));
+    }
+
+    @Test
     void integrationSubtypeRoundTrips() {
         String apiId = given().contentType(ContentType.JSON)
                 .body("{\"name\":\"int-subtype\",\"protocolType\":\"HTTP\"}")
