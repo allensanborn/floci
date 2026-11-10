@@ -21,6 +21,9 @@ public class UpdateClusterConfigRequest {
     @JsonProperty("accessConfig")
     private AccessConfig accessConfig;
 
+    @JsonProperty("kubernetesNetworkConfig")
+    private KubernetesNetworkConfig kubernetesNetworkConfig;
+
     @JsonProperty("clientRequestToken")
     private String clientRequestToken;
 
@@ -35,6 +38,9 @@ public class UpdateClusterConfigRequest {
 
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
+    public KubernetesNetworkConfig getKubernetesNetworkConfig() { return kubernetesNetworkConfig; }
+    public void setKubernetesNetworkConfig(KubernetesNetworkConfig kubernetesNetworkConfig) { this.kubernetesNetworkConfig = kubernetesNetworkConfig; }
 
     public String getClientRequestToken() { return clientRequestToken; }
     public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }

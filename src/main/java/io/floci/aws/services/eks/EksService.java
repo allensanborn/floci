@@ -1,9 +1,12 @@
 package io.floci.aws.services.eks;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.CidrCanonicalizer;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -89,6 +92,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
 
+    private static final ObjectMapper UPDATE_PARAM_MAPPER = new ObjectMapper();
+
     /** UpdateClusterConfig members stored verbatim, mapped to the Update type each reports. */
     private static final Map<String, String> PASSTHROUGH_UPDATE_TYPES = Map.ofEntries(
             Map.entry("upgradePolicy", "UpgradePolicyUpdate"),
@@ -97,8 +102,6 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Map.entry("remoteNetworkConfig", "RemoteNetworkConfigUpdate"),
             Map.entry("computeConfig", "AutoModeUpdate"),
             Map.entry("storageConfig", "AutoModeUpdate"),
-            // Part of the Auto Mode trio the provider sends together; typed on the cluster, so not stored here.
-            Map.entry("kubernetesNetworkConfig", "AutoModeUpdate"),
             Map.entry("controlPlaneScalingConfig", "ControlPlaneScalingConfigUpdate"),
             Map.entry("kubeApiServerConfig", "ControlPlaneComponentConfigUpdate"),
             Map.entry("kubeSchedulerConfig", "ControlPlaneComponentConfigUpdate"),
@@ -901,115 +904,37 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     private Update applyClusterConfigUpdate(String name, UpdateClusterConfigRequest request) {
         Cluster cluster = describeCluster(name);
-        if (cluster.getStatus() != ClusterStatus.ACTIVE) {
+        if (cluster.getStatus() != ClusterStatus.ACTIVE || isClusterDeleting(regionResolver.getAccountId(), cluster)) {
             throw new AwsException("ResourceInUseException",
                     "Cluster " + name + " is " + cluster.getStatus() + ", not ACTIVE", 409);
         }
-        validateClusterConfigUpdate(cluster, request);
-        String type = null;
-        List<UpdateParam> params = new ArrayList<>();
-
-        ResourcesVpcConfig vpc = request.getResourcesVpcConfig();
-        if (vpc != null) {
-            ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
-            if (vpc.getEndpointPrivateAccess() != null || vpc.getEndpointPublicAccess() != null
-                    || vpc.getPublicAccessCidrs() != null) {
-                type = "EndpointAccessUpdate";
-                if (vpc.getEndpointPrivateAccess() != null) {
-                    current.setEndpointPrivateAccess(vpc.getEndpointPrivateAccess());
-                    params.add(new UpdateParam("EndpointPrivateAccess", vpc.getEndpointPrivateAccess().toString()));
-                }
-                if (vpc.getEndpointPublicAccess() != null) {
-                    current.setEndpointPublicAccess(vpc.getEndpointPublicAccess());
-                    params.add(new UpdateParam("EndpointPublicAccess", vpc.getEndpointPublicAccess().toString()));
-                }
-                if (vpc.getPublicAccessCidrs() != null) {
-                    current.setPublicAccessCidrs(vpc.getPublicAccessCidrs());
-                    params.add(new UpdateParam("PublicAccessCidrs", String.join(",", vpc.getPublicAccessCidrs())));
-                }
-            }
-            if (vpc.getSubnetIds() != null || vpc.getSecurityGroupIds() != null) {
-                type = type != null ? type : "VpcConfigUpdate";
-                if (vpc.getSubnetIds() != null) {
-                    String vpcId = validateSubnetsAndResolveVpcId(regionResolver.getRegion(), vpc);
-                    if (vpcId != null && !current.getVpcId().isBlank() && !vpcId.equals(current.getVpcId())) {
-                        throw new AwsException("InvalidParameterException",
-                                "Subnets must be in the cluster's VPC " + current.getVpcId(), 400);
-                    }
-                    current.setSubnetIds(vpc.getSubnetIds());
-                    params.add(new UpdateParam("Subnets", String.join(",", vpc.getSubnetIds())));
-                }
-                if (vpc.getSecurityGroupIds() != null) {
-                    current.setSecurityGroupIds(vpc.getSecurityGroupIds());
-                    params.add(new UpdateParam("SecurityGroups", String.join(",", vpc.getSecurityGroupIds())));
-                }
-            }
-        }
-
-        Logging requestedLogging = request.getLogging();
-        if (requestedLogging != null) {
-            Set<String> enabled = cluster.getLogging().getClusterLogging().stream()
-                    .filter(s -> Boolean.TRUE.equals(s.getEnabled()))
-                    .flatMap(s -> s.getTypes().stream())
-                    .collect(Collectors.toCollection(LinkedHashSet::new));
-            // A request naming no type (the provider always names all five) leaves the state as it is.
-            boolean namesTypes = requestedLogging.getClusterLogging() != null
-                    && requestedLogging.getClusterLogging().stream()
-                    .anyMatch(s -> s != null && s.getTypes() != null && !s.getTypes().isEmpty());
-            Logging merged = namesTypes ? buildLogging(requestedLogging, enabled) : cluster.getLogging();
-            cluster.setLogging(merged);
-            type = type != null ? type : "LoggingUpdate";
-            params.add(new UpdateParam("ClusterLogging", merged.getClusterLogging().stream()
-                    .map(s -> "{\"types\":[\"" + String.join("\",\"", s.getTypes()) + "\"],\"enabled\":"
-                            + s.getEnabled() + "}")
-                    .collect(Collectors.joining(",", "[", "]"))));
-        }
-
-        AccessConfig access = request.getAccessConfig();
-        if (access != null && access.authenticationMode() != null) {
-            if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(access.authenticationMode())) {
-                throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
-            }
-            AccessConfig existing = cluster.getAccessConfig();
-            cluster.setAccessConfig(new AccessConfig(access.authenticationMode(),
-                    existing == null ? null : existing.bootstrapClusterCreatorAdminPermissions()));
-            type = type != null ? type : "AccessConfigUpdate";
-            params.add(new UpdateParam("AuthenticationMode", access.authenticationMode()));
-        }
-
-        for (Map.Entry<String, Object> member : request.getOther().entrySet()) {
-            String memberType = PASSTHROUGH_UPDATE_TYPES.get(member.getKey());
-            if (memberType == null || member.getValue() == null) {
-                continue;
-            }
-            if (!"kubernetesNetworkConfig".equals(member.getKey())) {
-                cluster.putExtraConfig(member.getKey(), member.getValue());
-            }
-            type = type != null ? type : memberType;
-            params.add(new UpdateParam(Character.toUpperCase(member.getKey().charAt(0)) + member.getKey().substring(1),
-                    String.valueOf(member.getValue())));
-        }
-
-        if (type == null) {
-            throw new AwsException("InvalidParameterException",
-                    "The type for cluster update was not provided.", 400);
-        }
+        ClusterConfigChange change = planClusterConfigUpdate(cluster, request);
+        change.apply().accept(cluster);
         storage.put(cluster.getName(), cluster);
-        if (requestedLogging != null && clusterManager != null) {
+        if (request.getLogging() != null && clusterManager != null) {
             clusterManager.attachClusterLogsFromNow(cluster);
         }
-        return addons.recordClusterUpdate(cluster, type, params);
+        return addons.recordClusterUpdate(cluster, change.type(), change.params());
     }
 
-    /** Refuses a request AWS would: more than one update type, or both endpoint accesses off. */
-    private static void validateClusterConfigUpdate(Cluster cluster, UpdateClusterConfigRequest request) {
+    /** A validated UpdateClusterConfig request: the Update it reports and the change to apply. */
+    private record ClusterConfigChange(String type, List<UpdateParam> params, Consumer<Cluster> apply) {}
+
+    /**
+     * Validates the whole request and builds its change without touching {@code cluster}, so a request
+     * AWS would refuse leaves the stored cluster as it was. AWS allows one update type per request.
+     */
+    private ClusterConfigChange planClusterConfigUpdate(Cluster cluster, UpdateClusterConfigRequest request) {
         Set<String> types = new LinkedHashSet<>();
+        List<UpdateParam> params = new ArrayList<>();
+        List<Consumer<Cluster>> applies = new ArrayList<>();
+
         ResourcesVpcConfig vpc = request.getResourcesVpcConfig();
+        ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
         if (vpc != null) {
             if (vpc.getEndpointPrivateAccess() != null || vpc.getEndpointPublicAccess() != null
                     || vpc.getPublicAccessCidrs() != null) {
                 types.add("EndpointAccessUpdate");
-                ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
                 Boolean pub = vpc.getEndpointPublicAccess() != null
                         ? vpc.getEndpointPublicAccess() : current.getEndpointPublicAccess();
                 Boolean priv = vpc.getEndpointPrivateAccess() != null
@@ -1019,26 +944,148 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     throw new AwsException("InvalidParameterException",
                             "Endpoint public access and private access cannot both be disabled", 400);
                 }
+                if (vpc.getPublicAccessCidrs() != null) {
+                    validatePublicAccessCidrs(cluster, vpc.getPublicAccessCidrs());
+                }
+                if (vpc.getEndpointPrivateAccess() != null) {
+                    params.add(new UpdateParam("EndpointPrivateAccess", vpc.getEndpointPrivateAccess().toString()));
+                }
+                if (vpc.getEndpointPublicAccess() != null) {
+                    params.add(new UpdateParam("EndpointPublicAccess", vpc.getEndpointPublicAccess().toString()));
+                }
+                if (vpc.getPublicAccessCidrs() != null) {
+                    params.add(new UpdateParam("PublicAccessCidrs", json(vpc.getPublicAccessCidrs())));
+                }
+                applies.add(c -> {
+                    ResourcesVpcConfig v = c.getResourcesVpcConfig();
+                    if (vpc.getEndpointPrivateAccess() != null) {
+                        v.setEndpointPrivateAccess(vpc.getEndpointPrivateAccess());
+                    }
+                    if (vpc.getEndpointPublicAccess() != null) {
+                        v.setEndpointPublicAccess(vpc.getEndpointPublicAccess());
+                    }
+                    if (vpc.getPublicAccessCidrs() != null) {
+                        v.setPublicAccessCidrs(vpc.getPublicAccessCidrs());
+                    }
+                });
             }
             if (vpc.getSubnetIds() != null || vpc.getSecurityGroupIds() != null) {
                 types.add("VpcConfigUpdate");
+                if (vpc.getSubnetIds() != null) {
+                    String vpcId = validateSubnetsAndResolveVpcId(regionResolver.getRegion(), vpc);
+                    if (vpcId != null && !current.getVpcId().isBlank() && !vpcId.equals(current.getVpcId())) {
+                        throw new AwsException("InvalidParameterException",
+                                "Subnets must be in the cluster's VPC " + current.getVpcId(), 400);
+                    }
+                    params.add(new UpdateParam("Subnets", json(vpc.getSubnetIds())));
+                }
+                if (vpc.getSecurityGroupIds() != null) {
+                    params.add(new UpdateParam("SecurityGroups", json(vpc.getSecurityGroupIds())));
+                }
+                applies.add(c -> {
+                    if (vpc.getSubnetIds() != null) {
+                        c.getResourcesVpcConfig().setSubnetIds(vpc.getSubnetIds());
+                    }
+                    if (vpc.getSecurityGroupIds() != null) {
+                        c.getResourcesVpcConfig().setSecurityGroupIds(vpc.getSecurityGroupIds());
+                    }
+                });
+            }
+            String egress = vpc.getControlPlaneEgressMode();
+            if (egress != null) {
+                types.add("ControlPlaneEgressUpdate");
+                if (!Set.of("AWS_MANAGED", "CUSTOMER_ROUTED", "CUSTOMER_ISOLATED").contains(egress)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Invalid controlPlaneEgressMode: " + egress, 400);
+                }
+                params.add(new UpdateParam("ControlPlaneEgressMode", egress));
+                applies.add(c -> c.getResourcesVpcConfig().setControlPlaneEgressMode(egress));
             }
         }
-        if (request.getLogging() != null) {
+
+        Logging requestedLogging = request.getLogging();
+        if (requestedLogging != null) {
             types.add("LoggingUpdate");
+            Set<String> enabled = cluster.getLogging().getClusterLogging().stream()
+                    .filter(s -> Boolean.TRUE.equals(s.getEnabled()))
+                    .flatMap(s -> s.getTypes().stream())
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            // A request naming no type (the provider always names all five) leaves the state as it is.
+            boolean namesTypes = requestedLogging.getClusterLogging() != null
+                    && requestedLogging.getClusterLogging().stream()
+                    .anyMatch(s -> s != null && s.getTypes() != null && !s.getTypes().isEmpty());
+            Logging merged = namesTypes ? buildLogging(requestedLogging, enabled) : cluster.getLogging();
+            params.add(new UpdateParam("ClusterLogging", json(merged.getClusterLogging())));
+            applies.add(c -> c.setLogging(merged));
         }
-        if (request.getAccessConfig() != null && request.getAccessConfig().authenticationMode() != null) {
+
+        AccessConfig access = request.getAccessConfig();
+        if (access != null && access.authenticationMode() != null) {
             types.add("AccessConfigUpdate");
-        }
-        request.getOther().forEach((key, value) -> {
-            String memberType = PASSTHROUGH_UPDATE_TYPES.get(key);
-            if (memberType != null && value != null) {
-                types.add(memberType);
+            if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(access.authenticationMode())) {
+                throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
             }
-        });
+            params.add(new UpdateParam("AuthenticationMode", access.authenticationMode()));
+            applies.add(c -> c.setAccessConfig(new AccessConfig(access.authenticationMode(),
+                    c.getAccessConfig() == null ? null : c.getAccessConfig().bootstrapClusterCreatorAdminPermissions())));
+        }
+
+        KubernetesNetworkConfig network = request.getKubernetesNetworkConfig();
+        if (network != null) {
+            // Only the Auto Mode member can change: the service CIDR and IP family are fixed at create.
+            types.add("AutoModeUpdate");
+            if (network.getElasticLoadBalancing() != null) {
+                params.add(new UpdateParam("KubernetesNetworkConfig",
+                        json(Map.of("elasticLoadBalancing", network.getElasticLoadBalancing()))));
+                applies.add(c -> {
+                    if (c.getKubernetesNetworkConfig() != null) {
+                        c.getKubernetesNetworkConfig().setElasticLoadBalancing(network.getElasticLoadBalancing());
+                    }
+                });
+            }
+        }
+
+        for (Map.Entry<String, Object> member : request.getOther().entrySet()) {
+            String memberType = PASSTHROUGH_UPDATE_TYPES.get(member.getKey());
+            if (memberType == null || member.getValue() == null) {
+                continue;
+            }
+            types.add(memberType);
+            params.add(new UpdateParam(Character.toUpperCase(member.getKey().charAt(0)) + member.getKey().substring(1),
+                    json(member.getValue())));
+            applies.add(c -> c.putExtraConfig(member.getKey(), member.getValue()));
+        }
+
+        if (types.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "The type for cluster update was not provided.", 400);
+        }
         // AWS's own text, seen in an InvalidParameterException when logging and endpoint access were sent together.
         if (types.size() > 1) {
             throw new AwsException("InvalidParameterException", "Only one type of update can be allowed.", 400);
+        }
+        return new ClusterConfigChange(types.iterator().next(), params, c -> applies.forEach(a -> a.accept(c)));
+    }
+
+    /** Every entry must be a CIDR with a prefix; IPv6 blocks only on an IPv6 cluster. */
+    private static void validatePublicAccessCidrs(Cluster cluster, List<String> cidrs) {
+        boolean ipv6Cluster = cluster.getKubernetesNetworkConfig() != null
+                && "ipv6".equals(cluster.getKubernetesNetworkConfig().getIpFamily());
+        for (String cidr : cidrs) {
+            if (cidr == null || CidrCanonicalizer.canonicalize(cidr).isEmpty()
+                    || (cidr.contains(":") && !ipv6Cluster)) {
+                throw new AwsException("InvalidParameterException",
+                        "Invalid publicAccessCidrs entry '" + cidr + "'"
+                                + (cidr != null && cidr.contains(":") ? ": IPv6 CIDRs need an ipv6 cluster" : ""), 400);
+            }
+        }
+    }
+
+    private static String json(Object value) {
+        try {
+            return UPDATE_PARAM_MAPPER.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
         }
     }
 
