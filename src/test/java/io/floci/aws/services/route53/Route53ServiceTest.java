@@ -101,8 +101,10 @@ class Route53ServiceTest {
     @Test
     void hostedZonesByNameMatchesAMixedCaseQueryAgainstLowercaseStoredNames() {
         Route53Service service = newService();
+        service.createHostedZone("apple.com", "before", null, null);
         String id = service.createHostedZone("zone.example.com", "mixed-query", null, null).zone().getId();
 
+        // apple.com sorts before zone.example.com, so an unlowercased start key would wrongly include it
         assertEquals(List.of(id), service.listHostedZonesByName("Zone.Example.COM", 0).stream()
                 .map(HostedZone::getId).toList());
     }
