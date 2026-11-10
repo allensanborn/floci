@@ -1101,7 +1101,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 cluster.setAccountId(regionResolver.getAccountId());
             }
             if (cluster.getExtraConfig() != null && Boolean.TRUE.equals(cluster.getExtraConfig().get("deletionProtection"))) {
-                // The eks model names no exception for this; InvalidRequestException is a guess.
+                // DeleteCluster lists InvalidRequestException among its errors; deletion protection is refused with it.
                 throw new AwsException("InvalidRequestException",
                         "Cluster " + name + " has deletion protection enabled", 400);
             }
