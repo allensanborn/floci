@@ -100,6 +100,22 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
     }
 
     @Test
+    void replayedConfigDoesNotCarryTheRequestsNamespaceOrWhitespace() {
+        String created = post("field-level-encryption", configBody(UUID.randomUUID().toString(), "ws", "P1"))
+                .asString();
+        String id = created.replaceAll("(?s).*<Id>([^<]+)</Id>.*", "$1");
+
+        for (String doc : new String[] {created, given().get(API + "field-level-encryption/" + id).asString()}) {
+            org.junit.jupiter.api.Assertions.assertEquals(1, doc.split("xmlns", -1).length - 1, doc);
+            org.junit.jupiter.api.Assertions.assertFalse(doc.contains("<?xml"), doc);
+            org.junit.jupiter.api.Assertions.assertFalse(doc.matches("(?s).*>\\s+<.*"), doc);
+        }
+        String config = given().get(API + "field-level-encryption/" + id + "/config").asString();
+        org.junit.jupiter.api.Assertions.assertFalse(config.contains("xmlns"), config);
+        org.junit.jupiter.api.Assertions.assertFalse(config.matches("(?s).*>\\s+<.*"), config);
+    }
+
+    @Test
     void updateReplacesTheStoredConfigAndChecksIfMatch() {
         String ref = UUID.randomUUID().toString();
         Response created = post("field-level-encryption", configBody(ref, "before", "P1"));
