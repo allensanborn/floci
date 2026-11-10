@@ -104,15 +104,51 @@ class EksUpdateClusterConfigIntegrationTest {
 
     @Test
     void storedMembersAreEchoedFromDescribeCluster() {
-        update("{\"upgradePolicy\":{\"supportType\":\"STANDARD\"},\"zonalShiftConfig\":{\"enabled\":true},"
-                + "\"remoteNetworkConfig\":{\"remoteNodeNetworks\":[{\"cidrs\":[\"10.1.0.0/16\"]}]}}")
+        update("{\"upgradePolicy\":{\"supportType\":\"STANDARD\"}}")
                 .then().statusCode(200).body("update.type", equalTo("UpgradePolicyUpdate"));
+        update("{\"zonalShiftConfig\":{\"enabled\":true}}").then().statusCode(200);
+        update("{\"remoteNetworkConfig\":{\"remoteNodeNetworks\":[{\"cidrs\":[\"10.1.0.0/16\"]}]}}")
+                .then().statusCode(200);
 
         given().when().get("/clusters/" + CLUSTER)
                 .then().statusCode(200)
                 .body("cluster.upgradePolicy.supportType", equalTo("STANDARD"))
                 .body("cluster.zonalShiftConfig.enabled", equalTo(true))
                 .body("cluster.remoteNetworkConfig.remoteNodeNetworks[0].cidrs[0]", equalTo("10.1.0.0/16"));
+    }
+
+    @Test
+    void autoModeTrioIsOneUpdateType() {
+        update("{\"computeConfig\":{\"enabled\":true},\"kubernetesNetworkConfig\":"
+                + "{\"elasticLoadBalancing\":{\"enabled\":true}},\"storageConfig\":{\"blockStorage\":{\"enabled\":true}}}")
+                .then().statusCode(200).body("update.type", equalTo("AutoModeUpdate"));
+    }
+
+    @Test
+    void moreThanOneUpdateTypeInARequestIsRejectedAndAppliesNothing() {
+        update("{\"logging\":{\"clusterLogging\":[{\"types\":[\"api\"],\"enabled\":true}]},"
+                + "\"resourcesVpcConfig\":{\"endpointPrivateAccess\":true}}")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterException"))
+                .body("message", equalTo("Only one type of update can be allowed."));
+
+        given().when().get("/clusters/" + CLUSTER)
+                .then().statusCode(200)
+                .body("cluster.resourcesVpcConfig.endpointPrivateAccess", equalTo(false))
+                .body("cluster.logging.clusterLogging.findAll { it.enabled == true }", hasSize(0));
+    }
+
+    @Test
+    void updateThatLeavesBothEndpointAccessesDisabledIsRejectedOnMergedValues() {
+        update("{\"resourcesVpcConfig\":{\"endpointPublicAccess\":false}}")
+                .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+        given().when().get("/clusters/" + CLUSTER)
+                .then().body("cluster.resourcesVpcConfig.endpointPublicAccess", equalTo(true));
+
+        update("{\"resourcesVpcConfig\":{\"endpointPrivateAccess\":true}}").then().statusCode(200);
+        update("{\"resourcesVpcConfig\":{\"endpointPublicAccess\":false}}").then().statusCode(200);
+        update("{\"resourcesVpcConfig\":{\"endpointPrivateAccess\":false}}")
+                .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
     }
 
     @Test

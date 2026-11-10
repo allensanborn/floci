@@ -2525,7 +2525,8 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
             assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
 
-            verify(copyCmd, never()).withHostResource(anyString());
+            // The audit policy is always injected now, so only key files must stay uninjected.
+            verify(copyCmd, never()).withHostResource(Mockito.argThat((String p) -> p.contains("keys")));
             assertFalse(Files.exists(tempDir.resolve("keys")));
         }
 
@@ -3884,6 +3885,41 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void disablingEveryLogTypeOnARunningClusterClosesItsLogHandle() throws Exception {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.startCluster(cluster);
+            assertEquals(mockHandle, manager.getLogHandle(cluster));
+
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), false))));
+            manager.attachClusterLogsFromNow(cluster);
+
+            verify(mockHandle).close();
+            assertNull(manager.getLogHandle(cluster));
+        }
+
+        @Test
+        void enablingApiLoggingOnARunningClusterStartsShippingFromNow() {
+            Cluster cluster = new Cluster();
+            cluster.setName("prod-cluster");
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), false))));
+            manager.startCluster(cluster);
+            assertNull(manager.getLogHandle(cluster));
+
+            cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
+            manager.attachClusterLogsFromNow(cluster);
+
+            verify(logStreamer).attachFromNowForAccount(
+                    eq("000000000000"),
+                    eq("container-id-123456789012345678901234567890"),
+                    eq("/aws/eks/prod-cluster/cluster"),
+                    eq("kube-apiserver-container-id-1234567890123456789"),
+                    eq("us-east-1"),
+                    eq("eks:prod-cluster"));
+        }
+
+        @Test
         void logHandleIsReleasedOnClusterStop() {
             Cluster cluster = new Cluster();
             cluster.setName("prod-cluster");
@@ -4031,7 +4067,7 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void clusterWithoutAuditLoggingDoesNotAddAuditArgsOrInjectPolicyFile(@TempDir Path tempDir) {
+        void clusterWithoutAuditLoggingStillStartsWithAuditArgsAndPolicyFile(@TempDir Path tempDir) {
             when(eks.dataPath()).thenReturn(tempDir.toString());
             DockerClient dockerClient = Mockito.mock(DockerClient.class);
             CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
@@ -4049,10 +4085,10 @@ class EksClusterManagerTest {
             verify(builder).withCmd(cmdCaptor.capture());
             List<String> cmd = cmdCaptor.getValue();
 
-            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-policy-file")));
-            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-log-path")));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-policy-file=/etc/audit-policy.yaml"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-path=/var/log/audit.log"));
 
-            verify(copyCmd, never()).withRemotePath("/etc");
+            verify(copyCmd).withRemotePath("/etc");
         }
 
         @Test

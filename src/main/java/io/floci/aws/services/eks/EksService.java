@@ -97,6 +97,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Map.entry("remoteNetworkConfig", "RemoteNetworkConfigUpdate"),
             Map.entry("computeConfig", "AutoModeUpdate"),
             Map.entry("storageConfig", "AutoModeUpdate"),
+            // Part of the Auto Mode trio the provider sends together; typed on the cluster, so not stored here.
+            Map.entry("kubernetesNetworkConfig", "AutoModeUpdate"),
             Map.entry("controlPlaneScalingConfig", "ControlPlaneScalingConfigUpdate"),
             Map.entry("kubeApiServerConfig", "ControlPlaneComponentConfigUpdate"),
             Map.entry("kubeSchedulerConfig", "ControlPlaneComponentConfigUpdate"),
@@ -890,11 +892,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      * a metadata-only create.
      */
     public Update updateClusterConfig(String name, UpdateClusterConfigRequest request) {
+        // Held for the whole update, as delete holds it, so the readiness poller or a node swap cannot
+        // write back a cluster record from before this change.
+        synchronized (capacityLock(regionResolver.getAccountId(), name)) {
+            return applyClusterConfigUpdate(name, request);
+        }
+    }
+
+    private Update applyClusterConfigUpdate(String name, UpdateClusterConfigRequest request) {
         Cluster cluster = describeCluster(name);
         if (cluster.getStatus() != ClusterStatus.ACTIVE) {
             throw new AwsException("ResourceInUseException",
                     "Cluster " + name + " is " + cluster.getStatus() + ", not ACTIVE", 409);
         }
+        validateClusterConfigUpdate(cluster, request);
         String type = null;
         List<UpdateParam> params = new ArrayList<>();
 
@@ -971,7 +982,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             if (memberType == null || member.getValue() == null) {
                 continue;
             }
-            cluster.putExtraConfig(member.getKey(), member.getValue());
+            if (!"kubernetesNetworkConfig".equals(member.getKey())) {
+                cluster.putExtraConfig(member.getKey(), member.getValue());
+            }
             type = type != null ? type : memberType;
             params.add(new UpdateParam(Character.toUpperCase(member.getKey().charAt(0)) + member.getKey().substring(1),
                     String.valueOf(member.getValue())));
@@ -982,7 +995,51 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     "The type for cluster update was not provided.", 400);
         }
         storage.put(cluster.getName(), cluster);
+        if (requestedLogging != null && clusterManager != null) {
+            clusterManager.attachClusterLogsFromNow(cluster);
+        }
         return addons.recordClusterUpdate(cluster, type, params);
+    }
+
+    /** Refuses a request AWS would: more than one update type, or both endpoint accesses off. */
+    private static void validateClusterConfigUpdate(Cluster cluster, UpdateClusterConfigRequest request) {
+        Set<String> types = new LinkedHashSet<>();
+        ResourcesVpcConfig vpc = request.getResourcesVpcConfig();
+        if (vpc != null) {
+            if (vpc.getEndpointPrivateAccess() != null || vpc.getEndpointPublicAccess() != null
+                    || vpc.getPublicAccessCidrs() != null) {
+                types.add("EndpointAccessUpdate");
+                ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
+                Boolean pub = vpc.getEndpointPublicAccess() != null
+                        ? vpc.getEndpointPublicAccess() : current.getEndpointPublicAccess();
+                Boolean priv = vpc.getEndpointPrivateAccess() != null
+                        ? vpc.getEndpointPrivateAccess() : current.getEndpointPrivateAccess();
+                if (!Boolean.TRUE.equals(pub) && !Boolean.TRUE.equals(priv)) {
+                    // The EKS user guide: private access must be enabled to disable public access.
+                    throw new AwsException("InvalidParameterException",
+                            "Endpoint public access and private access cannot both be disabled", 400);
+                }
+            }
+            if (vpc.getSubnetIds() != null || vpc.getSecurityGroupIds() != null) {
+                types.add("VpcConfigUpdate");
+            }
+        }
+        if (request.getLogging() != null) {
+            types.add("LoggingUpdate");
+        }
+        if (request.getAccessConfig() != null && request.getAccessConfig().authenticationMode() != null) {
+            types.add("AccessConfigUpdate");
+        }
+        request.getOther().forEach((key, value) -> {
+            String memberType = PASSTHROUGH_UPDATE_TYPES.get(key);
+            if (memberType != null && value != null) {
+                types.add(memberType);
+            }
+        });
+        // AWS's own text, seen in an InvalidParameterException when logging and endpoint access were sent together.
+        if (types.size() > 1) {
+            throw new AwsException("InvalidParameterException", "Only one type of update can be allowed.", 400);
+        }
     }
 
     public Cluster deleteCluster(String name) {
