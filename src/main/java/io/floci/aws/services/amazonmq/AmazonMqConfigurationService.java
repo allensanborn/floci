@@ -16,6 +16,7 @@ import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -25,7 +26,7 @@ import java.util.UUID;
 public class AmazonMqConfigurationService {
 
     private static final Set<String> ENGINES = Set.of("ACTIVEMQ", "RABBITMQ");
-    private static final int MAX_PAGE = 100;
+    static final int MAX_PAGE = 100;
 
     private final StorageBackend<String, MqConfiguration> storage;
     private final RegionResolver regionResolver;
@@ -49,7 +50,7 @@ public class AmazonMqConfigurationService {
         if (engineVersion == null || engineVersion.isBlank()) {
             throw new AwsException("BadRequestException", "EngineVersion is required.", 400);
         }
-        if (storage.scan(k -> true).stream().anyMatch(c -> c.name.equals(name))) {
+        if (inRegion().stream().anyMatch(c -> c.name.equals(name))) {
             throw new AwsException("ConflictException", "Configuration already exists: " + name, 409);
         }
         MqConfiguration c = new MqConfiguration();
@@ -59,7 +60,8 @@ public class AmazonMqConfigurationService {
         c.name = name;
         c.engineType = engineType.toUpperCase();
         c.engineVersion = engineVersion;
-        c.authenticationStrategy = authenticationStrategy;
+        // Configuration.AuthenticationStrategy is required in the model; SIMPLE is the default.
+        c.authenticationStrategy = authenticationStrategy == null ? "SIMPLE" : authenticationStrategy;
         c.created = Instant.now();
         if (tags != null) {
             c.tags.putAll(tags);
@@ -72,12 +74,12 @@ public class AmazonMqConfigurationService {
     }
 
     public MqConfiguration describe(String id) {
-        return storage.get(id).orElseThrow(() -> new AwsException("NotFoundException",
+        return storage.get(id).filter(this::isCurrentRegion).orElseThrow(() -> new AwsException("NotFoundException",
                 "Configuration not found: " + id, 404));
     }
 
     public PaginatedResult<MqConfiguration> list(Integer maxResults, String nextToken) {
-        return Pagination.paginate(storage.scan(k -> true), c -> c.id, maxResults, nextToken, MAX_PAGE,
+        return Pagination.paginate(inRegion(), c -> c.id, maxResults, nextToken, MAX_PAGE,
                 "BadRequestException");
     }
 
@@ -114,13 +116,22 @@ public class AmazonMqConfigurationService {
 
     /** The configuration whose ARN is {@code arn}, for the tag endpoints. */
     public MqConfiguration byArn(String arn) {
-        return storage.scan(k -> true).stream().filter(c -> c.arn.equals(arn)).findFirst()
+        return inRegion().stream().filter(c -> c.arn.equals(arn)).findFirst()
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Resource not found: " + arn, 404));
     }
 
     public void save(MqConfiguration c) {
         storage.put(c.id, c);
+    }
+
+    // The region lives in the ARN, as MskService does for its configurations.
+    private boolean isCurrentRegion(MqConfiguration c) {
+        return regionResolver.getRegion().equals(AwsArnUtils.regionOrDefault(c.arn, null));
+    }
+
+    private List<MqConfiguration> inRegion() {
+        return storage.scan(k -> true).stream().filter(this::isCurrentRegion).toList();
     }
 
     private static Revision revision(int number, String description, String data) {

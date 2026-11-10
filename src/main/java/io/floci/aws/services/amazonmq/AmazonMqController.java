@@ -59,10 +59,11 @@ public class AmazonMqController {
     @Path(CONFIGURATIONS)
     public Response listConfigurations(@QueryParam("maxResults") String maxResults,
                                        @QueryParam("nextToken") String nextToken) {
-        PaginatedResult<MqConfiguration> page = configurations.list(
-                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        Integer max = Pagination.parseMaxResults(maxResults, "BadRequestException");
+        PaginatedResult<MqConfiguration> page = configurations.list(max, nextToken);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("configurations", page.items().stream().map(AmazonMqController::configurationView).toList());
+        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.MAX_PAGE);
         if (page.nextToken() != null) {
             body.put("nextToken", page.nextToken());
         }
@@ -101,10 +102,11 @@ public class AmazonMqController {
     public Response listConfigurationRevisions(@PathParam("configuration-id") String id,
                                                @QueryParam("maxResults") String maxResults,
                                                @QueryParam("nextToken") String nextToken) {
-        PaginatedResult<Revision> page = configurations.revisions(id,
-                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        Integer max = Pagination.parseMaxResults(maxResults, "BadRequestException");
+        PaginatedResult<Revision> page = configurations.revisions(id, max, nextToken);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("configurationId", id);
+        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.MAX_PAGE);
         body.put("revisions", page.items().stream().map(AmazonMqController::revisionView).toList());
         if (page.nextToken() != null) {
             body.put("nextToken", page.nextToken());

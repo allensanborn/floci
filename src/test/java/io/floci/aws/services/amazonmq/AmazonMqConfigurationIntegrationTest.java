@@ -22,10 +22,35 @@ import static org.hamcrest.Matchers.startsWith;
 class AmazonMqConfigurationIntegrationTest {
 
     private static RequestSpecification signedFor(String service) {
+        return signedFor(service, "us-east-1");
+    }
+
+    private static RequestSpecification signedFor(String service, String region) {
         return given()
                 .contentType("application/json")
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/" + service
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260101/" + region + "/" + service
                         + "/aws4_request, SignedHeaders=host, Signature=x");
+    }
+
+    @Test
+    void configurationsAreScopedByRegion() {
+        String id = create("mq-cfg-region");
+
+        signedFor("mq", "eu-west-1")
+        .when().get("/v1/configurations").then().statusCode(200)
+            .body("configurations.id", not(hasItem(id)))
+            .body("maxResults", equalTo(100));
+        signedFor("mq", "eu-west-1")
+        .when().get("/v1/configurations/{id}", id).then().statusCode(404);
+        // The same name is free in another region.
+        signedFor("mq", "eu-west-1")
+            .body("{\"name\": \"mq-cfg-region\", \"engineType\": \"ACTIVEMQ\", \"engineVersion\": \"5.17.6\"}")
+        .when().post("/v1/configurations").then().statusCode(200)
+            .body("arn", containsString(":eu-west-1:"))
+            .body("authenticationStrategy", equalTo("SIMPLE"));
+        signedFor("mq")
+        .when().get("/v1/configurations").then().statusCode(200)
+            .body("configurations.id", hasItem(id));
     }
 
     private static String b64(String s) {
