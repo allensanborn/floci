@@ -63,7 +63,7 @@ public class AmazonMqController {
         PaginatedResult<MqConfiguration> page = configurations.list(max, nextToken);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("configurations", page.items().stream().map(AmazonMqController::configurationView).toList());
-        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.MAX_PAGE);
+        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.DEFAULT_PAGE);
         if (page.nextToken() != null) {
             body.put("nextToken", page.nextToken());
         }
@@ -106,7 +106,7 @@ public class AmazonMqController {
         PaginatedResult<Revision> page = configurations.revisions(id, max, nextToken);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("configurationId", id);
-        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.MAX_PAGE);
+        body.put("maxResults", max != null ? max : AmazonMqConfigurationService.DEFAULT_PAGE);
         body.put("revisions", page.items().stream().map(AmazonMqController::revisionView).toList());
         if (page.nextToken() != null) {
             body.put("nextToken", page.nextToken());
@@ -325,7 +325,7 @@ public class AmazonMqController {
         m.put("id", c.id);
         m.put("latestRevision", revisionView(c.latest()));
         m.put("name", c.name);
-        m.put("tags", c.tags);
+        m.put("tags", new LinkedHashMap<>(c.tags));
         return m;
     }
 

@@ -5,6 +5,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
@@ -39,7 +40,7 @@ class AmazonMqConfigurationIntegrationTest {
         signedFor("mq", "eu-west-1")
         .when().get("/v1/configurations").then().statusCode(200)
             .body("configurations.id", not(hasItem(id)))
-            .body("maxResults", equalTo(100));
+            .body("maxResults", equalTo(20));
         signedFor("mq", "eu-west-1")
         .when().get("/v1/configurations/{id}", id).then().statusCode(404);
         // The same name is free in another region.
@@ -155,6 +156,39 @@ class AmazonMqConfigurationIntegrationTest {
         .when().get("/v1/tags/{arn}", arn).then().statusCode(200)
             .body("tags.team", equalTo("a"))
             .body("tags.env", nullValue());
+    }
+
+    @Test
+    void createWithoutEngineVersionDefaultsIt() {
+        signedFor("mq").body("{\"name\": \"mq-cfg-nover\", \"engineType\": \"ACTIVEMQ\"}")
+        .when().post("/v1/configurations").then().statusCode(200)
+            .extract().path("id");
+        signedFor("mq")
+        .when().get("/v1/configurations").then().statusCode(200)
+            .body("configurations.find { it.name == 'mq-cfg-nover' }.engineVersion", equalTo("5.17.6"));
+    }
+
+    @Test
+    void updateWithInvalidBase64Is400() {
+        String id = create("mq-cfg-badb64");
+        signedFor("mq").body("{\"data\": \"not base64!\", \"description\": \"x\"}")
+        .when().put("/v1/configurations/{id}", id).then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    void createdIsIsoInstant() {
+        String id = create("mq-cfg-created");
+        String created = signedFor("mq").when().get("/v1/configurations/{id}", id).path("created");
+        Instant.parse(created);
+    }
+
+    @Test
+    void unknownRevisionIs404() {
+        String id = create("mq-cfg-norev");
+        signedFor("mq")
+        .when().get("/v1/configurations/{id}/revisions/99", id).then().statusCode(404)
+            .body("__type", equalTo("NotFoundException"));
     }
 
     @Test

@@ -2,7 +2,6 @@ package io.floci.aws.services.amazonmq;
 
 import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.common.V1Tags;
-import io.floci.aws.services.amazonmq.model.MqConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -31,20 +30,16 @@ public class AmazonMqTagHandler implements TagHandler {
 
     @Override
     public Map<String, String> listTags(String region, String arn) {
-        return configurations.byArn(arn).tags;
+        return configurations.listTags(arn);
     }
 
     @Override
     public void tagResource(String region, String arn, Map<String, String> tags) {
-        MqConfiguration c = configurations.byArn(arn);
-        c.tags.putAll(tags);
-        configurations.save(c);
+        configurations.tag(arn, tags);
     }
 
     @Override
     public void untagResource(String region, String arn, List<String> tagKeys) {
-        MqConfiguration c = configurations.byArn(arn);
-        tagKeys.forEach(c.tags::remove);
-        configurations.save(c);
+        configurations.untag(arn, tagKeys);
     }
 }
