@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.hasItem;
  * omitted ConnectionType reads back as AWS's default INTERNET.
  */
 @QuarkusTest
-class ApiGatewayV2IntegrationDescriptionTest {
+class ApiGatewayV2IntegrationDescriptionIntegrationTest {
 
     @BeforeAll
     static void configureRestAssured() {
