@@ -9,7 +9,6 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 
 /** Verifies field-level encryption configs and profiles return the full stored configuration. */
@@ -148,8 +147,9 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .xmlPath().getString("FieldLevelEncryption.Id");
 
         Response list = given().get(API + "field-level-encryption");
+        org.junit.jupiter.api.Assertions.assertTrue(list.xmlPath().getList(
+                "FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.Id").contains(id));
         list.then().statusCode(200)
-                .body("FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.Id", hasItem(id))
                 .body("FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.find { it.Id == '" + id
                         + "' }.QueryArgProfileConfig.QueryArgProfiles.Items.QueryArgProfile.ProfileId",
                         equalTo("P3"))
@@ -196,10 +196,10 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .then().statusCode(200)
                 .body("FieldLevelEncryptionProfileConfig.Comment", equalTo("changed"));
 
-        given().get(API + "field-level-encryption-profile")
-                .then().statusCode(200)
-                .body("FieldLevelEncryptionProfileList.Items.FieldLevelEncryptionProfileSummary.Id",
-                        hasItem(id))
+        Response profiles = given().get(API + "field-level-encryption-profile");
+        org.junit.jupiter.api.Assertions.assertTrue(profiles.xmlPath().getList(
+                "FieldLevelEncryptionProfileList.Items.FieldLevelEncryptionProfileSummary.Id").contains(id));
+        profiles.then().statusCode(200)
                 .body("FieldLevelEncryptionProfileList.Items.FieldLevelEncryptionProfileSummary.find { it.Id == '"
                         + id + "' }.EncryptionEntities.Items.EncryptionEntity.ProviderId",
                         equalTo("provider-1"));
