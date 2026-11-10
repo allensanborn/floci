@@ -1572,11 +1572,23 @@ public class CloudFrontController {
     }
 
     @GET
+    @Path("/field-level-encryption/{Id}")
+    public Response getFieldLevelEncryption(@PathParam("Id") String id) {
+        try {
+            FieldLevelEncryptionConfig cfg = service.getFieldLevelEncryptionConfig(id);
+            return Response.ok(xmlFieldLevelEncryptionConfigResponse(cfg), XML)
+                    .header("ETag", cfg.getEtag()).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
     @Path("/field-level-encryption/{Id}/config")
     public Response getFieldLevelEncryptionConfig(@PathParam("Id") String id) {
         try {
             FieldLevelEncryptionConfig cfg = service.getFieldLevelEncryptionConfig(id);
-            return Response.ok(xmlFieldLevelEncryptionConfigResponse(cfg), XML)
+            return Response.ok(cfg.getConfigXml(), XML)
                     .header("ETag", cfg.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1635,7 +1647,8 @@ public class CloudFrontController {
                     .elem("Quantity", page.items().size())
                     .start("Items");
             for (FieldLevelEncryptionConfig c : page.items()) {
-                xml.raw(xmlFieldLevelEncryptionConfigResponse(c));
+                xmlFieldLevelEncryptionSummary(xml, "FieldLevelEncryptionSummary", c.getId(),
+                        c.getLastModifiedTime(), c.getConfigXml(), "FieldLevelEncryptionConfig");
             }
             xml.end("Items").end("FieldLevelEncryptionList");
             return Response.ok(xml.build(), XML).build();
@@ -1670,6 +1683,18 @@ public class CloudFrontController {
         try {
             FieldLevelEncryptionProfile profile = service.getFieldLevelEncryptionProfile(id);
             return Response.ok(xmlFieldLevelEncryptionProfileResponse(profile), XML)
+                    .header("ETag", profile.getEtag()).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/field-level-encryption-profile/{Id}/config")
+    public Response getFieldLevelEncryptionProfileConfig(@PathParam("Id") String id) {
+        try {
+            FieldLevelEncryptionProfile profile = service.getFieldLevelEncryptionProfile(id);
+            return Response.ok(profile.getConfigXml(), XML)
                     .header("ETag", profile.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1728,7 +1753,8 @@ public class CloudFrontController {
                     .elem("Quantity", page.items().size())
                     .start("Items");
             for (FieldLevelEncryptionProfile p : page.items()) {
-                xml.raw(xmlFieldLevelEncryptionProfileResponse(p));
+                xmlFieldLevelEncryptionSummary(xml, "FieldLevelEncryptionProfileSummary", p.getId(),
+                        p.getLastModifiedTime(), p.getConfigXml(), "FieldLevelEncryptionProfileConfig");
             }
             xml.end("Items").end("FieldLevelEncryptionProfileList");
             return Response.ok(xml.build(), XML).build();
@@ -3730,33 +3756,52 @@ public class CloudFrontController {
 
     private String xmlFieldLevelEncryptionConfigResponse(FieldLevelEncryptionConfig cfg) {
         return new XmlBuilder()
-                .start("FieldLevelEncryption")
+                .start("FieldLevelEncryption", NS)
                 .elem("Id", cfg.getId())
-                .elem("LastModifiedTime",
-                        cfg.getLastModifiedTime() != null ? cfg.getLastModifiedTime().toString() : "")
-                .start("FieldLevelEncryptionConfig")
-                .elem("CallerReference", cfg.getCallerReference() != null ? cfg.getCallerReference() : "")
-                .elem("Comment", cfg.getComment() != null ? cfg.getComment() : "")
-                .end("FieldLevelEncryptionConfig")
+                .elem("LastModifiedTime", cfg.getLastModifiedTime().toString())
+                .raw(cfg.getConfigXml())
                 .end("FieldLevelEncryption")
                 .build();
     }
 
     private String xmlFieldLevelEncryptionProfileResponse(FieldLevelEncryptionProfile profile) {
         return new XmlBuilder()
-                .start("FieldLevelEncryptionProfile")
+                .start("FieldLevelEncryptionProfile", NS)
                 .elem("Id", profile.getId())
-                .elem("LastModifiedTime",
-                        profile.getLastModifiedTime() != null ? profile.getLastModifiedTime().toString() : "")
-                .start("FieldLevelEncryptionProfileConfig")
-                .elem("Name", profile.getName() != null ? profile.getName() : "")
-                .elem("CallerReference",
-                        profile.getCallerReference() != null ? profile.getCallerReference() : "")
-                .elem("Comment", profile.getComment() != null ? profile.getComment() : "")
-                .start("EncryptionEntities").elem("Quantity", 0).end("EncryptionEntities")
-                .end("FieldLevelEncryptionProfileConfig")
+                .elem("LastModifiedTime", profile.getLastModifiedTime().toString())
+                .raw(profile.getConfigXml())
                 .end("FieldLevelEncryptionProfile")
                 .build();
+    }
+
+    /** A list entry is the stored config's members, minus CallerReference, under Id and LastModifiedTime. */
+    private void xmlFieldLevelEncryptionSummary(XmlBuilder xml, String element, String id,
+                                                java.time.Instant lastModified, String configXml,
+                                                String configElement) {
+        xml.start(element).elem("Id", id).elem("LastModifiedTime", lastModified.toString());
+        XmlParser.XmlElement config = XmlParser.extractElementTree(configXml, configElement);
+        for (XmlParser.XmlElement child : config.children()) {
+            if (!"CallerReference".equals(child.name())) {
+                xml.raw(xmlTree(child));
+            }
+        }
+        xml.end(element);
+    }
+
+    private static String xmlTree(XmlParser.XmlElement element) {
+        XmlBuilder xml = new XmlBuilder();
+        writeXmlTree(xml, element);
+        return xml.build();
+    }
+
+    private static void writeXmlTree(XmlBuilder xml, XmlParser.XmlElement element) {
+        if (element.children().isEmpty()) {
+            xml.elem(element.name(), element.rawText());
+            return;
+        }
+        xml.start(element.name());
+        element.children().forEach(child -> writeXmlTree(xml, child));
+        xml.end(element.name());
     }
 
     private String xmlMonitoringSubscriptionResponse(MonitoringSubscription sub) {
@@ -3826,6 +3871,7 @@ public class CloudFrontController {
         FieldLevelEncryptionConfig cfg = new FieldLevelEncryptionConfig();
         cfg.setCallerReference(XmlParser.extractFirst(body, "CallerReference", null));
         cfg.setComment(XmlParser.extractFirst(body, "Comment", null));
+        cfg.setConfigXml(storedConfigXml(body, "FieldLevelEncryptionConfig"));
         return cfg;
     }
 
@@ -3834,7 +3880,14 @@ public class CloudFrontController {
         profile.setName(XmlParser.extractFirst(body, "Name", null));
         profile.setCallerReference(XmlParser.extractFirst(body, "CallerReference", null));
         profile.setComment(XmlParser.extractFirst(body, "Comment", null));
+        profile.setConfigXml(storedConfigXml(body, "FieldLevelEncryptionProfileConfig"));
         return profile;
+    }
+
+    /** Keeps the whole config element, so nested Quantity/Items lists read back as they were sent. */
+    private static String storedConfigXml(String body, String element) {
+        XmlParser.XmlElement config = XmlParser.extractElementTree(body, element);
+        return config == null ? "<" + element + "/>" : xmlTree(config);
     }
 
     private MonitoringSubscription parseMonitoringSubscription(String body) {

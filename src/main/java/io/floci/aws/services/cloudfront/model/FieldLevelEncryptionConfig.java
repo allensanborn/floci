@@ -12,6 +12,8 @@ public class FieldLevelEncryptionConfig {
     private String etag;
     private String callerReference;
     private String comment;
+    /** The whole {@code FieldLevelEncryptionConfig} element as the client sent it, replayed on every read. */
+    private String configXml;
 
     public FieldLevelEncryptionConfig() {}
 
@@ -29,4 +31,7 @@ public class FieldLevelEncryptionConfig {
 
     public String getComment() { return comment; }
     public void setComment(String comment) { this.comment = comment; }
+
+    public String getConfigXml() { return configXml; }
+    public void setConfigXml(String configXml) { this.configXml = configXml; }
 }
