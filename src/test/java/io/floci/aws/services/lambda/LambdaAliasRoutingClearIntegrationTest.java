@@ -85,4 +85,28 @@ class LambdaAliasRoutingClearIntegrationTest {
         given().when().get(ALIASES + "/live").then().statusCode(200)
             .body("RoutingConfig", nullValue());
     }
+
+    @Test
+    @Order(4)
+    void updateWithRoutingConfigAndNoWeightsClearsThem() {
+        // aws-sdk-go-v2 skips a nil map, so the Terraform provider's clear arrives as {"RoutingConfig":{}}.
+        assertClears("{\"RoutingConfig\": {}}");
+    }
+
+    @Test
+    @Order(5)
+    void updateWithNullWeightsClearsThem() {
+        assertClears("{\"RoutingConfig\": {\"AdditionalVersionWeights\": null}}");
+    }
+
+    private static void assertClears(String clearBody) {
+        update("{\"RoutingConfig\": {\"AdditionalVersionWeights\": {\"2\": 0.5}}}");
+        given().when().get(ALIASES + "/live").then().statusCode(200)
+            .body("RoutingConfig.AdditionalVersionWeights.2", equalTo(0.5f));
+
+        update(clearBody);
+
+        given().when().get(ALIASES + "/live").then().statusCode(200)
+            .body("RoutingConfig", nullValue());
+    }
 }
