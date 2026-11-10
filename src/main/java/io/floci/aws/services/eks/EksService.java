@@ -48,6 +48,9 @@ import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpdateParam;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -85,6 +88,19 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static final Logger LOG = Logger.getLogger(EksService.class);
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
+
+    /** UpdateClusterConfig members stored verbatim, mapped to the Update type each reports. */
+    private static final Map<String, String> PASSTHROUGH_UPDATE_TYPES = Map.ofEntries(
+            Map.entry("upgradePolicy", "UpgradePolicyUpdate"),
+            Map.entry("zonalShiftConfig", "ZonalShiftConfigUpdate"),
+            Map.entry("deletionProtection", "DeletionProtectionUpdate"),
+            Map.entry("remoteNetworkConfig", "RemoteNetworkConfigUpdate"),
+            Map.entry("computeConfig", "AutoModeUpdate"),
+            Map.entry("storageConfig", "AutoModeUpdate"),
+            Map.entry("controlPlaneScalingConfig", "ControlPlaneScalingConfigUpdate"),
+            Map.entry("kubeApiServerConfig", "ControlPlaneComponentConfigUpdate"),
+            Map.entry("kubeSchedulerConfig", "ControlPlaneComponentConfigUpdate"),
+            Map.entry("kubeControllerManagerConfig", "ControlPlaneComponentConfigUpdate"));
 
     private static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
@@ -868,6 +884,107 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
     }
 
+    /**
+     * Applies an UpdateClusterConfig request. There is no control plane to reconfigure, so the update
+     * completes at once: it is recorded as Successful and the cluster never leaves ACTIVE, the same as
+     * a metadata-only create.
+     */
+    public Update updateClusterConfig(String name, UpdateClusterConfigRequest request) {
+        Cluster cluster = describeCluster(name);
+        if (cluster.getStatus() != ClusterStatus.ACTIVE) {
+            throw new AwsException("ResourceInUseException",
+                    "Cluster " + name + " is " + cluster.getStatus() + ", not ACTIVE", 409);
+        }
+        String type = null;
+        List<UpdateParam> params = new ArrayList<>();
+
+        ResourcesVpcConfig vpc = request.getResourcesVpcConfig();
+        if (vpc != null) {
+            ResourcesVpcConfig current = cluster.getResourcesVpcConfig();
+            if (vpc.getEndpointPrivateAccess() != null || vpc.getEndpointPublicAccess() != null
+                    || vpc.getPublicAccessCidrs() != null) {
+                type = "EndpointAccessUpdate";
+                if (vpc.getEndpointPrivateAccess() != null) {
+                    current.setEndpointPrivateAccess(vpc.getEndpointPrivateAccess());
+                    params.add(new UpdateParam("EndpointPrivateAccess", vpc.getEndpointPrivateAccess().toString()));
+                }
+                if (vpc.getEndpointPublicAccess() != null) {
+                    current.setEndpointPublicAccess(vpc.getEndpointPublicAccess());
+                    params.add(new UpdateParam("EndpointPublicAccess", vpc.getEndpointPublicAccess().toString()));
+                }
+                if (vpc.getPublicAccessCidrs() != null) {
+                    current.setPublicAccessCidrs(vpc.getPublicAccessCidrs());
+                    params.add(new UpdateParam("PublicAccessCidrs", String.join(",", vpc.getPublicAccessCidrs())));
+                }
+            }
+            if (vpc.getSubnetIds() != null || vpc.getSecurityGroupIds() != null) {
+                type = type != null ? type : "VpcConfigUpdate";
+                if (vpc.getSubnetIds() != null) {
+                    String vpcId = validateSubnetsAndResolveVpcId(regionResolver.getRegion(), vpc);
+                    if (vpcId != null && !current.getVpcId().isBlank() && !vpcId.equals(current.getVpcId())) {
+                        throw new AwsException("InvalidParameterException",
+                                "Subnets must be in the cluster's VPC " + current.getVpcId(), 400);
+                    }
+                    current.setSubnetIds(vpc.getSubnetIds());
+                    params.add(new UpdateParam("Subnets", String.join(",", vpc.getSubnetIds())));
+                }
+                if (vpc.getSecurityGroupIds() != null) {
+                    current.setSecurityGroupIds(vpc.getSecurityGroupIds());
+                    params.add(new UpdateParam("SecurityGroups", String.join(",", vpc.getSecurityGroupIds())));
+                }
+            }
+        }
+
+        Logging requestedLogging = request.getLogging();
+        if (requestedLogging != null) {
+            Set<String> enabled = cluster.getLogging().getClusterLogging().stream()
+                    .filter(s -> Boolean.TRUE.equals(s.getEnabled()))
+                    .flatMap(s -> s.getTypes().stream())
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            // A request naming no type (the provider always names all five) leaves the state as it is.
+            boolean namesTypes = requestedLogging.getClusterLogging() != null
+                    && requestedLogging.getClusterLogging().stream()
+                    .anyMatch(s -> s != null && s.getTypes() != null && !s.getTypes().isEmpty());
+            Logging merged = namesTypes ? buildLogging(requestedLogging, enabled) : cluster.getLogging();
+            cluster.setLogging(merged);
+            type = type != null ? type : "LoggingUpdate";
+            params.add(new UpdateParam("ClusterLogging", merged.getClusterLogging().stream()
+                    .map(s -> "{\"types\":[\"" + String.join("\",\"", s.getTypes()) + "\"],\"enabled\":"
+                            + s.getEnabled() + "}")
+                    .collect(Collectors.joining(",", "[", "]"))));
+        }
+
+        AccessConfig access = request.getAccessConfig();
+        if (access != null && access.authenticationMode() != null) {
+            if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(access.authenticationMode())) {
+                throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
+            }
+            AccessConfig existing = cluster.getAccessConfig();
+            cluster.setAccessConfig(new AccessConfig(access.authenticationMode(),
+                    existing == null ? null : existing.bootstrapClusterCreatorAdminPermissions()));
+            type = type != null ? type : "AccessConfigUpdate";
+            params.add(new UpdateParam("AuthenticationMode", access.authenticationMode()));
+        }
+
+        for (Map.Entry<String, Object> member : request.getOther().entrySet()) {
+            String memberType = PASSTHROUGH_UPDATE_TYPES.get(member.getKey());
+            if (memberType == null || member.getValue() == null) {
+                continue;
+            }
+            cluster.putExtraConfig(member.getKey(), member.getValue());
+            type = type != null ? type : memberType;
+            params.add(new UpdateParam(Character.toUpperCase(member.getKey().charAt(0)) + member.getKey().substring(1),
+                    String.valueOf(member.getValue())));
+        }
+
+        if (type == null) {
+            throw new AwsException("InvalidParameterException",
+                    "The type for cluster update was not provided.", 400);
+        }
+        storage.put(cluster.getName(), cluster);
+        return addons.recordClusterUpdate(cluster, type, params);
+    }
+
     public Cluster deleteCluster(String name) {
         // A first node group replacing the node holds this lock while the swap runs; deleting
         // meanwhile would find no container to stop and have its cluster written back. Read the
@@ -878,6 +995,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             "No cluster found for name: " + name, 404));
             if (cluster.getAccountId() == null) {
                 cluster.setAccountId(regionResolver.getAccountId());
+            }
+            if (cluster.getExtraConfig() != null && Boolean.TRUE.equals(cluster.getExtraConfig().get("deletionProtection"))) {
+                // The eks model names no exception for this; InvalidRequestException is a guess.
+                throw new AwsException("InvalidRequestException",
+                        "Cluster " + name + " has deletion protection enabled", 400);
             }
             return deleteClusterHoldingCapacity(name, cluster);
         }
@@ -1536,12 +1658,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     private Logging buildLogging(Logging requestedLogging) {
+        return buildLogging(requestedLogging, new LinkedHashSet<>());
+    }
+
+    /** {@code enabledTypes} seeds the result: types the request does not name keep their current state. */
+    private Logging buildLogging(Logging requestedLogging, Set<String> enabledTypes) {
         if (requestedLogging == null || requestedLogging.getClusterLogging() == null
                 || requestedLogging.getClusterLogging().isEmpty()) {
             return defaultLogging();
         }
 
-        Set<String> enabledTypes = new LinkedHashSet<>();
         Set<String> specifiedTypes = new HashSet<>();
 
         for (LogSetup setup : requestedLogging.getClusterLogging()) {

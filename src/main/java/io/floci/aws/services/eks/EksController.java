@@ -17,6 +17,7 @@ import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.PodIdentityAssociation;
 import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateAddonRequest;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.services.eks.model.UpdatePodIdentityAssociationRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -294,6 +295,25 @@ public class EksController {
         Cluster cluster = eksService.describeCluster(name);
         Update update = addons.update(cluster, addonName, request);
         return Response.ok(Map.of("update", update)).build();
+    }
+
+    @POST
+    @Path("/clusters/{name}/update-config")
+    public Response updateClusterConfig(@PathParam("name") String name, UpdateClusterConfigRequest request) {
+        Update update = eksService.updateClusterConfig(name, request);
+        return Response.ok(Map.of("update", update)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/updates")
+    public Response listUpdates(@PathParam("name") String name,
+                                @QueryParam("addonName") String addonName,
+                                @QueryParam("nodegroupName") String nodegroupName) {
+        Cluster cluster = eksService.describeCluster(name);
+        // Node group updates are not recorded, so a node group filter matches none.
+        List<String> ids = nodegroupName != null && !nodegroupName.isBlank()
+                ? List.of() : addons.listUpdateIds(cluster, addonName);
+        return Response.ok(Map.of("updateIds", ids)).build();
     }
 
     @GET

@@ -29,7 +29,9 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeAddon` | Describe an addon by cluster and addon name |
 | `ListAddons` | List addon names installed in a cluster with pagination |
 | `UpdateAddon` | Update addon configuration, version, or service account role |
-| `DescribeUpdate` | Describe an update for an addon |
+| `UpdateClusterConfig` | Update cluster endpoint access, subnets, security groups, logging, access config, and other settings; completes immediately |
+| `DescribeUpdate` | Describe an update for an addon or a cluster config change |
+| `ListUpdates` | List update IDs for a cluster or one of its addons |
 | `DeleteAddon` | Delete an addon from a cluster |
 | `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
@@ -150,6 +152,7 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 - **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
 - **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
 - **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
+- **Cluster config updates**: `UpdateClusterConfig` applies `resourcesVpcConfig` (endpoint access, public CIDRs, subnets, security groups), `logging` (types not named keep their state) and `accessConfig.authenticationMode` to the cluster, and stores `upgradePolicy`, `zonalShiftConfig`, `deletionProtection`, `remoteNetworkConfig`, `computeConfig`, `storageConfig`, `controlPlaneScalingConfig` and the `kube*Config` members verbatim so `DescribeCluster` returns them. There is no control plane to reconfigure, so the update is recorded as `Successful` at once and the cluster stays `ACTIVE`. A request carrying no update member is rejected with `InvalidParameterException`. `DeleteCluster` is refused with `InvalidRequestException` while `deletionProtection` is true. Not modelled: AWS's one-update-type-per-request rule, `kubernetesNetworkConfig` changes, `clientRequestToken` idempotency, and `ResourceInUseException` while another update runs.
 - **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
 - **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
 - **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination. As in AWS, a `kubernetesVersion` filter also limits each version's `compatibilities` to that Kubernetes version. The catalog in `src/main/resources/eks/addon-versions.json` holds the parts of AWS's `DescribeAddonVersions` answer that Floci serves, for every Kubernetes version Floci can run; `make eks-addons-sync` regenerates it from `DescribeAddonVersions` with any AWS account's credentials.
@@ -1101,7 +1104,7 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateClusterVersion`
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

@@ -30,6 +30,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -342,6 +343,27 @@ public class EksAddonService {
             updatesStorage.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(updatesStorage::delete);
             LOG.infov("Purged all addons and updates for cluster {0}", cluster.getName());
         }
+    }
+
+    /** Records a cluster-level update that is already applied, so DescribeUpdate and ListUpdates return it. */
+    public synchronized Update recordClusterUpdate(Cluster cluster, String type, List<UpdateParam> params) {
+        Update update = new Update(UUID.randomUUID().toString(), "Successful", type, params,
+                EpochSeconds.fromInstant(Instant.now()), List.of());
+        updatesStorage.put(prefix(cluster) + update.id(), new StoredUpdate(update, null));
+        return update;
+    }
+
+    /** Update ids for the cluster itself (no addonName) or for one addon, oldest first. */
+    public List<String> listUpdateIds(Cluster cluster, String addonName) {
+        requireActiveCluster(cluster);
+        String p = prefix(cluster);
+        boolean clusterLevel = addonName == null || addonName.isBlank();
+        return updatesStorage.scan(key -> key.startsWith(p)).stream()
+                .filter(u -> clusterLevel ? u.addonName() == null : addonName.equalsIgnoreCase(u.addonName()))
+                .map(StoredUpdate::update)
+                .sorted(Comparator.comparingDouble(Update::createdAt))
+                .map(Update::id)
+                .toList();
     }
 
     public Update describeUpdate(Cluster cluster, String updateId, String addonName) {
