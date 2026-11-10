@@ -15,6 +15,7 @@ import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -3776,7 +3777,7 @@ public class CloudFrontController {
 
     /** A list entry is the stored config's members, minus CallerReference, under Id and LastModifiedTime. */
     private void xmlFieldLevelEncryptionSummary(XmlBuilder xml, String element, String id,
-                                                java.time.Instant lastModified, String configXml,
+                                                Instant lastModified, String configXml,
                                                 String configElement) {
         xml.start(element).elem("Id", id).elem("LastModifiedTime", lastModified.toString());
         XmlParser.XmlElement config = XmlParser.extractElementTree(configXml, configElement);

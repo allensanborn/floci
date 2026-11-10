@@ -2,11 +2,13 @@ package io.floci.aws.services.cloudfront;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -105,13 +107,13 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
         String id = created.replaceAll("(?s).*<Id>([^<]+)</Id>.*", "$1");
 
         for (String doc : new String[] {created, given().get(API + "field-level-encryption/" + id).asString()}) {
-            org.junit.jupiter.api.Assertions.assertEquals(1, doc.split("xmlns", -1).length - 1, doc);
-            org.junit.jupiter.api.Assertions.assertFalse(doc.contains("<?xml"), doc);
-            org.junit.jupiter.api.Assertions.assertFalse(doc.matches("(?s).*>\\s+<.*"), doc);
+            Assertions.assertEquals(1, doc.split("xmlns", -1).length - 1, doc);
+            Assertions.assertFalse(doc.contains("<?xml"), doc);
+            Assertions.assertFalse(doc.matches("(?s).*>\\s+<.*"), doc);
         }
         String config = given().get(API + "field-level-encryption/" + id + "/config").asString();
-        org.junit.jupiter.api.Assertions.assertFalse(config.contains("xmlns"), config);
-        org.junit.jupiter.api.Assertions.assertFalse(config.matches("(?s).*>\\s+<.*"), config);
+        Assertions.assertFalse(config.contains("xmlns"), config);
+        Assertions.assertFalse(config.matches("(?s).*>\\s+<.*"), config);
     }
 
     @Test
@@ -147,7 +149,7 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .xmlPath().getString("FieldLevelEncryption.Id");
 
         Response list = given().get(API + "field-level-encryption");
-        org.junit.jupiter.api.Assertions.assertTrue(list.xmlPath().getList(
+        Assertions.assertTrue(list.xmlPath().getList(
                 "FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.Id").contains(id));
         list.then().statusCode(200)
                 .body("FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.find { it.Id == '" + id
@@ -156,7 +158,7 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .body("FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary.find { it.Id == '" + id
                         + "' }.Comment", equalTo("listed"));
         // the summary shape has no CallerReference
-        org.junit.jupiter.api.Assertions.assertFalse(
+        Assertions.assertFalse(
                 list.xmlPath().getString("FieldLevelEncryptionList.Items.FieldLevelEncryptionSummary"
                         + ".find { it.Id == '" + id + "' }.CallerReference").length() > 0);
     }
@@ -180,7 +182,7 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                         + ".Items.EncryptionEntity.PublicKeyId", equalTo("K2ABCDEFGHIJKL"))
                 .body("FieldLevelEncryptionProfile.FieldLevelEncryptionProfileConfig.EncryptionEntities"
                         + ".Items.EncryptionEntity.FieldPatterns.Items.FieldPattern",
-                        org.hamcrest.Matchers.contains("card", "ssn*"));
+                        contains("card", "ssn*"));
 
         given().get(API + "field-level-encryption-profile/" + id + "/config")
                 .then().statusCode(200)
@@ -197,7 +199,7 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .body("FieldLevelEncryptionProfileConfig.Comment", equalTo("changed"));
 
         Response profiles = given().get(API + "field-level-encryption-profile");
-        org.junit.jupiter.api.Assertions.assertTrue(profiles.xmlPath().getList(
+        Assertions.assertTrue(profiles.xmlPath().getList(
                 "FieldLevelEncryptionProfileList.Items.FieldLevelEncryptionProfileSummary.Id").contains(id));
         profiles.then().statusCode(200)
                 .body("FieldLevelEncryptionProfileList.Items.FieldLevelEncryptionProfileSummary.find { it.Id == '"
