@@ -7,6 +7,7 @@ import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -128,6 +129,38 @@ class RdsStorageTypeIntegrationTest {
             delete(gp2);
             delete(gp3);
             delete(io1);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"mysql,500,12000,500", "mysql,20,3000,125", "sqlserver-se,500,3000,125"})
+    void gp3BaselineDependsOnEngineAndSize(String engine, String storage, String iops, String throughput) {
+        String id = "storage-baseline-" + engine;
+        try {
+            Response created = query("CreateDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("Engine", engine).formParam("DBInstanceClass", "db.t3.micro")
+                    .formParam("MasterUsername", "admin").formParam("MasterUserPassword", "password123")
+                    .formParam("AllocatedStorage", storage).formParam("StorageType", "gp3").post("/");
+            assertEquals(200, created.statusCode(), created.asString());
+            assertAll(() -> assertEquals(List.of(iops), described(id, "Iops")),
+                    () -> assertEquals(List.of(throughput), described(id, "StorageThroughput")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void iopsAreOmittedOnceTheTypeStopsCarryingThem() {
+        String id = "storage-iops-to-gp2";
+        try {
+            create(id).formParam("StorageType", "gp3").formParam("Iops", "6000")
+                    .formParam("StorageThroughput", "250").post("/").then().statusCode(200);
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp2")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertTrue(described(id, "Iops").isEmpty()),
+                    () -> assertTrue(described(id, "StorageThroughput").isEmpty()));
+        } finally {
+            delete(id);
         }
     }
 

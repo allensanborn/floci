@@ -38,26 +38,12 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                               Boolean performanceInsightsEnabled, Integer performanceInsightsRetentionPeriod,
                               String engineLifecycleSupport, List<String> enabledCloudwatchLogsExports,
                               LogExportChanges logExportChanges, Integer maxAllocatedStorage, String storageType,
-                              String caCertificateIdentifier, String licenseModel) {
-        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
-                preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
-                performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
-                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, licenseModel, null, null);
-    }
-
-    public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
-                              String preferredBackupWindow, String preferredMaintenanceWindow,
-                              Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
-                              Boolean performanceInsightsEnabled, Integer performanceInsightsRetentionPeriod,
-                              String engineLifecycleSupport, List<String> enabledCloudwatchLogsExports,
-                              LogExportChanges logExportChanges, Integer maxAllocatedStorage, String storageType,
                               String caCertificateIdentifier) {
         this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
                 preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
                 performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, null);
+                caCertificateIdentifier, null, null, null);
     }
 
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,

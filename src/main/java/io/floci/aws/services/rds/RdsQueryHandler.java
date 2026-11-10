@@ -56,6 +56,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
@@ -3287,8 +3288,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("StorageType", i.getStorageType())
-           .elem("Iops", iops(i))
-           .elem("StorageThroughput", storageThroughput(i))
+           .elem("Iops", provisionedStorage(i, false))
+           .elem("StorageThroughput", provisionedStorage(i, true))
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
@@ -3381,16 +3382,31 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    // ponytail: the gp3 baseline below 400 GiB; the 12000 IOPS / 500 MiB/s tier above it is not modelled
-    private static String iops(DbInstance i) {
-        Integer v = i.getIops() != null ? i.getIops() : "gp3".equals(i.getStorageType()) ? 3000 : null;
-        return v == null ? null : v.toString();
-    }
-
-    private static String storageThroughput(DbInstance i) {
-        Integer v = i.getStorageThroughput() != null ? i.getStorageThroughput()
-                : "gp3".equals(i.getStorageType()) ? 125 : null;
-        return v == null ? null : v.toString();
+    /**
+     * Iops or StorageThroughput as Describe reports it: only for the storage types that carry the
+     * member (Iops on io1/io2/gp3, throughput on gp3), the stored value when the request named one,
+     * else the gp3 baseline. The baseline steps up from 3000 IOPS / 125 MiB/s to 12000 / 500 at 400 GiB
+     * (Db2, MariaDB, MySQL, PostgreSQL) or 200 GiB (Oracle) and stays flat on SQL Server.
+     * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
+     */
+    private static String provisionedStorage(DbInstance i, boolean throughput) {
+        String type = i.getStorageType();
+        boolean gp3 = "gp3".equals(type);
+        if (!gp3 && (throughput || !("io1".equals(type) || "io2".equals(type)))) {
+            return null;
+        }
+        Integer stored = throughput ? i.getStorageThroughput() : i.getIops();
+        if (stored != null) {
+            return stored.toString();
+        }
+        if (!gp3) {
+            return null;
+        }
+        String engine = i.getEngineIdentifier() != null ? i.getEngineIdentifier()
+                : i.getEngine() != null ? i.getEngine().name().toLowerCase(Locale.ROOT) : "";
+        int threshold = engine.startsWith("sqlserver") ? Integer.MAX_VALUE : engine.startsWith("oracle") ? 200 : 400;
+        boolean high = i.getAllocatedStorage() >= threshold;
+        return String.valueOf(throughput ? (high ? 500 : 125) : (high ? 12000 : 3000));
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {
