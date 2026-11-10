@@ -106,14 +106,21 @@ class CloudFrontFieldLevelEncryptionIntegrationTest {
                 .asString();
         String id = created.replaceAll("(?s).*<Id>([^<]+)</Id>.*", "$1");
 
-        for (String doc : new String[] {created, given().get(API + "field-level-encryption/" + id).asString()}) {
+        String profile = post("field-level-encryption-profile",
+                profileBody("ws-" + UUID.randomUUID(), UUID.randomUUID().toString(), "ws")).asString();
+        String profileId = profile.replaceAll("(?s).*<Id>([^<]+)</Id>.*", "$1");
+
+        for (String doc : new String[] {
+                created,
+                given().get(API + "field-level-encryption/" + id).asString(),
+                given().get(API + "field-level-encryption/" + id + "/config").asString(),
+                profile,
+                given().get(API + "field-level-encryption-profile/" + profileId).asString(),
+                given().get(API + "field-level-encryption-profile/" + profileId + "/config").asString()}) {
             Assertions.assertEquals(1, doc.split("xmlns", -1).length - 1, doc);
             Assertions.assertFalse(doc.contains("<?xml"), doc);
             Assertions.assertFalse(doc.matches("(?s).*>\\s+<.*"), doc);
         }
-        String config = given().get(API + "field-level-encryption/" + id + "/config").asString();
-        Assertions.assertFalse(config.contains("xmlns"), config);
-        Assertions.assertFalse(config.matches("(?s).*>\\s+<.*"), config);
     }
 
     @Test

@@ -1589,7 +1589,7 @@ public class CloudFrontController {
     public Response getFieldLevelEncryptionConfig(@PathParam("Id") String id) {
         try {
             FieldLevelEncryptionConfig cfg = service.getFieldLevelEncryptionConfig(id);
-            return Response.ok(fleConfigXml(cfg), XML)
+            return Response.ok(withNamespace(fleConfigXml(cfg)), XML)
                     .header("ETag", cfg.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1695,7 +1695,7 @@ public class CloudFrontController {
     public Response getFieldLevelEncryptionProfileConfig(@PathParam("Id") String id) {
         try {
             FieldLevelEncryptionProfile profile = service.getFieldLevelEncryptionProfile(id);
-            return Response.ok(fleProfileConfigXml(profile), XML)
+            return Response.ok(withNamespace(fleProfileConfigXml(profile)), XML)
                     .header("ETag", profile.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -3883,6 +3883,11 @@ public class CloudFrontController {
         profile.setComment(XmlParser.extractFirst(body, "Comment", null));
         profile.setConfigXml(storedConfigXml(body, "FieldLevelEncryptionProfileConfig"));
         return profile;
+    }
+
+    /** Puts the CloudFront namespace on a stored config element served as a response root. */
+    private static String withNamespace(String configXml) {
+        return configXml.replaceFirst("^<(\\w+)", "<$1 xmlns=\"" + NS + "\"");
     }
 
     /** Records stored before the config was kept whole carry only these fields; rebuild what that build kept. */
