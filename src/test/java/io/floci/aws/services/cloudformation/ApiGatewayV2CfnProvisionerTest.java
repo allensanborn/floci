@@ -831,6 +831,17 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     @Test
+    void rollbackOfADescriptionOnlyIntegrationUpdateReportsFailure() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2","Description":"new"}
+                """);
+
+        assertFalse(provisioner.rollbackUpdate(integration), "the Description change has no rollback");
+    }
+
+    @Test
     void failedIntegrationUpdateRestoresItsConnection() throws Exception {
         stubIntegrationUpdate(priorVpcLinkIntegration());
         when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))

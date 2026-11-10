@@ -964,7 +964,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                                  Map<String, Object> req) {
         boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
                 || changes(req.get("integrationUri"), prior.getIntegrationUri())
-                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
+                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion())
+                || changes(req.get("description"), prior.getDescription())
+                || changes(req.get("passthroughBehavior"), prior.getPassthroughBehavior())
+                || changes(req.get("contentHandlingStrategy"), prior.getContentHandlingStrategy())
+                || changes(req.get("integrationSubtype"), prior.getIntegrationSubtype());
         ObjectNode snapshot = objectMapper.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("apiId", apiId);
