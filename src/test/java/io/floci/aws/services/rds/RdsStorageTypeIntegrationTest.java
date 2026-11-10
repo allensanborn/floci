@@ -133,7 +133,7 @@ class RdsStorageTypeIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"mysql,500,12000,500", "mysql,20,3000,125", "sqlserver-se,500,3000,125"})
+    @CsvSource({"mysql,500,12000,500", "mysql,20,3000,125", "mysql,399,3000,125", "mysql,400,12000,500", "sqlserver-se,500,3000,125"})
     void gp3BaselineDependsOnEngineAndSize(String engine, String storage, String iops, String throughput) {
         String id = "storage-baseline-" + engine;
         try {
@@ -159,6 +159,10 @@ class RdsStorageTypeIntegrationTest {
                     .post("/").then().statusCode(200);
             assertAll(() -> assertTrue(described(id, "Iops").isEmpty()),
                     () -> assertTrue(described(id, "StorageThroughput").isEmpty()));
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(List.of("3000"), described(id, "Iops")),
+                    () -> assertEquals(List.of("125"), described(id, "StorageThroughput")));
         } finally {
             delete(id);
         }

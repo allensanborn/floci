@@ -448,9 +448,10 @@ class RdsQueryHandlerTest {
     @Test
     void describeDbInstances_oracleGp3BaselineStepsUpAt200GiB() {
         // Floci cannot create an Oracle instance, so the Oracle threshold is reachable only from here.
-        for (int[] row : new int[][] {{250, 12000, 500}, {100, 3000, 125}}) {
+        // An upper-case identifier on a stored record must still read as SQL Server (always the lower tier).
+        for (int[] row : new int[][] {{200, 12000, 500}, {199, 3000, 125}, {500, 3000, 125}}) {
             DbInstance instance = makeInstance("ora");
-            instance.setEngineIdentifier("oracle-ee");
+            instance.setEngineIdentifier(row[0] == 500 ? "SQLSERVER-SE" : "oracle-ee");
             instance.setStorageType("gp3");
             instance.setAllocatedStorage(row[0]);
             when(service.listDbInstances(null, null)).thenReturn(List.of(instance));

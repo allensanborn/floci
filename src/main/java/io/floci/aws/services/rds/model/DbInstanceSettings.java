@@ -300,6 +300,13 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (storageType != null) {
             instance.setStorageType(storageType);
+            // a type that carries neither member drops the stored values, so a later switch back reports the baseline
+            if (!"gp3".equals(storageType)) {
+                instance.setStorageThroughput(null);
+                if (!"io1".equals(storageType) && !"io2".equals(storageType)) {
+                    instance.setIops(null);
+                }
+            }
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);

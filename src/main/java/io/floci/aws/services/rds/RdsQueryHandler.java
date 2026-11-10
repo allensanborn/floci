@@ -56,7 +56,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
@@ -3402,8 +3401,7 @@ public class RdsQueryHandler {
         if (!gp3) {
             return null;
         }
-        String engine = i.getEngineIdentifier() != null ? i.getEngineIdentifier()
-                : i.getEngine() != null ? i.getEngine().name().toLowerCase(Locale.ROOT) : "";
+        String engine = instanceEngine(i);
         int threshold = engine.startsWith("sqlserver") ? Integer.MAX_VALUE : engine.startsWith("oracle") ? 200 : 400;
         boolean high = i.getAllocatedStorage() >= threshold;
         return String.valueOf(throughput ? (high ? 500 : 125) : (high ? 12000 : 3000));
