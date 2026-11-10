@@ -4,6 +4,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.autoscaling.model.*;
@@ -281,8 +282,15 @@ public class AutoScalingQueryHandler {
     }
 
     private Response handleDescribeAutoScalingGroups(MultivaluedMap<String, String> p, String region) {
-        List<AutoScalingGroup> groups = service.describeAutoScalingGroups(
-                region, memberList(p, "AutoScalingGroupNames"));
+        List<Map.Entry<String, List<String>>> filters = parseFilters(p);
+        List<AutoScalingGroup> matches = service.describeAutoScalingGroups(
+                        region, memberList(p, "AutoScalingGroupNames")).stream()
+                .filter(g -> filters.stream().allMatch(f -> matchesGroupFilter(g, f)))
+                .toList();
+        PaginatedResult<AutoScalingGroup> page = Pagination.paginate(matches,
+                AutoScalingGroup::getAutoScalingGroupName, nullableIntParam(p, "MaxRecords"),
+                p.getFirst("NextToken"), 50, 100, "ValidationError", "NextToken");
+        List<AutoScalingGroup> groups = page.items();
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAutoScalingGroupsResponse", NS)
                   .start("DescribeAutoScalingGroupsResult")
@@ -292,11 +300,28 @@ public class AutoScalingQueryHandler {
             appendAsgXml(xml, asg);
             xml.end("member");
         }
-        xml.end("AutoScalingGroups")
-           .end("DescribeAutoScalingGroupsResult")
+        xml.end("AutoScalingGroups");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        xml.end("DescribeAutoScalingGroupsResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeAutoScalingGroupsResponse");
         return ok(xml.build());
+    }
+
+    // AWS documents no error for an unknown filter name, so it is ignored.
+    private static boolean matchesGroupFilter(AutoScalingGroup g, Map.Entry<String, List<String>> f) {
+        String name = f.getKey();
+        List<String> values = f.getValue();
+        if (name == null || values == null || values.isEmpty()) { return true; }
+        Map<String, String> tags = g.getTags();
+        if (name.startsWith("tag:")) { return values.contains(tags.get(name.substring(4))); }
+        return switch (name) {
+            case "tag-key" -> tags.keySet().stream().anyMatch(values::contains);
+            case "tag-value" -> tags.values().stream().anyMatch(values::contains);
+            default -> true;
+        };
     }
 
     private void appendAsgXml(XmlBuilder xml, AutoScalingGroup asg) {
@@ -537,7 +562,7 @@ public class AutoScalingQueryHandler {
                 .end("CreateOrUpdateTagsResponse").build());
     }
 
-    private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+    private List<Map.Entry<String, List<String>>> parseFilters(MultivaluedMap<String, String> p) {
         List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         for (int i = 1; ; i++) {
             String prefix = "Filters.member." + i;
@@ -547,6 +572,11 @@ public class AutoScalingQueryHandler {
             filters.add(new AbstractMap.SimpleImmutableEntry<>(name,
                     hasValues ? memberList(p, prefix + ".Values") : null));
         }
+        return filters;
+    }
+
+    private Response handleDescribeTags(MultivaluedMap<String, String> p, String region) {
+        List<Map.Entry<String, List<String>>> filters = parseFilters(p);
         String maxRecords = p.getFirst("MaxRecords");
         Integer limit = null;
         if (maxRecords != null) {
