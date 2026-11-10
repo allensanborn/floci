@@ -33,7 +33,14 @@ public class ResourcesVpcConfig {
     @JsonProperty("publicAccessCidrs")
     private List<String> publicAccessCidrs;
 
+    @JsonProperty("controlPlaneEgressMode")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String controlPlaneEgressMode;
+
     public ResourcesVpcConfig() {}
+
+    public String getControlPlaneEgressMode() { return controlPlaneEgressMode; }
+    public void setControlPlaneEgressMode(String controlPlaneEgressMode) { this.controlPlaneEgressMode = controlPlaneEgressMode; }
 
     public List<String> getSubnetIds() { return subnetIds; }
     public void setSubnetIds(List<String> subnetIds) { this.subnetIds = subnetIds; }

@@ -29,7 +29,9 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeAddon` | Describe an addon by cluster and addon name |
 | `ListAddons` | List addon names installed in a cluster with pagination |
 | `UpdateAddon` | Update addon configuration, version, or service account role |
-| `DescribeUpdate` | Describe an update for an addon |
+| `UpdateClusterConfig` | Update cluster endpoint access, subnets, security groups, logging, access config, and other settings; completes immediately |
+| `DescribeUpdate` | Describe an update for an addon or a cluster config change |
+| `ListUpdates` | List update IDs for a cluster or one of its addons |
 | `DeleteAddon` | Delete an addon from a cluster |
 | `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
@@ -150,6 +152,7 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 - **Retrieval**: `DescribeAddon` returns the complete addon resource shape, including ARN, cluster name, version, status (`ACTIVE`), health issues, tags, service account role ARN, configuration values, pod identity associations, owner, and publisher.
 - **Listing**: `ListAddons` lists installed addon names with pagination (`maxResults` and `nextToken`).
 - **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
+- **Cluster config updates**: `UpdateClusterConfig` applies `resourcesVpcConfig` (endpoint access, public CIDRs, subnets in the cluster's VPC, security groups, `controlPlaneEgressMode`), `kubernetesNetworkConfig.elasticLoadBalancing`, `logging` (types not named keep their state) and `accessConfig.authenticationMode` to the cluster, and stores `upgradePolicy`, `zonalShiftConfig`, `deletionProtection`, `remoteNetworkConfig`, `computeConfig`, `storageConfig`, `controlPlaneScalingConfig` and the `kube*Config` members verbatim so `DescribeCluster` returns them. There is no control plane to reconfigure, so the update is recorded as `Successful` at once and the cluster stays `ACTIVE`. A request may carry one update type only (the Auto Mode trio `computeConfig`, `kubernetesNetworkConfig` and `storageConfig` counts as one); more is `InvalidParameterException` "Only one type of update can be allowed.". An endpoint change that would leave both public and private access disabled is `InvalidParameterException`, as is a `publicAccessCidrs` entry that is not a CIDR (IPv6 only on an ipv6 cluster). The whole request is validated before the cluster changes, under the cluster's capacity lock. `params[].value` is JSON. A request carrying no update member is `InvalidParameterException`. `DeleteCluster` is refused with `InvalidRequestException` while `deletionProtection` is true. Not modelled: `kubernetesNetworkConfig` service CIDR and IP family changes, `CreateCluster` storing these members, `ListUpdates` pagination, `clientRequestToken` idempotency, and `ResourceInUseException` while another update runs.
 - **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
 - **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
 - **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination. As in AWS, a `kubernetesVersion` filter also limits each version's `compatibilities` to that Kubernetes version. The catalog in `src/main/resources/eks/addon-versions.json` holds the parts of AWS's `DescribeAddonVersions` answer that Floci serves, for every Kubernetes version Floci can run; `make eks-addons-sync` regenerates it from `DescribeAddonVersions` with any AWS account's credentials.
@@ -304,7 +307,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:
   - When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID.
-  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console.
+  - Floci always starts k3s with the Amazon EKS control plane audit policy, so the `audit` log type can be switched on later; with the type enabled it writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console. `UpdateClusterConfig` with `logging` starts or stops the log streams on a running cluster, shipping lines from that moment on; a cluster container adopted from an earlier Floci keeps its old API server flags until the cluster is recreated, so its audit stream stays empty.
   - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
@@ -1101,7 +1104,7 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateClusterVersion`
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

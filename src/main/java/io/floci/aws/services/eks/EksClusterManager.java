@@ -744,16 +744,15 @@ public class EksClusterManager
             }
         }
 
-        String auditPolicyLocalFile = null;
-        if (hasLoggingEnabled(cluster, "audit")) {
-            auditPolicyLocalFile = writeAuditPolicyFile(cluster);
-            if (auditPolicyLocalFile != null) {
-                serverArgs.add("--kube-apiserver-arg=audit-policy-file=" + AUDIT_POLICY_CONTAINER_PATH);
-                serverArgs.add("--kube-apiserver-arg=audit-log-path=" + AUDIT_LOG_CONTAINER_PATH);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxage=" + AUDIT_LOG_MAXAGE);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxbackup=" + AUDIT_LOG_MAXBACKUP);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxsize=" + AUDIT_LOG_MAXSIZE);
-            }
+        // The API server only audits if it starts with these flags, so they are always set: turning the
+        // audit log type on later (UpdateClusterConfig) then only has to start the CloudWatch follower.
+        String auditPolicyLocalFile = writeAuditPolicyFile(cluster);
+        if (auditPolicyLocalFile != null) {
+            serverArgs.add("--kube-apiserver-arg=audit-policy-file=" + AUDIT_POLICY_CONTAINER_PATH);
+            serverArgs.add("--kube-apiserver-arg=audit-log-path=" + AUDIT_LOG_CONTAINER_PATH);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxage=" + AUDIT_LOG_MAXAGE);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxbackup=" + AUDIT_LOG_MAXBACKUP);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxsize=" + AUDIT_LOG_MAXSIZE);
         }
 
         List<String> callerArgs = resolveCallerArgs(cluster);
@@ -1307,7 +1306,7 @@ public class EksClusterManager
     }
 
     private void attachClusterLogs(Cluster cluster, boolean fromNow) {
-        if (logStreamer == null || cluster == null || !hasLoggingEnabled(cluster)) {
+        if (logStreamer == null || cluster == null) {
             return;
         }
         String containerId = cluster.getContainerId();
@@ -1315,10 +1314,13 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        // Logs are attached only for a container that was just started or adopted, so a handle
-        // still registered under this name follows an earlier container: close it rather than
-        // leave the new cluster without control-plane logs.
+        // A handle still registered under this name follows an earlier container, or the log types
+        // before a logging update: close it rather than leave the cluster without control-plane
+        // logs, or still shipping a type that was switched off.
         closeQuietly(clusterLogHandles.remove(resourceName));
+        if (!hasLoggingEnabled(cluster)) {
+            return;
+        }
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);

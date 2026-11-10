@@ -1,5 +1,7 @@
 package io.floci.aws.services.eks.model;
 
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
@@ -9,6 +11,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -134,6 +137,24 @@ public class Cluster {
     private Map<String, String> joinedInstanceIds;
 
     private AccessConfig accessConfig;
+
+    /**
+     * Members UpdateClusterConfig stored verbatim (upgradePolicy, zonalShiftConfig, deletionProtection, ...),
+     * flattened back onto the cluster object so DescribeCluster returns them under their API names.
+     */
+    @JsonIgnore
+    private Map<String, Object> extraConfig;
+
+    @JsonAnyGetter
+    public Map<String, Object> getExtraConfig() { return extraConfig; }
+
+    @JsonAnySetter
+    public void putExtraConfig(String key, Object value) {
+        if (extraConfig == null) {
+            extraConfig = new LinkedHashMap<>();
+        }
+        extraConfig.put(key, value);
+    }
 
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
@@ -266,6 +287,7 @@ public class Cluster {
         c.defaultStorageClass = this.defaultStorageClass;
         c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
+        c.extraConfig = this.extraConfig != null ? new LinkedHashMap<>(this.extraConfig) : null;
         return c;
     }
 }
