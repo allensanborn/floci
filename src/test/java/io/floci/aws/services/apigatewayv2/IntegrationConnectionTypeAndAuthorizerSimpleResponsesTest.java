@@ -113,7 +113,7 @@ class IntegrationConnectionTypeAndAuthorizerSimpleResponsesTest {
     }
 
     @Test
-    void connectionTypeOmittedWhenNull() {
+    void connectionTypeDefaultsToInternet() {
         String apiId = given()
                 .contentType(ContentType.JSON)
                 .body("""
@@ -135,8 +135,7 @@ class IntegrationConnectionTypeAndAuthorizerSimpleResponsesTest {
                         """)
                 .when().post("/v2/apis/" + apiId + "/integrations")
                 .then().statusCode(201)
-                .body("$", not(hasKey("connectionType")))
-                .body("connectionType", nullValue());
+                .body("connectionType", equalTo("INTERNET"));
     }
 
     // ──────────────────────────── Authorizer.enableSimpleResponses ────────────────────────────

@@ -888,6 +888,10 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
         req.put("connectionId", connectionId);
+        req.put("description", ctx.resolveOptional(props, "Description"));
+        req.put("passthroughBehavior", ctx.resolveOptional(props, "PassthroughBehavior"));
+        req.put("contentHandlingStrategy", ctx.resolveOptional(props, "ContentHandlingStrategy"));
+        req.put("integrationSubtype", ctx.resolveOptional(props, "IntegrationSubtype"));
         req.put("integrationMethod", ctx.resolveOrDefault(props, "IntegrationMethod", null));
         req.put("templateSelectionExpression",
                 ctx.resolveOrDefault(props, "TemplateSelectionExpression", null));
