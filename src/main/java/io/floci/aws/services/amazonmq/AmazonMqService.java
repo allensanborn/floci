@@ -40,7 +40,7 @@ public class AmazonMqService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(AmazonMqService.class);
     private static final String ENGINE_RABBITMQ = "RABBITMQ";
-    private static final String DEFAULT_ENGINE_VERSION = "3.13";
+    static final String DEFAULT_ENGINE_VERSION = "3.13";
     private static final String DEPLOYMENT_SINGLE_INSTANCE = "SINGLE_INSTANCE";
 
     private final StorageBackend<String, Broker> storage;
