@@ -98,6 +98,7 @@ public class CloudWatchLogsHandler {
             case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
             case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
             case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
+            case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             case "PutDestination" -> handlePutDestination(request, region);
             case "PutDestinationPolicy" -> handlePutDestinationPolicy(request, region);
             case "PutAccountPolicy" -> handlePutAccountPolicy(request, region);
@@ -224,6 +225,15 @@ public class CloudWatchLogsHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("resourcePolicies", policies);
         return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String policyName = request.path("policyName").asText(null);
+        if (policyName == null || policyName.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyName is required.", 400);
+        }
+        logsService.deleteResourcePolicy(policyName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private ObjectNode buildResourcePolicy(ResourcePolicy policy) {
