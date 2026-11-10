@@ -287,9 +287,14 @@ public class AutoScalingQueryHandler {
                         region, memberList(p, "AutoScalingGroupNames")).stream()
                 .filter(g -> filters.stream().allMatch(f -> matchesGroupFilter(g, f)))
                 .toList();
+        Integer maxRecords = nullableIntParam(p, "MaxRecords");
+        if (maxRecords != null && (maxRecords < 1 || maxRecords > 100)) {
+            throw new AwsException("ValidationError", "MaxRecords must be between 1 and 100.", 400);
+        }
         PaginatedResult<AutoScalingGroup> page = Pagination.paginate(matches,
-                AutoScalingGroup::getAutoScalingGroupName, nullableIntParam(p, "MaxRecords"),
-                p.getFirst("NextToken"), 50, 100, "ValidationError", "NextToken");
+                AutoScalingGroup::getAutoScalingGroupName, maxRecords != null ? maxRecords : 50,
+                p.getFirst("NextToken"), "autoscaling-groups",
+                token -> new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400));
         List<AutoScalingGroup> groups = page.items();
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAutoScalingGroupsResponse", NS)

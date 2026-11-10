@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
+import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingGroup;
 import software.amazon.awssdk.services.autoscaling.model.DescribeAutoScalingGroupsResponse;
 import software.amazon.awssdk.services.autoscaling.model.Filter;
@@ -15,6 +16,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * DescribeAutoScalingGroups Filters (tag:&lt;key&gt;, tag-key, tag-value) and pagination over the
@@ -81,6 +83,31 @@ class AutoScalingDescribeGroupsFilterIntegrationTest {
         }
     }
 
+    @Test
+    void tagFilterOnAGroupWithoutThatKeyMatchesNothing() {
+        try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, Region.US_EAST_2)) {
+            client.createLaunchConfiguration(r -> r.launchConfigurationName("miss-lc")
+                    .imageId("ami-12345678").instanceType("t3.micro"));
+            createGroup(client, "miss-a");
+            assertEquals(List.of(), names(client, filter("tag:absent", "v")));
+            assertEquals(List.of("miss-a"), names(client));
+        }
+    }
+
+    @Test
+    void undecodableNextTokenIsInvalidNextToken() {
+        try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, REGION)) {
+            AutoScalingException e = assertThrows(AutoScalingException.class,
+                    () -> client.describeAutoScalingGroups(r -> r.nextToken("not-a-token")));
+            assertEquals(400, e.statusCode());
+            assertEquals("InvalidNextToken", e.awsErrorDetails().errorCode());
+            assertEquals("The NextToken value is not valid.", e.awsErrorDetails().errorMessage());
+            e = assertThrows(AutoScalingException.class,
+                    () -> client.describeAutoScalingGroups(r -> r.maxRecords(101)));
+            assertEquals("ValidationError", e.awsErrorDetails().errorCode());
+        }
+    }
+
     private static List<String> names(AutoScalingClient client, Filter... filters) {
         return client.describeAutoScalingGroups(r -> r.filters(filters)).autoScalingGroups().stream()
                 .map(AutoScalingGroup::autoScalingGroupName).sorted().toList();
@@ -96,7 +123,7 @@ class AutoScalingDescribeGroupsFilterIntegrationTest {
 
     private static void createGroup(AutoScalingClient client, String name, Tag... tags) {
         client.createAutoScalingGroup(r -> r.autoScalingGroupName(name)
-                .launchConfigurationName(name.startsWith("page") ? "page-lc" : "flt-lc")
+                .launchConfigurationName(name.substring(0, name.indexOf('-')) + "-lc")
                 .minSize(0).maxSize(1).desiredCapacity(0)
                 .availabilityZones(client.serviceClientConfiguration().region().id() + "a").tags(tags));
     }
