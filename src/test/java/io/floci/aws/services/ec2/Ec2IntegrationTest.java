@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.MethodOrderer;
@@ -1934,6 +1935,42 @@ class Ec2IntegrationTest {
             .body("DescribeSubnetsResponse.subnetSet.item.assignIpv6AddressOnCreation", equalTo("false"))
             .body("DescribeSubnetsResponse.subnetSet.item.enableDns64", equalTo("false"))
             .body("DescribeSubnetsResponse.subnetSet.item.mapCustomerOwnedIpOnLaunch", equalTo("false"));
+    }
+
+    @Test
+    @Order(21)
+    void subnetPrivateDnsNameOptionsOnLaunchDefaultsAndModify() {
+        describePrivateDnsOptions()
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.hostnameType", equalTo("ip-name"))
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.enableResourceNameDnsARecord", equalTo("false"))
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.enableResourceNameDnsAAAARecord", equalTo("false"));
+
+        given().formParam("Action", "ModifySubnetAttribute").formParam("SubnetId", subnetId)
+            .formParam("PrivateDnsHostnameTypeOnLaunch", "resource-name")
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);
+        given().formParam("Action", "ModifySubnetAttribute").formParam("SubnetId", subnetId)
+            .formParam("EnableResourceNameDnsARecordOnLaunch.Value", "true")
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);
+
+        describePrivateDnsOptions()
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.hostnameType", equalTo("resource-name"))
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.enableResourceNameDnsARecord", equalTo("true"))
+            .body("DescribeSubnetsResponse.subnetSet.item.privateDnsNameOptionsOnLaunch.enableResourceNameDnsAAAARecord", equalTo("false"));
+    }
+
+    @Test
+    @Order(21)
+    void modifySubnetAttributeRejectsInvalidHostnameType() {
+        given().formParam("Action", "ModifySubnetAttribute").formParam("SubnetId", subnetId)
+            .formParam("PrivateDnsHostnameTypeOnLaunch", "bogus")
+            .header("Authorization", AUTH_HEADER).when().post("/").then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    private ValidatableResponse describePrivateDnsOptions() {
+        return given().formParam("Action", "DescribeSubnets").formParam("SubnetId.1", subnetId)
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);
     }
 
     @Test

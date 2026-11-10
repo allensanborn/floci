@@ -3563,11 +3563,17 @@ public class Ec2QueryHandler {
 
     private Response handleModifySubnetAttribute(MultivaluedMap<String, String> p, String region) {
         String subnetId = p.getFirst("SubnetId");
+        String hostnameType = p.getFirst("PrivateDnsHostnameTypeOnLaunch");
+        if (hostnameType != null) {
+            service.modifySubnetAttribute(region, subnetId, "privateDnsHostnameTypeOnLaunch", hostnameType);
+        }
         for (String attr : List.of(
                 "MapPublicIpOnLaunch",
                 "AssignIpv6AddressOnCreation",
                 "EnableDns64",
-                "MapCustomerOwnedIpOnLaunch")) {
+                "MapCustomerOwnedIpOnLaunch",
+                "EnableResourceNameDnsARecordOnLaunch",
+                "EnableResourceNameDnsAAAARecordOnLaunch")) {
             String val = p.getFirst(attr + ".Value");
             if (val != null) {
                 String camel = Character.toLowerCase(attr.charAt(0)) + attr.substring(1);
@@ -5713,6 +5719,11 @@ public class Ec2QueryHandler {
                 .elem("assignIpv6AddressOnCreation", String.valueOf(s.isAssignIpv6AddressOnCreation()))
                 .elem("enableDns64", String.valueOf(s.isEnableDns64()))
                 .elem("mapCustomerOwnedIpOnLaunch", String.valueOf(s.isMapCustomerOwnedIpOnLaunch()))
+                .start("privateDnsNameOptionsOnLaunch")
+                .elem("hostnameType", s.getPrivateDnsHostnameTypeOnLaunch())
+                .elem("enableResourceNameDnsARecord", String.valueOf(s.isEnableResourceNameDnsARecordOnLaunch()))
+                .elem("enableResourceNameDnsAAAARecord", String.valueOf(s.isEnableResourceNameDnsAAAARecordOnLaunch()))
+                .end("privateDnsNameOptionsOnLaunch")
                 .start("ipv6CidrBlockAssociationSet");
         for (VpcIpv6CidrBlockAssociation assoc : s.getIpv6CidrBlockAssociationSet()) {
             xml.start("item").raw(subnetIpv6AssociationXml(assoc)).end("item");
