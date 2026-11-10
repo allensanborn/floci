@@ -1,6 +1,11 @@
 package io.floci.aws.services.amazonmq;
 
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.amazonmq.model.Broker;
+import io.floci.aws.services.amazonmq.model.MqConfiguration;
+import io.floci.aws.services.amazonmq.model.MqConfiguration.Revision;
 import io.floci.aws.services.amazonmq.model.MqUser;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -22,10 +27,108 @@ import java.util.Map;
 public class AmazonMqController {
 
     private final AmazonMqService service;
+    private final AmazonMqConfigurationService configurations;
 
     @Inject
-    public AmazonMqController(AmazonMqService service) {
+    public AmazonMqController(AmazonMqService service, AmazonMqConfigurationService configurations) {
         this.service = service;
+        this.configurations = configurations;
+    }
+
+    // Configurations share /v1/configurations with MSK; AmazonMqRouteFilter rewrites a request
+    // signed for mq onto this internal prefix.
+    private static final String CONFIGURATIONS = AmazonMqRouteFilter.INTERNAL_PREFIX + "/v1/configurations";
+
+    @POST
+    @Path(CONFIGURATIONS)
+    public Response createConfiguration(Map<String, Object> request) {
+        MqConfiguration c = configurations.create(str(request, "name"), str(request, "engineType"),
+                str(request, "engineVersion"), str(request, "authenticationStrategy"),
+                tags(request.get("tags")));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("arn", c.arn);
+        putIfPresent(body, "authenticationStrategy", c.authenticationStrategy);
+        body.put("created", c.created);
+        body.put("id", c.id);
+        body.put("latestRevision", revisionView(c.latest()));
+        body.put("name", c.name);
+        return Response.ok(body).build();
+    }
+
+    @GET
+    @Path(CONFIGURATIONS)
+    public Response listConfigurations(@QueryParam("maxResults") String maxResults,
+                                       @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<MqConfiguration> page = configurations.list(
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("configurations", page.items().stream().map(AmazonMqController::configurationView).toList());
+        if (page.nextToken() != null) {
+            body.put("nextToken", page.nextToken());
+        }
+        return Response.ok(body).build();
+    }
+
+    @GET
+    @Path(CONFIGURATIONS + "/{configuration-id}")
+    public Response describeConfiguration(@PathParam("configuration-id") String id) {
+        return Response.ok(configurationView(configurations.describe(id))).build();
+    }
+
+    @PUT
+    @Path(CONFIGURATIONS + "/{configuration-id}")
+    public Response updateConfiguration(@PathParam("configuration-id") String id, Map<String, Object> request) {
+        MqConfiguration c = configurations.update(id, str(request, "data"), str(request, "description"));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("arn", c.arn);
+        body.put("created", c.created);
+        body.put("id", c.id);
+        body.put("latestRevision", revisionView(c.latest()));
+        body.put("name", c.name);
+        body.put("warnings", List.of());
+        return Response.ok(body).build();
+    }
+
+    @DELETE
+    @Path(CONFIGURATIONS + "/{configuration-id}")
+    public Response deleteConfiguration(@PathParam("configuration-id") String id) {
+        configurations.delete(id);
+        return Response.ok(Map.of("configurationId", id)).build();
+    }
+
+    @GET
+    @Path(CONFIGURATIONS + "/{configuration-id}/revisions")
+    public Response listConfigurationRevisions(@PathParam("configuration-id") String id,
+                                               @QueryParam("maxResults") String maxResults,
+                                               @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<Revision> page = configurations.revisions(id,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("configurationId", id);
+        body.put("revisions", page.items().stream().map(AmazonMqController::revisionView).toList());
+        if (page.nextToken() != null) {
+            body.put("nextToken", page.nextToken());
+        }
+        return Response.ok(body).build();
+    }
+
+    @GET
+    @Path(CONFIGURATIONS + "/{configuration-id}/revisions/{revision}")
+    public Response describeConfigurationRevision(@PathParam("configuration-id") String id,
+                                                  @PathParam("revision") String revision) {
+        int number;
+        try {
+            number = Integer.parseInt(revision);
+        } catch (NumberFormatException e) {
+            throw new AwsException("BadRequestException", "Invalid revision: " + revision, 400);
+        }
+        Revision r = configurations.revision(id, number);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("configurationId", id);
+        body.put("created", r.created);
+        body.put("data", r.data);
+        body.put("description", r.description);
+        return Response.ok(body).build();
     }
 
     @POST
@@ -199,6 +302,29 @@ public class AmazonMqController {
                                @PathParam("username") String username) {
         service.deleteUser(brokerId, username);
         return Response.ok(Map.of()).build();
+    }
+
+    private static Map<String, Object> revisionView(Revision r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("created", r.created);
+        m.put("description", r.description);
+        m.put("revision", r.revision);
+        return m;
+    }
+
+    private static Map<String, Object> configurationView(MqConfiguration c) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("arn", c.arn);
+        putIfPresent(m, "authenticationStrategy", c.authenticationStrategy);
+        m.put("created", c.created);
+        m.put("description", c.latest().description);
+        m.put("engineType", c.engineType);
+        m.put("engineVersion", c.engineVersion);
+        m.put("id", c.id);
+        m.put("latestRevision", revisionView(c.latest()));
+        m.put("name", c.name);
+        m.put("tags", c.tags);
+        return m;
     }
 
     // --- request parsing helpers ---

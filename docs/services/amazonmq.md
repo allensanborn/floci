@@ -20,6 +20,17 @@ Only the **RabbitMQ** engine and the `SINGLE_INSTANCE` deployment mode are suppo
 | `DeleteBroker` | Stops and removes the RabbitMQ container |
 | `RebootBroker` | Reboots the broker |
 | `DescribeSharedResources` | Returns an empty `sharedResources` list for an existing broker (always empty, since Floci has no `UpdateBroker` to associate a resource share with the broker) |
+| `CreateConfiguration` | Creates a configuration (`ACTIVEMQ` or `RABBITMQ`) with a default revision 1; accepts tags and `AuthenticationStrategy` |
+| `DescribeConfiguration` | Returns the configuration, its latest revision and tags |
+| `UpdateConfiguration` | Appends a revision from base64 `Data` and a description |
+| `ListConfigurations` | Lists configurations, paginated |
+| `DeleteConfiguration` | Deletes a configuration and its revisions |
+| `DescribeConfigurationRevision` | Returns a revision's base64 `Data` and description |
+| `ListConfigurationRevisions` | Lists a configuration's revisions, paginated |
+| `ListTags` / `CreateTags` / `DeleteTags` | Tag a configuration by ARN (broker ARNs are not served) |
+
+Configurations share `/v1/configurations` with MSK; Floci tells them apart by the SigV4 signing
+service (`mq` or `kafka`). Configurations are metadata only: a broker does not consume them.
 
 ### User management
 
