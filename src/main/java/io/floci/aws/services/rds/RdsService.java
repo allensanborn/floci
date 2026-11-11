@@ -7149,7 +7149,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
         DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(
                 dbProxyName, targetGroupName, effectiveRegion);
-        validatePoolConfiguration(proxy, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 connectionBorrowTimeout, sessionPinningFilters);
         DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
         if (maxConnectionsPercent != null) {
@@ -7200,7 +7200,7 @@ public class RdsService implements Resettable, ResourceProvider {
         List<String> instanceIds = dbInstanceIdentifiers != null
                 ? dbInstanceIdentifiers : List.of();
         validateProxyTargetSelection(proxy, clusterIds, instanceIds, effectiveRegion);
-        validatePoolConfiguration(proxy, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 connectionBorrowTimeout, sessionPinningFilters);
 
         DbProxyTarget currentTarget = original.getTargets().isEmpty()
@@ -9275,12 +9275,12 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void validatePoolConfiguration(Integer maxConnectionsPercent,
                                            Integer maxIdleConnectionsPercent) {
-        validatePoolConfiguration(null, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 null, null);
     }
 
     private void validatePoolConfiguration(
-            DbProxy proxy, Integer maxConnectionsPercent, Integer maxIdleConnectionsPercent,
+            Integer maxConnectionsPercent, Integer maxIdleConnectionsPercent,
             Integer connectionBorrowTimeout, List<String> sessionPinningFilters) {
         if (maxConnectionsPercent != null) {
             validatePercent("MaxConnectionsPercent", maxConnectionsPercent, 1, 100);
@@ -9297,10 +9297,6 @@ public class RdsService implements Resettable, ResourceProvider {
             validatePercent("ConnectionBorrowTimeout", connectionBorrowTimeout, 0, 300);
         }
         if (sessionPinningFilters != null && !sessionPinningFilters.isEmpty()) {
-            if (proxy == null || !"MYSQL".equals(proxy.getEngineFamily())) {
-                throw new AwsException("InvalidParameterValue",
-                        "SessionPinningFilters are supported only for MYSQL DB proxies.", 400);
-            }
             if (sessionPinningFilters.stream()
                     .anyMatch(filter -> !"EXCLUDE_VARIABLE_SETS".equals(filter))) {
                 throw new AwsException("InvalidParameterValue",
