@@ -3287,8 +3287,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("StorageType", i.getStorageType())
-           .elem("Iops", provisionedStorage(i, false))
-           .elem("StorageThroughput", provisionedStorage(i, true))
+           .elem("Iops", iops(i))
+           .elem("StorageThroughput", storageThroughput(i))
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
@@ -3381,30 +3381,39 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    /**
-     * Iops or StorageThroughput as Describe reports it: only for the storage types that carry the
-     * member (Iops on io1/io2/gp3, throughput on gp3), the stored value when the request named one,
-     * else the gp3 baseline. The baseline steps up from 3000 IOPS / 125 MiB/s to 12000 / 500 at 400 GiB
-     * (Db2, MariaDB, MySQL, PostgreSQL) or 200 GiB (Oracle) and stays flat on SQL Server.
-     * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
-     */
-    private static String provisionedStorage(DbInstance i, boolean throughput) {
+    /** Iops as Describe reports it: on io1, io2 and gp3, the stored value, else the gp3 baseline. */
+    private static String iops(DbInstance i) {
         String type = i.getStorageType();
         boolean gp3 = "gp3".equals(type);
-        if (!gp3 && (throughput || !("io1".equals(type) || "io2".equals(type)))) {
+        if (!gp3 && !"io1".equals(type) && !"io2".equals(type)) {
             return null;
         }
-        Integer stored = throughput ? i.getStorageThroughput() : i.getIops();
-        if (stored != null) {
-            return stored.toString();
+        if (i.getIops() != null) {
+            return i.getIops().toString();
         }
-        if (!gp3) {
+        return gp3 ? (gp3BaselineSteppedUp(i) ? "12000" : "3000") : null;
+    }
+
+    /** StorageThroughput as Describe reports it: on gp3 only, the stored value, else the baseline. */
+    private static String storageThroughput(DbInstance i) {
+        if (!"gp3".equals(i.getStorageType())) {
             return null;
         }
+        if (i.getStorageThroughput() != null) {
+            return i.getStorageThroughput().toString();
+        }
+        return gp3BaselineSteppedUp(i) ? "500" : "125";
+    }
+
+    /**
+     * Whether the gp3 baseline has stepped up from 3000 IOPS / 125 MiB/s to 12000 / 500: at 400 GiB
+     * (Db2, MariaDB, MySQL, PostgreSQL) or 200 GiB (Oracle), never on SQL Server.
+     * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
+     */
+    private static boolean gp3BaselineSteppedUp(DbInstance i) {
         String engine = instanceEngine(i);
         int threshold = engine.startsWith("sqlserver") ? Integer.MAX_VALUE : engine.startsWith("oracle") ? 200 : 400;
-        boolean high = i.getAllocatedStorage() >= threshold;
-        return String.valueOf(throughput ? (high ? 500 : 125) : (high ? 12000 : 3000));
+        return i.getAllocatedStorage() >= threshold;
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {
