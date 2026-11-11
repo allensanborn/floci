@@ -2134,6 +2134,9 @@ public class Ec2QueryHandler {
         String deliverLogsPermissionArn = p.getFirst("DeliverLogsPermissionArn");
         String logFormat = p.getFirst("LogFormat");
         int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
+        String fileFormat = p.getFirst("DestinationOptions.FileFormat");
+        String hive = p.getFirst("DestinationOptions.HiveCompatiblePartitions");
+        String perHour = p.getFirst("DestinationOptions.PerHourPartition");
 
         if (resourceIds.isEmpty()) {
             // Some SDKs send ResourceIds.member.N — fall back to that prefix.
@@ -2150,7 +2153,9 @@ public class Ec2QueryHandler {
         List<Tag> flowLogTags = parseTagsForResource(p, "vpc-flow-log");
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
-                    logDestinationType, logDestination, logGroupName, deliverLogsPermissionArn, logFormat, maxAgg);
+                    logDestinationType, logDestination, logGroupName, deliverLogsPermissionArn, logFormat, maxAgg,
+                    fileFormat, hive == null ? null : Boolean.valueOf(hive),
+                    perHour == null ? null : Boolean.valueOf(perHour));
             if (!flowLogTags.isEmpty()) {
                 service.createTags(region, List.of(fl.getFlowLogId()), flowLogTags);
             }
@@ -2186,8 +2191,15 @@ public class Ec2QueryHandler {
                             ? fl.getLogFormat() : FlowLogService.DEFAULT_LOG_FORMAT)
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
-                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
-                    .raw(tagSetXml(service.resourceTags(region, fl.getFlowLogId())))
+                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()));
+            if (fl.getDestinationFileFormat() != null) {
+                xml.start("destinationOptions")
+                        .elem("fileFormat", fl.getDestinationFileFormat())
+                        .elem("hiveCompatiblePartitions", String.valueOf(fl.getHiveCompatiblePartitions()))
+                        .elem("perHourPartition", String.valueOf(fl.getPerHourPartition()))
+                        .end("destinationOptions");
+            }
+            xml.raw(tagSetXml(service.resourceTags(region, fl.getFlowLogId())))
                     .end("item");
         }
         xml.end("flowLogSet").end("DescribeFlowLogsResponse");
