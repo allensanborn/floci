@@ -1383,6 +1383,14 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         return policies;
     }
 
+    public void deleteResourcePolicy(String policyName, String region) {
+        String key = resourcePolicyKey(region, policyName);
+        if (resourcePolicyStore.get(key).isEmpty()) {
+            throw new AwsException("ResourceNotFoundException", "The specified resource does not exist.", 400);
+        }
+        resourcePolicyStore.delete(key);
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     /**
