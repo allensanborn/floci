@@ -1420,6 +1420,11 @@ public class KmsService implements ResourceProvider {
         requireNotPendingDeletion(key);
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
+        // Retargeting an existing alias is UpdateAlias's job; CreateAlias must leave it untouched.
+        if (aliasStore.get(region + "::" + aliasName).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "An alias with the name " + aliasArn + " already exists", 400);
+        }
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
         aliasStore.put(region + "::" + aliasName, alias);
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());

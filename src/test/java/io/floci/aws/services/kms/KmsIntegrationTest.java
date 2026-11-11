@@ -3897,6 +3897,29 @@ class KmsIntegrationTest {
     }
 
     /**
+     * CreateAlias on a name that is taken is AlreadyExistsException and leaves the alias where it
+     * was; silently retargeting it showed up in Terraform as aws_kms_alias target_key_id drift.
+     */
+    @Test
+    void createAliasRefusesAnExistingNameAndKeepsItsTarget() {
+        String alias = "alias/dup-" + UUID.randomUUID();
+        String first = callKms("CreateKey", "{}").then().statusCode(200).extract().path("KeyMetadata.KeyId");
+        String second = callKms("CreateKey", "{}").then().statusCode(200).extract().path("KeyMetadata.KeyId");
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, first))
+                .then().statusCode(200);
+
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, second))
+                .then().statusCode(400)
+                .body("__type", equalTo("AlreadyExistsException"))
+                .body("message", equalTo("An alias with the name arn:aws:kms:us-east-1:000000000000:"
+                        + alias + " already exists"));
+
+        callKms("DescribeKey", "{\"KeyId\":\"%s\"}".formatted(alias))
+                .then().statusCode(200)
+                .body("KeyMetadata.KeyId", equalTo(first));
+    }
+
+    /**
      * CreateAlias must not hand an AWS managed key a second alias. AWS excludes them as a target,
      * so accepting one here would make a template succeed against Floci and fail against AWS,
      * which is the one failure mode nothing downstream reports.
