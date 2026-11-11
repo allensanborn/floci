@@ -155,7 +155,7 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
 
     @Test
     @Order(5)
-    void deleteRemovesIt() {
+    void deleteLeavesItDescribableAsDeleted() {
         given()
             .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
             .formParam("TransitGatewayAttachmentId", attachmentId)
@@ -170,8 +170,9 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             .formParam("TransitGatewayAttachmentIds.1", attachmentId)
             .header("Authorization", EAST)
         .when().post("/")
-        .then().statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayPeeringAttachmentsResponse.transitGatewayPeeringAttachments.item.state",
+                    equalTo("deleted"));
     }
 
     @Test
@@ -367,8 +368,9 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             .formParam("TransitGatewayAttachmentIds.1", id)
             .header("Authorization", EAST)
         .when().post("/")
-        .then().statusCode(400)
-            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayAttachmentID.NotFound"));
+        .then().statusCode(200)
+            .body("DescribeTransitGatewayPeeringAttachmentsResponse.transitGatewayPeeringAttachments.item.state",
+                    equalTo("deleted"));
     }
 
     /**

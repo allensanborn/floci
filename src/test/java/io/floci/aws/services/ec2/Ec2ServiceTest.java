@@ -47,6 +47,7 @@ import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.TransitGateway;
 import io.floci.aws.services.ec2.model.TransitGatewayOptions;
+import io.floci.aws.services.ec2.model.TransitGatewayPeeringAttachment;
 import io.floci.aws.services.ec2.model.TransitGatewayRoute;
 import io.floci.aws.services.ec2.model.TransitGatewayRouteTable;
 import io.floci.aws.services.ec2.model.TransitGatewayRouteTablePropagation;
@@ -8752,8 +8753,9 @@ class Ec2ServiceTest {
 
                 String what = attachment ? "attachment" : "gateway";
                 if (attachment) {
-                    assertTrue(service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of())
-                            .isEmpty(), what + " trial " + trial + ": tagging put the deleted record back");
+                    List<TransitGatewayVpcAttachment> left =
+                            service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of());
+                    assertTrue(left.size() == 1 && "deleted".equals(left.get(0).getState()), what + " trial " + trial + ": tagging put the deleted record back");
                 } else {
                     assertTrue(service.describeTransitGateways("us-east-1", List.of(), Map.of()).stream()
                                     .noneMatch(g -> g.getTransitGatewayId().equals(target)),
@@ -8787,6 +8789,77 @@ class Ec2ServiceTest {
         service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
         service.deleteSubnet("us-east-1", fixture[2]);
         service.deleteVpc("us-east-1", fixture[1]);
+    }
+
+    /**
+     * AWS keeps a deleted attachment describable; the provider's delete waiter polls for it. It
+     * must hold nothing, though: its VPC, subnet and gateway delete, its route table forgets it,
+     * the VPC re-attaches, and it cannot be tagged, modified or deleted again.
+     */
+    @Test
+    void aDeletedVpcAttachmentStaysDescribableButReleasesEverything() {
+        Ec2Service service = prefixListService();
+        String[] fixture = attachmentFixture(service);
+        TransitGatewayVpcAttachment created = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                fixture[1], List.of(fixture[2]), null, List.of());
+        String attachmentId = created.getTransitGatewayAttachmentId();
+        // Create associates with the gateway's default table.
+        String routeTableId = created.getAssociationRouteTableId();
+        assertEquals(1, service.associationsOf("us-east-1", routeTableId).size());
+        service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
+
+        List<TransitGatewayVpcAttachment> described =
+                service.describeTransitGatewayVpcAttachments("us-east-1", List.of(attachmentId), Map.of());
+        assertEquals(List.of("deleted"), described.stream().map(TransitGatewayVpcAttachment::getState).toList());
+        assertEquals(1, service.describeTransitGatewayVpcAttachments("us-east-1", List.of(),
+                Map.of("state", List.of("deleted"))).size());
+        assertEquals(0, service.describeTransitGatewayVpcAttachments("us-east-1", List.of(),
+                Map.of("state", List.of("available"))).size());
+        assertTrue(service.associationsOf("us-east-1", routeTableId).isEmpty());
+        assertNull(described.get(0).getAssociationRouteTableId());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId)).getErrorCode());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.createTags("us-east-1", List.of(attachmentId), List.of(new Tag("a", "b"))))
+                .getErrorCode());
+
+        // Nothing it named is held any more: the subnet and VPC go, and so does the gateway.
+        service.deleteSubnet("us-east-1", fixture[2]);
+        service.deleteSubnet("us-east-1", fixture[3]);
+        service.deleteVpc("us-east-1", fixture[1]);
+        service.deleteTransitGateway("us-east-1", fixture[0]);
+    }
+
+    @Test
+    void aDeletedVpcAttachmentDoesNotBlockReattaching() {
+        Ec2Service service = prefixListService();
+        String[] fixture = attachmentFixture(service);
+        String attachmentId = service.createTransitGatewayVpcAttachment("us-east-1", fixture[0],
+                fixture[1], List.of(fixture[2]), null, List.of()).getTransitGatewayAttachmentId();
+        service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
+        service.createTransitGatewayVpcAttachment("us-east-1", fixture[0], fixture[1],
+                List.of(fixture[2]), null, List.of());
+    }
+
+    @Test
+    void aDeletedPeeringAttachmentStaysDescribableButHoldsNothing() {
+        Ec2Service service = prefixListService();
+        String requester = service.createTransitGateway("us-east-1", "a", null, List.of()).getTransitGatewayId();
+        String accepter = service.createTransitGateway("us-east-1", "b", null, List.of()).getTransitGatewayId();
+        String id = service.createTransitGatewayPeeringAttachment("us-east-1", requester, accepter,
+                "000000000000", "us-east-1", null, List.of()).getTransitGatewayAttachmentId();
+        assertEquals("IncorrectState", assertThrows(AwsException.class,
+                () -> service.deleteTransitGateway("us-east-1", requester)).getErrorCode());
+        service.deleteTransitGatewayPeeringAttachment("us-east-1", id);
+
+        assertEquals(List.of("deleted"), service.describeTransitGatewayPeeringAttachments("us-east-1",
+                List.of(id), Map.of()).stream().map(TransitGatewayPeeringAttachment::getState).toList());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayPeeringAttachment("us-east-1", id)).getErrorCode());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.createTags("us-east-1", List.of(id), List.of(new Tag("a", "b")))).getErrorCode());
+        service.deleteTransitGateway("us-east-1", requester);
+        service.deleteTransitGateway("us-east-1", accepter);
     }
 
     /**

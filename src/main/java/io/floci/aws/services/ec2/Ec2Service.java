@@ -2614,7 +2614,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (lockFor(key(region, transitGatewayId))) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
             // AWS refuses while anything is still attached, naming the attachments in the message.
-            List<String> attached = transitGatewayVpcAttachments.scan(k -> true).stream()
+            List<String> attached = liveVpcAttachments().stream()
                     .filter(attachment -> region.equals(attachment.getRegion()))
                     .filter(attachment -> transitGatewayId.equals(attachment.getTransitGatewayId()))
                     .map(TransitGatewayVpcAttachment::getTransitGatewayAttachmentId)
@@ -2712,7 +2712,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The request must contain the parameter SubnetIds.", 400);
             }
             requireAttachableSubnets(region, vpcId, subnetIds, List.of());
-            boolean alreadyAttached = transitGatewayVpcAttachments.scan(k -> true).stream()
+            boolean alreadyAttached = liveVpcAttachments().stream()
                     .filter(existing -> region.equals(existing.getRegion()))
                     .filter(existing -> transitGatewayId.equals(existing.getTransitGatewayId()))
                     .anyMatch(existing -> vpcId.equals(existing.getVpcId()));
@@ -2966,9 +2966,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         transitGatewayRoutes.put(routeKey(region, route.getTransitGatewayRouteTableId(),
                                 route.getDestinationCidrBlock()), route);
                     });
-            transitGatewayVpcAttachments.delete(key(region, attachmentId));
-            removeTags(region, attachmentId);
+            // The record stays, as on AWS: the provider's delete waiter polls Describe for state
+            // "deleted", and a vanished attachment fails it with "couldn't find resource".
             attachment.setState("deleted");
+            attachment.setAssociationRouteTableId(null);
+            attachment.setAssociationState(null);
+            transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+            removeTags(region, attachmentId);
             return attachment;
         }
     }
@@ -3101,11 +3105,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (lockFor(attachmentId)) {
             OwnedPeeringAttachment owned = getRequiredPeeringAttachment(region, attachmentId);
             TransitGatewayPeeringAttachment attachment = withStoredTags(owned.attachment(), region);
-            if (owned.storageAccountId() != null) {
-                peeringAttachmentsByAccount().deleteForAccount(owned.storageAccountId(), attachmentId);
-            } else {
-                transitGatewayPeeringAttachments.delete(attachmentId);
-            }
+            // Kept, like a rejected one, so the provider's delete waiter can still see "deleted".
+            attachment.setState("deleted");
+            savePeeringAttachment(owned);
             // Tags are per account and per region, so each side keeps its own; both go with the attachment.
             TransitGatewayPeeringAttachment.TgwInfo requester = attachment.getRequesterTgwInfo();
             TransitGatewayPeeringAttachment.TgwInfo accepter = attachment.getAccepterTgwInfo();
@@ -3116,7 +3118,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 removeTags(requester.getRegion(), attachmentId);
                 removeTags(accepter.getRegion(), attachmentId);
             }
-            attachment.setState("deleted");
             return attachment;
         }
     }
@@ -3137,6 +3138,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         requireWellFormedAttachmentId(attachmentId);
         return findPeeringAttachment(attachmentId)
                 .filter(owned -> isPartyTo(owned.attachment(), callerAccountId(), region))
+                .filter(owned -> !"deleted".equals(owned.attachment().getState()))
                 .orElseThrow(() -> peeringAttachmentNotFound(attachmentId));
     }
 
@@ -3341,6 +3343,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     List<TransitGatewayVpcAttachment> associationsOf(
             String region, String routeTableId, List<Map.Entry<String, List<String>>> filters) {
         List<Map.Entry<String, List<String>>> modeledFilters = membershipFilters(filters);
+        // A deleted attachment has had its association cleared, so it never matches here.
         return transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .filter(attachment -> routeTableId.equals(attachment.getAssociationRouteTableId()))
@@ -3727,6 +3730,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** Deleted attachments stay describable but hold nothing: no gateway, VPC, subnet or route table. */
+    private List<TransitGatewayVpcAttachment> liveVpcAttachments() {
+        return transitGatewayVpcAttachments.scan(k -> true).stream()
+                .filter(attachment -> !"deleted".equals(attachment.getState()))
+                .toList();
+    }
+
     private TransitGatewayVpcAttachment getRequiredVpcAttachment(String region, String attachmentId) {
         if (attachmentId == null || attachmentId.isBlank()) {
             throw new AwsException("MissingParameter",
@@ -3734,6 +3744,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         requireWellFormedAttachmentId(attachmentId);
         return transitGatewayVpcAttachments.get(key(region, attachmentId))
+                .filter(attachment -> !"deleted".equals(attachment.getState()))
                 .orElseThrow(() -> new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
                         "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400));
     }
@@ -7759,7 +7770,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private void requireNoTransitGatewayAttachment(
             String region, java.util.function.Predicate<TransitGatewayVpcAttachment> dependsOnIt, String message) {
-        boolean attached = transitGatewayVpcAttachments.scan(k -> true).stream()
+        boolean attached = liveVpcAttachments().stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
                 .anyMatch(dependsOnIt);
         if (attached) {
@@ -10449,7 +10460,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "tgw" -> getRequiredTransitGateway(region, resourceId);
             case "tgw-rtb" -> getRequiredTransitGatewayRouteTable(region, resourceId);
             case "tgw-attach" -> {
-                if (transitGatewayVpcAttachments.get(key(region, resourceId)).isEmpty()) {
+                if (transitGatewayVpcAttachments.get(key(region, resourceId))
+                        .filter(attachment -> !"deleted".equals(attachment.getState())).isEmpty()) {
                     getRequiredPeeringAttachment(region, resourceId);
                 }
             }
@@ -10701,7 +10713,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return;
             }
             TransitGatewayVpcAttachment attachment = transitGatewayVpcAttachments.get(storeKey).orElse(null);
-            if (attachment != null) {
+            if (attachment != null && !"deleted".equals(attachment.getState())) {
                 attachment.setTags(new ArrayList<>(tagList));
                 transitGatewayVpcAttachments.put(storeKey, attachment);
             }
