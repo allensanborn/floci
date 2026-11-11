@@ -119,6 +119,25 @@ PUT, PATCH and DELETE).
 | `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
 | `ListKeyGroups` | GET | `/2020-05-31/key-group` |
 
+### Field-Level Encryption
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateFieldLevelEncryptionConfig` | POST | `/2020-05-31/field-level-encryption` |
+| `GetFieldLevelEncryption` | GET | `/2020-05-31/field-level-encryption/{Id}` |
+| `GetFieldLevelEncryptionConfig` | GET | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `UpdateFieldLevelEncryptionConfig` | PUT | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `DeleteFieldLevelEncryptionConfig` | DELETE | `/2020-05-31/field-level-encryption/{Id}` |
+| `ListFieldLevelEncryptionConfigs` | GET | `/2020-05-31/field-level-encryption` |
+| `CreateFieldLevelEncryptionProfile` | POST | `/2020-05-31/field-level-encryption-profile` |
+| `GetFieldLevelEncryptionProfile` | GET | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `GetFieldLevelEncryptionProfileConfig` | GET | `/2020-05-31/field-level-encryption-profile/{Id}/config` |
+| `UpdateFieldLevelEncryptionProfile` | PUT | `/2020-05-31/field-level-encryption-profile/{Id}/config` |
+| `DeleteFieldLevelEncryptionProfile` | DELETE | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `ListFieldLevelEncryptionProfiles` | GET | `/2020-05-31/field-level-encryption-profile` |
+
+Configs and profiles are stored as sent and read back whole; Floci does not encrypt request fields.
+
 ### Tagging
 
 | Operation | Method | Path |
@@ -516,7 +535,6 @@ signatures must still return 403. Verify those cases through the proxy after con
 - Continuous deployment policies (`CreateContinuousDeploymentPolicy`, etc.)
 - `CopyDistribution` (staging distributions)
 - Real-time log configs (`CreateRealtimeLogConfig`, etc.)
-- Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists, key value stores
