@@ -29,7 +29,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  Integer maxAllocatedStorage,
                                  String storageType,
                                  String caCertificateIdentifier,
-                                 String licenseModel) {
+                                 String licenseModel,
+                                 Integer iops,
+                                 Integer storageThroughput) {
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
                               String preferredBackupWindow, String preferredMaintenanceWindow,
                               Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
@@ -41,7 +43,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
                 performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, null);
+                caCertificateIdentifier, null, null, null);
     }
 
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
@@ -216,7 +218,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -225,7 +227,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     public DbInstanceSettings withStorageType(String resolvedStorageType) {
@@ -234,7 +236,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     /** The same settings with the CA certificate the service resolved. */
@@ -244,7 +246,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                resolvedCaCertificateIdentifier, licenseModel);
+                resolvedCaCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     public void validateStorageType() {
@@ -298,6 +300,13 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (storageType != null) {
             instance.setStorageType(storageType);
+            // a type that carries neither member drops the stored values, so a later switch back reports the baseline
+            if (!"gp3".equals(storageType)) {
+                instance.setStorageThroughput(null);
+                if (!"io1".equals(storageType) && !"io2".equals(storageType)) {
+                    instance.setIops(null);
+                }
+            }
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);
@@ -307,6 +316,12 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (licenseModel != null && !licenseModel.isBlank()) {
             instance.setLicenseModel(licenseModel);
+        }
+        if (iops != null) {
+            instance.setIops(iops);
+        }
+        if (storageThroughput != null) {
+            instance.setStorageThroughput(storageThroughput);
         }
     }
 }

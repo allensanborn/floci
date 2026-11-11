@@ -500,7 +500,10 @@ restores, point-in-time copies and read replicas. It also survives persistent, h
 reloads. Legacy records without the member retain the existing `gp2` fallback.
 
 Storage type changes apply immediately to control-plane metadata; the backing container volume's
-performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+performance is unchanged. `MultiAZ` changes remain unimplemented. `Iops` and `StorageThroughput` are stored from Create and
+Modify and described for the storage types that carry them (`Iops` on io1, io2 and gp3, throughput on gp3);
+a gp3 instance that named neither reports the
+[gp3 baseline](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage).
 Omitted create requests retain Floci's existing `gp2` default, which differs from the current
 [AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
 Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
