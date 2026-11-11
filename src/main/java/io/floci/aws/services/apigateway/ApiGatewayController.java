@@ -2868,6 +2868,10 @@ public class ApiGatewayController {
         node.put("integrationType", i.getIntegrationType());
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
+        if (i.getDescription() != null) node.put("description", i.getDescription());
+        if (i.getPassthroughBehavior() != null) node.put("passthroughBehavior", i.getPassthroughBehavior());
+        if (i.getContentHandlingStrategy() != null) node.put("contentHandlingStrategy", i.getContentHandlingStrategy());
+        if (i.getIntegrationSubtype() != null) node.put("integrationSubtype", i.getIntegrationSubtype());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getCredentialsArn() != null) {
             node.put("credentialsArn", i.getCredentialsArn());

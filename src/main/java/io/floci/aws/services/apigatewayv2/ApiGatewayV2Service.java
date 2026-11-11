@@ -755,7 +755,9 @@ public class ApiGatewayV2Service {
         integration.setIntegrationType((String) request.get("integrationType"));
         integration.setCredentialsArn((String) request.get("credentialsArn"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
-        integration.setConnectionType((String) request.get("connectionType"));
+        // AWS defaults an omitted ConnectionType to INTERNET; CloudFormation passes the key with a null value.
+        String connectionType = (String) request.get("connectionType");
+        integration.setConnectionType(connectionType != null ? connectionType : "INTERNET");
         integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
@@ -777,6 +779,10 @@ public class ApiGatewayV2Service {
         integration.setRequestParameters(requestParameters);
 
         integration.setConnectionId((String) request.get("connectionId"));
+        integration.setDescription((String) request.get("description"));
+        integration.setPassthroughBehavior((String) request.get("passthroughBehavior"));
+        integration.setContentHandlingStrategy((String) request.get("contentHandlingStrategy"));
+        integration.setIntegrationSubtype((String) request.get("integrationSubtype"));
 
         integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()), integration);
         return integration;
@@ -850,6 +856,18 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("connectionId") && request.get("connectionId") != null) {
             integration.setConnectionId((String) request.get("connectionId"));
+        }
+        if (request.get("description") != null) {
+            integration.setDescription((String) request.get("description"));
+        }
+        if (request.get("passthroughBehavior") != null) {
+            integration.setPassthroughBehavior((String) request.get("passthroughBehavior"));
+        }
+        if (request.get("contentHandlingStrategy") != null) {
+            integration.setContentHandlingStrategy((String) request.get("contentHandlingStrategy"));
+        }
+        if (request.get("integrationSubtype") != null) {
+            integration.setIntegrationSubtype((String) request.get("integrationSubtype"));
         }
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);

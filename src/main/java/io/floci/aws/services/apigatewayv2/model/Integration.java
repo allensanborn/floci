@@ -20,6 +20,10 @@ public class Integration {
     private String templateSelectionExpression;
     private Map<String, String> requestParameters;
     private String connectionId;
+    private String description;
+    private String passthroughBehavior;
+    private String contentHandlingStrategy;
+    private String integrationSubtype;
 
     private String credentialsArn;
 
@@ -43,6 +47,10 @@ public class Integration {
         this.templateSelectionExpression = src.templateSelectionExpression;
         this.requestParameters = src.requestParameters;
         this.connectionId = src.connectionId;
+        this.description = src.description;
+        this.passthroughBehavior = src.passthroughBehavior;
+        this.contentHandlingStrategy = src.contentHandlingStrategy;
+        this.integrationSubtype = src.integrationSubtype;
     }
 
     public String getIntegrationId() { return integrationId; }
@@ -80,4 +88,16 @@ public class Integration {
 
     public String getConnectionId() { return connectionId; }
     public void setConnectionId(String connectionId) { this.connectionId = connectionId; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+
+    public String getPassthroughBehavior() { return passthroughBehavior; }
+    public void setPassthroughBehavior(String passthroughBehavior) { this.passthroughBehavior = passthroughBehavior; }
+
+    public String getContentHandlingStrategy() { return contentHandlingStrategy; }
+    public void setContentHandlingStrategy(String contentHandlingStrategy) { this.contentHandlingStrategy = contentHandlingStrategy; }
+
+    public String getIntegrationSubtype() { return integrationSubtype; }
+    public void setIntegrationSubtype(String integrationSubtype) { this.integrationSubtype = integrationSubtype; }
 }

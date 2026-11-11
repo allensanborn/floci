@@ -888,6 +888,10 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
         req.put("connectionId", connectionId);
+        req.put("description", ctx.resolveOptional(props, "Description"));
+        req.put("passthroughBehavior", ctx.resolveOptional(props, "PassthroughBehavior"));
+        req.put("contentHandlingStrategy", ctx.resolveOptional(props, "ContentHandlingStrategy"));
+        req.put("integrationSubtype", ctx.resolveOptional(props, "IntegrationSubtype"));
         req.put("integrationMethod", ctx.resolveOrDefault(props, "IntegrationMethod", null));
         req.put("templateSelectionExpression",
                 ctx.resolveOrDefault(props, "TemplateSelectionExpression", null));
@@ -960,7 +964,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                                  Map<String, Object> req) {
         boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
                 || changes(req.get("integrationUri"), prior.getIntegrationUri())
-                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
+                || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion())
+                || changes(req.get("description"), prior.getDescription())
+                || changes(req.get("passthroughBehavior"), prior.getPassthroughBehavior())
+                || changes(req.get("contentHandlingStrategy"), prior.getContentHandlingStrategy())
+                || changes(req.get("integrationSubtype"), prior.getIntegrationSubtype());
         ObjectNode snapshot = objectMapper.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("apiId", apiId);
