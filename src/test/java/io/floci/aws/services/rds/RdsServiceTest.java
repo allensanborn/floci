@@ -8822,6 +8822,35 @@ class RdsServiceTest {
     }
 
     @Test
+    void postgresqlProxyAcceptsSessionPinningFilters() {
+        // AWS documents the filter as effective only on MySQL, not as rejected elsewhere.
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        rdsService.createDbProxy("pg-proxy", "POSTGRESQL", true, false,
+                PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+
+        rdsService.configureDbProxyTargetGroup("pg-proxy", "default", 80, 40, 120, null,
+                List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1");
+        assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), rdsService
+                .describeDbProxyTargetGroups("pg-proxy").iterator().next()
+                .getSessionPinningFilters());
+
+        DbProxyTargetGroup reconciled = rdsService.reconcileDbProxyTargetGroup(
+                "pg-proxy", "default", List.of("cluster1"), List.of(),
+                80, 40, 120, null, List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1");
+        assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), reconciled.getSessionPinningFilters());
+
+        AwsException invalid = assertThrows(AwsException.class, () ->
+                rdsService.configureDbProxyTargetGroup("pg-proxy", "default", 80, 40, 120,
+                        null, List.of("INCLUDE_ALL"), "us-east-1"));
+        assertEquals("InvalidParameterValue", invalid.getErrorCode());
+        assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), rdsService
+                .describeDbProxyTargetGroups("pg-proxy").iterator().next()
+                .getSessionPinningFilters());
+    }
+
+    @Test
     void targetGroupReconciliationValidatesBeforeMutation() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
@@ -8834,7 +8863,7 @@ class RdsServiceTest {
         AwsException invalid = assertThrows(AwsException.class, () ->
                 rdsService.reconcileDbProxyTargetGroup(
                         "app-proxy", "default", List.of("cluster1"), List.of(),
-                        80, 40, 120, null, List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1"));
+                        80, 40, 120, null, List.of("INCLUDE_ALL"), "us-east-1"));
 
         assertEquals("InvalidParameterValue", invalid.getErrorCode());
         DbProxyTargetGroup after = rdsService.describeDbProxyTargetGroups("app-proxy")
