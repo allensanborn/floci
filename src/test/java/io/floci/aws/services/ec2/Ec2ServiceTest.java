@@ -7337,7 +7337,8 @@ class Ec2ServiceTest {
         String groupId = service.createSecurityGroup("us-east-1", "tf", "x", vpcId).getGroupId();
         service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("tcp", 22, 22)));
 
-        service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("tcp", 0, 0)));
+        assertThrows(AwsException.class, () ->
+                service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("tcp", 0, 0))));
         assertEquals(1, service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
                 .getFirst().getIpPermissions().size(), "port 0 is not port 22");
 

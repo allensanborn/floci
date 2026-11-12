@@ -3695,26 +3695,50 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        List<SecurityGroupRule> revoked = new ArrayList<>();
         if (!ruleIds.isEmpty()) {
-            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, false);
+            revoked.addAll(service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, false));
         }
         if (!perms.isEmpty() || ruleIds.isEmpty()) {
-            service.revokeSecurityGroupIngress(region, groupId, perms);
+            revoked.addAll(service.revokeSecurityGroupIngress(region, groupId, perms));
         }
-        return booleanResponse("RevokeSecurityGroupIngress");
+        return revokeResponse("RevokeSecurityGroupIngress", revoked);
     }
 
     private Response handleRevokeSecurityGroupEgress(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<String> ruleIds = getList(p, "SecurityGroupRuleId");
+        List<SecurityGroupRule> revoked = new ArrayList<>();
         if (!ruleIds.isEmpty()) {
-            service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, true);
+            revoked.addAll(service.revokeSecurityGroupRulesByIds(region, groupId, ruleIds, true));
         }
         if (!perms.isEmpty() || ruleIds.isEmpty()) {
-            service.revokeSecurityGroupEgress(region, groupId, perms);
+            revoked.addAll(service.revokeSecurityGroupEgress(region, groupId, perms));
         }
-        return booleanResponse("RevokeSecurityGroupEgress");
+        return revokeResponse("RevokeSecurityGroupEgress", revoked);
+    }
+
+    private Response revokeResponse(String action, List<SecurityGroupRule> revoked) {
+        XmlBuilder xml = Ec2QueryProtocol.startResponse(action).elem("return", "true")
+                .start("revokedSecurityGroupRuleSet");
+        for (SecurityGroupRule rule : revoked) {
+            ReferencedSecurityGroup ref = rule.getReferencedGroupInfo();
+            xml.start("item")
+                    .elem("securityGroupRuleId", rule.getSecurityGroupRuleId())
+                    .elem("groupId", rule.getGroupId())
+                    .elem("isEgress", String.valueOf(rule.isEgress()))
+                    .elem("ipProtocol", rule.getIpProtocol());
+            if (rule.getFromPort() != null) xml.elem("fromPort", String.valueOf(rule.getFromPort()));
+            if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
+            xml.elem("cidrIpv4", rule.getCidrIpv4())
+                    .elem("cidrIpv6", rule.getCidrIpv6())
+                    .elem("prefixListId", rule.getPrefixListId())
+                    .elem("referencedGroupId", ref == null ? null : ref.getGroupId())
+                    .elem("description", rule.getDescription())
+                    .end("item");
+        }
+        return Ec2QueryProtocol.endResponse(xml.end("revokedSecurityGroupRuleSet"), action);
     }
 
     private Response handleDescribeSecurityGroupRules(MultivaluedMap<String, String> p, String region) {
@@ -3760,13 +3784,15 @@ public class Ec2QueryHandler {
 
     private Response handleUpdateSgRuleDescriptionsIngress(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
-        service.updateSecurityGroupRuleDescriptionsIngress(region, groupId, Collections.emptyList());
+        service.updateSecurityGroupRuleDescriptionsIngress(region, groupId,
+                parseIpPermissions(p, "IpPermissions"));
         return booleanResponse("UpdateSecurityGroupRuleDescriptionsIngress");
     }
 
     private Response handleUpdateSgRuleDescriptionsEgress(MultivaluedMap<String, String> p, String region) {
         String groupId = p.getFirst("GroupId");
-        service.updateSecurityGroupRuleDescriptionsEgress(region, groupId, Collections.emptyList());
+        service.updateSecurityGroupRuleDescriptionsEgress(region, groupId,
+                parseIpPermissions(p, "IpPermissions"));
         return booleanResponse("UpdateSecurityGroupRuleDescriptionsEgress");
     }
 

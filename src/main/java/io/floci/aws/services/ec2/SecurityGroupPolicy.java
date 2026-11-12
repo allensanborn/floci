@@ -68,6 +68,7 @@ public final class SecurityGroupPolicy {
             return null;
         }
         return switch (protocol.toLowerCase(Locale.ROOT)) {
+            case "all" -> "-1";
             case "6" -> "tcp";
             case "17" -> "udp";
             case "1" -> "icmp";
