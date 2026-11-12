@@ -8026,8 +8026,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * ("all" and "-1" alike, "TCP" as tcp) and "all traffic" without ports. Every reader then
      * compares stored values directly.
      */
-    private static void canonicalize(IpPermission perm) {
-        perm.setIpProtocol(SecurityGroupPolicy.normalizeProtocol(perm.getIpProtocol()));
+    public static void canonicalize(IpPermission perm) {
+        // Names fold in case and "all" becomes -1; a protocol number stays as written, as on AWS.
+        String protocol = perm.getIpProtocol() == null ? null : perm.getIpProtocol().toLowerCase(Locale.ROOT);
+        perm.setIpProtocol("all".equals(protocol) ? "-1" : protocol);
         if ("-1".equals(perm.getIpProtocol())) {
             perm.setFromPort(null);
             perm.setToPort(null);
@@ -8038,9 +8040,27 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static String ruleKey(SecurityGroupRule r) {
         boolean all = "-1".equals(r.getIpProtocol());
         ReferencedSecurityGroup ref = r.getReferencedGroupInfo();
-        return Arrays.asList(r.getIpProtocol(), all ? -1 : r.getFromPort(), all ? -1 : r.getToPort(),
+        // 6 and tcp name the same protocol, so they share a key even though each is stored as written.
+        return Arrays.asList(SecurityGroupPolicy.normalizeProtocol(r.getIpProtocol()), all ? -1 : r.getFromPort(), all ? -1 : r.getToPort(),
                 r.getCidrIpv4(), r.getCidrIpv6(), r.getPrefixListId(),
                 ref == null ? null : ref.getGroupId()).toString();
+    }
+
+    private static boolean sameProtocol(String a, String b) {
+        return Objects.equals(SecurityGroupPolicy.normalizeProtocol(a), SecurityGroupPolicy.normalizeProtocol(b));
+    }
+
+    /**
+     * The rule a previous provisioning recorded, if it still holds exactly what {@code perm} (one
+     * source) would create in its group, so an identical re-provision can keep it instead of
+     * tripping the duplicate check. Descriptions are not part of a rule's identity.
+     */
+    public Optional<SecurityGroupRule> unchangedRule(String region, String ruleId, String groupId, IpPermission perm) {
+        canonicalize(perm);
+        return securityGroupRules.get(key(region, ruleId))
+                .filter(prev -> groupId.equals(prev.getGroupId()))
+                .filter(prev -> buildRules(groupId, perm, prev.isEgress()).stream()
+                        .allMatch(n -> ruleKey(n).equals(ruleKey(prev))));
     }
 
     private List<SecurityGroupRule> heldRules(String region, String groupId, boolean egress) {
@@ -8057,7 +8077,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 String peer = Stream.of(rule.getCidrIpv4(), rule.getCidrIpv6(), rule.getPrefixListId(),
                         ref == null ? null : ref.getGroupId()).filter(Objects::nonNull).findFirst().orElse("");
                 String shape = "-1".equals(rule.getIpProtocol()) ? "ALL"
-                        : rule.getIpProtocol().toUpperCase(Locale.ROOT) + ", from port: " + rule.getFromPort()
+                        : String.valueOf(rule.getIpProtocol()).toUpperCase(Locale.ROOT) + ", from port: " + rule.getFromPort()
                                 + ", to port: " + rule.getToPort();
                 throw new AwsException("InvalidPermission.Duplicate",
                         "the specified rule \"peer: " + peer + ", " + shape + ", ALLOW\" already exists", 400);
@@ -8132,7 +8152,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             SecurityGroupRule shape = newRule(groupId, perm, egress);
             List<SecurityGroupRule> named = hasSources(perm) ? buildRules(groupId, perm, egress) : List.of();
             List<SecurityGroupRule> matches = named.isEmpty()
-                    ? held.stream().filter(r -> Objects.equals(r.getIpProtocol(), shape.getIpProtocol())
+                    ? held.stream().filter(r -> sameProtocol(r.getIpProtocol(), shape.getIpProtocol())
                             && Objects.equals(r.getFromPort(), shape.getFromPort())
                             && Objects.equals(r.getToPort(), shape.getToPort())).toList()
                     : named.stream().map(n -> held.stream()
@@ -8239,7 +8259,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 ? null : rule.getReferencedGroupInfo().getGroupId();
         for (IpPermission perm : perms) {
             boolean all = "-1".equals(rule.getIpProtocol());
-            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
+            if (!sameProtocol(perm.getIpProtocol(), rule.getIpProtocol())
                     || !all && (!Objects.equals(perm.getFromPort(), rule.getFromPort())
                             || !Objects.equals(perm.getToPort(), rule.getToPort()))) {
                 continue;
@@ -8376,7 +8396,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private void describeRecordedPeer(List<IpPermission> perms, SecurityGroupRule rule) {
         String refGroup = rule.getReferencedGroupInfo() == null ? null : rule.getReferencedGroupInfo().getGroupId();
         for (IpPermission perm : perms) {
-            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
+            if (!sameProtocol(perm.getIpProtocol(), rule.getIpProtocol())
                     || !"-1".equals(rule.getIpProtocol()) && (!Objects.equals(perm.getFromPort(), rule.getFromPort())
                             || !Objects.equals(perm.getToPort(), rule.getToPort()))) {
                 continue;

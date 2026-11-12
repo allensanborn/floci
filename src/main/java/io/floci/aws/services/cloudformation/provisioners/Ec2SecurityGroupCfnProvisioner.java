@@ -202,7 +202,10 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         List<IpPermission> declared = new ArrayList<>();
         if (props != null && props.has(property)) {
             for (JsonNode rule : props.get(property)) {
-                declared.add(Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine));
+                IpPermission perm = Ec2SecurityGroupRuleCfnProvisioner.toIpPermission(rule, engine);
+                // Compare in the form the group stores it, or "all"/"-1" never matches itself.
+                Ec2Service.canonicalize(perm);
+                declared.add(perm);
             }
         }
         Set<String> declaredKeys = new LinkedHashSet<>();

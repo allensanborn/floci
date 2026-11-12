@@ -70,12 +70,24 @@ public class Ec2SecurityGroupRuleCfnProvisioner implements CfnResourceProvisione
         // its permission, so the stack settles as UPDATE_ROLLBACK_COMPLETE minus a valid rule.
         String previousRuleId = r.getPhysicalId();
 
-        List<SecurityGroupRule> rules = ingress
-                ? ec2Service.authorizeSecurityGroupIngress(ctx.region(), groupId, List.of(perm))
-                : ec2Service.authorizeSecurityGroupEgress(ctx.region(), groupId, List.of(perm));
-
-        if (previousRuleId != null && previousRuleId.startsWith("sgr-")) {
-            ec2Service.deleteSecurityGroupRule(ctx.region(), previousRuleId);
+        boolean hasPrevious = previousRuleId != null && previousRuleId.startsWith("sgr-");
+        // An identical re-provision keeps its rule: authorizing it again would be a duplicate.
+        List<SecurityGroupRule> rules = hasPrevious
+                ? ec2Service.unchangedRule(ctx.region(), previousRuleId, groupId, perm).map(List::of).orElse(null)
+                : null;
+        if (rules != null) {
+            if (ingress) {
+                ec2Service.updateSecurityGroupRuleDescriptionsIngress(ctx.region(), groupId, List.of(perm));
+            } else {
+                ec2Service.updateSecurityGroupRuleDescriptionsEgress(ctx.region(), groupId, List.of(perm));
+            }
+        } else {
+            rules = ingress
+                    ? ec2Service.authorizeSecurityGroupIngress(ctx.region(), groupId, List.of(perm))
+                    : ec2Service.authorizeSecurityGroupEgress(ctx.region(), groupId, List.of(perm));
+            if (hasPrevious) {
+                ec2Service.deleteSecurityGroupRule(ctx.region(), previousRuleId);
+            }
         }
         // Ref and Fn::GetAtt Id both return the rule id, as they do in CloudFormation. The logical
         // id is only a fallback for the (unreachable in practice) case of no rule being recorded —

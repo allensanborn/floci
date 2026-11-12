@@ -7331,6 +7331,33 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aProtocolNumberIsStoredAsWrittenYetDuplicatesItsName() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc("us-east-1", "10.78.0.0/16", false).getVpcId();
+        String groupId = service.createSecurityGroup("us-east-1", "tf", "x", vpcId).getGroupId();
+
+        List<SecurityGroupRule> granted = service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                List.of(cidrPermission("6", 22, 22)));
+
+        assertEquals("6", granted.getFirst().getIpProtocol());
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("TCP", 22, 22))));
+        assertEquals("InvalidPermission.Duplicate", duplicate.getErrorCode());
+    }
+
+    @Test
+    void aDuplicateWithoutAProtocolIsAnAwsErrorNotAServerError() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc("us-east-1", "10.79.0.0/16", false).getVpcId();
+        String groupId = service.createSecurityGroup("us-east-1", "tf", "x", vpcId).getGroupId();
+
+        AwsException duplicate = assertThrows(AwsException.class, () ->
+                service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                        List.of(cidrPermission(null, 22, 22), cidrPermission(null, 22, 22))));
+        assertEquals("InvalidPermission.Duplicate", duplicate.getErrorCode());
+    }
+
+    @Test
     void portsStillMatterForOtherProtocols() {
         Ec2Service service = mockModeService();
         String vpcId = service.createVpc("us-east-1", "10.76.0.0/16", false).getVpcId();
