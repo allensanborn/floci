@@ -1,11 +1,13 @@
 package io.floci.aws.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Attach, detach and delete of an internet gateway refuse what AWS refuses, with AWS's codes and
@@ -42,7 +44,7 @@ class Ec2InternetGatewayDependencyIntegrationTest {
         if (vpcId != null) {
             r = r.formParam("VpcId", vpcId);
         }
-        var resp = r.when().post("/").then().statusCode(status);
+        ValidatableResponse resp = r.when().post("/").then().statusCode(status);
         if (code != null) {
             resp.body("Response.Errors.Error.Code", equalTo(code))
                 .body("Response.Errors.Error.Message", equalTo(message));
@@ -107,9 +109,5 @@ class Ec2InternetGatewayDependencyIntegrationTest {
 
         call("DeleteInternetGateway", "igw-00000000", null, 400, "InvalidInternetGatewayId.Malformed",
                 "The internet-gateway ID 'igw-00000000' is malformed");
-    }
-
-    private static void assertEquals(String expected, String actual) {
-        org.junit.jupiter.api.Assertions.assertEquals(expected, actual);
     }
 }
