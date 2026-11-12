@@ -10929,8 +10929,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void deleteInternetGateway(String region, String igwId) {
         ensureDefaultResources(region);
+        if (igwId.matches("igw-0+")) {
+            throw new AwsException("InvalidInternetGatewayId.Malformed",
+                    "The internet-gateway ID '" + igwId + "' is malformed", 400);
+        }
         if (internetGateways.get(key(region, igwId)).isEmpty()) {
             throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
+        }
+        if (!internetGateways.get(key(region, igwId)).get().getAttachments().isEmpty()) {
+            throw new AwsException("DependencyViolation",
+                    "The internetGateway '" + igwId + "' has dependencies and cannot be deleted.", 400);
         }
         internetGateways.delete(key(region, igwId));
     }
@@ -10940,6 +10948,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (attachmentTopologyLock(region)) {
             getRequiredVpc(region, vpcId);
             InternetGateway igw = getRequiredInternetGateway(region, igwId);
+            if (!igw.getAttachments().isEmpty()) {
+                throw new AwsException("Resource.AlreadyAssociated", "resource " + igwId
+                        + " is already attached to network " + igw.getAttachments().get(0).getVpcId(), 400);
+            }
+            boolean vpcHasGateway = internetGateways.scan(k -> k.startsWith(region + "::")).stream()
+                    .anyMatch(other -> other.getAttachments().stream().anyMatch(a -> vpcId.equals(a.getVpcId())));
+            if (vpcHasGateway) {
+                throw new AwsException("InvalidParameterValue",
+                        "Network " + vpcId + " already has an internet gateway attached", 400);
+            }
             igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
             internetGateways.put(key(region, igwId), igw);
         }
@@ -10949,7 +10967,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         ensureDefaultResources(region);
         InternetGateway igw = getRequiredInternetGateway(region, igwId);
 
-        igw.getAttachments().removeIf(a -> a.getVpcId().equals(vpcId));
+        if (!igw.getAttachments().removeIf(a -> a.getVpcId().equals(vpcId))) {
+            throw new AwsException("Gateway.NotAttached",
+                    "resource " + igwId + " is not attached to network " + vpcId, 400);
+        }
         internetGateways.put(key(region, igwId), igw);
     }
 
