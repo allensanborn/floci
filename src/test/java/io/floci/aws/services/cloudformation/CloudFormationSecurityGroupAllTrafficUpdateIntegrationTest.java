@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * An update that touches only an unrelated resource must leave rules declared as all traffic
+ * An update that re-executes the group and a standalone rule without changing the rules must leave rules declared as all traffic
  * ({@code -1} with ports -1, "all", an upper-case name) alone: the group stores them canonically,
  * so a declared rule keyed on its raw spelling would be authorized again and refused as a duplicate.
  */
@@ -24,22 +24,26 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class CloudFormationSecurityGroupAllTrafficUpdateIntegrationTest {
 
     @Test
-    void anUnrelatedUpdateKeepsAllTrafficRulesAsTheyWere() {
+    void aReExecutedGroupAndRuleKeepTheirAllTrafficRules() {
         String stackName = "cfn-sg-all-" + UUID.randomUUID();
         CloudFormationClient cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
         Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1);
         try {
-            cfn.createStack(r -> r.stackName(stackName).templateBody(template("")));
+            cfn.createStack(r -> r.stackName(stackName).templateBody(template("v1")));
             String groupId = CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE").outputs().getFirst()
                     .outputValue();
             Set<String> before = ruleIds(ec2, groupId);
             assertEquals(5, before.size(), "implicit egress, three inline ingress, one standalone ingress");
 
-            String queue = ",\"Queue\": {\"Type\": \"AWS::SQS::Queue\"}";
-            cfn.updateStack(r -> r.stackName(stackName).templateBody(template(queue)));
+            // Only a tag and a rule description change: the group and the standalone rule are
+            // re-executed, the rules they declare are not.
+            cfn.updateStack(r -> r.stackName(stackName).templateBody(template("v2")));
             CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
 
             assertEquals(before, ruleIds(ec2, groupId));
+            assertEquals(Set.of("v2"), ec2.describeSecurityGroupRules(r -> r.filters(f -> f.name("group-id").values(groupId)))
+                    .securityGroupRules().stream().filter(x -> "10.4.0.0/16".equals(x.cidrIpv4()))
+                    .map(SecurityGroupRule::description).collect(Collectors.toSet()));
         } finally {
             cfn.deleteStack(r -> r.stackName(stackName));
             ec2.close();
@@ -53,7 +57,7 @@ class CloudFormationSecurityGroupAllTrafficUpdateIntegrationTest {
                 .collect(Collectors.toSet());
     }
 
-    private static String template(String more) {
+    private static String template(String version) {
         return """
                 {
                   "Resources": {
@@ -64,12 +68,14 @@ class CloudFormationSecurityGroupAllTrafficUpdateIntegrationTest {
                         {"IpProtocol": "-1", "FromPort": -1, "ToPort": -1, "CidrIp": "10.1.0.0/16"},
                         {"IpProtocol": "all", "CidrIp": "10.2.0.0/16"},
                         {"IpProtocol": "TCP", "FromPort": 22, "ToPort": 22, "CidrIp": "10.3.0.0/16"}
-                      ]}},
+                      ],
+                      "Tags": [{"Key": "version", "Value": "%1$s"}]}},
                     "Extra": {"Type": "AWS::EC2::SecurityGroupIngress", "Properties": {
-                      "GroupId": {"Fn::GetAtt": ["Group", "GroupId"]}, "IpProtocol": "all", "CidrIp": "10.4.0.0/16"}}%s
+                      "GroupId": {"Fn::GetAtt": ["Group", "GroupId"]}, "IpProtocol": "all", "CidrIp": "10.4.0.0/16",
+                      "Description": "%1$s"}}
                   },
                   "Outputs": {"GroupId": {"Value": {"Ref": "Group"}}}
                 }
-                """.formatted(more);
+                """.formatted(version);
     }
 }
