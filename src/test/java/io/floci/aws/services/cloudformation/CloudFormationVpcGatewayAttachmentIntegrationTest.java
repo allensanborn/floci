@@ -126,7 +126,8 @@ class CloudFormationVpcGatewayAttachmentIntegrationTest {
         String xml = "";
         long deadline = System.currentTimeMillis() + 10_000;
         while (System.currentTimeMillis() < deadline) {
-            xml = describeIgw(igwId).then().statusCode(200).extract().asString();
+            // Once the gateway is deleted, describing it by id is NotFound, as AWS answers.
+            xml = describeIgw(igwId).then().extract().asString();
             if (!xml.contains(vpcId)) {
                 return xml;
             }

@@ -100,6 +100,10 @@ class Ec2InternetGatewayDependencyIntegrationTest {
 
         call("DetachInternetGateway", gw, vpc1, 200, null, null);
         call("DeleteInternetGateway", gw, null, 200, null, null);
+        ec2().formParam("Action", "DescribeInternetGateways").formParam("InternetGatewayId.1", gw)
+                .when().post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidInternetGatewayID.NotFound"))
+                .body("Response.Errors.Error.Message", equalTo("The internetGateway ID '" + gw + "' does not exist"));
 
         call("DeleteInternetGateway", "igw-00000000", null, 400, "InvalidInternetGatewayId.Malformed",
                 "The internet-gateway ID 'igw-00000000' is malformed");

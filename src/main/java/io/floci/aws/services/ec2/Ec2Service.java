@@ -10920,6 +10920,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     List<InternetGateway> describeInternetGateways(String region, List<String> igwIds,
                                                    List<Map.Entry<String, List<String>>> filters) {
         ensureDefaultResources(region);
+        for (String igwId : igwIds) {
+            if (internetGateways.get(key(region, igwId)).isEmpty()) {
+                throw new AwsException("InvalidInternetGatewayID.NotFound",
+                        "The internetGateway ID '" + igwId + "' does not exist", 400);
+            }
+        }
         return internetGateways.scan(k -> true).stream()
                 .filter(igw -> igw.getRegion().equals(region))
                 .filter(igw -> igwIds.isEmpty() || igwIds.contains(igw.getInternetGatewayId()))
