@@ -2,6 +2,7 @@ package io.floci.aws.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -18,7 +19,7 @@ class Ec2RouteTableAssociationChecksIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
 
     private static XmlPath call(int status, String... params) {
-        var req = given().header("Authorization", AUTH_HEADER).formParam("Action", params[0]);
+        RequestSpecification req = given().header("Authorization", AUTH_HEADER).formParam("Action", params[0]);
         for (int i = 1; i < params.length; i += 2) {
             req = req.formParam(params[i], params[i + 1]);
         }
