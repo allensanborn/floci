@@ -172,4 +172,19 @@ class CognitoErrorMessagesIntegrationTest {
                 """.formatted(poolId, clientId)), "ResourceNotFoundException",
                 "User pool " + poolId + " does not exist.");
     }
+
+    @Test
+    void updatePoolAndCreateClientRefuseAMissingPoolWithoutAMessage() {
+        String gone = "us-east-1_doesnotexist";
+        assertError(cognitoAction("UpdateUserPool", """
+                {"UserPoolId":"%s","DeletionProtection":"INACTIVE"}
+                """.formatted(gone)), "ResourceNotFoundException", "");
+        assertError(cognitoAction("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"c"}
+                """.formatted(gone)), "ResourceNotFoundException", "");
+        // every other pool operation still says which pool
+        assertError(cognitoAction("DescribeUserPool", """
+                {"UserPoolId":"%s"}
+                """.formatted(gone)), "ResourceNotFoundException", "User pool " + gone + " does not exist.");
+    }
 }

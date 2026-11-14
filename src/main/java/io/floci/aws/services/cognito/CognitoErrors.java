@@ -55,4 +55,12 @@ final class CognitoErrors {
         return new AwsException("ResourceNotFoundException",
                 "User pool client " + clientId + " does not exist in user pool " + userPoolId + ".", 400);
     }
+
+    /**
+     * A missing pool, for UpdateUserPool and CreateUserPoolClient, which AWS refuses with the code
+     * and status alone: unlike the other pool operations, nothing says which pool.
+     */
+    static AwsException userPoolNotFoundWithoutMessage() {
+        return new AwsException("ResourceNotFoundException", "", 400);
+    }
 }

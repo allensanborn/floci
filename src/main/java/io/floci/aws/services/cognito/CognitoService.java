@@ -502,7 +502,7 @@ public class CognitoService implements ResourceProvider {
     public UserPool updateUserPool(Map<String, Object> request, String region) {
         String id = (String) request.get("UserPoolId");
         synchronized (poolLock(id)) {
-            UserPool pool = describeUserPool(id);
+            UserPool pool = describeUserPoolRefusingSilently(id);
             UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
             populateUserPool(updatedPool, request);
@@ -828,6 +828,14 @@ public class CognitoService implements ResourceProvider {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("AttributesRequireVerificationBeforeUpdate", new ArrayList<>(normalized));
         return result;
+    }
+
+    /** {@link #describeUserPool} for the operations whose refusal of a missing pool carries no message. */
+    private UserPool describeUserPoolRefusingSilently(String id) {
+        if (poolStore.get(id).isEmpty()) {
+            throw CognitoErrors.userPoolNotFoundWithoutMessage();
+        }
+        return describeUserPool(id);
     }
 
     public UserPool describeUserPool(String id) {
@@ -1264,7 +1272,7 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation, Integer authSessionValidity) {
 
         validateAuthSessionValidity(authSessionValidity);
-        UserPool userPool = describeUserPool(userPoolId);
+        UserPool userPool = describeUserPoolRefusingSilently(userPoolId);
         String clientId = clientIdFor(userPool, clientName);
         UserPoolClient client = requestedClientSettings(clientName, allowedOAuthFlowsUserPoolClient,
                 allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs, defaultRedirectURI,
