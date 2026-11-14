@@ -2611,6 +2611,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * the returned object carries the settled state for the same reason creation does.
      */
     public TransitGateway deleteTransitGateway(String region, String transitGatewayId) {
+        return deleteTransitGateway(region, transitGatewayId, false);
+    }
+
+    /** As above; with {@code dryRun} every check is made and the gateway is left available. */
+    public TransitGateway deleteTransitGateway(String region, String transitGatewayId, boolean dryRun) {
         // Outermost first: the attachment check below and a concurrent attachment create have to
         // agree on who goes first.
         synchronized (attachmentTopologyLock(region)) {
@@ -2641,6 +2646,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (!peered.isEmpty()) {
                 throw new AwsException("IncorrectState", transitGatewayId
                         + " has non-deleted Peering Attachments: " + String.join(", ", peered) + ".", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             live.stream()
                     .filter(attachment -> isGateway(attachment.getAccepterTgwInfo(), region, transitGatewayId))
@@ -2976,6 +2984,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** The id's presence and form, which AWS checks ahead of a DryRun answered before the lookup. */
+    static void requirePeeringAttachmentIdForm(String attachmentId) {
+        if (!isSet(attachmentId)) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter TransitGatewayAttachmentId.", 400);
+        }
+        requireWellFormedAttachmentId(attachmentId);
+    }
+
     /**
      * Verified live: an id of the wrong shape is rejected before any lookup, and the message does
      * not echo it back, unlike the transit gateway's equivalent.
@@ -3133,11 +3150,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@link #allVpcPeeringConnections} uses.
      */
     private OwnedPeeringAttachment getRequiredPeeringAttachment(String region, String attachmentId) {
-        if (!isSet(attachmentId)) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter TransitGatewayAttachmentId.", 400);
-        }
-        requireWellFormedAttachmentId(attachmentId);
+        requirePeeringAttachmentIdForm(attachmentId);
         return findPeeringAttachment(attachmentId)
                 .filter(owned -> isPartyTo(owned.attachment(), callerAccountId(), region))
                 .orElseThrow(() -> peeringAttachmentNotFound(attachmentId));
@@ -3299,6 +3312,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** An attachment associates with exactly one route table, so a second attempt is refused. */
     public TransitGatewayVpcAttachment associateTransitGatewayRouteTable(
             String region, String routeTableId, String attachmentId) {
+        return associateTransitGatewayRouteTable(region, routeTableId, attachmentId, false);
+    }
+
+    /** As above; with {@code dryRun} the checks are made and nothing is associated. */
+    public TransitGatewayVpcAttachment associateTransitGatewayRouteTable(
+            String region, String routeTableId, String attachmentId, boolean dryRun) {
         synchronized (attachmentTopologyLock(region)) {
             TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
             TransitGatewayVpcAttachment attachment =
@@ -3306,6 +3325,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (attachment.getAssociationRouteTableId() != null) {
                 throw new AwsException("Resource.AlreadyAssociated", "Transit Gateway Attachment "
                         + attachmentId + " is already associated to a route table.", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             attachment.setAssociationRouteTableId(routeTableId);
             attachment.setAssociationState("associated");
@@ -3367,6 +3389,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public TransitGatewayRouteTablePropagation disableTransitGatewayRouteTablePropagation(
             String region, String routeTableId, String attachmentId) {
+        return disableTransitGatewayRouteTablePropagation(region, routeTableId, attachmentId, false);
+    }
+
+    /** As above; with {@code dryRun} the checks are made and the propagation is left enabled. */
+    public TransitGatewayRouteTablePropagation disableTransitGatewayRouteTablePropagation(
+            String region, String routeTableId, String attachmentId, boolean dryRun) {
         synchronized (attachmentTopologyLock(region)) {
             TransitGatewayRouteTable routeTable = getRequiredTransitGatewayRouteTable(region, routeTableId);
             requireAttachmentOfSameGateway(region, routeTable, attachmentId);
@@ -3375,6 +3403,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .orElseThrow(() -> new AwsException("InvalidparameterValue", "Propagation "
                             + attachmentId + " does not exist in Transit Gateway Route Table "
                             + routeTableId + ".", 400));
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             transitGatewayPropagations.delete(propagationKey(region, routeTableId, attachmentId));
             propagation.setState("disabled");
             return propagation;
@@ -3410,6 +3441,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public TransitGatewayRoute createTransitGatewayRoute(String region, String routeTableId,
                                                          String destinationCidrBlock, String attachmentId,
                                                          boolean blackhole) {
+        return createTransitGatewayRoute(region, routeTableId, destinationCidrBlock, attachmentId, blackhole, false);
+    }
+
+    /** As above; with {@code dryRun} the checks are made and no route is written. */
+    public TransitGatewayRoute createTransitGatewayRoute(String region, String routeTableId,
+                                                         String destinationCidrBlock, String attachmentId,
+                                                         boolean blackhole, boolean dryRun) {
         synchronized (attachmentTopologyLock(region)) {
             getRequiredTransitGatewayRouteTable(region, routeTableId);
             if (destinationCidrBlock == null || destinationCidrBlock.isBlank()) {
@@ -3434,6 +3472,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 route.setTransitGatewayAttachmentId(attachmentId);
                 route.setResourceId(attachment.getVpcId());
                 route.setResourceType("vpc");
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             transitGatewayRoutes.put(routeKey(region, routeTableId, destinationCidrBlock), route);
             return route;

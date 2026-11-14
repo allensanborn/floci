@@ -41,8 +41,15 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "GetEbsDefaultKmsKeyId|",
             "ModifyEbsDefaultKmsKeyId|KmsKeyId=alias/aws/ebs",
             "ResetEbsDefaultKmsKeyId|",
+            "DescribeTransitGateways|",
+            "DescribeTransitGatewayAttachments|",
+            "DescribeTransitGatewayConnects|",
+            "DescribeTransitGatewayPeeringAttachments|",
+            "DescribeTransitGatewayVpcAttachments|",
+            "DescribeTransitGatewayRouteTables|",
             "DeleteKeyPair|KeyName=no-such-key",
-            "DeleteFlowLogs|FlowLogId.1=fl-0123456789abcdef0"
+            "DeleteFlowLogs|FlowLogId.1=fl-0123456789abcdef0",
+            "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=" + ATTACHMENT
     })
     void aDryRunIsAnsweredWithDryRunOperation(String action, String query) {
         dryRun(action, query).then()
@@ -55,9 +62,22 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     /** A dry run the real call would refuse keeps the real call's error. */
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
+            "DeleteTransitGateway|TransitGatewayId=" + TGW + "|InvalidTransitGatewayID.NotFound",
+            "AssociateTransitGatewayRouteTable|TransitGatewayRouteTableId=" + ROUTE_TABLE
+                    + "&TransitGatewayAttachmentId=" + ATTACHMENT + "|InvalidRouteTableID.NotFound",
+            "DisableTransitGatewayRouteTablePropagation|TransitGatewayRouteTableId=" + ROUTE_TABLE
+                    + "&TransitGatewayAttachmentId=" + ATTACHMENT + "|InvalidRouteTableID.NotFound",
+            "CreateTransitGatewayRoute|TransitGatewayRouteTableId=" + ROUTE_TABLE
+                    + "&DestinationCidrBlock=10.0.0.0/16&TransitGatewayAttachmentId=" + ATTACHMENT
+                    + "|InvalidRouteTableID.NotFound",
+            "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=not-an-attachment"
+                    + "|InvalidTransitGatewayAttachmentID.Malformed",
+            "DescribeTransitGateways|TransitGatewayIds.1=" + TGW + "|InvalidTransitGatewayID.NotFound",
             "DeleteLaunchTemplate|LaunchTemplateName=no-such-template|InvalidLaunchTemplateName.NotFoundException",
             "ModifyEbsDefaultKmsKeyId||MissingParameter",
-            "DeleteKeyPair||MissingParameter"
+            "DeleteKeyPair||MissingParameter",
+            "ExportTransitGatewayRoutes|TransitGatewayRouteTableId=" + ROUTE_TABLE + "&S3Bucket=b"
+                    + "|InvalidRouteTableID.NotFound"
     })
     void aDryRunTheRealCallWouldRefuseKeepsItsError(String action, String query, String errorCode) {
         dryRun(action, query).then()
@@ -72,6 +92,8 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     /** A DryRun value that is not a boolean is refused as one. */
     @ParameterizedTest
     @CsvSource({
+            "DeleteTransitGateway, maybe",
+            "DeleteTransitGateway, ''",
             "DeleteKeyPair, maybe",
             "DeleteLaunchTemplate, ''",
             "EnableEbsEncryptionByDefault, ''"
@@ -95,6 +117,15 @@ class Ec2ControlPlaneDryRunIntegrationTest {
     }
 
     @Test
+    void aDryRunDeleteLeavesTheTransitGatewayAvailable() {
+        String id = ec2("CreateTransitGateway")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        dryRun("DeleteTransitGateway", "TransitGatewayId=" + id).then().statusCode(412);
+        assertEquals("available", ec2("DescribeTransitGateways", "TransitGatewayId.1", id)
+                .getString("DescribeTransitGatewaysResponse.transitGatewaySet.item.state"));
+    }
+
+    @Test
     void aDryRunDeleteLeavesTheKeyPairAndTheLaunchTemplate() {
         ec2("CreateKeyPair", "KeyName", "dry-run-key");
         dryRun("DeleteKeyPair", "KeyName=dry-run-key").then().statusCode(412);
@@ -106,6 +137,44 @@ class Ec2ControlPlaneDryRunIntegrationTest {
         dryRun("DeleteLaunchTemplate", "LaunchTemplateName=dry-run-template").then().statusCode(412);
         assertEquals("dry-run-template", ec2("DescribeLaunchTemplates", "LaunchTemplateName.1", "dry-run-template")
                 .getString("DescribeLaunchTemplatesResponse.launchTemplates.item.launchTemplateName"));
+    }
+
+    @Test
+    void aDryRunAssociateLeavesTheAttachmentUnassociated() {
+        String gateway = ec2("CreateTransitGateway", "Options.DefaultRouteTableAssociation", "disable",
+                "Options.DefaultRouteTablePropagation", "disable")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        String vpc = ec2("CreateVpc", "CidrBlock", "10.40.0.0/16").getString("CreateVpcResponse.vpc.vpcId");
+        String subnet = ec2("CreateSubnet", "VpcId", vpc, "CidrBlock", "10.40.1.0/24", "AvailabilityZone",
+                "us-east-1a").getString("CreateSubnetResponse.subnet.subnetId");
+        String attachment = ec2("CreateTransitGatewayVpcAttachment", "TransitGatewayId", gateway, "VpcId", vpc,
+                "SubnetIds.1", subnet).getString("CreateTransitGatewayVpcAttachmentResponse"
+                + ".transitGatewayVpcAttachment.transitGatewayAttachmentId");
+        String routeTable = ec2("CreateTransitGatewayRouteTable", "TransitGatewayId", gateway)
+                .getString("CreateTransitGatewayRouteTableResponse.transitGatewayRouteTable"
+                        + ".transitGatewayRouteTableId");
+
+        dryRun("AssociateTransitGatewayRouteTable", "TransitGatewayRouteTableId=" + routeTable
+                + "&TransitGatewayAttachmentId=" + attachment).then().statusCode(412);
+
+        assertEquals(0, ec2("GetTransitGatewayRouteTableAssociations", "TransitGatewayRouteTableId", routeTable)
+                .getList("GetTransitGatewayRouteTableAssociationsResponse.associations.item").size());
+    }
+
+    @Test
+    void aDryRunCreateRouteWritesNoRoute() {
+        String gateway = ec2("CreateTransitGateway")
+                .getString("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+        String routeTable = ec2("CreateTransitGatewayRouteTable", "TransitGatewayId", gateway)
+                .getString("CreateTransitGatewayRouteTableResponse.transitGatewayRouteTable"
+                        + ".transitGatewayRouteTableId");
+
+        dryRun("CreateTransitGatewayRoute", "TransitGatewayRouteTableId=" + routeTable
+                + "&DestinationCidrBlock=10.50.0.0/16&Blackhole=true").then().statusCode(412);
+
+        assertEquals(0, ec2("SearchTransitGatewayRoutes", "TransitGatewayRouteTableId", routeTable,
+                "Filter.1.Name", "type", "Filter.1.Value.1", "static")
+                .getList("SearchTransitGatewayRoutesResponse.routeSet.item").size());
     }
 
     private Response dryRun(String action, String query) {
