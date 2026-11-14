@@ -116,4 +116,14 @@ class CognitoErrorMessagesIntegrationTest {
                 {"ClientId":"%s","RefreshToken":"not-a-token"}
                 """.formatted(clientId)), "NotAuthorizedException", "Invalid Refresh Token");
     }
+
+    @Test
+    void unknownGroupDoesNotNameTheGroup() {
+        assertError(cognitoAction("GetGroup", """
+                {"UserPoolId":"%s","GroupName":"missing"}
+                """.formatted(poolId)), "ResourceNotFoundException", "Group not found.");
+        assertError(cognitoAction("AdminAddUserToGroup", """
+                {"UserPoolId":"%s","Username":"alice","GroupName":"missing"}
+                """.formatted(poolId)), "ResourceNotFoundException", "Group not found.");
+    }
 }

@@ -3423,8 +3423,7 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         validateGroupName(groupName);
         return groupStore.get(groupKey(userPoolId, groupName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Group not found: " + groupName, 400));
+                .orElseThrow(CognitoErrors::groupNotFound);
     }
 
     public List<CognitoGroup> listGroups(String userPoolId) {

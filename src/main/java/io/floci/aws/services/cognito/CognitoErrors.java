@@ -33,4 +33,9 @@ final class CognitoErrors {
     static AwsException usernameClientNotFound() {
         return new AwsException("UserNotFoundException", "Username/client id combination not found.", 400);
     }
+
+    /** An unknown group: the same sentence whichever name was asked for. */
+    static AwsException groupNotFound() {
+        return new AwsException("ResourceNotFoundException", "Group not found.", 400);
+    }
 }
