@@ -259,4 +259,24 @@ class CognitoErrorMessagesIntegrationTest {
                 {"ClientId":"%s","RefreshToken":"%s"}
                 """.formatted(clientId, refreshToken)), "NotAuthorizedException", "Refresh Token has been revoked");
     }
+
+    @Test
+    void contradictoryMfaPreferencesAreWordedAsAwsDoes() {
+        cognitoAction("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"mfa-user","MessageAction":"SUPPRESS",
+                 "UserAttributes":[{"Name":"phone_number","Value":"+15005550006"},
+                                   {"Name":"phone_number_verified","Value":"true"}]}
+                """.formatted(poolId)).then().statusCode(200);
+
+        assertError(cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"mfa-user",
+                 "SMSMfaSettings":{"Enabled":true,"PreferredMfa":true},
+                 "SoftwareTokenMfaSettings":{"Enabled":true,"PreferredMfa":true}}
+                """.formatted(poolId)), "InvalidParameterException",
+                "Two MFA types marked as preferred, only one is allowed.");
+        assertError(cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"mfa-user",
+                 "SMSMfaSettings":{"Enabled":false,"PreferredMfa":true}}
+                """.formatted(poolId)), "InvalidParameterException", "Can't mark a disabled mfa as preferred");
+    }
 }

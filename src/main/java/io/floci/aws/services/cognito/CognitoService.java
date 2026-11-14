@@ -7094,8 +7094,7 @@ public class CognitoService implements ResourceProvider {
         long preferredCount = List.of(sms, email, softwareToken).stream()
                 .filter(update -> Boolean.TRUE.equals(update.preferredMfa())).count();
         if (preferredCount > 1) {
-            throw new AwsException("InvalidParameterException",
-                    "Only one MFA method can be set as preferred.", 400);
+            throw CognitoErrors.twoPreferredMfaTypes();
         }
         SmsMfaSettings smsSettings = user.getSmsMfaSettings();
         EmailMfaSettings emailSettings = user.getEmailMfaSettings();
@@ -7190,8 +7189,7 @@ public class CognitoService implements ResourceProvider {
         boolean enabled = update.enabled() != null ? update.enabled() : current.enabled();
         boolean preferred = update.preferredMfa() != null ? update.preferredMfa() : current.preferred();
         if (!enabled && Boolean.TRUE.equals(update.preferredMfa())) {
-            throw new AwsException("InvalidParameterException",
-                    "Preferred MFA setting cannot be enabled when the MFA method is disabled.", 400);
+            throw CognitoErrors.preferredMfaDisabled();
         }
         return new FactorState(enabled, enabled && preferred);
     }

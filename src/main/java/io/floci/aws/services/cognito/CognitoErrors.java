@@ -98,4 +98,15 @@ final class CognitoErrors {
     static AwsException unsupportedTokenType() {
         return new AwsException("UnsupportedTokenTypeException", "Unsupported token type", 400);
     }
+
+    /** SetUserMFAPreference naming more than one MFA type as preferred. */
+    static AwsException twoPreferredMfaTypes() {
+        return new AwsException("InvalidParameterException",
+                "Two MFA types marked as preferred, only one is allowed.", 400);
+    }
+
+    /** SetUserMFAPreference preferring an MFA type the same request leaves disabled. */
+    static AwsException preferredMfaDisabled() {
+        return new AwsException("InvalidParameterException", "Can't mark a disabled mfa as preferred", 400);
+    }
 }
