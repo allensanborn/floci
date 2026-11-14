@@ -158,7 +158,8 @@ class ConfigurationRecorderIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"))
+            .body("message", equalTo("The name of the configuration recorder you entered cannot be found. Verify the configuration recorder name, and try again."));
     }
 
     // --- Delivery Channel ---
@@ -243,7 +244,9 @@ class ConfigurationRecorderIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("LastDeliveryChannelDeleteFailedException"));
+            .body("__type", equalTo("LastDeliveryChannelDeleteFailedException"))
+            .body("message", equalTo("Failed to delete last specified delivery channel with name 'default', "
+                    + "because there is a running configuration recorder."));
     }
 
     @Test
@@ -285,7 +288,8 @@ class ConfigurationRecorderIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchDeliveryChannelException"));
+            .body("__type", equalTo("NoSuchDeliveryChannelException"))
+            .body("message", equalTo("Cannot find delivery channel with specified name 'default'."));
     }
 
     @Test

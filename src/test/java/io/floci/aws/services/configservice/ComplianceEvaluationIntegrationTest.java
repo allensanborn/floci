@@ -26,6 +26,10 @@ class ComplianceEvaluationIntegrationTest {
     }
 
     private static void putRule(String ruleName) {
+        putRule(ruleName, "CUSTOM_LAMBDA", "arn:aws:lambda:us-east-1:000000000000:function:checker");
+    }
+
+    private static void putRule(String ruleName, String owner, String sourceIdentifier) {
         given()
             .header("X-Amz-Target", TARGET_PREFIX + "PutConfigRule")
             .contentType(CONTENT_TYPE)
@@ -34,12 +38,12 @@ class ComplianceEvaluationIntegrationTest {
                     "ConfigRule": {
                         "ConfigRuleName": "%s",
                         "Source": {
-                            "Owner": "CUSTOM_LAMBDA",
-                            "SourceIdentifier": "arn:aws:lambda:us-east-1:000000000000:function:checker"
+                            "Owner": "%s",
+                            "SourceIdentifier": "%s"
                         }
                     }
                 }
-                """.formatted(ruleName))
+                """.formatted(ruleName, owner, sourceIdentifier))
         .when()
             .post("/")
         .then()
@@ -50,7 +54,7 @@ class ComplianceEvaluationIntegrationTest {
     @Order(1)
     void setupRules() {
         putRule(LAMBDA_RULE);
-        putRule(EXTERNAL_RULE);
+        putRule(EXTERNAL_RULE, "AWS", "AWS_CONFIG_PROCESS_CHECK");
     }
 
     @Test
@@ -450,7 +454,8 @@ class ComplianceEvaluationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigRuleException"));
+            .body("__type", equalTo("InvalidResultTokenException"))
+            .body("message", equalTo("Result Token provided is invalid"));
     }
 
     @Test
@@ -500,7 +505,8 @@ class ComplianceEvaluationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigRuleException"));
+            .body("__type", equalTo("NoSuchConfigRuleException"))
+            .body("message", equalTo("The ConfigRule 'no-such-rule' provided in the request is invalid. Please check the configRule name."));
     }
 
     @Test

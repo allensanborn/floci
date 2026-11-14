@@ -143,7 +143,8 @@ class ConfigTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ResourceNotFoundException"));
+            .body("__type", equalTo("ResourceNotFoundException"))
+            .body("message", containsString("Resource arn:aws:config:us-east-1:123456789012:config-rule/nonexistent does not exist for account "));
     }
 
     private String getConfigRuleArn(String ruleName) {

@@ -116,7 +116,8 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigRuleException"));
+            .body("__type", equalTo("NoSuchConfigRuleException"))
+            .body("message", equalTo("One or more ConfigRules provided in the request are invalid. Please check the configRule names."));
     }
 
     @Test
@@ -268,7 +269,8 @@ class ConfigRuleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchConfigRuleException"));
+            .body("__type", equalTo("NoSuchConfigRuleException"))
+            .body("message", equalTo("The ConfigRule 'no-such-rule' provided in the request is invalid. Please check the configRule name."));
     }
 
     @Test

@@ -114,10 +114,10 @@ class AwsConfigServiceEvaluationConcurrencyTest {
             putter.join(TimeUnit.SECONDS.toMillis(10));
             deleter.join(TimeUnit.SECONDS.toMillis(10));
             assertFalse(putter.isAlive() || deleter.isAlive(), "a putEvaluations/deleteConfigRule call never finished");
-            // Losing the race to the delete (NoSuchConfigRuleException) is a legitimate outcome for
+            // Losing the race to the delete (the token no longer names a rule) is a legitimate outcome for
             // the putter; any other failure, on either side, is not.
             if (putFailure.get() != null) {
-                assertEquals("NoSuchConfigRuleException",
+                assertEquals("InvalidResultTokenException",
                         ((AwsException) putFailure.get()).getErrorCode(),
                         "unexpected putEvaluations failure: " + putFailure.get());
             }

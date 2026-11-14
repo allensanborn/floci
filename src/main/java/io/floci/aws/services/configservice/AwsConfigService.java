@@ -53,6 +53,11 @@ public class AwsConfigService {
             Set.of("COMPLIANT", "NON_COMPLIANT", "NOT_APPLICABLE", "INSUFFICIENT_DATA");
     private static final String NO_SUCH_CONFIG_RULE_MESSAGE =
             "The ConfigRule provided in the request is invalid. Please check the configRule name.";
+    private static final String NO_SUCH_CONFIG_RULES_MESSAGE =
+            "One or more ConfigRules provided in the request are invalid. Please check the configRule names.";
+    private static final String NO_SUCH_RECORDER_BY_NAME_MESSAGE =
+            "The name of the configuration recorder you entered cannot be found. "
+                    + "Verify the configuration recorder name, and try again.";
     private static final String INVALID_NEXT_TOKEN_MESSAGE =
             "The specified next token is not valid. Specify the nextToken string that was returned "
                     + "in the previous response to get the next page of results.";
@@ -283,15 +288,21 @@ public class AwsConfigService {
         return rule;
     }
 
+    private static AwsException noSuchConfigRule(String ruleName) {
+        return new AwsException("NoSuchConfigRuleException",
+                "The ConfigRule '" + ruleName + "' provided in the request is invalid. "
+                        + "Please check the configRule name.", 400);
+    }
+
     public void deleteConfigRule(String region, String ruleName) {
         if (isBlank(ruleName)) {
-            throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+            throw noSuchConfigRule(ruleName);
         }
         synchronized (lockFor(ruleKey(region, ruleName))) {
             Map<String, ConfigRule> store = rulesFor(region);
             ConfigRule removed = store.remove(ruleName);
             if (removed == null) {
-                throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+                throw noSuchConfigRule(ruleName);
             }
             persistRegion(configRules, region);
             tags.remove(removed.configRuleArn());
@@ -317,7 +328,7 @@ public class AwsConfigService {
             for (String name : ruleNames) {
                 ConfigRule rule = store.get(name);
                 if (rule == null) {
-                    throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+                    throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULES_MESSAGE, 400);
                 }
                 result.add(rule);
             }
@@ -383,7 +394,9 @@ public class AwsConfigService {
         int separator = resultToken.indexOf(':');
         String ruleName = separator > 0 ? resultToken.substring(0, separator) : resultToken;
         synchronized (lockFor(ruleKey(region, ruleName))) {
-            requireRule(region, ruleName);
+            if (isBlank(ruleName) || !rulesFor(region).containsKey(ruleName)) {
+                throw new AwsException("InvalidResultTokenException", "Result Token provided is invalid", 400);
+            }
             storeEvaluations(region, ruleName, newEvaluations);
         }
     }
@@ -391,7 +404,12 @@ public class AwsConfigService {
     public void putExternalEvaluation(String region, String ruleName, ConfigEvaluation evaluation) {
         validateEvaluation(evaluation);
         synchronized (lockFor(ruleKey(region, ruleName))) {
-            requireRule(region, ruleName);
+            ConfigRule rule = requireRule(region, ruleName);
+            if (rule.source() == null || !"AWS_CONFIG_PROCESS_CHECK".equals(rule.source().sourceIdentifier())) {
+                throw new AwsException("InvalidParameterValueException",
+                        "This API can only be applied to rules with sourceIdentifier as "
+                                + "AWS_CONFIG_PROCESS_CHECK.", 400);
+            }
             storeEvaluations(region, ruleName, List.of(evaluation));
         }
     }
@@ -677,7 +695,7 @@ public class AwsConfigService {
     private ConfigRule requireRule(String region, String ruleName) {
         ConfigRule rule = isBlank(ruleName) ? null : rulesFor(region).get(ruleName);
         if (rule == null) {
-            throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+            throw noSuchConfigRule(ruleName);
         }
         return rule;
     }
@@ -718,7 +736,7 @@ public class AwsConfigService {
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
-                        "Cannot find configuration recorder with the specified name.", 400);
+                        NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
             }
             return Collections.emptyList();
         }
@@ -726,7 +744,7 @@ public class AwsConfigService {
             for (String name : names) {
                 if (!name.equals(recorder.name())) {
                     throw new AwsException("NoSuchConfigurationRecorderException",
-                            "Cannot find configuration recorder with the specified name.", 400);
+                            NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
                 }
             }
         }
@@ -770,7 +788,7 @@ public class AwsConfigService {
         ConfigurationRecorder recorder = configurationRecorders.get(region);
         if (recorder == null || !recorder.name().equals(name)) {
             throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified name.", 400);
+                    NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
         }
         recorderRunning.put(runtimeKey(region), true);
         recorderLastStartTime.put(runtimeKey(region), now());
@@ -821,7 +839,7 @@ public class AwsConfigService {
     public void putDeliveryChannel(String region, DeliveryChannel channel) {
         if (!configurationRecorders.containsKey(region)) {
             throw new AwsException("NoAvailableConfigurationRecorderException",
-                    "There are no configuration recorders available to provide the resource count.", 400);
+                    "Configuration recorder is not available to put delivery channel.", 400);
         }
         String name = (channel.name() == null || channel.name().isEmpty()) ? "default" : channel.name();
         DeliveryChannel stored = new DeliveryChannel(name, channel.s3BucketName(), channel.s3KeyPrefix(),
@@ -834,7 +852,7 @@ public class AwsConfigService {
         if (channel == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchDeliveryChannelException",
-                        "Cannot find delivery channel with the specified name.", 400);
+                        "Cannot find delivery channel with specified name '" + names.get(0) + "'.", 400);
             }
             return Collections.emptyList();
         }
@@ -842,7 +860,7 @@ public class AwsConfigService {
             for (String name : names) {
                 if (!name.equals(channel.name())) {
                     throw new AwsException("NoSuchDeliveryChannelException",
-                            "Cannot find delivery channel with the specified name.", 400);
+                            "Cannot find delivery channel with specified name '" + name + "'.", 400);
                 }
             }
         }
@@ -853,12 +871,12 @@ public class AwsConfigService {
         DeliveryChannel channel = deliveryChannels.get(region);
         if (channel == null || !channel.name().equals(name)) {
             throw new AwsException("NoSuchDeliveryChannelException",
-                    "Cannot find delivery channel with the specified name.", 400);
+                    "Cannot find delivery channel with specified name '" + name + "'.", 400);
         }
         if (recorderRunning.getOrDefault(runtimeKey(region), false)) {
             throw new AwsException("LastDeliveryChannelDeleteFailedException",
-                    "You cannot delete the delivery channel you specified because the customer managed "
-                            + "configuration recorder is running.", 400);
+                    "Failed to delete last specified delivery channel with name '" + name
+                            + "', because there is a running configuration recorder.", 400);
         }
         deliveryChannels.remove(region);
     }
@@ -896,7 +914,7 @@ public class AwsConfigService {
         RetentionConfiguration configuration = retentionConfigurations.get(region);
         if (configuration == null || !configuration.name().equals(name)) {
             throw new AwsException("NoSuchRetentionConfigurationException",
-                    "Cannot find retention configuration with the specified name.", 400);
+                    "Cannot find retention configuration with specified name '" + name + "'.", 400);
         }
         retentionConfigurations.remove(region);
     }
@@ -1166,7 +1184,7 @@ public class AwsConfigService {
         synchronized (lockFor(lockKey)) {
             if (!exists.getAsBoolean()) {
                 throw new AwsException("ResourceNotFoundException",
-                        "The resource " + arn + " does not exist.", 400);
+                        "Resource " + arn + " does not exist for account " + regionResolver.getAccountId(), 400);
             }
             return action.get();
         }

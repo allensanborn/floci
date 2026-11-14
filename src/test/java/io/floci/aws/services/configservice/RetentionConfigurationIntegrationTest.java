@@ -126,6 +126,7 @@ class RetentionConfigurationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("NoSuchRetentionConfigurationException"));
+            .body("__type", equalTo("NoSuchRetentionConfigurationException"))
+            .body("message", equalTo("Cannot find retention configuration with specified name 'default'."));
     }
 }
