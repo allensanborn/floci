@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -118,26 +119,24 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
     @Test
     @Order(4)
     void acceptMakesItAvailableAndTagsRoundTrip() {
-        given()
-            .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
-            .formParam("TransitGatewayAttachmentId", attachmentId)
-            .header("Authorization", EAST)
-        .when().post("/")
-        .then().statusCode(200);
+        // The requester cannot accept its own request, so the accepter is a gateway in another region.
+        String westTgw = createTransitGateway(WEST);
+        String id = createPeering(EAST, requesterTgw, westTgw, "000000000000", "us-west-2");
+        accept(WEST, id);
 
         given()
             .formParam("Action", "CreateTags")
-            .formParam("ResourceId.1", attachmentId)
+            .formParam("ResourceId.1", id)
             .formParam("Tag.1.Key", "side")
             .formParam("Tag.1.Value", "accepter")
-            .header("Authorization", EAST)
+            .header("Authorization", WEST)
         .when().post("/")
         .then().statusCode(200);
 
         given()
             .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
-            .formParam("TransitGatewayAttachmentIds.1", attachmentId)
-            .header("Authorization", EAST)
+            .formParam("TransitGatewayAttachmentIds.1", id)
+            .header("Authorization", WEST)
         .when().post("/")
         .then().statusCode(200)
             .body(ITEM + ".state", equalTo("available"))
@@ -146,8 +145,8 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
         // Only a pending attachment can be accepted.
         given()
             .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
-            .formParam("TransitGatewayAttachmentId", attachmentId)
-            .header("Authorization", EAST)
+            .formParam("TransitGatewayAttachmentId", id)
+            .header("Authorization", WEST)
         .when().post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
@@ -245,15 +244,17 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
     @Order(8)
     void aPeeredGatewayCannotBeDeletedFromEitherEnd() {
         String requester = createTransitGateway(EAST);
-        String accepter = createTransitGateway(EAST);
-        String id = createPeering(EAST, requester, accepter, "000000000000");
-        accept(EAST, id);
+        String accepter = createTransitGateway(WEST);
+        String id = createPeering(EAST, requester, accepter, "000000000000", "us-west-2");
+        accept(WEST, id);
 
-        for (String gateway : new String[] {requester, accepter}) {
+        String[][] ends = {{requester, EAST}, {accepter, WEST}};
+        for (String[] end : ends) {
+            String gateway = end[0];
             given()
                 .formParam("Action", "DeleteTransitGateway")
                 .formParam("TransitGatewayId", gateway)
-                .header("Authorization", EAST)
+                .header("Authorization", end[1])
             .when().post("/")
             .then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("IncorrectState"));
@@ -261,7 +262,7 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
             given()
                 .formParam("Action", "DescribeTransitGateways")
                 .formParam("TransitGatewayIds.1", gateway)
-                .header("Authorization", EAST)
+                .header("Authorization", end[1])
             .when().post("/")
             .then().statusCode(200)
                 .body("DescribeTransitGatewaysResponse.transitGatewaySet.item.state", equalTo("available"));
@@ -482,16 +483,55 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
     }
 
     /**
-     * An account names someone else's gateway as the peer with itself as the peer account. It must
-     * not be able to accept that: an accepted peering pins the gateway, and its real owner could
-     * then never delete it.
+     * An account names someone else's gateway as the peer with itself as the peer account. The
+     * gateway is not the caller's, so the request is refused before anything is stored: an accepted
+     * peering would pin the gateway, and its real owner could then never delete it.
      */
     @Test
     @Order(12)
-    void anAccountCannotAcceptForAGatewayItDoesNotOwn() {
+    void anAccountCannotPeerWithAGatewayItDoesNotOwnAsItsOwn() {
         String victimTgw = createTransitGateway(EAST);
         String attackerTgw = createTransitGateway(PEER_ACCOUNT);
-        String id = createPeering(PEER_ACCOUNT, attackerTgw, victimTgw, "000000000002");
+
+        given()
+            .formParam("Action", "CreateTransitGatewayPeeringAttachment")
+            .formParam("TransitGatewayId", attackerTgw)
+            .formParam("PeerTransitGatewayId", victimTgw)
+            .formParam("PeerAccountId", "000000000002")
+            .formParam("PeerRegion", "us-east-1")
+            .header("Authorization", PEER_ACCOUNT)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayID.NotFound"));
+
+        Assertions.assertTrue(given()
+            .formParam("Action", "DescribeTransitGatewayPeeringAttachments")
+            .formParam("Filter.1.Name", "transit-gateway-id")
+            .formParam("Filter.1.Value.1", victimTgw)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().xmlPath().getList(ITEM).isEmpty());
+
+        given()
+            .formParam("Action", "DeleteTransitGateway")
+            .formParam("TransitGatewayId", victimTgw)
+            .header("Authorization", EAST)
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    /**
+     * An account names someone else's gateway as the peer with a third account as the peer account,
+     * which create does not look up. The third account must not be able to accept it: an accepted
+     * peering pins the gateway, and its real owner could then never delete it.
+     */
+    @Test
+    @Order(13)
+    void anAccountCannotAcceptForAGatewayItDoesNotOwn() {
+        String victimTgw = createTransitGateway(EAST);
+        String requesterOwnTgw = createTransitGateway(EAST);
+        String id = createPeering(EAST, requesterOwnTgw, victimTgw, "000000000002");
 
         given()
             .formParam("Action", "AcceptTransitGatewayPeeringAttachment")
@@ -527,7 +567,7 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
         given()
             .formParam("Action", "DeleteTransitGatewayPeeringAttachment")
             .formParam("TransitGatewayAttachmentId", id)
-            .header("Authorization", PEER_ACCOUNT)
+            .header("Authorization", EAST)
         .when().post("/")
         .then().statusCode(200);
     }
@@ -542,12 +582,17 @@ class Ec2TransitGatewayPeeringAttachmentIntegrationTest {
     }
 
     private static String createPeering(String auth, String tgw, String peerTgw, String peerAccount) {
+        return createPeering(auth, tgw, peerTgw, peerAccount, "us-east-1");
+    }
+
+    private static String createPeering(String auth, String tgw, String peerTgw, String peerAccount,
+                                        String peerRegion) {
         return given()
             .formParam("Action", "CreateTransitGatewayPeeringAttachment")
             .formParam("TransitGatewayId", tgw)
             .formParam("PeerTransitGatewayId", peerTgw)
             .formParam("PeerAccountId", peerAccount)
-            .formParam("PeerRegion", "us-east-1")
+            .formParam("PeerRegion", peerRegion)
             .header("Authorization", auth)
         .when().post("/")
         .then().statusCode(200)
