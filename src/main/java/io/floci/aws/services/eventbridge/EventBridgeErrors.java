@@ -65,6 +65,27 @@ final class EventBridgeErrors {
                 "Replay " + replay + " is not in a valid state for this operation.", 400);
     }
 
+    static AwsException cannotDeleteDefaultBus() {
+        return validation("Cannot delete event bus default.");
+    }
+
+    static AwsException busHasRules() {
+        return validation("EventBus can't be deleted since it has rules.");
+    }
+
+    static AwsException ruleHasTargets() {
+        return validation("Rule can't be deleted since it has targets.");
+    }
+
+    static AwsException replaySourceArchiveNotFound(String archive) {
+        return validation("Parameter EventSourceArn is not valid. Reason: Archive " + archive
+                + " does not exist.");
+    }
+
+    private static AwsException validation(String message) {
+        return new AwsException("ValidationException", message, 400);
+    }
+
     private static String connectionMissing(String connection) {
         return "Connection '" + connection + "' does not exist.";
     }

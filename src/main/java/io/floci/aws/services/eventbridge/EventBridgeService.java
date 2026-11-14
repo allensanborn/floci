@@ -241,7 +241,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveName = resolvedBusName(name);
         validateEventBusNameForMutation(effectiveName);
         if ("default".equals(effectiveName)) {
-            throw new AwsException("ValidationException", "Cannot delete event bus default.", 400);
+            throw EventBridgeErrors.cannotDeleteDefaultBus();
         }
         String key = busKey(region, effectiveName);
         EventBus bus = busStore.get(key).orElse(null);
@@ -252,8 +252,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         boolean hasRules = ruleStore.scan(k -> k.startsWith(rulePrefix)).stream()
                 .anyMatch(rule -> effectiveName.equals(rule.getEventBusName()));
         if (hasRules) {
-            throw new AwsException("ValidationException",
-                    "EventBus can't be deleted since it has rules.", 400);
+            throw EventBridgeErrors.busHasRules();
         }
         busStore.delete(key);
         resourceGroupsTaggingService.deleteResources(List.of(bus.getArn()), region);
@@ -482,8 +481,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         List<Target> targets = targetStore.get(key).orElse(List.of());
         if (!targets.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "Rule can't be deleted since it has targets.", 400);
+            throw EventBridgeErrors.ruleHasTargets();
         }
 
         if (ruleScheduler != null) {
@@ -2038,6 +2036,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
         String key = apiDestinationKey(region, name);
         if (apiDestinationStore.get(key).isPresent()) {
+            // AWS's wording for this duplicate is not recorded, so it keeps Floci's own.
             throw new AwsException("ResourceAlreadyExistsException",
                     "ApiDestination " + name + " already exists.", 400);
         }
@@ -2312,9 +2311,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         // resolve archive
         String archiveName = archiveNameFromArn(eventSourceArn);
         Archive archive = archiveStore.get(archiveKey(region, archiveName))
-                .orElseThrow(() -> new AwsException("ValidationException",
-                        "Parameter EventSourceArn is not valid. Reason: Archive " + archiveName
-                                + " does not exist.", 400));
+                .orElseThrow(() -> EventBridgeErrors.replaySourceArchiveNotFound(archiveName));
 
         List<ArchivedEvent> events = archivedEventStore
                 .get(archivedEventKey(region, archiveName))

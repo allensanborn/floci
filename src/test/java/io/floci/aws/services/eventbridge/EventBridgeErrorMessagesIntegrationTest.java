@@ -136,4 +136,40 @@ class EventBridgeErrorMessagesIntegrationTest {
                 + "\"Destination\":{\"Arn\":\"" + BUS_ARN + "default\"}}", "ValidationException",
                 "Parameter EventSourceArn is not valid. Reason: Archive emsg-gone does not exist.");
     }
+
+    @Test
+    void settledReplayCannotBeCancelled() throws InterruptedException {
+        createArchive("emsg-cancel-arch", "default");
+        ok("StartReplay", "{\"ReplayName\":\"emsg-cancel-replay\",\"EventSourceArn\":\"arn:aws:events:"
+                + "us-east-1:000000000000:archive/emsg-cancel-arch\",\"EventStartTime\":1700000000,"
+                + "\"EventEndTime\":1700000100,\"Destination\":{\"Arn\":\"" + BUS_ARN + "default\"}}");
+        String state = "";
+        for (int i = 0; i < 100 && !"COMPLETED".equals(state); i++) {
+            state = call("DescribeReplay", "{\"ReplayName\":\"emsg-cancel-replay\"}")
+                    .extract().path("State");
+            Thread.sleep(100);
+        }
+        refused("CancelReplay", "{\"ReplayName\":\"emsg-cancel-replay\"}", "IllegalStatusException",
+                "Replay emsg-cancel-replay is not in a valid state for this operation.");
+    }
+
+    @Test
+    void connectionAndApiDestinationWritesOnMissingResourcesNameTheCall() {
+        String nf = "ResourceNotFoundException";
+        refused("UpdateConnection", "{\"Name\":\"emsg-w-conn\",\"Description\":\"d\"}", nf,
+                "Failed to update the connection(s). Connection 'emsg-w-conn' does not exist.");
+        refused("DeleteConnection", "{\"Name\":\"emsg-w-conn\"}", nf,
+                "Failed to delete the connection(s). Connection 'emsg-w-conn' does not exist.");
+        refused("UpdateApiDestination", "{\"Name\":\"emsg-w-dest\",\"Description\":\"d\"}", nf,
+                "Failed to update the api-destination(s). An api-destination 'emsg-w-dest' does not exist.");
+        refused("DeleteApiDestination", "{\"Name\":\"emsg-w-dest\"}", nf,
+                "Failed to delete the api-destination(s). An api-destination 'emsg-w-dest' does not exist.");
+    }
+
+    @Test
+    void untagOnMissingRuleArnNamesRuleAndBus() {
+        refused("UntagResource", "{\"ResourceARN\":\"arn:aws:events:us-east-1:000000000000:rule/emsg-untag\","
+                + "\"TagKeys\":[\"k\"]}", "ResourceNotFoundException",
+                "Rule emsg-untag does not exist on EventBus default.");
+    }
 }
