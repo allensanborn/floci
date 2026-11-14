@@ -110,11 +110,10 @@ public class ApiGatewayController {
     private static final TypeReference<Map<String, Object>> JSON_OBJECT = new TypeReference<>() { };
 
     /**
-     * The {@code op} enum, verbatim from the model. Wider than what any one handler implements on
-     * purpose: whether a handler supports {@code move} is its own business, but a value outside the
-     * enum never reaches a handler at all.
+     * The {@code op} enum, verbatim from the model, in the order API Gateway lists it. Wider than what
+     * any one handler implements on purpose: whether a handler supports {@code move} is its own
+     * business, but a value outside the enum never reaches a handler at all.
      */
-    /** The op enum of the PatchOperation model, in the order API Gateway lists it. */
     private static final List<String> PATCH_OP_ENUM = List.of("add", "remove", "move", "test", "replace", "copy");
 
     /**
@@ -134,20 +133,25 @@ public class ApiGatewayController {
         } catch (IOException | IllegalArgumentException e) {
             throw new AwsException("BadRequestException", "Invalid patchOperations: " + e.getMessage(), 400);
         }
-        if (patchOperations != null) {
-            for (Map<String, String> operation : patchOperations) {
-                if (operation == null) {
-                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
-                }
-                String op = operation.get("op");
-                if (op != null && !PATCH_OP_ENUM.contains(op)) {
-                    throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(op,
-                            inputName + ".patchOperations." + (patchOperations.indexOf(operation) + 1) + ".member.op",
-                            PATCH_OP_ENUM));
-                }
+        requirePatchOpsInEnum(patchOperations, inputName);
+        return patchOperations;
+    }
+
+    private static void requirePatchOpsInEnum(List<Map<String, String>> patchOperations, String inputName) {
+        if (patchOperations == null) {
+            return;
+        }
+        for (int i = 0; i < patchOperations.size(); i++) {
+            Map<String, String> operation = patchOperations.get(i);
+            if (operation == null) {
+                throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+            }
+            String op = operation.get("op");
+            if (op != null && !PATCH_OP_ENUM.contains(op)) {
+                throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(op,
+                        inputName + ".patchOperations." + (i + 1) + ".member.op", PATCH_OP_ENUM));
             }
         }
-        return patchOperations;
     }
 
     // ──────────────────────────── Specific v1 Paths (ORDER MATTERS) ────────────────────────────
@@ -375,6 +379,7 @@ public class ApiGatewayController {
                 }
             }
 
+            requirePatchOpsInEnum(patchOperations, "updateAccountInput");
             return Response.ok(toAccountNode(service.updateAccount(region, patchOperations)).toString())
                     .type(MediaType.APPLICATION_JSON)
                     .build();

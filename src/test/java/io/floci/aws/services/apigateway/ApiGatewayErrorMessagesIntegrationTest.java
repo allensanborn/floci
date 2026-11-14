@@ -196,4 +196,31 @@ class ApiGatewayErrorMessagesIntegrationTest {
                         + "[add, remove, move, test, replace, copy]",
                 "/vpclinks/anyid");
     }
+
+    @Test
+    void createRequestValidatorUnderAnUnknownRestApiIsABadRequest() {
+        refused("POST", "{\"name\":\"orphan\",\"validateRequestBody\":true}", 400, "BadRequestException",
+                "Invalid REST API identifier specified", "/restapis/nosuchapi/requestvalidators");
+    }
+
+    @Test
+    void accountPatchOpOutsideTheEnumIsAValidationException() {
+        refused("PATCH", "{\"patchOperations\":[{\"op\":\"nope\",\"path\":\"/cloudwatchRoleArn\",\"value\":\"x\"}]}",
+                400, "ValidationException",
+                "1 validation error detected: Value 'nope' at 'updateAccountInput.patchOperations.1.member.op' "
+                        + "failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[add, remove, move, test, replace, copy]",
+                "/account");
+    }
+
+    @Test
+    void unparseableOpenApi3BodyMentioningSwaggerIoIsAnOasError() {
+        given().contentType(JSON)
+                .body("{\"openapi\": \"3.0.1\", \"info\": {\"description\": \"see https://swagger.io/docs\" ")
+                .post("/restapis?mode=import").then().statusCode(400)
+                .body("message", equalTo("Invalid OAS input"));
+        given().contentType("text/plain").body("swagger: \"2.0\"\ninfo: [unclosed")
+                .post("/restapis?mode=import").then().statusCode(400)
+                .body("message", equalTo("Invalid OpenAPI input."));
+    }
 }

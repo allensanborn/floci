@@ -2258,7 +2258,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     // ──────────────────────────── Request Validators ────────────────────────────
 
     public RequestValidator createRequestValidator(String region, String apiId, Map<String, Object> request) {
-        getRestApi(region, apiId);
+        if (!restApiExists(region, apiId)) {
+            throw new AwsException("BadRequestException", "Invalid REST API identifier specified", 400);
+        }
         RequestValidator validator = saveRequestValidator(region, apiId, shortId(6), request);
         LOG.infov("Created request validator {0} for API {1}", validator.getId(), apiId);
         return validator;
@@ -4272,17 +4274,19 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         entries.forEach(store::put);
     }
 
+    /** A document whose first key is {@code swagger}, as JSON or YAML. */
+    private static final Pattern SWAGGER_FIRST_KEY = Pattern.compile("\\A\\s*\\{?\\s*[\"']?swagger[\"']?\\s*:");
+
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
     private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
         SwaggerParseResult result = new OpenAPIParser()
                 .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
-            String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
-            // ponytail: AWS names the parser that refused the document; sniffing "swagger" tells
+            // ponytail: AWS names the parser that refused the document; a leading "swagger" key tells
             // the two apart for the truncated bodies seen so far, a real version probe if that stops holding.
             throw new AwsException("BadRequestException",
-                    specBody.contains("swagger") ? "Invalid OpenAPI input." : "Invalid OAS input", 400);
+                    SWAGGER_FIRST_KEY.matcher(specBody).find() ? "Invalid OpenAPI input." : "Invalid OAS input", 400);
         }
         OpenAPI openAPI = result.getOpenAPI();
         validateImportedAuthorizers(openAPI);
