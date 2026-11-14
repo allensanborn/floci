@@ -229,8 +229,9 @@ public final class EnforcementFixtures {
     }
 
     /**
-     * Deletes a role, and first the policies it carries: Floci answers {@code DeleteConflict},
-     * "must detach all policies first", for a role holding either an inline or a managed one.
+     * Deletes a role, and first the policies it carries: Floci answers {@code DeleteConflict}
+     * for a role holding either a managed policy ("must detach all policies first") or an inline
+     * one ("must delete policies first").
      */
     public static void removeRole(int port, String authorization, String roleName) {
         if (iam(port, authorization, "GetRole", "RoleName", roleName)
