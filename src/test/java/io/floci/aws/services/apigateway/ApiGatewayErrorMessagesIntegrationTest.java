@@ -156,4 +156,44 @@ class ApiGatewayErrorMessagesIntegrationTest {
                 .post("/restapis?mode=import").then().statusCode(400)
                 .body("message", equalTo("Invalid OAS input"));
     }
+
+    @Test
+    void requestModelViolationsAreValidationExceptions() {
+        refused("POST", "{\"name\":\"bad-type\",\"endpointConfiguration\":{\"types\":[\"NOPE\"]}}", 400,
+                "ValidationException",
+                "1 validation error detected: Value '[NOPE]' at 'createRestApiInput.endpointConfiguration.types' "
+                        + "failed to satisfy constraint: Member must satisfy constraint: "
+                        + "[Member must satisfy enum value set: [PRIVATE, EDGE, REGIONAL]]",
+                "/restapis");
+        refused("PUT", "{\"statusCode\":\"abc\"}", 400, "ValidationException",
+                "1 validation error detected: Value 'abc' at 'putGatewayResponseInput.statusCode' failed to satisfy "
+                        + "constraint: Member must satisfy regular expression pattern: [1-5]\\d\\d",
+                "/restapis/{a}/gatewayresponses/DEFAULT_4XX", apiId);
+        refused("PUT", "{\"openapi\":\"3.0.1\"}", 400, "ValidationException",
+                "1 validation error detected: Value 'bogus' at 'mode' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [overwrite, merge]",
+                "/restapis/{a}?mode=bogus", apiId);
+        refused("POST", "{\"location\":{\"type\":\"NOPE\"},\"properties\":\"{}\"}", 400, "ValidationException",
+                "1 validation error detected: Value 'NOPE' at 'createDocumentationPartInput.location.type' failed to "
+                        + "satisfy constraint: Member must satisfy enum value set: [RESPONSE_BODY, RESPONSE, METHOD, "
+                        + "MODEL, AUTHORIZER, RESPONSE_HEADER, RESOURCE, PATH_PARAMETER, REQUEST_BODY, "
+                        + "QUERY_PARAMETER, API, REQUEST_HEADER]",
+                "/restapis/{a}/documentation/parts", apiId);
+    }
+
+    @Test
+    void patchOpOutsideTheEnumNamesTheOperationInput() {
+        refused("PATCH", "{\"patchOperations\":[{\"op\":\"increment\",\"path\":\"/x\",\"value\":\"1\"}]}", 400,
+                "ValidationException",
+                "1 validation error detected: Value 'increment' at 'updateStageInput.patchOperations.1.member.op' "
+                        + "failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[add, remove, move, test, replace, copy]",
+                "/restapis/{a}/stages/dev", apiId);
+        refused("PATCH", "{\"patchOperations\":[{\"op\":\"nope\",\"path\":\"/name\",\"value\":\"1\"}]}", 400,
+                "ValidationException",
+                "1 validation error detected: Value 'nope' at 'updateVpcLinkInput.patchOperations.1.member.op' "
+                        + "failed to satisfy constraint: Member must satisfy enum value set: "
+                        + "[add, remove, move, test, replace, copy]",
+                "/vpclinks/anyid");
+    }
 }

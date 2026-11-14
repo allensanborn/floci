@@ -191,7 +191,7 @@ class ApiGatewayGatewayResponseIntegrationTest {
                 .body("{\"statusCode\":\"abc\"}")
                 .when().put("/restapis/" + apiId + "/gatewayresponses/DEFAULT_5XX")
                 .then().statusCode(400)
-                .body("__type", equalTo("BadRequestException"));
+                .body("__type", equalTo("ValidationException"));
 
         given()
                 .contentType(ContentType.JSON)

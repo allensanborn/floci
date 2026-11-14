@@ -66,7 +66,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).
@@ -115,7 +114,8 @@ public class ApiGatewayController {
      * purpose: whether a handler supports {@code move} is its own business, but a value outside the
      * enum never reaches a handler at all.
      */
-    private static final Set<String> PATCH_OPS = Set.of("add", "remove", "replace", "move", "copy", "test");
+    /** The op enum of the PatchOperation model, in the order API Gateway lists it. */
+    private static final List<String> PATCH_OP_ENUM = List.of("add", "remove", "move", "test", "replace", "copy");
 
     /**
      * Reads the {@code patchOperations} envelope shared by every PATCH operation. A body that is not
@@ -126,7 +126,7 @@ public class ApiGatewayController {
      * implement, and several skip anything they do not recognise — so without a boundary check an
      * unmodelled {@code op} was answered 200 with the resource silently untouched.
      */
-    private List<Map<String, String>> parsePatchOperations(String body) {
+    private List<Map<String, String>> parsePatchOperations(String body, String inputName) {
         List<Map<String, String>> patchOperations;
         try {
             patchOperations =
@@ -140,10 +140,10 @@ public class ApiGatewayController {
                     throw new AwsException("BadRequestException", "Invalid patch operation", 400);
                 }
                 String op = operation.get("op");
-                if (op != null && !PATCH_OPS.contains(op)) {
-                    throw new AwsException("BadRequestException",
-                            "Invalid patch operation '" + op + "'. Must be one of: add, remove, replace, "
-                                    + "move, copy, test", 400);
+                if (op != null && !PATCH_OP_ENUM.contains(op)) {
+                    throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(op,
+                            inputName + ".patchOperations." + (patchOperations.indexOf(operation) + 1) + ".member.op",
+                            PATCH_OP_ENUM));
                 }
             }
         }
@@ -191,7 +191,7 @@ public class ApiGatewayController {
                                          @PathParam("statusCode") String statusCode,
                                          String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateMethodResponseInput");
         MethodResponse response = service.updateMethodResponse(
                 region, apiId, resourceId, httpMethod, statusCode, patchOperations);
         return Response.status(201).entity(toMethodResponseNode(response).toString())
@@ -261,7 +261,7 @@ public class ApiGatewayController {
                                               @PathParam("statusCode") String statusCode,
                                               String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateIntegrationResponseInput");
         io.floci.aws.services.apigateway.model.IntegrationResponse integrationResponse = service.updateIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, patchOperations);
         return Response.ok(toIntegrationResponseNode(integrationResponse).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -440,7 +440,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}")
     public Response updateRestApi(@Context HttpHeaders headers, @PathParam("apiId") String apiId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateRestApiInput");
         RestApi api = service.updateRestApi(region, apiId, patchOperations);
         return Response.ok(toApiNode(region, api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -486,7 +486,7 @@ public class ApiGatewayController {
                                    @PathParam("resourceId") String resourceId,
                                    String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateResourceInput");
         ApiGatewayResource resource = service.updateResource(region, apiId, resourceId, patchOperations);
         return Response.ok(toResourceNode(resource).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -556,7 +556,7 @@ public class ApiGatewayController {
                                  @PathParam("httpMethod") String httpMethod,
                                  String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateMethodInput");
         MethodConfig method = service.updateMethod(region, apiId, resourceId, httpMethod, patchOperations);
         return Response.ok(toMethodNode(method, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -610,7 +610,7 @@ public class ApiGatewayController {
                                       @PathParam("httpMethod") String httpMethod,
                                       String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateIntegrationInput");
         io.floci.aws.services.apigateway.model.Integration integration = service.updateIntegration(region, apiId, resourceId, httpMethod, patchOperations);
         return Response.ok(toIntegrationNode(integration, resourceId).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -670,7 +670,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/deployments/{deploymentId}")
     public Response updateDeployment(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("deploymentId") String deploymentId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateDeploymentInput");
         io.floci.aws.services.apigateway.model.Deployment deployment = service.updateDeployment(region, apiId, deploymentId, patchOperations);
         return Response.ok(toDeploymentNode(deployment).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -708,7 +708,7 @@ public class ApiGatewayController {
                                 @PathParam("stageName") String stageName,
                                 String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateStageInput");
         io.floci.aws.services.apigateway.model.Stage stage = service.updateStage(region, apiId, stageName, patchOperations);
         return Response.ok(toStageNode(stage).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -745,7 +745,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/authorizers/{authorizerId}")
     public Response updateAuthorizer(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("authorizerId") String authorizerId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateAuthorizerInput");
         io.floci.aws.services.apigateway.model.Authorizer authorizer = service.updateAuthorizer(region, apiId, authorizerId, patchOperations);
         return Response.ok(toAuthorizerNode(authorizer).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -843,7 +843,7 @@ public class ApiGatewayController {
                                  @PathParam("apiKeyId") String apiKeyId,
                                  String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateApiKeyInput");
         ApiKey key = service.updateApiKey(region, apiKeyId, patchOperations);
         ObjectNode node = toApiKeyNode(key);
         node.remove("value");
@@ -920,7 +920,7 @@ public class ApiGatewayController {
     public Response updateUsagePlan(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId, String body) {
         String region = regionResolver.resolveRegion(headers);
         checkUpdateUsagePlanInput(body);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateUsagePlanInput");
         UsagePlan plan = service.updateUsagePlan(region, usagePlanId, patchOperations);
         return Response.ok(toUsagePlanNode(plan, true).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1094,7 +1094,7 @@ public class ApiGatewayController {
                                           @PathParam("responseType") String responseType,
                                           String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateGatewayResponseInput");
         GatewayResponse response = service.updateGatewayResponse(region, apiId, responseType, patchOperations);
         return Response.ok(toGatewayResponseNode(response).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1152,7 +1152,7 @@ public class ApiGatewayController {
                                            @PathParam("validatorId") String validatorId,
                                            String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateRequestValidatorInput");
         RequestValidator validator = service.updateRequestValidator(region, apiId, validatorId, patchOperations);
         return Response.ok(toRequestValidatorNode(validator).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1207,7 +1207,7 @@ public class ApiGatewayController {
     @Path("/restapis/{apiId}/models/{modelName}")
     public Response updateModel(@Context HttpHeaders headers, @PathParam("apiId") String apiId, @PathParam("modelName") String modelName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateModelInput");
         io.floci.aws.services.apigateway.model.Model model = service.updateModel(region, apiId, modelName, patchOperations);
         return Response.ok(toModelNode(model).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1273,7 +1273,7 @@ public class ApiGatewayController {
     public Response updateDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
                                             @PathParam("partId") String partId, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> operations = parsePatchOperations(body);
+        List<Map<String, String>> operations = parsePatchOperations(body, "updateDocumentationPartInput");
         DocumentationPart part = service.updateDocumentationPart(region, apiId, partId, operations);
         return Response.ok(objectMapper.valueToTree(part).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1325,7 +1325,7 @@ public class ApiGatewayController {
     @Path("/domainnames/{domainName}")
     public Response updateDomainName(@Context HttpHeaders headers, @PathParam("domainName") String domainName, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateDomainNameInput");
         CustomDomain domain = service.updateDomainName(region, domainName, patchOperations);
         return Response.ok(toDomainNode(region, domain).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1376,7 +1376,7 @@ public class ApiGatewayController {
     @Path("/domainnames/{domainName}/basepathmappings/{basePath}")
     public Response updateBasePathMapping(@Context HttpHeaders headers, @PathParam("domainName") String domainName, @PathParam("basePath") String basePath, String body) {
         String region = regionResolver.resolveRegion(headers);
-        List<Map<String, String>> patchOperations = parsePatchOperations(body);
+        List<Map<String, String>> patchOperations = parsePatchOperations(body, "updateBasePathMappingInput");
         BasePathMapping mapping = service.updateBasePathMapping(region, domainName, basePath, patchOperations);
         return Response.ok(toMappingNode(mapping).toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1667,7 +1667,7 @@ public class ApiGatewayController {
                                     String body) {
         String region = regionResolver.resolveRegion(headers);
         io.floci.aws.services.apigateway.model.VpcLink link =
-                service.updateVpcLink(region, vpcLinkId, parsePatchOperations(body));
+                service.updateVpcLink(region, vpcLinkId, parsePatchOperations(body, "updateVpcLinkInput"));
         return Response.ok(toV1VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

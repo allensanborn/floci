@@ -358,11 +358,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             epMap.forEach((k, v) -> {
                 if (k instanceof String ks && v instanceof List<?> list) {
                     if (EPC_TYPES_KEY.equals(ks)) {
-                        List<EndpointType> types = list.stream()
+                        List<String> names = list.stream()
                                 .filter(String.class::isInstance)
                                 .map(String.class::cast)
-                                .map(ApiGatewayService::endpointType)
                                 .toList();
+                        if (!names.stream().allMatch(typeName -> ENDPOINT_TYPE_ENUM.contains(typeName.toUpperCase()))) {
+                            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notAllInEnum(
+                                    names, "createRestApiInput.endpointConfiguration.types", ENDPOINT_TYPE_ENUM));
+                        }
+                        List<EndpointType> types = names.stream().map(ApiGatewayService::endpointType).toList();
                         endpointConfiguration.setTypes(types);
                     } else if (EPC_VPC_IDS_KEY.equals(ks)) {
                         List<String> vpcIds = list.stream()
@@ -410,6 +414,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         }
         throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
     }
+
+    /** The EndpointType enum, in the order API Gateway lists it. */
+    private static final List<String> ENDPOINT_TYPE_ENUM = List.of("PRIVATE", "EDGE", "REGIONAL");
 
     /** The endpoint type {@code value} names, in any case. */
     private static EndpointType endpointType(String value) {
@@ -2009,6 +2016,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Gateway Responses ────────────────────────────
 
+    private static final String GATEWAY_STATUS_CODE_PATTERN = "[1-5]\\d\\d";
     private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
     private static final List<String> GATEWAY_RESPONSE_PARAMETER_SOURCES = List.of(
             "method.request.header.", "method.request.querystring.", "method.request.path.",
@@ -2028,7 +2036,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
         GatewayResponse response = new GatewayResponse();
         response.setResponseType(type.name());
-        response.setStatusCode(validatedGatewayStatusCode(body.get("statusCode")));
+        response.setStatusCode(putGatewayResponseStatusCode(body.get("statusCode")));
         response.setResponseParameters(validatedGatewayResponseParameters(stringMap(body.get("responseParameters"))));
         response.setResponseTemplates(stringMap(body.get("responseTemplates")));
         response.setDefaultResponse(false);
@@ -2177,6 +2185,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return GatewayResponseType.fromName(responseType)
                 .orElseThrow(() -> new AwsException("BadRequestException",
                         "Invalid Gateway response type specified: " + responseType, 400));
+    }
+
+    /** PutGatewayResponse refuses a malformed statusCode in the request model, before the operation runs. */
+    private static String putGatewayResponseStatusCode(Object statusCode) {
+        if (statusCode != null && !String.valueOf(statusCode).matches(GATEWAY_STATUS_CODE_PATTERN)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.pattern(
+                    "putGatewayResponseInput.statusCode", String.valueOf(statusCode), GATEWAY_STATUS_CODE_PATTERN));
+        }
+        return validatedGatewayStatusCode(statusCode);
     }
 
     private static String validatedGatewayStatusCode(Object statusCode) {
@@ -2401,6 +2418,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Documentation Parts ────────────────────────────
 
+    /** The DocumentationPartLocationType enum, in the order API Gateway lists it. */
+    private static final List<String> DOCUMENTATION_PART_TYPES = List.of("RESPONSE_BODY", "RESPONSE", "METHOD",
+            "MODEL", "AUTHORIZER", "RESPONSE_HEADER", "RESOURCE", "PATH_PARAMETER", "REQUEST_BODY",
+            "QUERY_PARAMETER", "API", "REQUEST_HEADER");
     private static final Set<String> DOCUMENTATION_PART_NAMED_TYPES = Set.of("AUTHORIZER", "MODEL",
             "PATH_PARAMETER", "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE_HEADER");
     private static final Set<String> DOCUMENTATION_PART_PATH_TYPES = Set.of("RESOURCE", "METHOD", "PATH_PARAMETER",
@@ -2415,6 +2436,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getRestApi(region, apiId);
         if (request == null) {
             throw new AwsException("BadRequestException", "Documentation part request is required", 400);
+        }
+        if (request.get("location") instanceof Map<?, ?> input && input.get("type") instanceof String type
+                && !DOCUMENTATION_PART_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(type,
+                    "createDocumentationPartInput.location.type", DOCUMENTATION_PART_TYPES));
         }
         ObjectNode modeledRequest = JSON.valueToTree(request);
         modeledRequest.put("restApiId", apiId);
@@ -4122,8 +4148,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         if (mode != null && !"merge".equals(mode) && !"overwrite".equals(mode)) {
             // AWS PutRestApi accepts only merge (the default) and overwrite; reject anything
             // else before parsing or mutating so a typo cannot take the destructive overwrite path.
-            throw new AwsException("BadRequestException",
-                    "Invalid mode specified. Valid modes are 'merge' and 'overwrite'.", 400);
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(mode, "mode", List.of("overwrite", "merge")));
         }
         ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);

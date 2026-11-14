@@ -117,7 +117,10 @@ class ApiGatewayDocumentationPartIntegrationTest {
             AwsException type = assertThrows(AwsException.class,
                     () -> service.createDocumentationPart(region, apiId,
                             Map.of("location", Map.of("type", "UNKNOWN"), "properties", "{}")));
-            assertEquals("CreateDocumentationPart.location.type is not a modeled value.", type.getMessage());
+            assertEquals("1 validation error detected: Value 'UNKNOWN' at 'createDocumentationPartInput.location.type' "
+                    + "failed to satisfy constraint: Member must satisfy enum value set: [RESPONSE_BODY, RESPONSE, "
+                    + "METHOD, MODEL, AUTHORIZER, RESPONSE_HEADER, RESOURCE, PATH_PARAMETER, REQUEST_BODY, "
+                    + "QUERY_PARAMETER, API, REQUEST_HEADER]", type.getMessage());
 
             AwsException statusCode = assertThrows(AwsException.class,
                     () -> service.createDocumentationPart(region, apiId,
