@@ -52,6 +52,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -283,13 +284,20 @@ public class AcmService implements ResourceProvider {
     public ListResult listCertificates(List<CertificateStatus> statuses, List<KeyAlgorithm> keyTypes,
                                        String region, int maxItems, String nextToken) {
         int limit = maxItems > 0 ? Math.min(maxItems, 1000) : 100;
+        return searchCertificates(c -> (statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
+            && (keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm())),
+            region, limit, nextToken);
+    }
+
+    /** The certificates of a region that match, in ARN order, one cursor-paginated page of {@code limit}. */
+    public ListResult searchCertificates(Predicate<Certificate> filter,
+                                         String region, int limit, String nextToken) {
         String lastArn = decodeToken(nextToken);
 
         List<Certificate> allCerts = store.scan(k -> true).stream()
             .filter(c -> c.getArn().contains(":acm:" + region + ":"))
             .map(c -> settleValidation(c, region))
-            .filter(c -> statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
-            .filter(c -> keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm()))
+            .filter(filter)
             .sorted(Comparator.comparing(Certificate::getArn))
             .collect(Collectors.toList());
 

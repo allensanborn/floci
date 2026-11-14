@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -99,13 +100,90 @@ class AcmPendingValidationIntegrationTest {
     }
 
     @Test
-    void aDeletedCertificateIsNotFoundWithTheModelMessage() {
-        String arn = request("deleted-it.example.com", "");
+    void listCertificateDomainValidationsReportsEachNameAndPages() {
+        String arn = request("lcdv-it.example.com", ",\"SubjectAlternativeNames\":[\"*.lcdv-it.example.com\",\"www.lcdv-it.example.com\"]");
+
+        acm("ListCertificateDomainValidations", "{\"CertificateArn\":\"" + arn + "\"}")
+            .statusCode(200)
+            .body("DomainValidationSummaryList.DomainName", containsInAnyOrder(
+                "lcdv-it.example.com", "*.lcdv-it.example.com", "www.lcdv-it.example.com"))
+            .body("DomainValidationSummaryList[0].ActiveValidationConfiguration.ValidationStatus",
+                equalTo("PENDING_VALIDATION"))
+            .body("DomainValidationSummaryList[0].ActiveValidationConfiguration.ValidationChallenge"
+                + ".DnsValidationChallenge.ResourceRecord.Type", equalTo("CNAME"));
+
+        String token = acm("ListCertificateDomainValidations", "{\"CertificateArn\":\"" + arn + "\",\"MaxItems\":2}")
+            .statusCode(200).extract().jsonPath().getString("NextToken");
+        acm("ListCertificateDomainValidations", "{\"CertificateArn\":\"" + arn + "\",\"NextToken\":\"" + token + "\"}")
+            .statusCode(200).body("DomainValidationSummaryList.size()", equalTo(1))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    void searchCertificatesFiltersByArnAndStatusAndSeesDeletion() {
+        String arn = request("search-it.example.com", ",\"ValidationMethod\":\"DNS\"");
+
+        acm("SearchCertificates", "{\"FilterStatement\":{\"Filter\":{\"CertificateArn\":\"" + arn + "\"}}}")
+            .statusCode(200)
+            .body("Results.size()", equalTo(1))
+            .body("Results[0].CertificateMetadata.AcmCertificateMetadata.Status", equalTo("PENDING_VALIDATION"))
+            .body("Results[0].CertificateMetadata.AcmCertificateMetadata.Type", equalTo("AMAZON_ISSUED"))
+            .body("Results[0].CertificateMetadata.AcmCertificateMetadata.ValidationMethod", equalTo("DNS"));
+        acm("SearchCertificates", "{\"FilterStatement\":{\"And\":[{\"Filter\":{\"CertificateArn\":\"" + arn
+                + "\"}},{\"Filter\":{\"AcmCertificateMetadataFilter\":{\"Status\":\"ISSUED\"}}}]}}")
+            .statusCode(200).body("Results.size()", equalTo(0));
 
         acm("DeleteCertificate", "{\"CertificateArn\":\"" + arn + "\"}").statusCode(200);
+        acm("SearchCertificates", "{\"FilterStatement\":{\"Filter\":{\"CertificateArn\":\"" + arn + "\"}}}")
+            .statusCode(200).body("Results.size()", equalTo(0));
         acm("DescribeCertificate", "{\"CertificateArn\":\"" + arn + "\"}")
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"))
             .body("message", equalTo("Could not find certificate " + arn + "."));
+    }
+
+    @Test
+    void searchCertificatesRefusesAFilterItDoesNotUnderstand() {
+        acm("SearchCertificates", "{\"FilterStatement\":{\"Filter\":{\"X509AttributeFilter\":{}}}}")
+            .statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void listCertificateDomainValidationsRefusesAnUnknownToken() {
+        String arn = request("token-it.example.com", "");
+
+        acm("ListCertificateDomainValidations", "{\"CertificateArn\":\"" + arn + "\",\"NextToken\":\"nope\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid next token."));
+    }
+
+    @Test
+    void searchCertificatesRefusesAUnionThatIsNotExactlyOneMember() {
+        acm("SearchCertificates", "{\"FilterStatement\":{\"And\":[],\"Or\":[]}}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Each CertificateFilterStatement must contain exactly one member. "
+                + "A CertificateFilterStatement in your request contains the members [And, Or]."));
+        acm("SearchCertificates", "{\"FilterStatement\":{}}")
+            .statusCode(400).body("__type", equalTo("ValidationException"));
+        acm("SearchCertificates", "{\"FilterStatement\":{\"And\":[]}}")
+            .statusCode(400).body("__type", equalTo("ValidationException"));
+        acm("SearchCertificates", "{\"FilterStatement\":{\"Filter\":{\"CertificateArn\":\"a\","
+                + "\"AcmCertificateMetadataFilter\":{\"Status\":\"ISSUED\"}}}}")
+            .statusCode(400).body("message", equalTo("Each CertificateFilter must contain exactly one member. "
+                + "A CertificateFilter in your request contains the members [CertificateArn, AcmCertificateMetadataFilter]."));
+        acm("SearchCertificates", "{\"FilterStatement\":{\"Filter\":{\"AcmCertificateMetadataFilter\":"
+                + "{\"Status\":\"ISSUED\",\"Type\":\"IMPORTED\"}}}}")
+            .statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void searchCertificatesBoundsMaxResults() {
+        for (String bad : new String[] {"0", "-1", "501"}) {
+            acm("SearchCertificates", "{\"MaxResults\":" + bad + "}")
+                .statusCode(400).body("__type", equalTo("ValidationException"));
+        }
+        acm("SearchCertificates", "{\"MaxResults\":500}").statusCode(200);
     }
 }
