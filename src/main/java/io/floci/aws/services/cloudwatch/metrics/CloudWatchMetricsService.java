@@ -523,7 +523,7 @@ public class CloudWatchMetricsService {
     private static ObjectNode snapshot(Alarm alarm) {
         ObjectNode node = MAPPER.valueToTree(alarm);
         node.remove(List.of("region", "tags", "stateReason", "stateReasonData", "alarmType",
-                "stateTransitionedTimestamp"));
+                "stateTransitionedTimestamp", "stateForcedTimestamp"));
         node.put("alarmConfigurationUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
                 Instant.ofEpochSecond(alarm.getAlarmConfigurationUpdatedTimestamp())));
         node.put("stateUpdatedTimestamp", AlarmSnsNotifier.TIMESTAMP_FORMAT.format(
@@ -928,7 +928,20 @@ public class CloudWatchMetricsService {
         return false;
     }
 
+    /**
+     * SetAlarmState as a client calls it: the state holds until the evaluator's next evaluation period
+     * ({@link AlarmEvaluator} skips the alarm for its period after this), as on AWS
+     * (the hold is capped, see {@link MetricAlarm#stateHeld}).
+     */
+    public void forceAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region) {
+        setAlarmState(alarmName, stateValue, stateReason, stateReasonData, region, true);
+    }
+
     public void setAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region) {
+        setAlarmState(alarmName, stateValue, stateReason, stateReasonData, region, false);
+    }
+
+    private void setAlarmState(String alarmName, String stateValue, String stateReason, String stateReasonData, String region, boolean forced) {
         List<String> states = List.of("INSUFFICIENT_DATA", "ALARM", "OK");
         if (stateValue == null || !states.contains(stateValue)) {
             throw SmithyValidationErrors.validationError(stateValue == null ? SmithyValidationErrors.notNull("stateValue")
@@ -953,7 +966,14 @@ public class CloudWatchMetricsService {
             Alarm alarm = alarmStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFound", "Alarm not found: " + alarmName, 404));
 
+            long nowSeconds = Instant.now().getEpochSecond();
+            if (!forced && alarm instanceof MetricAlarm held && held.stateHeld(nowSeconds)) {
+                return; // a SetAlarmState landed after the evaluator read this alarm
+            }
             String oldState = alarm.getStateValue();
+            if (forced) {
+                alarm.setStateForcedTimestamp(nowSeconds); // before changeState stores it
+            }
             changeState(alarm, region, stateValue, stateReason, stateReasonData);
             if (!stateValue.equals(oldState)) {
                 evaluateComposites(region, Set.of(alarmName));

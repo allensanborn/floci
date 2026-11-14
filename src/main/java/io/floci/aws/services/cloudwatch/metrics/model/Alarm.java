@@ -31,6 +31,7 @@ public abstract class Alarm {
     private String stateReasonData;
     private long stateUpdatedTimestamp;
     private long stateTransitionedTimestamp;
+    private volatile long stateForcedTimestamp;
     private Map<String, String> tags = new HashMap<>();
     private String region;
 
@@ -82,6 +83,10 @@ public abstract class Alarm {
     /** When StateValue last changed; 0 for an alarm stored before this was recorded. */
     public long getStateTransitionedTimestamp() { return stateTransitionedTimestamp; }
     public void setStateTransitionedTimestamp(long timestamp) { this.stateTransitionedTimestamp = timestamp; }
+
+    /** When a client last set the state through SetAlarmState; 0 if never. See {@link MetricAlarm#stateHeld}. */
+    public long getStateForcedTimestamp() { return stateForcedTimestamp; }
+    public void setStateForcedTimestamp(long timestamp) { this.stateForcedTimestamp = timestamp; }
 
     /** The StateTransitionedTimestamp to report: an alarm stored without one reports its last state update. */
     public long lastTransitionTimestamp() {

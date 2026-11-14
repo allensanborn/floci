@@ -552,7 +552,7 @@ public class CloudWatchMetricsJsonHandler {
         String state = request.path("StateValue").asText();
         String reason = request.path("StateReason").asText(null);
         String reasonData = request.path("StateReasonData").asText(null);
-        metricsService.setAlarmState(name, state, reason, reasonData, region);
+        metricsService.forceAlarmState(name, state, reason, reasonData, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

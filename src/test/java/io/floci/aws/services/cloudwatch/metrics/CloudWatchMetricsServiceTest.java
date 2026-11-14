@@ -640,7 +640,7 @@ class CloudWatchMetricsServiceTest {
         assertEquals(created, createdAlarm.path("alarmConfigurationUpdatedTimestamp").asText());
         assertTrue(created.endsWith("+0000"));
         for (String hidden : List.of("region", "tags", "stateReason", "stateReasonData", "alarmType", "unit",
-                "stateTransitionedTimestamp")) {
+                "stateTransitionedTimestamp", "stateForcedTimestamp")) {
             assertFalse(createdAlarm.has(hidden), hidden);
         }
 

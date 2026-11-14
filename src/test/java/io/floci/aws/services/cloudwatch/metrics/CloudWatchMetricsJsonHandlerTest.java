@@ -338,6 +338,9 @@ class CloudWatchMetricsJsonHandlerTest {
         Response resp = handler.handle("SetAlarmState", alarmReq, REGION);
         assertEquals(200, resp.getStatus());
 
+        assertTrue(service.describeAlarms(List.of("TestAlarm"), null, REGION).getFirst()
+                .getStateForcedTimestamp() > 0, "the SetAlarmState handler marks the state as forced");
+
         // Verify that the alarm state is reflected in the metrics service
         ObjectNode getAlarmReq = MAPPER.createObjectNode();
         getAlarmReq.putArray("AlarmNames").add("TestAlarm");
