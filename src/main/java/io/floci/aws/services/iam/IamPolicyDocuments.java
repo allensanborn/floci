@@ -180,7 +180,10 @@ final class IamPolicyDocuments {
         for (JsonNode statement : statements(root)) {
             JsonNode effect = statement.get("Effect");
             if (effect != null && !EFFECTS.contains(effect.asText())) {
-                throw malformed(POLICY_PARSE_FAILED);
+                // Only a case variant of a defined effect ("allow") is the legacy-parsing failure;
+                // any other value is a syntax error.
+                boolean caseVariant = EFFECTS.stream().anyMatch(effect.asText()::equalsIgnoreCase);
+                throw malformed(caseVariant ? POLICY_PARSE_FAILED : SYNTAX_ERRORS_IN_POLICY);
             }
             for (String resource : resourceValues(statement)) {
                 if (!resource.startsWith(ARN_PREFIX) && !ANY_RESOURCE.equals(resource)) {

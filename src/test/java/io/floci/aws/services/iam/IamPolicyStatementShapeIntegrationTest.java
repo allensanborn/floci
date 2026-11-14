@@ -31,6 +31,8 @@ class IamPolicyStatementShapeIntegrationTest {
     private static final String INVALID_EFFECT = "{\"Version\":\"2012-10-17\",\"Statement\":"
             + "[{\"Effect\":\"Maybe\",\"Action\":\"iam:GetUser\",\"Resource\":\"*\"}]}";
 
+    private static final String CASE_VARIANT_EFFECT = INVALID_EFFECT.replace("Maybe", "allow");
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
@@ -79,7 +81,9 @@ class IamPolicyStatementShapeIntegrationTest {
             expectMalformed(iam(h[0]).formParam(h[1], h[2]).formParam("PolicyName", "bad")
                     .formParam("PolicyDocument", STATEMENT_IS_A_STRING), SYNTAX);
             expectMalformed(iam(h[0]).formParam(h[1], h[2]).formParam("PolicyName", "bad")
-                    .formParam("PolicyDocument", INVALID_EFFECT), "The policy failed legacy parsing");
+                    .formParam("PolicyDocument", INVALID_EFFECT), SYNTAX);
+            expectMalformed(iam(h[0]).formParam(h[1], h[2]).formParam("PolicyName", "bad")
+                    .formParam("PolicyDocument", CASE_VARIANT_EFFECT), "The policy failed legacy parsing");
             iam(h[3]).formParam(h[1], h[2]).when().post("/").then().statusCode(200)
                     .body(not(containsString("<member>bad</member>")));
             expectOk(iam(h[0]).formParam(h[1], h[2]).formParam("PolicyName", "good")
@@ -117,10 +121,12 @@ class IamPolicyStatementShapeIntegrationTest {
         expectMalformed(iam("CreatePolicy").formParam("PolicyName", unique("shape-nostmt"))
                 .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\"}"), SYNTAX);
         expectMalformed(iam("CreatePolicy").formParam("PolicyName", unique("shape-effect"))
-                .formParam("PolicyDocument", INVALID_EFFECT), "The policy failed legacy parsing");
+                .formParam("PolicyDocument", INVALID_EFFECT), SYNTAX);
         expectMalformed(iam("CreatePolicy").formParam("PolicyName", unique("shape-noaction"))
                 .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Resource\":\"*\"}]}"), "Policy statement must contain actions.");
+        expectMalformed(iam("CreatePolicy").formParam("PolicyName", unique("shape-case"))
+                .formParam("PolicyDocument", CASE_VARIANT_EFFECT), "The policy failed legacy parsing");
         // a lone statement object is a valid Statement
         String lone = "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\","
                 + "\"Action\":\"s3:ListBucket\",\"Resource\":\"*\"}}";
