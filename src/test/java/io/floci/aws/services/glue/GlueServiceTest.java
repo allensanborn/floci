@@ -885,7 +885,7 @@ class GlueServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> glueService.updatePartition("db1", "plain", List.of("missing"), missing));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
-        assertEquals("Partition not found.", ex.getMessage());
+        assertEquals("Partition [missing] not found", ex.getMessage());
     }
 
     @Test
@@ -1043,12 +1043,24 @@ class GlueServiceTest {
     }
 
     @Test
+    void internalTableLookupNamesTheMissingTableButTheApiAndVersionReadsKeepTheConstant() {
+        AwsException internal = assertThrows(AwsException.class, () -> glueService.getTable("db1", "ghost"));
+        assertEquals("EntityNotFoundException", internal.getErrorCode());
+        assertEquals("Table ghost not found.", internal.getMessage());
+
+        assertEquals("Entity Not Found", assertThrows(AwsException.class,
+                () -> glueService.getTableEntity("db1", "ghost")).getMessage());
+        assertEquals("Entity Not Found", assertThrows(AwsException.class,
+                () -> glueService.getTableVersions("db1", "ghost")).getMessage());
+    }
+
+    @Test
     void deleteTableForMissingTableThrows() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> glueService.deleteTable("db1", "missing_table"));
 
         assertEquals("EntityNotFoundException", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("db1.missing_table"));
+        assertEquals("Table missing_table not found.", ex.getMessage());
     }
 
     @Test
@@ -2169,7 +2181,7 @@ class GlueServiceTest {
 
         assertEquals(List.of("keep-a", "keep-b"), result.succeeded());
         assertEquals(1, result.errors().size());
-        assertEquals("EntityNotFoundException", result.errors().get("absent").errorCode());
+        assertEquals("InternalException", result.errors().get("absent").errorCode());
         assertTrue(glueService.getConnections(null, null, null, false, null, null).items().isEmpty());
 
         // The reference caps ConnectionNameList at 25 entries.
