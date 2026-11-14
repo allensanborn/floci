@@ -20,6 +20,8 @@ public class ScheduledAction {
     private Instant deadline;
     private Integer minCapacity;
     private Integer maxCapacity;
+    private Double startTime;
+    private Double endTime;
     private double creationTime;
     private State state;
 
@@ -36,6 +38,8 @@ public class ScheduledAction {
         this.deadline = source.deadline;
         this.minCapacity = source.minCapacity;
         this.maxCapacity = source.maxCapacity;
+        this.startTime = source.startTime;
+        this.endTime = source.endTime;
         this.creationTime = source.creationTime;
         this.state = source.state;
     }
@@ -69,6 +73,12 @@ public class ScheduledAction {
 
     public Integer getMaxCapacity() { return maxCapacity; }
     public void setMaxCapacity(Integer value) { this.maxCapacity = value; }
+
+    public Double getStartTime() { return startTime; }
+    public void setStartTime(Double value) { this.startTime = value; }
+
+    public Double getEndTime() { return endTime; }
+    public void setEndTime(Double value) { this.endTime = value; }
 
     public double getCreationTime() { return creationTime; }
     public void setCreationTime(double value) { this.creationTime = value; }

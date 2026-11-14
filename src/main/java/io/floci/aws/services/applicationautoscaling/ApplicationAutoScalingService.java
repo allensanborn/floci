@@ -33,6 +33,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -44,6 +45,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -205,10 +208,8 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     public List<ScalableTarget> describeScalableTargets(String serviceNamespace, List<String> resourceIds,
                                                         String scalableDimension, String region) {
         requireNamespace(serviceNamespace);
-        if (scalableDimension != null && (resourceIds == null || resourceIds.isEmpty())) {
-            throw new AwsException("ValidationException",
-                    "A resource ID must be specified when a scalable dimension is specified.", 400);
-        }
+        requireResourceWithDimension(scalableDimension, resourceIds != null && !resourceIds.isEmpty(), true);
+        requireMaxFifty(resourceIds, "resourceIds");
         String prefix = region + "::" + serviceNamespace + "::";
         return targets.scan(k -> k.startsWith(prefix)).stream()
                 .filter(t -> resourceIds == null || resourceIds.isEmpty() || resourceIds.contains(t.getResourceId()))
@@ -268,25 +269,41 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
                                        String schedule, boolean actionSupplied, Integer min, Integer max,
                                        String timezone, String region, Instant now) {
+        return putScheduledAction(namespace, resourceId, dimension, name, schedule, actionSupplied, min, max,
+                timezone, null, null, region, now);
+    }
+
+    ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
+                                       String schedule, boolean actionSupplied, Integer min, Integer max,
+                                       String timezone, Double startTime, Double endTime, String region,
+                                       Instant now) {
         validateTriple(namespace, resourceId, dimension);
         validateActionName(name);
-        if (!"ecs".equals(namespace) || !"ecs:service:DesiredCount".equals(dimension)) {
-            throw new AwsException("ValidationException", "Scheduled actions support ECS desired count only.", 400);
+        if (schedule != null) {
+            validateScheduleSyntax(schedule);
         }
-        if (timezone != null && !"UTC".equals(timezone)) {
-            throw new AwsException("ValidationException", "Only UTC is supported for Timezone.", 400);
-        }
-        Instant deadline = schedule == null ? null : parseSchedule(schedule);
-        if (actionSupplied && (min == null && max == null || min != null && min < 0 || max != null && max < 0
-                || min != null && max != null && min > max)) {
+        if (actionSupplied && (min == null && max == null || min != null && min < 0 || max != null && max < 0)) {
             throw new AwsException("ValidationException", "Supply nonnegative capacity bounds with MinCapacity <= MaxCapacity.", 400);
+        }
+        if (actionSupplied && min != null && max != null && min > max) {
+            throw new AwsException("ValidationException", "Maximum capacity cannot be less than minimum capacity", 400);
+        }
+        if (timezone != null && !ZoneId.getAvailableZoneIds().contains(timezone)) {
+            throw new AwsException("ValidationException", "Invalid schedule timezone: " + timezone, 400);
         }
         synchronized (targetLock(region, namespace, resourceId, dimension)) {
             requireTarget(region, namespace, resourceId, dimension);
             String key = policyKey(region, namespace, resourceId, dimension, name);
             ScheduledAction existing = scheduledActions.get(key).orElse(null);
-            if (existing == null && (schedule == null || !actionSupplied)) {
+            if (existing == null && schedule == null) {
+                throw new AwsException("ValidationException", "Schedule must be set", 400);
+            }
+            if (existing == null && !actionSupplied) {
                 throw new AwsException("ValidationException", "Schedule and ScalableTargetAction are required.", 400);
+            }
+            // Omitted StartTime/EndTime clear the stored window, unlike every other member.
+            if (startTime != null && endTime != null && endTime < startTime) {
+                throw new AwsException("ValidationException", "StartTime must be before EndTime", 400);
             }
             ScheduledAction action = existing == null ? new ScheduledAction() : new ScheduledAction(existing);
             if (existing == null) {
@@ -299,13 +316,20 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                         "scheduledAction:" + UUID.randomUUID() + ":resource/" + namespace + "/" + resourceId
                                 + ":scheduledActionName/" + name));
             }
-            if (schedule != null) {
-                action.setSchedule(schedule);
-                action.setDeadline(deadline);
-                action.setState(deadline.isBefore(now.truncatedTo(ChronoUnit.SECONDS)) ? State.SKIPPED : State.PENDING);
-            }
             if (timezone != null) {
                 action.setTimezone(timezone);
+            }
+            action.setStartTime(startTime);
+            action.setEndTime(endTime);
+            if (schedule != null) {
+                action.setSchedule(schedule);
+                // ponytail: only at() on ECS fires; other schedules and dimensions are stored and described, never
+                // executed. Add cron/rate evaluation and per-dimension CapacityAdjusters to dispatch them.
+                Instant deadline = "ecs".equals(namespace) && schedule.startsWith("at(")
+                        ? parseAt(schedule, action.getTimezone()) : null;
+                action.setDeadline(deadline);
+                action.setState(deadline == null ? null
+                        : deadline.isBefore(now.truncatedTo(ChronoUnit.SECONDS)) ? State.SKIPPED : State.PENDING);
             }
             if (actionSupplied) {
                 action.setMinCapacity(min);
@@ -321,8 +345,12 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         validateActionName(name);
         synchronized (targetLock(region, namespace, resourceId, dimension)) {
             String key = policyKey(region, namespace, resourceId, dimension, name);
+            ScalableTarget target = requireTarget(region, namespace, resourceId, dimension);
             if (scheduledActions.get(key).isEmpty()) {
-                throw new AwsException("ObjectNotFoundException", "Scheduled action not found: " + name, 400);
+                String id = target.getScalableTargetArn().substring(target.getScalableTargetArn().lastIndexOf('/') + 1);
+                String uuid = id.length() == 32 ? id.replaceFirst("(.{8})(.{4})(.{4})(.{4})(.{12})", "$1-$2-$3-$4-$5") : id;
+                throw new AwsException("ObjectNotFoundException", "No scheduled action found for service namespace: "
+                        + namespace + ", scalable target ID: " + uuid + ", scheduled action name: " + name, 400);
             }
             scheduledActions.deleteAllAtomically(Set.of(key));
         }
@@ -332,15 +360,11 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                                                               List<String> names, Integer maxResults,
                                                               String nextToken, String region) {
         requireNamespace(namespace);
-        if (dimension != null && (resourceId == null || resourceId.isBlank())) {
-            throw new AwsException("ValidationException", "A resource ID is required with ScalableDimension.", 400);
-        }
+        requireResourceWithDimension(dimension, resourceId != null && !resourceId.isBlank(), false);
         if (dimension != null) {
             validateTriple(namespace, resourceId, dimension);
         }
-        if (names != null && names.size() > 50) {
-            throw new AwsException("ValidationException", "At most 50 scheduled action names are allowed.", 400);
-        }
+        requireMaxFifty(names, "scheduledActionNames");
         String prefix = region + "::" + namespace + "::";
         List<ScheduledAction> matching = scheduledActions.scan(key -> key.startsWith(prefix)).stream()
                 .filter(a -> resourceId == null || resourceId.equals(a.getResourceId()))
@@ -358,19 +382,107 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         return action.getScheduledActionName() + "\u0000" + action.getResourceId() + "\u0000" + action.getScalableDimension();
     }
 
+    // The model's @pattern for ScheduledActionName, quoted verbatim in the refusal.
+    private static final String NAME_PATTERN =
+            "(?!((^[ ]+.*)|(.*([\\u0000-\\u001f]|[\\u007f-\\u009f]|[:/|])+.*)|(.*[ ]+$))).+";
+
     private static void validateActionName(String name) {
-        if (name == null || name.isBlank() || name.length() > 256
-                || name.chars().anyMatch(c -> c == ':' || c == '/' || c == '|' || Character.isISOControl(c))) {
+        if (name == null) {
             throw new AwsException("ValidationException", "Invalid ScheduledActionName.", 400);
+        }
+        if (name.length() > 256) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + name
+                    + "' at 'scheduledActionName' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 256", 400);
+        }
+        if (!name.matches(NAME_PATTERN)) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '" + name
+                    + "' at 'scheduledActionName' failed to satisfy constraint: "
+                    + "Member must satisfy regular expression pattern: " + NAME_PATTERN, 400);
         }
     }
 
-    private static Instant parseSchedule(String schedule) {
-        if (!schedule.matches("at\\(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\)")) {
-            throw new AwsException("ValidationException", "Only UTC at(yyyy-MM-ddTHH:mm:ss) schedules are supported.", 400);
+    private static void requireMaxFifty(List<String> values, String member) {
+        if (values != null && values.size() > 50) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value '["
+                    + String.join(", ", values) + "]' at '" + member + "' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 50", 400);
         }
+    }
+
+    private static void requireResourceWithDimension(String dimension, boolean hasResource, boolean plural) {
+        if (dimension != null && !hasResource) {
+            throw new AwsException("ValidationException", "Scalable dimension cannot be provided without "
+                    + (plural ? "resource IDs." : "a resource ID."), 400);
+        }
+    }
+
+    private static final String SCHEDULE_SYNTAX = "Invalid schedule expression. Details: Schedule expressions must "
+            + "have the following syntax: rate(<number>\\s?(minutes?|hours?|days?)), cron(<cron_expression>) or "
+            + "at(yyyy-MM-dd'T'HH:mm:ss).";
+    private static final String CRON_LAYOUT = "the CRON format consists of 6 fields "
+            + "([Minutes] [Hours] [Day_of_Month] [Month] [Day_of_Week] [Year]).";
+    private static final String[] CRON_FIELD_NAMES =
+            {"Minutes", "Hours", "Day_of_Month", "Month", "Day_of_Week", "Year"};
+    // ponytail: per-field character classes, not a full Quartz grammar (no range or step arithmetic checks).
+    private static final String MONTHS = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC";
+    private static final String DAYS = "SUN|MON|TUE|WED|THU|FRI|SAT";
+    private static final Pattern[] CRON_FIELDS = {
+            Pattern.compile("[0-9,\\-*/]+"), Pattern.compile("[0-9,\\-*/]+"), Pattern.compile("[0-9,\\-*/?LW]+"),
+            Pattern.compile("([0-9,\\-*/]|" + MONTHS + ")+", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("([0-9,\\-*/?L#]|" + DAYS + ")+", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("[0-9,\\-*/]+")};
+    private static final Pattern RATE = Pattern.compile("rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?)\\s*\\)");
+
+    private static void validateScheduleSyntax(String schedule) {
+        if (schedule.startsWith("at(")) {
+            if (!schedule.matches("at\\(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\)")) {
+                throw new AwsException("ValidationException", SCHEDULE_SYNTAX, 400);
+            }
+            parseAt(schedule, null);
+        } else if (schedule.startsWith("rate(")) {
+            Matcher rate = RATE.matcher(schedule);
+            if (!rate.matches() || rate.group(1).matches("0+")) {
+                throw new AwsException("ValidationException", SCHEDULE_SYNTAX, 400);
+            }
+        } else if (schedule.startsWith("cron(") && schedule.endsWith(")")) {
+            validateCron(schedule.substring(5, schedule.length() - 1));
+        } else {
+            throw new AwsException("ValidationException", SCHEDULE_SYNTAX, 400);
+        }
+    }
+
+    private static void validateCron(String body) {
+        Matcher token = Pattern.compile("\\S+").matcher(body);
+        int index = 0;
+        while (token.find()) {
+            String field = token.group();
+            if (index >= CRON_FIELDS.length) {
+                throw cronError(token.start(), "Unexpected token '" + field.toUpperCase(Locale.ROOT)
+                        + "' after the Year field, " + CRON_LAYOUT);
+            }
+            boolean noSpecificValue = field.equals("?") && (index == 2 || index == 4);
+            if (!noSpecificValue && !CRON_FIELDS[index].matcher(field).matches() || field.equals("?") && !noSpecificValue) {
+                throw cronError(token.start(), "Illegal characters for this position: '"
+                        + field.toUpperCase(Locale.ROOT) + "'");
+            }
+            index++;
+        }
+        if (index < CRON_FIELDS.length) {
+            throw cronError(body.length(), "Unexpected end of expression, the " + CRON_FIELD_NAMES[index]
+                    + " field is missing, " + CRON_LAYOUT);
+        }
+    }
+
+    private static AwsException cronError(int position, String detail) {
+        return new AwsException("ValidationException", "Invalid schedule expression. Details: Invalid CRON expression: "
+                + "error at position " + position + ", details: " + detail, 400);
+    }
+
+    /** Parses an already syntax-checked {@code at(...)} expression in the action's timezone (UTC when unset). */
+    private static Instant parseAt(String schedule, String timezone) {
         try {
-            return SchedulerExpressionParser.parseAt(schedule, "UTC");
+            return SchedulerExpressionParser.parseAt(schedule, timezone == null ? "UTC" : timezone);
         } catch (DateTimeParseException e) {
             throw new AwsException("ValidationException", "Invalid scheduled date.", 400);
         }
@@ -378,7 +490,8 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
 
     private ScalableTarget requireTarget(String region, String namespace, String resourceId, String dimension) {
         return targets.get(targetKey(region, namespace, resourceId, dimension))
-                .orElseThrow(() -> new AwsException("ObjectNotFoundException", "Scalable target not found.", 400));
+                .orElseThrow(() -> new AwsException("ObjectNotFoundException", "No scalable target registered for service namespace: " + namespace
+                        + ", resource ID: " + resourceId + ", scalable dimension: " + dimension, 400));
     }
 
     Object targetLock(String region, String namespace, String resourceId, String dimension) {
@@ -562,10 +675,8 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                                                        String scalableDimension, List<String> policyNames,
                                                        String region) {
         requireNamespace(serviceNamespace);
-        if (scalableDimension != null && (resourceId == null || resourceId.isBlank())) {
-            throw new AwsException("ValidationException",
-                    "A resource ID must be specified when a scalable dimension is specified.", 400);
-        }
+        requireResourceWithDimension(scalableDimension, resourceId != null && !resourceId.isBlank(), false);
+        requireMaxFifty(policyNames, "policyNames");
         String prefix = region + "::" + serviceNamespace + "::";
         return policies.scan(k -> k.startsWith(prefix)).stream()
                 .filter(p -> resourceId == null || resourceId.equals(p.getResourceId()))
@@ -1053,6 +1164,7 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     public List<ScalingActivity> describeScalingActivities(String serviceNamespace, String resourceId,
                                                             String scalableDimension, String region) {
         requireNamespace(serviceNamespace);
+        requireResourceWithDimension(scalableDimension, resourceId != null && !resourceId.isBlank(), false);
         String prefix = region + "::" + serviceNamespace + "::";
         return activities.scan(k -> k.startsWith(prefix)).stream()
                 .filter(a -> resourceId == null || resourceId.equals(a.getResourceId()))

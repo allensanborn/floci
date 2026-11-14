@@ -19,7 +19,7 @@ Auto Scaling groups over the Query protocol under the `autoscaling` signing name
 | `RegisterScalableTarget` | Registers or updates a scalable target and returns its ARN |
 | `DescribeScalableTargets` | Lists scalable targets in a namespace, optionally filtered |
 | `DeregisterScalableTarget` | Deregisters a target and deletes its policies and alarms |
-| `PutScheduledAction` | Creates or updates a one-off UTC scheduled action for ECS |
+| `PutScheduledAction` | Creates or updates a scheduled action on any registered target; only ECS `at()` actions execute |
 | `DescribeScheduledActions` | Lists scheduled actions with filters and pagination |
 | `DeleteScheduledAction` | Deletes a scheduled action and cancels its pending occurrence |
 | `PutScalingPolicy` | Creates or updates a scaling policy and its CloudWatch alarms |
@@ -150,10 +150,11 @@ to actually change `desiredCount`, respecting `MinCapacity`/`MaxCapacity` and
   DynamoDB capacity, Lambda provisioned concurrency, ...) remain stored but inert, as
   described below.
 
-## Scheduled scaling (ECS only)
+## Scheduled scaling
 
-`PutScheduledAction` accepts `at(yyyy-MM-ddTHH:mm:ss)` in UTC for
-`ecs:service:DesiredCount`. A new action requires a schedule and a nonempty
+`PutScheduledAction` validates and stores `at()`, `rate()` and `cron()` schedules, an IANA
+`Timezone`, and `StartTime`/`EndTime` for any registered target. Only `at(yyyy-MM-ddTHH:mm:ss)`
+actions on `ecs:service:DesiredCount` execute; other stored actions are described but never fire. A new action requires a schedule and a nonempty
 `ScalableTargetAction` with `MinCapacity`, `MaxCapacity`, or both. Updating an action
 preserves omitted whole fields. Supplying `ScalableTargetAction` replaces its configured
 bounds, so a minimum-only update removes any previously configured maximum.
