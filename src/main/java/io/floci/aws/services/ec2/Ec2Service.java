@@ -10091,9 +10091,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
+        return deleteLaunchTemplate(region, id, name, false);
+    }
+
+    /** As above; with {@code dryRun} the template is resolved and then answered with DryRunOperation, kept. */
+    public LaunchTemplate deleteLaunchTemplate(String region, String id, String name, boolean dryRun) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
             removeTags(region, launchTemplate.getLaunchTemplateId());
             return launchTemplate;

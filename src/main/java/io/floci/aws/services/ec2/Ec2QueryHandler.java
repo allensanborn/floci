@@ -118,12 +118,12 @@ public class Ec2QueryHandler {
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
-                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
-                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
-                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
-                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
+                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(params, region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(params, region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(params, region);
+                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(params, region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
-                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(params, region);
                 // AMI block public access
                 case "EnableImageBlockPublicAccess" -> handleEnableImageBlockPublicAccess(params, region);
                 case "DisableImageBlockPublicAccess" -> handleDisableImageBlockPublicAccess(params, region);
@@ -673,32 +673,37 @@ public class Ec2QueryHandler {
 
     // ─── EBS encryption defaults ─────────────────────────────────────────────
 
-    private Response handleGetEbsEncryptionByDefault(String region) {
+    private Response handleGetEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("GetEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.getEbsEncryptionByDefault(region));
     }
 
-    private Response handleEnableEbsEncryptionByDefault(String region) {
+    private Response handleEnableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.enableEbsEncryptionByDefault(region));
     }
 
-    private Response handleDisableEbsEncryptionByDefault(String region) {
+    private Response handleDisableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.disableEbsEncryptionByDefault(region));
     }
 
-    private Response handleGetEbsDefaultKmsKeyId(String region) {
+    private Response handleGetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("GetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.getEbsDefaultKmsKeyId(region));
     }
 
     private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
         return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
-                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId"), dryRun(p)));
     }
 
-    private Response handleResetEbsDefaultKmsKeyId(String region) {
+    private Response handleResetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
     }
@@ -2195,6 +2200,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "FlowLogId");
         if (ids.isEmpty()) {
             ids = getList(p, "FlowLogIds.member");
@@ -3875,6 +3881,7 @@ public class Ec2QueryHandler {
         if (noName && noId) {
             throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
         }
+        checkDryRun(p);
         KeyPair deleted = service.deleteKeyPair(region, keyName, keyPairId);
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteKeyPairResponse", AwsNamespaces.EC2)
@@ -5287,7 +5294,7 @@ public class Ec2QueryHandler {
 
     private Response handleDeleteLaunchTemplate(MultivaluedMap<String, String> p, String region) {
         LaunchTemplate launchTemplate = service.deleteLaunchTemplate(
-                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"));
+                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
