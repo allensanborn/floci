@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Pins the exact error codes and messages IAM returns for missing and duplicate entities.
+ * RestAssured is used deliberately so the raw wire messages are asserted, not SDK-rewritten ones.
  */
 @QuarkusTest
 class IamEntityMessagesIntegrationTest {
@@ -83,6 +84,35 @@ class IamEntityMessagesIntegrationTest {
         call(200, null, null, "Action", "CreateUser", "UserName", user);
         call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
                 "Action", "AttachUserPolicy", "UserName", user, "PolicyArn", missing);
+        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
+                "Action", "CreatePolicyVersion", "PolicyArn", missing, "PolicyDocument", DOC);
+        call(404, "NoSuchEntity", "Policy " + missing + " version v1" + notAttachable,
+                "Action", "GetPolicyVersion", "PolicyArn", missing, "VersionId", "v1");
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "ListPolicyTags", "PolicyArn", missing);
+
+        // permissions boundary on a missing policy
+        String scope = "Scope ARN: " + missing + notAttachable;
+        call(404, "NoSuchEntity", scope,
+                "Action", "PutUserPermissionsBoundary", "UserName", user, "PermissionsBoundary", missing);
+        call(404, "NoSuchEntity", scope,
+                "Action", "CreateUser", "UserName", "ub-" + id(), "PermissionsBoundary", missing);
+
+        // detach of a policy that is not attached
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachUserPolicy", "UserName", user, "PolicyArn", arn);
+        String group = "g-" + id();
+        call(200, null, null, "Action", "CreateGroup", "GroupName", group);
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachGroupPolicy", "GroupName", group, "PolicyArn", arn);
+        String role = "r-" + id();
+        call(200, null, null, "Action", "CreateRole", "RoleName", role, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachRolePolicy", "RoleName", role, "PolicyArn", arn);
+        call(404, "NoSuchEntity", scope,
+                "Action", "PutRolePermissionsBoundary", "RoleName", role, "PermissionsBoundary", missing);
     }
 
     @Test
