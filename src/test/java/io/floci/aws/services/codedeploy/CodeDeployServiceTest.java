@@ -18,6 +18,7 @@ import io.floci.aws.services.ssm.SsmCommandService;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -596,6 +597,40 @@ class CodeDeployServiceTest {
         AwsException unknown = assertThrows(AwsException.class,
                 () -> service.listDeploymentGroups("us-east-1", "nope"));
         assertEquals("ApplicationDoesNotExistException", unknown.getErrorCode());
+    }
+
+    private void assertAws(String code, String message, Executable call) {
+        AwsException e = assertThrows(AwsException.class, call);
+        assertEquals(code, e.getErrorCode());
+        assertEquals(message, e.getMessage());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void applicationErrorsUseAwsMessages() {
+        service.createApplication(REGION, "app-a", "Server", null);
+        service.createApplication(REGION, "app-b", "Lambda", null);
+        assertAws("ApplicationAlreadyExistsException", "app-a already exists.",
+                () -> service.createApplication(REGION, "app-a", "Server", null));
+        assertAws("ApplicationAlreadyExistsException",
+                "The application name: app-b you want to update to already exist",
+                () -> service.updateApplication(REGION, "app-a", "app-b"));
+        assertAws("ApplicationDoesNotExistException", "No application found for name: ghost",
+                () -> service.getApplication(REGION, "ghost"));
+        assertAws("ApplicationDoesNotExistException", "No application found for name: ghost",
+                () -> service.updateApplication(REGION, "ghost", "x"));
+    }
+
+    @Test
+    void renameMovesApplicationAndDeleteIsIdempotent() {
+        service.createApplication(REGION, "old-app", "Server", null);
+        service.updateApplication(REGION, "old-app", "new-app");
+        assertEquals("Server", service.getApplication(REGION, "new-app").getComputePlatform());
+        assertAws("ApplicationDoesNotExistException", "No application found for name: old-app",
+                () -> service.getApplication(REGION, "old-app"));
+        service.deleteApplication(REGION, "new-app");
+        service.deleteApplication(REGION, "new-app");
+        assertFalse(service.listApplications(REGION).contains("new-app"));
     }
 
     @SuppressWarnings("unchecked")

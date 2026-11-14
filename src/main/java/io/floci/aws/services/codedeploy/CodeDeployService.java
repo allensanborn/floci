@@ -336,7 +336,7 @@ public class CodeDeployService {
         Map<String, Application> store = applicationsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("ApplicationAlreadyExistsException",
-                    "Application already exists: " + name, 400);
+                    name + " already exists.", 400);
         }
         Application app = new Application();
         app.setApplicationId(UUID.randomUUID().toString());
@@ -366,7 +366,7 @@ public class CodeDeployService {
         Application app = applicationsFor(region).get(name);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + name, 400);
+                    "No application found for name: " + name, 400);
         }
         return app;
     }
@@ -376,12 +376,12 @@ public class CodeDeployService {
         Application app = store.get(currentName);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + currentName, 400);
+                    "No application found for name: " + currentName, 400);
         }
         if (newName != null && !newName.equals(currentName)) {
             if (store.containsKey(newName)) {
                 throw new AwsException("ApplicationAlreadyExistsException",
-                        "Application already exists: " + newName, 400);
+                        "The application name: " + newName + " you want to update to already exist", 400);
             }
             store.remove(currentName);
             app.setApplicationName(newName);
@@ -391,11 +391,10 @@ public class CodeDeployService {
     }
 
     public void deleteApplication(String region, String name) {
-        if (applicationsFor(region).remove(name) == null) {
-            throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + name, 400);
+        // AWS: DeleteApplication on an unknown name succeeds (no not-found error in its model).
+        if (applicationsFor(region).remove(name) != null) {
+            persistRegion(applications, region);
         }
-        persistRegion(applications, region);
     }
 
     public List<String> listApplications(String region) {
@@ -415,7 +414,7 @@ public class CodeDeployService {
                     Application a = store.get(n);
                     if (a == null) {
                         throw new AwsException("ApplicationDoesNotExistException",
-                                "Application does not exist: " + n, 400);
+                                "No application found for name: " + n, 400);
                     }
                     return a;
                 })
