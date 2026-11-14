@@ -181,6 +181,22 @@ class CloudWatchErrorMessagesIntegrationTest {
         }
     }
 
+    /** GetDashboard names the dashboard in its ResourceNotFound message; a deleted one reads the same. */
+    @Test
+    void getDashboardOnAMissingDashboardNamesItInTheMessage() throws Exception {
+        String name = unique("no-such-dashboard-");
+        assertRefusal("GetDashboard", form("DashboardName", name), 404, "ResourceNotFound",
+                "Dashboard " + name + " does not exist");
+
+        String present = unique("present-dashboard-");
+        query("PutDashboard", form("DashboardName", present, "DashboardBody", "{\"widgets\":[]}"))
+                .when().post("/").then().statusCode(200);
+        query("GetDashboard", form("DashboardName", present)).when().post("/").then().statusCode(200);
+        query("DeleteDashboards", form("DashboardNames.member.1", present)).when().post("/").then().statusCode(200);
+        assertRefusal("GetDashboard", form("DashboardName", present), 404, "ResourceNotFound",
+                "Dashboard " + present + " does not exist");
+    }
+
     /** GetMetricStream's ResourceNotFoundException carries no message. */
     @Test
     void getMetricStreamOnAMissingStreamAnswersNotFoundWithNoMessage() throws Exception {

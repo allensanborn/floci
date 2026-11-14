@@ -127,7 +127,8 @@ public class CloudWatchDashboardsService {
     public Dashboard getDashboard(String dashboardName, String region) {
         return dashboardStore.get(key(region, dashboardName))
                 .map(CloudWatchDashboardsService::withRegionlessArn)
-                .orElseThrow(() -> notFound(dashboardName));
+                .orElseThrow(() -> new AwsException("ResourceNotFound",
+                        "Dashboard " + dashboardName + " does not exist", 404));
     }
 
     public List<Dashboard> listDashboards(String dashboardNamePrefix, String region) {
