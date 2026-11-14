@@ -3574,20 +3574,14 @@ public class CloudFrontController {
                     400);
         }
         if (quantity != itemCount) {
-            throw new AwsException(
-                    "InconsistentQuantities",
-                    "The value of Quantity does not match the number of items.",
-                    400);
+            throw CloudFrontErrors.inconsistentTrustedKeyGroupQuantity(quantity, itemCount);
         }
     }
 
     private static void validateEnabledTrustedKeyGroups(
             boolean enabled, int itemCount) {
         if (enabled && itemCount == 0) {
-            throw new AwsException(
-                    "InvalidArgument",
-                    "TrustedKeyGroups cannot be enabled without a key group.",
-                    400);
+            throw CloudFrontErrors.trustedKeyGroupsEnabledWithoutItems();
         }
     }
 

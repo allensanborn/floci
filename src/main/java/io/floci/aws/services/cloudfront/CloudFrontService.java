@@ -948,8 +948,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized CachePolicy updateCachePolicy(String id, String ifMatch, CachePolicy updated) {
         CachePolicy existing = getCachePolicy(id);
         if (isManagedCachePolicy(id)) {
-            throw new AwsException("IllegalUpdate",
-                    "AWS managed cache policies cannot be updated.", 400);
+            throw CloudFrontErrors.illegalPolicyUpdate();
         }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -965,8 +964,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized void deleteCachePolicy(String id, String ifMatch) {
         CachePolicy existing = getCachePolicy(id);
         if (isManagedCachePolicy(id)) {
-            throw new AwsException("IllegalDelete",
-                    "AWS managed cache policies cannot be deleted.", 400);
+            throw CloudFrontErrors.illegalPolicyDelete();
         }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1020,8 +1018,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                                                                        OriginRequestPolicy updated) {
         OriginRequestPolicy existing = getOriginRequestPolicy(id);
         if (isManagedOriginRequestPolicy(id)) {
-            throw new AwsException("IllegalUpdate",
-                    "AWS managed origin request policies cannot be updated.", 400);
+            throw CloudFrontErrors.illegalPolicyUpdate();
         }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1037,8 +1034,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized void deleteOriginRequestPolicy(String id, String ifMatch) {
         OriginRequestPolicy existing = getOriginRequestPolicy(id);
         if (isManagedOriginRequestPolicy(id)) {
-            throw new AwsException("IllegalDelete",
-                    "AWS managed origin request policies cannot be deleted.", 400);
+            throw CloudFrontErrors.illegalPolicyDelete();
         }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1090,8 +1086,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public ResponseHeadersPolicy getResponseHeadersPolicy(String id) {
         return rhpStore.get(id)
                 .or(() -> Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
-                .orElseThrow(() -> new AwsException("NoSuchResponseHeadersPolicy",
-                        "The specified response headers policy does not exist.", 404));
+                .orElseThrow(() -> CloudFrontErrors.noSuchResponseHeadersPolicy(id));
     }
 
     public synchronized ResponseHeadersPolicy updateResponseHeadersPolicy(String id, String ifMatch,
@@ -1165,22 +1160,19 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         boolean duplicateManaged = MANAGED_RESPONSE_HEADERS_POLICIES.values().stream()
                 .anyMatch(existing -> name.equals(existing.getName()));
         if (duplicateCustom || duplicateManaged) {
-            throw new AwsException("ResponseHeadersPolicyAlreadyExists",
-                    "A response headers policy with this name already exists.", 409);
+            throw CloudFrontErrors.responseHeadersPolicyAlreadyExists();
         }
     }
 
     private static void rejectManagedResponseHeadersPolicyUpdate(String id) {
         if (isManagedResponseHeadersPolicy(id)) {
-            throw new AwsException("IllegalUpdate",
-                    "AWS managed response headers policies cannot be updated.", 400);
+            throw CloudFrontErrors.illegalPolicyUpdate();
         }
     }
 
     private static void rejectManagedResponseHeadersPolicyDelete(String id) {
         if (isManagedResponseHeadersPolicy(id)) {
-            throw new AwsException("IllegalDelete",
-                    "AWS managed response headers policies cannot be deleted.", 400);
+            throw CloudFrontErrors.illegalPolicyDelete();
         }
     }
 
@@ -1575,9 +1567,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         if (originAccessControlInUse(id)) {
-            throw new AwsException("OriginAccessControlInUse",
-                    "Cannot delete the origin access control because it's in use by one or more distributions.",
-                    409);
+            throw CloudFrontErrors.originAccessControlInUse();
         }
         oacStore.delete(id);
     }
@@ -1596,8 +1586,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         for (CloudFrontOriginAccessIdentity existing : oaiStore.scan(k -> true)) {
             if (oai.getCallerReference() != null
                     && oai.getCallerReference().equals(existing.getCallerReference())) {
-                throw new AwsException("CloudFrontOriginAccessIdentityAlreadyExists",
-                        "An origin access identity with the caller reference already exists.", 409);
+                throw CloudFrontErrors.cloudFrontOriginAccessIdentityAlreadyExists();
             }
         }
         oai.setId(generateDistributionId());
@@ -1608,9 +1597,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public CloudFrontOriginAccessIdentity getCloudFrontOriginAccessIdentity(String id) {
-        return oaiStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchCloudFrontOriginAccessIdentity",
-                        "The specified origin access identity does not exist.", 404));
+        return oaiStore.get(id).orElseThrow(CloudFrontErrors::noSuchCloudFrontOriginAccessIdentity);
     }
 
     public synchronized CloudFrontOriginAccessIdentity updateCloudFrontOriginAccessIdentity(
@@ -1634,8 +1621,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
         if (originAccessIdentityInUse(id)) {
-            throw new AwsException("CloudFrontOriginAccessIdentityInUse",
-                    "The Origin Access Identity specified is already in use.", 409);
+            throw CloudFrontErrors.cloudFrontOriginAccessIdentityInUse();
         }
         oaiStore.delete(id);
     }
@@ -1869,8 +1855,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         // stage-aware keys.
         if (functionStore.get(fn.getName()).isPresent()
                 || functionStore.get(functionKey(fn.getName(), "LIVE")).isPresent()) {
-            throw new AwsException("FunctionAlreadyExists",
-                    "A function with the same name already exists in this AWS account.", 409);
+            throw CloudFrontErrors.functionAlreadyExists();
         }
         fn.setStage("DEVELOPMENT");
         fn.setStatus("UNPUBLISHED");
@@ -2153,10 +2138,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                                 existing.getCallerReference(),
                                 key.getCallerReference()));
         if (duplicateCallerReference) {
-            throw new AwsException(
-                    "PublicKeyAlreadyExists",
-                    "A public key with this caller reference already exists.",
-                    409);
+            throw CloudFrontErrors.publicKeyAlreadyExists();
         }
         key.setId(generatePublicKeyId());
         key.setCreatedTime(Instant.now());
@@ -2166,8 +2148,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public PublicKey getPublicKey(String id) {
-        return publicKeyStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchPublicKey", "The specified public key does not exist.", 404));
+        return publicKeyStore.get(id).orElseThrow(CloudFrontErrors::noSuchPublicKey);
     }
 
     public synchronized PublicKey updatePublicKey(String id, String ifMatch, PublicKey updated) {
@@ -2185,10 +2166,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 || !Objects.equals(existing.getName(), updated.getName())
                 || !Objects.equals(
                     existing.getEncodedKey(), updated.getEncodedKey())) {
-            throw new AwsException(
-                    "CannotChangeImmutablePublicKeyFields",
-                    "The caller reference, name, and encoded public key cannot be changed.",
-                    400);
+            throw CloudFrontErrors.cannotChangeImmutablePublicKeyFields();
         }
         updated.setId(id);
         updated.setCreatedTime(existing.getCreatedTime());
@@ -2206,8 +2184,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     412);
         }
         if (publicKeyInUse(id)) {
-            throw new AwsException(
-                    "PublicKeyInUse", "The specified public key is in use.", 409);
+            throw CloudFrontErrors.publicKeyInUse();
         }
         publicKeyStore.delete(id);
     }
@@ -2276,8 +2253,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public KeyGroup getKeyGroup(String id) {
-        return keyGroupStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchResource", "The specified key group does not exist.", 404));
+        return keyGroupStore.get(id).orElseThrow(() -> CloudFrontErrors.noSuchKeyGroup(id));
     }
 
     public synchronized KeyGroup updateKeyGroup(String id, String ifMatch, KeyGroup updated) {
@@ -2319,10 +2295,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 .anyMatch(group -> !Objects.equals(excludedId, group.getId())
                         && Objects.equals(name, group.getName()));
         if (duplicate) {
-            throw new AwsException(
-                    "KeyGroupAlreadyExists",
-                    "A key group with this name already exists.",
-                    409);
+            throw CloudFrontErrors.keyGroupAlreadyExists();
         }
     }
 
@@ -2392,10 +2365,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             if (publicKeyId == null
                     || publicKeyId.isBlank()
                     || publicKeyStore.get(publicKeyId).isEmpty()) {
-                throw new AwsException(
-                        "InvalidArgument",
-                        "The specified public key does not exist.",
-                        400);
+                throw CloudFrontErrors.publicKeyMissingFromKeyGroup();
             }
         }
     }
@@ -2425,19 +2395,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             boolean enabled, List<String> keyGroupIds) {
         List<String> ids = keyGroupIds != null ? keyGroupIds : List.of();
         if (enabled && ids.isEmpty()) {
-            throw new AwsException(
-                    "InvalidArgument",
-                    "TrustedKeyGroups cannot be enabled without a key group.",
-                    400);
+            throw CloudFrontErrors.trustedKeyGroupsEnabledWithoutItems();
         }
         for (String keyGroupId : ids) {
             if (keyGroupId == null
                     || keyGroupId.isBlank()
                     || keyGroupStore.get(keyGroupId).isEmpty()) {
-                throw new AwsException(
-                        "TrustedKeyGroupDoesNotExist",
-                        "The specified key group does not exist.",
-                        400);
+                throw CloudFrontErrors.trustedKeyGroupDoesNotExist();
             }
         }
     }
@@ -2580,9 +2544,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public FieldLevelEncryptionConfig getFieldLevelEncryptionConfig(String id) {
-        return fleConfigStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchFieldLevelEncryptionConfig",
-                        "The specified field-level encryption configuration does not exist.", 404));
+        return fleConfigStore.get(id).orElseThrow(CloudFrontErrors::noSuchFieldLevelEncryptionConfig);
     }
 
     public synchronized FieldLevelEncryptionConfig updateFieldLevelEncryptionConfig(
@@ -2626,9 +2588,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public FieldLevelEncryptionProfile getFieldLevelEncryptionProfile(String id) {
-        return fleProfileStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchFieldLevelEncryptionProfile",
-                        "The specified field-level encryption profile does not exist.", 404));
+        return fleProfileStore.get(id).orElseThrow(() -> CloudFrontErrors.noSuchFieldLevelEncryptionProfile(id));
     }
 
     public synchronized FieldLevelEncryptionProfile updateFieldLevelEncryptionProfile(
@@ -2671,9 +2631,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public MonitoringSubscription getMonitoringSubscription(String distributionId) {
-        return monitoringStore.get(distributionId).orElseThrow(() ->
-                new AwsException("NoSuchMonitoringSubscription",
-                        "A monitoring subscription does not exist for the specified distribution.", 404));
+        return monitoringStore.get(distributionId).orElseThrow(CloudFrontErrors::noSuchMonitoringSubscription);
     }
 
     public synchronized void deleteMonitoringSubscription(String distributionId) {

@@ -230,8 +230,7 @@ final class ResponseHeadersPolicyValidator {
                 throw invalid("ContentSecurityPolicy contains an invalid control character.");
             }
             if (policy.length() > MAX_HEADER_VALUE_LENGTH) {
-                throw new AwsException("TooLongCSPInResponseHeadersPolicy",
-                        "The Content-Security-Policy value exceeds the maximum length.", 400);
+                throw CloudFrontErrors.tooLongContentSecurityPolicy();
             }
             requireBoolean(csp, "Override");
         }
