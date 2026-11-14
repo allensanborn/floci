@@ -8,7 +8,7 @@
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `RequestCertificate` | Request a new certificate (auto-issued for emulation) |
+| `RequestCertificate` | Request a new certificate (left `PENDING_VALIDATION` unless a validation wait is configured) |
 | `DescribeCertificate` | Get certificate details and validation status |
 | `GetCertificate` | Retrieve the certificate and chain in PEM format |
 | `ListCertificates` | List all certificates with optional status filtering |
@@ -24,12 +24,15 @@
 | `RevokeCertificate` | - |
 | `RenewCertificate` | - |
 | `ResendValidationEmail` | - |
+| `ListCertificateDomainValidations` | List each name's validation status and challenge, paginated by `MaxItems` and `NextToken` |
+| `SearchCertificates` | Search by `CertificateArn` or the `Status`, `Type` and `ValidationMethod` of `AcmCertificateMetadataFilter`, with `And`, `Or` and `Not`; other filters are refused |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
 
-- **Auto-Issuance:** All requested certificates are immediately issued with status `ISSUED`, and every entry in `DomainValidationOptions` reports `ValidationStatus: SUCCESS` (no DNS/email validation required). With a validation wait configured, both stay pending until the wait has passed, for `DNS` and `EMAIL` validation alike: there is no approval mail to confirm, so the wait stands in for the approval, and a certificate never times out.
-- **Validation Artefacts:** `DomainValidationOptions` follows the validation method as on AWS. `DNS` validation carries the `ResourceRecord` CNAME to publish; `EMAIL` validation carries no record but `ValidationEmails`, the five conventional mailboxes (`admin@`, `administrator@`, `hostmaster@`, `postmaster@`, `webmaster@`) of the `ValidationDomain`, which is the domain itself (wildcard stripped) or the one given in the request's `DomainValidationOptions`. An option naming a domain that is not on the certificate, or a `ValidationDomain` that is not the domain or one of its parents, is rejected with `InvalidDomainValidationOptionsException`. Real ACM also mails the WHOIS contacts, which Floci cannot know.
+- **Issuance:** By default (`FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS=0`) a requested certificate is issued at once and every entry in `DomainValidationOptions` reports `ValidationStatus: SUCCESS`, so Terraform's `aws_acm_certificate_validation` completes. Set it to `N > 0` to issue `N` seconds after the request, or to `-1` for the AWS behaviour: a requested public certificate (`AMAZON_ISSUED`) stays `PENDING_VALIDATION`, with every entry `PENDING_VALIDATION`, until validated. Floci does not look for the DNS record in Route 53 or wait for an approval mail, so under `-1` nothing issues it. This applies to `DNS` and `EMAIL` validation alike. A `PRIVATE` certificate is always issued immediately. Under `-1` an `AWS::CertificateManager::Certificate` resource is still issued as soon as it is created, so the resources that depend on it in a stack can be created.
+- **While pending (`-1`, or within a wait):** the certificate has signed nothing yet, so `DescribeCertificate` omits `Serial`, `NotBefore` and `NotAfter`. `GetCertificate` fails with `RequestInProgressException`, `RenewCertificate` and `ExportCertificate` with `ResourceNotFoundException`, `RevokeCertificate` with `ValidationException`, `UpdateCertificateOptions` with `InvalidStateException` (or `ValidationException` when it names `ValidationMethod` or a different `Export`), and a load balancer listener refuses the certificate.
+- **Validation Artefacts:** `DomainValidationOptions` follows the validation method as on AWS. `DNS` validation carries the `ResourceRecord` CNAME to publish, `_<32 hex>.<domain>.` pointing at `_<32 hex>.<label>.acm-validations.aws.`, one per name with a wildcard and its apex sharing one (`ListCertificateDomainValidations` reports the same); `EMAIL` validation carries no record but `ValidationEmails`, the five conventional mailboxes (`admin@`, `administrator@`, `hostmaster@`, `postmaster@`, `webmaster@`) of the `ValidationDomain`, which is the domain itself (wildcard stripped) or the one given in the request's `DomainValidationOptions`. An option naming a domain that is not on the certificate, or a `ValidationDomain` that is not the domain or one of its parents, is rejected with `InvalidDomainValidationOptionsException`. Real ACM also mails the WHOIS contacts, which Floci cannot know.
 - **Real Cryptography:** Certificates are generated with real RSA/EC keys and valid X.509 structure
 - **One Local CA:** Every issued certificate (`AMAZON_ISSUED` and `PRIVATE`) is signed by Floci's local root CA, and `GetCertificate` returns that CA as `CertificateChain`. Trust it once (`GET /_floci/ca.pem`, see [TLS](../configuration/tls.md)) and both Floci's HTTPS endpoint and every ACM certificate validate. `DescribeCertificate` reports `Issuer` as the CA's name, `CN=Floci Local CA`, where AWS reports `Amazon`. `ImportCertificate` keeps the chain you upload.
 - **CA on First Use:** The CA is created under `{persistent-path}/tls/` the first time a certificate is issued, also with TLS off and in `memory` storage mode, so that directory must be writable. A certificate keeps the chain it was issued with; after a CA regeneration, delete and re-request it.
@@ -46,7 +49,7 @@
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ACM_ENABLED` | `true` | Enable or disable the service |
-| `FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS` | `0` | Seconds to wait before transitioning a certificate from `PENDING_VALIDATION` to `ISSUED` (0 = immediate) |
+| `FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS` | `0` | Seconds to wait before transitioning a certificate from `PENDING_VALIDATION` to `ISSUED` (0 = immediate, `-1` = never, as on AWS) |
 
 ## Examples
 

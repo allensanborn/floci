@@ -112,7 +112,7 @@ class AcmCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(STACK);
 
         describeCertificate(arn).then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
@@ -166,7 +166,7 @@ class AcmCfnIntegrationTest {
         String replacement = outputValue(describeStacks(OPTIONS_STACK, "UPDATE_COMPLETE"), "CertArn");
         assertNotEquals(arn, replacement, "an export change replaces the certificate");
         describeCertificate(arn).then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
         describeCertificate(replacement).then()
             .statusCode(200)
@@ -178,7 +178,7 @@ class AcmCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(OPTIONS_STACK);
 
         describeCertificate(replacement).then()
-            .statusCode(404)
+            .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 

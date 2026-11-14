@@ -388,7 +388,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ACM_ENABLED` | `true` | Enable the ACM service |
-| `FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS` | `0` | Simulated delay before a requested certificate transitions to `ISSUED` |
+| `FLOCI_SERVICES_ACM_VALIDATION_WAIT_SECONDS` | `0` | Simulated delay before a requested certificate transitions to `ISSUED` (0 = immediately, `-1` = stays `PENDING_VALIDATION` as on AWS) |
 
 ### SES (Simple Email Service)
 

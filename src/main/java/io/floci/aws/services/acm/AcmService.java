@@ -52,7 +52,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -72,6 +74,12 @@ public class AcmService implements ResourceProvider {
     private static final int MAX_TAG_VALUE_LENGTH = 256;
     private static final int MAX_SANS = 100;
     private static final int MAX_DOMAIN_LENGTH = 253;
+    /** DomainNameString in the ACM model: an optional leading wildcard label, then at least two labels. */
+    private static final Pattern DOMAIN_NAME = Pattern.compile(
+        "(\\*\\.)?(((?!-)[A-Za-z0-9-]{0,62}[A-Za-z0-9])\\.)+((?!-)[A-Za-z0-9-]{1,62}[A-Za-z0-9])");
+    /** The Arn shape of the ACM model, which every operation taking a CertificateArn is held to. */
+    private static final Pattern CERTIFICATE_ARN = Pattern.compile(
+        "arn:[\\w+=/,.@-]+:acm:[\\w+=/,.@-]*:[0-9]+:[\\w+=,.@-]+(/[\\w+=,.@-]+)*");
     /** Key algorithms real ACM accepts for RequestCertificate; the wider enum stays valid for ImportCertificate. */
     private static final Set<KeyAlgorithm> REQUESTABLE_KEY_ALGORITHMS =
         EnumSet.of(KeyAlgorithm.RSA_2048, KeyAlgorithm.EC_prime256v1, KeyAlgorithm.EC_secp384r1);
@@ -182,15 +190,12 @@ public class AcmService implements ResourceProvider {
             status = CertificateStatus.ISSUED;
         } else {
             type = CertificateType.AMAZON_ISSUED;
-            status = validationWaitSeconds > 0 ? CertificateStatus.PENDING_VALIDATION : CertificateStatus.ISSUED;
+            // AWS leaves a public certificate PENDING_VALIDATION until its domains are validated. Only
+            // an explicit wait of 0 issues at once; a negative wait never issues without a validation.
+            status = validationWaitSeconds == 0 ? CertificateStatus.ISSUED : CertificateStatus.PENDING_VALIDATION;
         }
 
         ValidationMethod method = validationMethod != null ? validationMethod : ValidationMethod.DNS;
-
-        // A server leaf signed by the local CA, so Certificate plus CertificateChain from
-        // GetCertificate validate the way an ACM certificate and its chain do on AWS.
-        CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
-            domainName, sans, alg, null);
 
         Instant now = Instant.now();
 
@@ -211,7 +216,13 @@ public class AcmService implements ResourceProvider {
         cert.setValidationMethod(method);
         cert.setCreatedAt(now);
         cert.setIssuedAt(status == CertificateStatus.ISSUED ? now : null);
-        applyIssuedMaterial(cert, alg, generated);
+        cert.setKeyAlgorithm(alg);
+        if (status == CertificateStatus.ISSUED) {
+            // A server leaf signed by the local CA, so Certificate plus CertificateChain from
+            // GetCertificate validate the way an ACM certificate and its chain do on AWS. A pending
+            // certificate has signed nothing yet: it is issued when it leaves PENDING_VALIDATION.
+            applyIssuedMaterial(cert, alg, certificateAuthority.issueServerCertificate(domainName, sans, alg, null));
+        }
         cert.setCertOptions(options != null ? options : CertificateOptions.defaultOptions());
         cert.setCertAuthorityArn(certAuthorityArn);
         cert.setIdempotencyToken(idempotencyToken);
@@ -273,13 +284,20 @@ public class AcmService implements ResourceProvider {
     public ListResult listCertificates(List<CertificateStatus> statuses, List<KeyAlgorithm> keyTypes,
                                        String region, int maxItems, String nextToken) {
         int limit = maxItems > 0 ? Math.min(maxItems, 1000) : 100;
+        return searchCertificates(c -> (statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
+            && (keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm())),
+            region, limit, nextToken);
+    }
+
+    /** The certificates of a region that match, in ARN order, one cursor-paginated page of {@code limit}. */
+    public ListResult searchCertificates(Predicate<Certificate> filter,
+                                         String region, int limit, String nextToken) {
         String lastArn = decodeToken(nextToken);
 
         List<Certificate> allCerts = store.scan(k -> true).stream()
             .filter(c -> c.getArn().contains(":acm:" + region + ":"))
             .map(c -> settleValidation(c, region))
-            .filter(c -> statuses == null || statuses.isEmpty() || statuses.contains(c.getStatus()))
-            .filter(c -> keyTypes == null || keyTypes.isEmpty() || keyTypes.contains(c.getKeyAlgorithm()))
+            .filter(filter)
             .sorted(Comparator.comparing(Certificate::getArn))
             .collect(Collectors.toList());
 
@@ -498,6 +516,11 @@ public class AcmService implements ResourceProvider {
     public Certificate exportCertificate(String certificateArn, String passphraseBase64, String region) {
         Certificate cert = getCertificateByArn(certificateArn, region);
 
+        // An ACM certificate that is not issued has no key pair to export yet.
+        if (cert.getStatus() != CertificateStatus.ISSUED) {
+            throw new AwsException("ResourceNotFoundException",
+                "Could not find an issued certificate " + certificateArn, 400);
+        }
         if (!cert.canExport()) {
             throw new AwsException("ValidationException",
                 "Certificate is not PRIVATE type and Export is not ENABLED", 400);
@@ -611,10 +634,19 @@ public class AcmService implements ResourceProvider {
 
     public synchronized Certificate revokeCertificate(String certificateArn, RevocationReason reason, String region) {
         Certificate cert = getCertificateByArn(certificateArn, region);
+        if (cert.getType() == CertificateType.IMPORTED) {
+            throw new AwsException("ValidationException",
+                "Certificate " + certificateArn + " is not a public certificate.", 400);
+        }
         boolean exportEnabled = cert.getCertOptions() != null && "ENABLED".equals(cert.getCertOptions().export());
         if (!exportEnabled) {
             throw new AwsException("ValidationException",
-                "Certificate " + certificateArn + " cannot be revoked because it is not export-enabled.", 400);
+                "Export not allowed for certificate " + certificateArn, 400);
+        }
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+            // Only a certificate that has been exported can be revoked, and a pending one has no key to export.
+            throw new AwsException("ValidationException", "Certificate " + certificateArn
+                + " has not been exported; only a certificate that has been exported can be revoked", 400);
         }
         if (!certificateInUseBy(cert).isEmpty()) {
             throw new AwsException("ResourceInUseException",
@@ -629,10 +661,11 @@ public class AcmService implements ResourceProvider {
         Certificate renewed;
         synchronized (this) {
             Certificate cert = getCertificateByArn(certificateArn, region);
-            if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
-                throw new AwsException("RequestInProgressException", "Certificate is pending validation", 400);
+            if (cert.getStatus() != CertificateStatus.ISSUED) {
+                throw new AwsException("ResourceNotFoundException",
+                    "Could not find an issued certificate " + certificateArn, 400);
             }
-            if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
+            if (cert.getType() != CertificateType.PRIVATE) {
                 throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
             }
             // A renewed private certificate is new material under the same ARN: a fresh key pair of the
@@ -704,10 +737,29 @@ public class AcmService implements ResourceProvider {
         }
     }
 
-    public synchronized void updateCertificateOptions(String certificateArn, CertificateOptions options, String region) {
+    public void updateCertificateOptions(String certificateArn, CertificateOptions options, String region) {
+        updateCertificateOptions(certificateArn, options, false, region);
+    }
+
+    /**
+     * @param validationMethodRequested whether the request carried {@code Options.ValidationMethod}, which
+     *                                  this emulator does not apply but AWS refuses before issuance
+     */
+    public synchronized void updateCertificateOptions(String certificateArn, CertificateOptions options,
+                                                      boolean validationMethodRequested, String region) {
         Certificate cert = getCertificateByArn(certificateArn, region);
         CertificateOptions current = cert.getCertOptions() != null
             ? cert.getCertOptions() : CertificateOptions.defaultOptions();
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+            // Export is fixed when the certificate is requested, so a different value is refused first.
+            if (options.export() != null && !options.export().equals(current.export())) {
+                throw new AwsException("ValidationException", "Export option for certificates cannot be updated", 400);
+            }
+            if (validationMethodRequested) {
+                throw new AwsException("ValidationException", "Certificate is not issued", 400);
+            }
+            throw new AwsException("InvalidStateException", "The selected certificate is not Issued and/or Valid.", 400);
+        }
         cert.setCertOptions(new CertificateOptions(
             options.certificateTransparencyLoggingPreference() != null
                 ? options.certificateTransparencyLoggingPreference()
@@ -719,12 +771,16 @@ public class AcmService implements ResourceProvider {
     // ============ Helper Methods ============
 
     private synchronized Certificate getCertificateByArn(String arn, String region) {
+        if (arn == null || arn.length() < 20 || arn.length() > 2048 || !CERTIFICATE_ARN.matcher(arn).matches()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value of the input at "
+                + "'certificateArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                + CERTIFICATE_ARN.pattern(), 400);
+        }
         String certId = Certificate.idFromArn(arn);
         String storageKey = regionKey(region, certId);
 
         Certificate cert = store.get(storageKey).orElseThrow(() ->
-            new AwsException("ResourceNotFoundException",
-                "The certificate " + arn + " does not exist.", 404));
+            new AwsException("ResourceNotFoundException", "Could not find certificate " + arn + ".", 400));
         return settleValidation(cert, region);
     }
 
@@ -744,10 +800,10 @@ public class AcmService implements ResourceProvider {
         }
         cert = current;
         boolean changed = false;
-        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION && cert.getCreatedAt() != null
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION && validationWaitSeconds >= 0
+                && cert.getCreatedAt() != null
                 && !Instant.now().isBefore(cert.getCreatedAt().plusSeconds(validationWaitSeconds))) {
-            cert.setStatus(CertificateStatus.ISSUED);
-            cert.setIssuedAt(Instant.now());
+            issuePending(cert);
             LOG.debugv("Certificate {0} issued after the validation wait", cert.getArn());
             changed = true;
         }
@@ -764,6 +820,29 @@ public class AcmService implements ResourceProvider {
             store.put(regionKey(region, cert.extractCertificateId()), cert);
         }
         return cert;
+    }
+
+    /** Signs the leaf a pending certificate has not had yet and marks it ISSUED. */
+    private void issuePending(Certificate cert) {
+        List<String> sans = new ArrayList<>(cert.getSubjectAlternativeNames());
+        sans.remove(cert.getDomainName());
+        applyIssuedMaterial(cert, cert.getKeyAlgorithm(),
+            certificateAuthority.issueServerCertificate(cert.getDomainName(), sans, cert.getKeyAlgorithm(), null));
+        cert.setStatus(CertificateStatus.ISSUED);
+        cert.setIssuedAt(Instant.now());
+    }
+
+    /**
+     * Completes validation of a pending certificate on behalf of a caller that stands in for the
+     * wait AWS makes (a CloudFormation stack holds its certificate resource until it is issued).
+     * A certificate that is not pending is left as it is.
+     */
+    public synchronized void completeValidation(String certificateArn, String region) {
+        Certificate cert = getCertificateByArn(certificateArn, region);
+        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+            issuePending(cert);
+            store.put(regionKey(region, cert.extractCertificateId()), cert);
+        }
     }
 
     /**
@@ -824,6 +903,15 @@ public class AcmService implements ResourceProvider {
             throw new AwsException("ValidationException",
                 "Domain name cannot exceed " + MAX_DOMAIN_LENGTH + " characters", 400);
         }
+        requireDomainNamePattern(domainName, "domainName");
+    }
+
+    private static void requireDomainNamePattern(String name, String path) {
+        if (!DOMAIN_NAME.matcher(name).matches()) {
+            throw new AwsException("ValidationException", "1 validation error detected: Value of the input at '"
+                + path + "' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                + DOMAIN_NAME.pattern(), 400);
+        }
     }
 
     private void validateRequestableKeyAlgorithm(KeyAlgorithm alg, String region) {
@@ -840,6 +928,9 @@ public class AcmService implements ResourceProvider {
         if (sans != null && sans.size() > MAX_SANS) {
             throw new AwsException("ValidationException",
                 "Cannot have more than " + MAX_SANS + " subject alternative names", 400);
+        }
+        if (sans != null) {
+            sans.forEach(san -> requireDomainNamePattern(san, "subjectAlternativeNames"));
         }
     }
 
@@ -937,7 +1028,8 @@ public class AcmService implements ResourceProvider {
         ResourceRecord resourceRecord = new ResourceRecord(
             "_" + validationToken.substring(0, 32) + "." + recordBase + ".",
             "CNAME",
-            "_" + validationToken.substring(32) + ".acm-validations.aws."
+            "_" + validationToken.substring(32) + "." + Digests.sha256Hex(validationToken).substring(0, 10)
+                + ".acm-validations.aws."
         );
         return new DomainValidation(
             domain,

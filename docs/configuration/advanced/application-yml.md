@@ -271,7 +271,7 @@ floci:
 
     acm:
       enabled: true
-      validation-wait-seconds: 0              # Seconds before transitioning PENDING_VALIDATION → ISSUED
+      validation-wait-seconds: 0              # Seconds before PENDING_VALIDATION → ISSUED (0 = at once, -1 = never, as on AWS)
 
     ses:
       enabled: true

@@ -73,6 +73,10 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
         } else {
             arn = acmService.requestCertificate(domainName, sans, validationMethod, null,
                     keyAlgorithm, null, options, tags, ctx.region()).getArn();
+            // CloudFormation holds this resource until the certificate is issued and a stack's
+            // dependents (a listener, a distribution) are only created after that, which this
+            // engine, creating resources in one step, stands in for by completing validation.
+            acmService.completeValidation(arn, ctx.region());
             if (existing != null) {
                 deletePriorOrUnwind(r, existing.getArn(), arn, ctx.region());
             }

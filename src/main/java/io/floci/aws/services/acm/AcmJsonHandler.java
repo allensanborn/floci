@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
@@ -28,6 +29,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * JSON handler for AWS Certificate Manager (ACM) API operations.
@@ -69,10 +72,174 @@ public class AcmJsonHandler {
             case "RevokeCertificate" -> handleRevokeCertificate(request, region);
             case "RenewCertificate" -> handleRenewCertificate(request, region);
             case "ResendValidationEmail" -> handleResendValidationEmail(request, region);
+            case "ListCertificateDomainValidations" -> handleListCertificateDomainValidations(request, region);
+            case "SearchCertificates" -> handleSearchCertificates(request, region);
             default -> Response.status(400)
                 .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                 .build();
         };
+    }
+
+    private Response handleListCertificateDomainValidations(JsonNode request, String region) {
+        Certificate cert = service.getCertificate(request.path("CertificateArn").asText(null), region);
+        int maxItems = request.path("MaxItems").asInt(1000);
+        String after = request.path("NextToken").asText(null);
+        List<DomainValidation> all = cert.getDomainValidationOptions();
+        int start = 0;
+        if (after != null) {
+            // The token is the last domain the previous page returned.
+            start = all.stream().map(DomainValidation::domainName).toList().indexOf(after) + 1;
+            if (start == 0) {
+                throw new AwsException("ValidationException", "Invalid next token.", 400);
+            }
+        }
+        List<DomainValidation> page = all.subList(start, Math.min(all.size(), start + Math.max(1, maxItems)));
+        ArrayNode summaries = objectMapper.createArrayNode();
+        for (DomainValidation dv : page) {
+            ObjectNode config = objectMapper.createObjectNode();
+            config.put("ValidationMethod", dv.validationMethod());
+            config.put("ValidationStatus", dv.validationStatus());
+            ObjectNode challenge = objectMapper.createObjectNode();
+            if (dv.resourceRecord() != null) {
+                challenge.putObject("DnsValidationChallenge").set("ResourceRecord", resourceRecordNode(dv));
+            } else if (dv.validationEmails() != null) {
+                ObjectNode email = challenge.putObject("EmailValidationChallenge");
+                email.put("ValidationDomain", dv.validationDomain());
+                dv.validationEmails().forEach(email.putArray("ValidationEmails")::add);
+            }
+            config.set("ValidationChallenge", challenge);
+            ObjectNode summary = summaries.addObject();
+            summary.put("DomainName", dv.domainName());
+            summary.set("ActiveValidationConfiguration", config);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("DomainValidationSummaryList", summaries);
+        if (start + page.size() < all.size() && !page.isEmpty()) {
+            response.put("NextToken", page.get(page.size() - 1).domainName());
+        }
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode resourceRecordNode(DomainValidation dv) {
+        ObjectNode rrNode = objectMapper.createObjectNode();
+        rrNode.put("Name", dv.resourceRecord().name());
+        rrNode.put("Type", dv.resourceRecord().type());
+        rrNode.put("Value", dv.resourceRecord().value());
+        return rrNode;
+    }
+
+    private Response handleSearchCertificates(JsonNode request, String region) {
+        JsonNode statement = request.path("FilterStatement");
+        int limit = request.path("MaxResults").asInt(100);
+        if (limit < 1 || limit > 500) {
+            throw SmithyValidationErrors.validationException(
+                SmithyValidationErrors.outOfRange("maxResults", limit, 1, 500));
+        }
+        ListResult result = service.searchCertificates(
+            statement.isObject() ? searchPredicate(statement) : c -> true, region, limit,
+            request.path("NextToken").asText(null));
+        ArrayNode results = objectMapper.createArrayNode();
+        for (Certificate cert : result.certificates()) {
+            ObjectNode meta = objectMapper.createObjectNode();
+            if (cert.getCreatedAt() != null) {
+                meta.put("CreatedAt", EpochSeconds.fromInstant(cert.getCreatedAt()));
+            }
+            if (cert.getImportedAt() != null) {
+                meta.put("ImportedAt", EpochSeconds.fromInstant(cert.getImportedAt()));
+            }
+            if (cert.getIssuedAt() != null) {
+                meta.put("IssuedAt", EpochSeconds.fromInstant(cert.getIssuedAt()));
+            }
+            meta.put("InUse", !service.certificateInUseBy(cert).isEmpty());
+            meta.put("Status", cert.getStatus().name());
+            meta.put("Type", cert.getType().name());
+            if (cert.getValidationMethod() != null) {
+                meta.put("ValidationMethod", cert.getValidationMethod().name());
+            }
+            ObjectNode entry = results.addObject();
+            entry.put("CertificateArn", cert.getArn());
+            entry.putObject("CertificateMetadata").set("AcmCertificateMetadata", meta);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Results", results);
+        if (result.nextToken() != null) {
+            response.put("NextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static final Set<String> SEARCH_METADATA_FILTERS = Set.of("Status", "Type", "ValidationMethod");
+
+    /**
+     * A CertificateFilterStatement as a predicate. Each of the three unions (statement, filter, metadata
+     * filter) must carry exactly one member. Of the filter it understands CertificateArn and the Status,
+     * Type and ValidationMethod of AcmCertificateMetadataFilter; any other member is refused rather than
+     * ignored, which would answer every certificate to a question it was not asked.
+     */
+    private Predicate<Certificate> searchPredicate(JsonNode statement) {
+        String member = exactlyOneMember(statement, "CertificateFilterStatement");
+        JsonNode value = statement.path(member);
+        if ("Filter".equals(member)) {
+            return filterPredicate(value);
+        }
+        if ("Not".equals(member)) {
+            return searchPredicate(value).negate();
+        }
+        if (!"And".equals(member) && !"Or".equals(member)) {
+            throw unsupportedFilter();
+        }
+        if (!value.isArray() || value.isEmpty() || value.size() > 15) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.sizeOutOfRange(
+                "filterStatement." + member.toLowerCase(), value.size(), 1, 15));
+        }
+        Predicate<Certificate> combined = null;
+        for (JsonNode child : value) {
+            Predicate<Certificate> next = searchPredicate(child);
+            combined = combined == null ? next : "And".equals(member) ? combined.and(next) : combined.or(next);
+        }
+        return combined;
+    }
+
+    private Predicate<Certificate> filterPredicate(JsonNode filter) {
+        String member = exactlyOneMember(filter, "CertificateFilter");
+        if ("CertificateArn".equals(member)) {
+            String arn = filter.path(member).asText();
+            return c -> c.getArn().equals(arn);
+        }
+        if (!"AcmCertificateMetadataFilter".equals(member)) {
+            throw unsupportedFilter();
+        }
+        JsonNode meta = filter.path(member);
+        String key = exactlyOneMember(meta, "AcmCertificateMetadataFilter");
+        if (!SEARCH_METADATA_FILTERS.contains(key)) {
+            throw unsupportedFilter();
+        }
+        String wanted = meta.path(key).asText();
+        if ("Status".equals(key)) {
+            return c -> c.getStatus().name().equals(wanted);
+        }
+        if ("Type".equals(key)) {
+            return c -> c.getType().name().equals(wanted);
+        }
+        return c -> c.getValidationMethod() != null && c.getValidationMethod().name().equals(wanted);
+    }
+
+    /** The one member a union carries; none, or several, is ValidationException naming what the request set. */
+    private static String exactlyOneMember(JsonNode union, String name) {
+        List<String> members = new ArrayList<>();
+        if (union.isObject()) {
+            union.fieldNames().forEachRemaining(members::add);
+        }
+        if (members.size() != 1) {
+            throw new AwsException("ValidationException", "Each " + name + " must contain exactly one member. A "
+                + name + " in your request contains the members [" + String.join(", ", members) + "].", 400);
+        }
+        return members.get(0);
+    }
+
+    private static AwsException unsupportedFilter() {
+        return new AwsException("ValidationException",
+            "Only the CertificateArn, Status, Type and ValidationMethod filters are supported", 400);
     }
 
     private Response handleResendValidationEmail(JsonNode request, String region) {
@@ -140,10 +307,9 @@ public class AcmJsonHandler {
 
         // AWS returns RequestInProgressException for certificates still pending validation
         if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
-            throw new AwsException(
-                "RequestInProgressException",
-                "The certificate request is in progress. The certificate body is not yet available.",
-                400);
+            throw new AwsException("RequestInProgressException",
+                "Certificate " + certificateArn + " in account " + AwsArnUtils.parse(certificateArn).accountId()
+                    + " not yet issued", 400);
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -329,7 +495,8 @@ public class AcmJsonHandler {
                 .entity(new AwsErrorResponse("ValidationException", "Options is required"))
                 .build();
         }
-        service.updateCertificateOptions(certificateArn, parseUpdateOptions(optionsNode), region);
+        service.updateCertificateOptions(certificateArn, parseUpdateOptions(optionsNode),
+            optionsNode.has("ValidationMethod"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -414,11 +581,7 @@ public class AcmJsonHandler {
                 dvNode.put("ValidationStatus", dv.validationStatus());
                 dvNode.put("ValidationMethod", dv.validationMethod());
                 if (dv.resourceRecord() != null) {
-                    ObjectNode rrNode = objectMapper.createObjectNode();
-                    rrNode.put("Name", dv.resourceRecord().name());
-                    rrNode.put("Type", dv.resourceRecord().type());
-                    rrNode.put("Value", dv.resourceRecord().value());
-                    dvNode.set("ResourceRecord", rrNode);
+                    dvNode.set("ResourceRecord", resourceRecordNode(dv));
                 }
                 if (dv.validationEmails() != null && !dv.validationEmails().isEmpty()) {
                     ArrayNode emails = objectMapper.createArrayNode();
