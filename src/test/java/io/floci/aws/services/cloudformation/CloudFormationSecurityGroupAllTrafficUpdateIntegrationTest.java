@@ -51,6 +51,49 @@ class CloudFormationSecurityGroupAllTrafficUpdateIntegrationTest {
         }
     }
 
+    @Test
+    void aFailedAuthorizeRollsBackWithoutRevokingRulesItNeverAdded() {
+        String stackName = "cfn-sg-partial-" + UUID.randomUUID();
+        CloudFormationClient cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+        Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1);
+        try {
+            cfn.createStack(r -> r.stackName(stackName).templateBody(partial("")));
+            String groupId = CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE").outputs().getFirst()
+                    .outputValue();
+            Set<String> before = ruleIds(ec2, groupId);
+
+            // The first added rule is valid and lands; its twin, spelled with the protocol number, is refused as a duplicate, so the rollback finds
+            // one authorized rule present and one never added.
+            cfn.updateStack(r -> r.stackName(stackName).templateBody(partial("""
+                    ,
+                    {"IpProtocol": "tcp", "FromPort": 81, "ToPort": 81, "CidrIp": "10.8.0.0/16"},
+                    {"IpProtocol": "6", "FromPort": 81, "ToPort": 81, "CidrIp": "10.8.0.0/16"}""")));
+            CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+            assertEquals(before, ruleIds(ec2, groupId));
+        } finally {
+            cfn.deleteStack(r -> r.stackName(stackName));
+            ec2.close();
+            cfn.close();
+        }
+    }
+
+    private static String partial(String more) {
+        return """
+                {
+                  "Resources": {
+                    "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.62.0.0/16"}},
+                    "Group": {"Type": "AWS::EC2::SecurityGroup", "Properties": {
+                      "GroupDescription": "partial", "VpcId": {"Ref": "Vpc"},
+                      "SecurityGroupIngress": [
+                        {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "CidrIp": "10.1.0.0/16"}%s
+                      ]}}
+                  },
+                  "Outputs": {"GroupId": {"Value": {"Ref": "Group"}}}
+                }
+                """.formatted(more);
+    }
+
     private static Set<String> ruleIds(Ec2Client ec2, String groupId) {
         return ec2.describeSecurityGroupRules(r -> r.filters(f -> f.name("group-id").values(groupId)))
                 .securityGroupRules().stream().map(SecurityGroupRule::securityGroupRuleId)

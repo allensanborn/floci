@@ -269,9 +269,10 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts a reused group back from its snapshot: revokes the rules the update authorized,
-     * authorizes again the ones it revoked that the group no longer carries (EC2 here does not
-     * reject a duplicate), and restores the tag keys it touched and every ownership record. The
+     * Puts a reused group back from its snapshot: revokes the rules the update authorized that
+     * the group carries (the update may have failed before adding them, and EC2 rejects revoking
+     * an absent rule), authorizes again the ones it revoked that the group no longer carries (EC2
+     * rejects a duplicate), and restores the tag keys it touched and every ownership record. The
      * snapshot is removed only after the restore succeeds, so a failed one keeps it for a
      * ContinueUpdateRollback retry, which repeats it safely.
      */
@@ -286,14 +287,16 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
                 .getFirst();
         UnaryOperator<String> peerGroupId = peerGroupIdResolver(region, current.getVpcId());
         JsonNode ingress = prior.path("ingress");
-        for (IpPermission perm : permissions(ingress.path("authorized"))) {
+        for (IpPermission perm : present(permissions(ingress.path("authorized")), current.getIpPermissions(),
+                peerGroupId)) {
             ec2Service.revokeSecurityGroupIngress(region, groupId, List.of(perm));
         }
         for (IpPermission perm : missing(permissions(ingress.path("revoked")), current.getIpPermissions(), peerGroupId)) {
             ec2Service.authorizeSecurityGroupIngress(region, groupId, List.of(perm));
         }
         JsonNode egress = prior.path("egress");
-        for (IpPermission perm : permissions(egress.path("authorized"))) {
+        for (IpPermission perm : present(permissions(egress.path("authorized")), current.getIpPermissionsEgress(),
+                peerGroupId)) {
             ec2Service.revokeSecurityGroupEgress(region, groupId, List.of(perm));
         }
         for (IpPermission perm : missing(permissions(egress.path("revoked")), current.getIpPermissionsEgress(),
@@ -316,6 +319,15 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
             throw new IllegalStateException("Unreadable security group rule in the update snapshot", e);
         }
         return permissions;
+    }
+
+    /** The saved rules whose every source the group carries now, so revoking them never finds one absent. */
+    private static List<IpPermission> present(List<IpPermission> saved, List<IpPermission> current,
+                                              UnaryOperator<String> peerGroupId) {
+        Set<String> present = sourceKeys(current, peerGroupId);
+        return saved.stream()
+                .filter(perm -> present.containsAll(sourceKeys(List.of(perm), peerGroupId)))
+                .toList();
     }
 
     /**
