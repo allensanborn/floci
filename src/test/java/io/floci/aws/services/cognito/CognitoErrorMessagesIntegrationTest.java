@@ -187,4 +187,22 @@ class CognitoErrorMessagesIntegrationTest {
                 {"UserPoolId":"%s"}
                 """.formatted(gone)), "ResourceNotFoundException", "User pool " + gone + " does not exist.");
     }
+
+    @Test
+    void takenDomainIsDomainAlreadyExists() {
+        String domain = "error-messages-" + poolId.substring(poolId.indexOf('_') + 1).toLowerCase();
+        cognitoAction("CreateUserPoolDomain", """
+                {"UserPoolId":"%s","Domain":"%s"}
+                """.formatted(poolId, domain)).then().statusCode(200);
+        assertError(cognitoAction("CreateUserPoolDomain", """
+                {"UserPoolId":"%s","Domain":"%s"}
+                """.formatted(poolId, domain)), "InvalidParameterException", "Domain already exists.");
+        cognitoAction("DescribeUserPoolDomain", """
+                {"Domain":"%s"}
+                """.formatted(domain)).then().statusCode(200)
+                .body("DomainDescription.UserPoolId", equalTo(poolId));
+        cognitoAction("DeleteUserPoolDomain", """
+                {"UserPoolId":"%s","Domain":"%s"}
+                """.formatted(poolId, domain)).then().statusCode(200);
+    }
 }

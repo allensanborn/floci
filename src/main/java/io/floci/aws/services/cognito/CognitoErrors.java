@@ -63,4 +63,9 @@ final class CognitoErrors {
     static AwsException userPoolNotFoundWithoutMessage() {
         return new AwsException("ResourceNotFoundException", "", 400);
     }
+
+    /** A domain prefix already taken, by this pool or another: the same sentence whichever name was asked for. */
+    static AwsException domainExists() {
+        return new AwsException("InvalidParameterException", "Domain already exists.", 400);
+    }
 }

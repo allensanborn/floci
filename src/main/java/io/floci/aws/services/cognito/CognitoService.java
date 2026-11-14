@@ -1869,8 +1869,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
         if (!findDomains(domain).isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "Domain " + domain + " already associated with another user pool", 400);
+            throw CognitoErrors.domainExists();
         }
 
         UserPoolDomain userPoolDomain = new UserPoolDomain();
@@ -1902,8 +1901,7 @@ public class CognitoService implements ResourceProvider {
         // ambiguous for routing.
         synchronized (domainLock) {
             if (!findDomains(domain).isEmpty()) {
-                throw new AwsException("InvalidParameterException",
-                        "Domain " + domain + " already associated with another user pool", 400);
+                throw CognitoErrors.domainExists();
             }
             if (userPoolDomain.isCustomDomain()) {
                 registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
