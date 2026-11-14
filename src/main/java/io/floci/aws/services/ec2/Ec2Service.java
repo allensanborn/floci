@@ -12010,6 +12010,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public RouteTableAssociation associateRouteTable(String region, String routeTableId, String subnetId) {
         ensureDefaultResources(region);
         RouteTable rt = getRequiredRouteTable(region, routeTableId);
+        subnets.get(key(region, subnetId)).ifPresent(subnet -> {
+            if (!Objects.equals(subnet.getVpcId(), rt.getVpcId())) {
+                throw new AwsException("InvalidParameterValue",
+                        "route table " + routeTableId + " and subnet " + subnetId
+                                + " belong to different networks", 400);
+            }
+        });
 
         String assocId = "rtbassoc-" + randomHex(8);
         RouteTableAssociation assoc = new RouteTableAssociation();
@@ -12037,6 +12044,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             .anyMatch(a -> a.getRouteTableAssociationId().equals(associationId))) {
                 synchronized (lockFor(key(region, rt.getRouteTableId()))) {
                     RouteTable current = getRequiredRouteTable(region, rt.getRouteTableId());
+                    if (current.getAssociations().stream().anyMatch(
+                            a -> a.getRouteTableAssociationId().equals(associationId) && a.isMain())) {
+                        throw new AwsException("InvalidParameterValue",
+                                "cannot disassociate the main route table association " + associationId, 400);
+                    }
                     List<RouteTableAssociation> next = new ArrayList<>(current.getAssociations());
                     next.removeIf(a -> a.getRouteTableAssociationId().equals(associationId));
                     current.setAssociations(next);
