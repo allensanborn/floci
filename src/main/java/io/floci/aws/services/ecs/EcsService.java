@@ -3400,7 +3400,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             }
             if (!force && svc.getDesiredCount() > 0) {
                 throw new AwsException("InvalidParameterException",
-                        "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
+                        "The service cannot be stopped while it is scaled above 0.", 400);
             }
             svc.setStatus("INACTIVE");
             svc.setDesiredCount(0);

@@ -100,4 +100,19 @@ class EcsErrorMessagesIntegrationTest {
                 + "\"taskDefinition\":\"errmsg-no-family:1\",\"desiredCount\":0}",
                 400, "ClientException", "TaskDefinition not found.");
     }
+
+    // ── DeleteService without force on a scaled service ───────────────────────
+
+    @Test
+    void deleteScaledServiceWithoutForceIsRefused() {
+        ok("CreateCluster", "{\"clusterName\":\"errmsg-del-svc-cluster\"}");
+        String td = registerTaskDef("errmsg-del-svc-td");
+        ok("CreateService", "{\"cluster\":\"errmsg-del-svc-cluster\",\"serviceName\":\"scaled\","
+                + "\"taskDefinition\":\"" + td + "\",\"desiredCount\":1}");
+        expectError("DeleteService", "{\"cluster\":\"errmsg-del-svc-cluster\",\"service\":\"scaled\"}",
+                400, "InvalidParameterException", "The service cannot be stopped while it is scaled above 0.");
+        // the refused delete left the service alone
+        call("DescribeServices", "{\"cluster\":\"errmsg-del-svc-cluster\",\"services\":[\"scaled\"]}")
+                .then().body("services[0].status", equalTo("ACTIVE"));
+    }
 }
