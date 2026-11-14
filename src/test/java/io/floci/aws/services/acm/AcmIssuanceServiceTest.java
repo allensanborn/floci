@@ -2,6 +2,7 @@ package io.floci.aws.services.acm;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.FlociCertificateAuthority;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -27,6 +28,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -179,19 +181,20 @@ class AcmIssuanceServiceTest {
     }
 
     @Test
-    void certificateRevokedWhileStillPendingKeepsItsPendingValidation(@TempDir Path dir) {
-        // Never issued, so nothing was ever validated: leaving PENDING_VALIDATION is the honest answer.
+    void pendingExportableCertificateIsNotRevocableBecauseItWasNeverExported(@TempDir Path dir) {
         AcmService service = newService(dir, 3600);
-        String arn = request(service, null).getArn();
-        service.updateCertificateOptions(arn, new CertificateOptions(null, "ENABLED"), REGION);
-        service.revokeCertificate(arn, RevocationReason.UNSPECIFIED, REGION);
+        // Export is fixed when the certificate is requested, so it is exportable from the start.
+        String arn = service.requestCertificate("example.com", List.of("www.example.com"), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, new CertificateOptions("ENABLED", "ENABLED"), Map.of(), REGION)
+                .getArn();
 
-        Certificate revoked = service.describeCertificate(arn, REGION);
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.revokeCertificate(arn, RevocationReason.UNSPECIFIED, REGION));
 
-        assertEquals(CertificateStatus.REVOKED, revoked.getStatus());
-        assertNull(revoked.getIssuedAt());
-        assertTrue(revoked.getDomainValidationOptions().stream()
-                .allMatch(validation -> "PENDING_VALIDATION".equals(validation.validationStatus())));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("Certificate " + arn + " has not been exported; only a certificate that has been exported "
+                + "can be revoked", refused.getMessage());
+        assertEquals(CertificateStatus.PENDING_VALIDATION, service.describeCertificate(arn, REGION).getStatus());
     }
 
     private static Certificate request(AcmService service, String certificateAuthorityArn) {

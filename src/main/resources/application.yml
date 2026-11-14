@@ -696,6 +696,8 @@ floci:
       allow-stub-unsupported-resource-types: true
     acm:
       enabled: true
+      # 0 issues a requested public certificate at once; -1 leaves it PENDING_VALIDATION, as AWS does;
+      # N > 0 issues it N seconds after the request.
       validation-wait-seconds: 0
     athena:
       enabled: true

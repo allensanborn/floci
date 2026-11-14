@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
@@ -140,10 +141,9 @@ public class AcmJsonHandler {
 
         // AWS returns RequestInProgressException for certificates still pending validation
         if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
-            throw new AwsException(
-                "RequestInProgressException",
-                "The certificate request is in progress. The certificate body is not yet available.",
-                400);
+            throw new AwsException("RequestInProgressException",
+                "Certificate " + certificateArn + " in account " + AwsArnUtils.parse(certificateArn).accountId()
+                    + " not yet issued", 400);
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -329,7 +329,8 @@ public class AcmJsonHandler {
                 .entity(new AwsErrorResponse("ValidationException", "Options is required"))
                 .build();
         }
-        service.updateCertificateOptions(certificateArn, parseUpdateOptions(optionsNode), region);
+        service.updateCertificateOptions(certificateArn, parseUpdateOptions(optionsNode),
+            optionsNode.has("ValidationMethod"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

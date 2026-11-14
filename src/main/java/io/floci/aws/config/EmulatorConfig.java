@@ -2421,7 +2421,11 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        /** Seconds to wait before transitioning from PENDING_VALIDATION to ISSUED (0 = immediate) */
+        /**
+         * Seconds to wait before transitioning from PENDING_VALIDATION to ISSUED (0 = immediate, the default).
+         * A negative value never issues a requested public certificate: AWS leaves it pending until the
+         * domain is validated, which this emulator cannot observe.
+         */
         @WithDefault("0")
         int validationWaitSeconds();
     }

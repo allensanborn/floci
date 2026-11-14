@@ -14,6 +14,7 @@ import io.floci.aws.services.acm.model.CertificateStatus;
 import io.floci.aws.services.acm.model.CertificateType;
 import io.floci.aws.services.acm.model.DomainValidation;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.services.acm.model.ResourceRecord;
 import io.floci.aws.services.acm.model.RevocationReason;
 import io.floci.aws.services.acm.model.ValidationMethod;
 import jakarta.enterprise.inject.Instance;
@@ -56,6 +57,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -360,13 +363,148 @@ class AcmServiceTest {
     }
 
     @Test
-    void pendingValidationCertificateAlreadyHoldsItsLeafAndChain() throws Exception {
-        Certificate cert = newService(30).requestCertificate("pending.example.test", List.of(),
+    void pendingValidationCertificateHasSignedNothingUntilItIsIssued() throws Exception {
+        AcmService pending = newService(-1);
+        Certificate cert = pending.requestCertificate("pending.example.test", List.of(),
                 ValidationMethod.EMAIL, null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
 
         assertEquals(CertificateStatus.PENDING_VALIDATION, cert.getStatus());
         assertNull(cert.getIssuedAt());
-        assertChainsToTheCa(cert);
+        assertNull(cert.getSerial());
+        assertNull(cert.getNotBefore());
+        assertNull(cert.getNotAfter());
+        assertNull(cert.getCertificateBody());
+
+        pending.completeValidation(cert.getArn(), REGION);
+
+        Certificate issued = pending.getCertificate(cert.getArn(), REGION);
+        assertEquals(CertificateStatus.ISSUED, issued.getStatus());
+        assertNotNull(issued.getIssuedAt());
+        assertNotNull(issued.getSerial());
+        assertChainsToTheCa(issued);
+    }
+
+    @Test
+    void aNegativeWaitNeverIssuesAndZeroIssuesAtOnce() {
+        AcmService never = newService(-1);
+        Certificate pending = never.requestCertificate("never.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
+        pending.setCreatedAt(pending.getCreatedAt().minusSeconds(86_400));
+
+        assertEquals(CertificateStatus.PENDING_VALIDATION, never.getCertificate(pending.getArn(), REGION).getStatus());
+        assertEquals(CertificateStatus.ISSUED, newService(0).requestCertificate("now.example.test", List.of(),
+                ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, null, null, null, REGION).getStatus());
+    }
+
+    @Test
+    void pendingCertificateRefusesTheOperationsThatNeedAnIssuedOne() {
+        AcmService pending = newService(-1);
+        String arn = pending.requestCertificate("refuse.example.test", List.of(), ValidationMethod.EMAIL, null,
+                KeyAlgorithm.RSA_2048, null, null, null, REGION).getArn();
+
+        AwsException renew = assertThrows(AwsException.class, () -> pending.renewCertificate(arn, REGION));
+        assertEquals("ResourceNotFoundException", renew.getErrorCode());
+        assertEquals("Could not find an issued certificate " + arn, renew.getMessage());
+
+        AwsException ct = assertThrows(AwsException.class,
+                () -> pending.updateCertificateOptions(arn, new CertificateOptions("DISABLED", null), REGION));
+        assertEquals("InvalidStateException", ct.getErrorCode());
+        assertEquals("The selected certificate is not Issued and/or Valid.", ct.getMessage());
+
+        AwsException method = assertThrows(AwsException.class,
+                () -> pending.updateCertificateOptions(arn, new CertificateOptions(null, null), true, REGION));
+        assertEquals("ValidationException", method.getErrorCode());
+        assertEquals("Certificate is not issued", method.getMessage());
+
+        AwsException export = assertThrows(AwsException.class,
+                () -> pending.updateCertificateOptions(arn, new CertificateOptions(null, "ENABLED"), REGION));
+        assertEquals("Export option for certificates cannot be updated", export.getMessage());
+
+        AwsException revoke = assertThrows(AwsException.class,
+                () -> pending.revokeCertificate(arn, RevocationReason.UNSPECIFIED, REGION));
+        assertEquals("Export not allowed for certificate " + arn, revoke.getMessage());
+
+        assertEquals(CertificateStatus.PENDING_VALIDATION, pending.getCertificate(arn, REGION).getStatus());
+        assertEquals("ENABLED", pending.getCertificate(arn, REGION).getCertOptions()
+                .certificateTransparencyLoggingPreference());
+    }
+
+    @Test
+    void exportOfAPendingCertificateIsNotFoundRatherThanACrash() {
+        AcmService pending = newService(-1);
+        String arn = pending.requestCertificate("export.example.test", List.of(), ValidationMethod.DNS, null,
+                KeyAlgorithm.RSA_2048, null, new CertificateOptions("ENABLED", "ENABLED"), null, REGION).getArn();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> pending.exportCertificate(arn, Base64.getEncoder().encodeToString("passphrase".getBytes()), REGION));
+
+        assertEquals("ResourceNotFoundException", failure.getErrorCode());
+        assertEquals("Could not find an issued certificate " + arn, failure.getMessage());
+    }
+
+    @Test
+    void revokingAnImportedCertificateIsNotAPublicCertificate() {
+        CertificateGenerator.GeneratedCertificate generated = generator.generateSelfSignedCertificate(
+                "imported.example.test", List.of(), KeyAlgorithm.RSA_2048);
+        String arn = service.importCertificate(generated.certificatePem(), generated.privateKeyPem(), null, null,
+                null, REGION).getArn();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.revokeCertificate(arn, RevocationReason.UNSPECIFIED, REGION));
+
+        assertEquals("Certificate " + arn + " is not a public certificate.", failure.getMessage());
+    }
+
+    @Test
+    void subjectAlternativeNamesAreHeldToTheDomainNamePattern() {
+        AwsException failure = assertThrows(AwsException.class, () -> service.requestCertificate("ok.example.test",
+                List.of("a.*.example.test"), ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, null, null, null, REGION));
+
+        assertEquals("ValidationException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("'subjectAlternativeNames' failed to satisfy constraint"));
+    }
+
+    @Test
+    void requestRejectsADomainNameThatBreaksTheModelPattern() {
+        for (String bad : List.of("*.*.example.test", "a.*.example.test", "localhost", "-a.example.test")) {
+            AwsException failure = assertThrows(AwsException.class, () -> service.requestCertificate(bad, List.of(),
+                    ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, null, null, null, REGION), bad);
+            assertEquals("ValidationException", failure.getErrorCode(), bad);
+            assertTrue(failure.getMessage().startsWith("1 validation error detected: Value of the input at "
+                    + "'domainName' failed to satisfy constraint: Member must satisfy regular expression pattern: "), bad);
+        }
+        assertEquals("*.example.test", service.requestCertificate("*.example.test", List.of(), ValidationMethod.DNS,
+                null, KeyAlgorithm.RSA_2048, null, null, null, REGION).getDomainName());
+    }
+
+    @Test
+    void aCertificateArnIsHeldToTheModelPatternAndAMissingOneIsNotFound() {
+        AwsException malformed = assertThrows(AwsException.class,
+                () -> service.describeCertificate("not-an-acm-arn-0123456789", REGION));
+        assertEquals("ValidationException", malformed.getErrorCode());
+        assertTrue(malformed.getMessage().startsWith("1 validation error detected: Value of the input at "
+                + "'certificateArn' failed to satisfy constraint: Member must satisfy regular expression pattern: arn:"));
+
+        String missing = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000";
+        AwsException notFound = assertThrows(AwsException.class, () -> service.describeCertificate(missing, REGION));
+        assertEquals("ResourceNotFoundException", notFound.getErrorCode());
+        assertEquals("Could not find certificate " + missing + ".", notFound.getMessage());
+        assertEquals(400, notFound.getHttpStatus());
+    }
+
+    @Test
+    void dnsValidationRecordsCarryALabelAndShareOneRecordForAWildcardAndItsApex() {
+        AcmService pending = newService(-1);
+        Certificate cert = pending.requestCertificate("dns.example.test", List.of("*.dns.example.test", "www.dns.example.test"),
+                ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, null, null, null, REGION);
+
+        Map<String, ResourceRecord> byName = new HashMap<>();
+        cert.getDomainValidationOptions().forEach(v -> byName.put(v.domainName(), v.resourceRecord()));
+        assertEquals(byName.get("dns.example.test"), byName.get("*.dns.example.test"));
+        assertNotEquals(byName.get("dns.example.test"), byName.get("www.dns.example.test"));
+        ResourceRecord record = byName.get("dns.example.test");
+        assertTrue(record.name().matches("_[0-9a-f]{32}\\.dns\\.example\\.test\\."), record.name());
+        assertTrue(record.value().matches("_[0-9a-f]{32}\\.[a-z0-9]+\\.acm-validations\\.aws\\."), record.value());
     }
 
     @Test

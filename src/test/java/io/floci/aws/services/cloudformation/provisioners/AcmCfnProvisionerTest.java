@@ -106,6 +106,15 @@ class AcmCfnProvisionerTest {
     }
 
     @Test
+    void certificateIsIssuedBeforeTheStackGoesOnToItsDependents() {
+        stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
+
+        provisioner.provision(resource(), mapper.createObjectNode().put("DomainName", "api.example.com"), ctx());
+
+        verify(acm).completeValidation(ARN, REGION);
+    }
+
+    @Test
     void certificatePassesTemplatePropertiesToRequestCertificate() {
         stubRequestCertificate("api.example.com", certificate(ARN, "api.example.com"));
         StackResource r = resource();
