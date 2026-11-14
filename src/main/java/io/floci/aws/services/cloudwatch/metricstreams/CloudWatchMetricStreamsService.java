@@ -100,7 +100,7 @@ public class CloudWatchMetricStreamsService {
 
     public MetricStream getMetricStream(String name, String region) {
         requireParameter(name, "Name");
-        return streamStore.get(key(region, name)).orElseThrow(() -> notFound(name));
+        return streamStore.get(key(region, name)).orElseThrow(CloudWatchMetricStreamsService::notFound);
     }
 
     /** Deleting a stream that is not there is a no-op, which is how AWS answers it. */
@@ -238,8 +238,8 @@ public class CloudWatchMetricStreamsService {
         return region + "::" + name;
     }
 
-    private static AwsException notFound(String name) {
-        return new AwsException("ResourceNotFoundException",
-                "Metric stream " + name + " does not exist.", 404);
+    /** AWS answers GetMetricStream's ResourceNotFoundException by its code alone, with no message. */
+    private static AwsException notFound() {
+        return new AwsException("ResourceNotFoundException", null, 404);
     }
 }
