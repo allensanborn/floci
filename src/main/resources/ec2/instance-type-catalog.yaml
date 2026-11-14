@@ -283,6 +283,132 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 15
 
+  - instanceType: t3.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 12
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: t3.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: t3.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: t3a.micro
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 1024
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 2
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
+
+  - instanceType: t3a.small
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 2048
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 2
+
+  - instanceType: t3a.medium
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 4096
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 6
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: t3a.large
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 12
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: t3a.xlarge
+    processorManufacturer: AMD
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: t3a.2xlarge
+    processorManufacturer: AMD
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
   - instanceType: r5.large
     processorManufacturer: Intel
     vcpu: 2

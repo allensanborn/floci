@@ -58,6 +58,13 @@ values come from the
 [AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
 as checked on 2026-11-14. They were not captured from the API.
 
+The catalog also includes the T3 and T3a burstable general purpose types `t3.large`, `t3.xlarge`, `t3.2xlarge`, `t3a.micro`, `t3a.small`, `t3a.medium`, `t3a.large`, `t3a.xlarge`, `t3a.2xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
