@@ -329,8 +329,7 @@ public class GlueService {
         validateSecurityConfigurationName(name);
         String key = securityConfigurationKey(region, name);
         if (securityConfigurationStore.get(key).isEmpty()) {
-            throw new AwsException("EntityNotFoundException",
-                    "Security configuration not found: " + name, 400);
+            throw GlueErrors.securityConfigurationNotFound();
         }
         securityConfigurationStore.delete(key);
     }
@@ -742,7 +741,7 @@ public class GlueService {
             requireIntegerVersionId(versionId);
             version = tableVersionStore.get(tableVersionKey(databaseName, tableName, versionId))
                     .map(this::withResolvedSchemaReference)
-                    .orElseThrow(GlueErrors::tableVersionNotFound);
+                    .orElseThrow(() -> GlueErrors.tableVersionMiss(current.getVersionId(), versionId));
         }
         return Map.of("Table", withReadDefaults(version), "VersionId", version.getVersionId());
     }
@@ -759,7 +758,7 @@ public class GlueService {
         }
         String key = tableVersionKey(databaseName, tableName, versionId);
         if (tableVersionStore.get(key).isEmpty()) {
-            throw GlueErrors.versionNotFound();
+            throw GlueErrors.tableVersionMiss(current.getVersionId(), versionId);
         }
         tableVersionStore.delete(key);
         LOG.infov("Deleted Glue Table version: {0}.{1} v{2}", databaseName, tableName, versionId);
@@ -886,7 +885,7 @@ public class GlueService {
 
     public synchronized void createPartition(String databaseName, String tableName, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
-        Table table = getTable(databaseName, tableName);
+        Table table = requireTableNamedOnMiss(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
         if (partitionStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
@@ -909,7 +908,7 @@ public class GlueService {
                     descriptorOf(partitions.get(index))));
         }
         requireValidSortColumns(violations);
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         List<BatchCreatePartitionError> errors = new ArrayList<>();
         for (Partition partition : partitions) {
             String key = partitionKey(databaseName, tableName, partition.getValues());
@@ -929,13 +928,13 @@ public class GlueService {
     }
 
     public Partition getPartition(String databaseName, String tableName, List<String> partitionValues) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         return partitionStore.get(partitionKey(databaseName, tableName, partitionValues))
                 .orElseThrow(GlueErrors::partitionNotFound);
     }
 
     public List<Partition> batchGetPartitions(String databaseName, String tableName, List<List<String>> partitionValues) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         List<Partition> partitions = new ArrayList<>();
         for (List<String> values : partitionValues) {
             partitionStore.get(partitionKey(databaseName, tableName, values)).ifPresent(partitions::add);
@@ -954,7 +953,7 @@ public class GlueService {
                     entry == null ? null : descriptorOf(entry.partitionInput())));
         }
         requireValidSortColumns(violations);
-        Table table = getTable(databaseName, tableName);
+        Table table = requireTableNamedOnMiss(databaseName, tableName);
         List<BatchUpdatePartitionError> errors = new ArrayList<>();
         for (BatchUpdatePartitionEntry entry : entries) {
             String key = partitionKey(databaseName, tableName, entry.partitionValueList());
@@ -985,7 +984,7 @@ public class GlueService {
      */
     public List<Partition> getPartitions(String databaseName, String tableName, String expression, Segment segment) {
         validateSegment(segment);
-        Table table = getTable(databaseName, tableName);
+        Table table = requireTableNamedOnMiss(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(partition -> segment == null || Math.floorMod(Objects.hashCode(partition.getValues()),
@@ -1060,7 +1059,7 @@ public class GlueService {
      * otherwise both pass a check that only one of them should.
      */
     public synchronized void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
-        Table table = getTable(databaseName, tableName);
+        Table table = requireTableNamedOnMiss(databaseName, tableName);
 
         if (index == null || index.getIndexName() == null || index.getIndexName().isBlank()) {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
@@ -1120,7 +1119,7 @@ public class GlueService {
     }
 
     public synchronized void deletePartitionIndex(String databaseName, String tableName, String indexName) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         if (indexName == null || indexName.isBlank()) {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
         }
@@ -1227,7 +1226,7 @@ public class GlueService {
     /** Deletes what exists and reports the rest, the batch shape BatchCreatePartition uses. */
     public List<BatchCreatePartitionError> batchDeletePartitions(
             String databaseName, String tableName, List<List<String>> partitionsToDelete) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         if (partitionsToDelete.size() > 25) {
             throw new AwsException("InvalidInputException",
                     "PartitionsToDelete must contain at most 25 partitions.", 400);
@@ -1246,11 +1245,10 @@ public class GlueService {
 
     public void updatePartition(String databaseName, String tableName, List<String> partitionValues, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
-        Table table = getTable(databaseName, tableName);
+        Table table = requireTableNamedOnMiss(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partitionValues);
         Partition existing = partitionStore.get(key)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        GlueErrors.partitionNotFoundMessage(partitionValues), 400));
+                .orElseThrow(() -> GlueErrors.partitionNotFound(partitionValues));
         putUpdatedPartition(table, key, existing, partition);
     }
 
@@ -2234,7 +2232,7 @@ public class GlueService {
     public void deleteClassifier(String name) {
         validateClassifierName(name);
         if (classifierStore.get(name).isEmpty()) {
-            throw new AwsException("EntityNotFoundException", "Classifier " + name + " not found.", 400);
+            throw GlueErrors.classifierNotFoundForDelete(name, regionResolver.getAccountId());
         }
         classifierStore.delete(name);
         LOG.infov("Deleted Glue Classifier: {0}", name);
@@ -2449,22 +2447,21 @@ public class GlueService {
      * with {@code ?} in exactly one of the two day fields.
      */
     static void validateCronExpression(String expression) {
-        validateCronExpression(expression, new AwsException("InvalidInputException",
-                "Schedule must be a cron expression, for example cron(15 12 * * ? *).", 400));
+        validateCronExpression(expression, "Schedule must be a cron expression, for example cron(15 12 * * ? *).");
     }
 
-    /** {@code malformed} is what a trigger or a crawler reports for a schedule that is not a cron expression. */
-    static void validateCronExpression(String expression, AwsException malformed) {
+    /** {@code message} is what a trigger or a crawler reports for a schedule that is not a cron expression. */
+    static void validateCronExpression(String expression, String message) {
         if (expression == null || !expression.startsWith("cron(") || !expression.endsWith(")")) {
-            throw malformed;
+            throw GlueErrors.invalidInput(message);
         }
         String[] fields = expression.substring(5, expression.length() - 1).trim().split("\\s+");
         if (fields.length != 6) {
-            throw malformed;
+            throw GlueErrors.invalidInput(message);
         }
         for (String field : fields) {
             if (!CRON_FIELD.matcher(field).matches()) {
-                throw malformed;
+                throw GlueErrors.invalidInput(message);
             }
         }
         if ("?".equals(fields[2]) == "?".equals(fields[4])) {
@@ -2763,7 +2760,7 @@ public class GlueService {
             }
         }
         if ("SCHEDULED".equals(trigger.getType())) {
-            validateCronExpression(trigger.getSchedule(), GlueErrors.invalidSchedule(trigger.getSchedule()));
+            validateCronExpression(trigger.getSchedule(), GlueErrors.invalidScheduleMessage(trigger.getSchedule()));
         }
         if ("CONDITIONAL".equals(trigger.getType())) {
             validatePredicate(trigger.getPredicate());
@@ -2924,12 +2921,19 @@ public class GlueService {
 
     public void deleteConnection(String name, String region) {
         validateRequired(name, "ConnectionName");
-        if (connectionStore.get(name).isEmpty()) {
+        if (!removeConnection(name, region)) {
             throw GlueErrors.connectionNotFoundForDelete();
+        }
+    }
+
+    private boolean removeConnection(String name, String region) {
+        if (connectionStore.get(name).isEmpty()) {
+            return false;
         }
         connectionStore.delete(name);
         resourceGroupsTaggingService.deleteResources(List.of(connectionArn(region, name)), region);
         LOG.infov("Deleted Glue Connection: {0}", name);
+        return true;
     }
 
     /** Deletes what it can; the names that could not be deleted come back keyed in the errors map. */
@@ -2942,14 +2946,11 @@ public class GlueService {
         List<String> succeeded = new ArrayList<>();
         Map<String, ErrorDetail> errors = new LinkedHashMap<>();
         for (String name : names) {
-            try {
-                deleteConnection(name, region);
+            validateRequired(name, "ConnectionName");
+            if (removeConnection(name, region)) {
                 succeeded.add(name);
-            } catch (AwsException e) {
-                // The per-entry error names the connection; the single DeleteConnection miss does not.
-                String message = "EntityNotFoundException".equals(e.getErrorCode())
-                        ? GlueErrors.connectionNotFoundNamed(name).getMessage() : e.getMessage();
-                errors.put(name, new ErrorDetail(e.getErrorCode(), message));
+            } else {
+                errors.put(name, GlueErrors.batchConnectionMiss(name, regionResolver.getAccountId()));
             }
         }
         return new BatchDeleteConnectionResult(succeeded, errors);

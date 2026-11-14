@@ -187,7 +187,7 @@ public class GlueJobRunService {
                     .orElse(null);
             if (run == null) {
                 errors.add(new StopError(jobName, runId, "EntityNotFoundException",
-                        "Job run " + runId + " not found for job " + jobName));
+                        GlueErrors.jobRunNotFound().getMessage()));
                 continue;
             }
             settle(run);

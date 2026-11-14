@@ -6,9 +6,13 @@ import java.util.List;
 
 /**
  * Glue's not-found, already-exists and invalid-input errors, worded as AWS words them. AWS's
- * wording is per operation and per resource, not one template: some misses name the resource,
- * some are a fixed sentence, and a few carry a doubled or empty message. Every message here is
- * pinned by an AWS-verified behavioural check, so change one only with a recorded AWS response.
+ * wording is per operation, per resource and sometimes per state, not one template: some misses
+ * name the resource, some are a fixed sentence, and a few carry a doubled or empty message.
+ *
+ * <p>Most messages are asserted by AWS-verified behavioural checks (the evaluation suite's glue
+ * checks). The rest, among them the DeleteClassifier, DeleteSecurityConfiguration and the
+ * partition operations' table miss, are the wording the Rust emulator's recorded AWS responses
+ * carry and no check here pins. Change one only with a recorded AWS response.
  */
 final class GlueErrors {
 
@@ -27,7 +31,7 @@ final class GlueErrors {
         return new AwsException(ALREADY_EXISTS, message, 400);
     }
 
-    private static AwsException invalid(String message) {
+    static AwsException invalidInput(String message) {
         return new AwsException(INVALID_INPUT, message, 400);
     }
 
@@ -53,16 +57,18 @@ final class GlueErrors {
         return exists("Table already exists.");
     }
 
-    static AwsException tableVersionNotFound() {
-        return notFound("Table version not found.");
-    }
-
-    static AwsException versionNotFound() {
-        return notFound("Version not found.");
+    /**
+     * The wording follows the version's state, not the operation: an id at or below the table's
+     * current version counter was minted once and has since been deleted, so the miss reads "Table
+     * version not found."; an id above it never existed, so it reads "Version not found.".
+     */
+    static AwsException tableVersionMiss(String currentVersionId, String requestedVersionId) {
+        boolean minted = Long.parseLong(requestedVersionId) <= Long.parseLong(currentVersionId);
+        return notFound(minted ? "Table version not found." : "Version not found.");
     }
 
     static AwsException cannotDeleteLatestVersion() {
-        return invalid("VersionId cannot be equal to the latest.");
+        return invalidInput("VersionId cannot be equal to the latest.");
     }
 
     static AwsException partitionNotFound() {
@@ -71,6 +77,11 @@ final class GlueErrors {
 
     static String partitionNotFoundMessage(List<String> values) {
         return "Partition [" + String.join(", ", values) + "] not found";
+    }
+
+    /** UpdatePartition's miss. */
+    static AwsException partitionNotFound(List<String> values) {
+        return notFound(partitionNotFoundMessage(values));
     }
 
     static AwsException jobNotFound() {
@@ -90,12 +101,24 @@ final class GlueErrors {
         return notFound("Classifier " + name + " not found. not found.");
     }
 
+    static AwsException classifierNotFoundForDelete(String name, String accountId) {
+        return notFound("Classifier " + accountId + ":" + name + " not found.");
+    }
+
     static AwsException crawlerNotFound(String name) {
         return notFound("Crawler entry with name " + name + " does not exist");
     }
 
     static AwsException crawlerTargetsNotDefined() {
-        return invalid("Targets are not defined");
+        return invalidInput("Targets are not defined");
+    }
+
+    /**
+     * BatchDeleteConnection's per-entry error: the code is InternalException, which the check rejects
+     * the entity-miss code in favour of, and the message is GetConnection's sentence.
+     */
+    static GlueService.ErrorDetail batchConnectionMiss(String name, String accountId) {
+        return new GlueService.ErrorDetail("InternalException", connectionNotFound(name, accountId).getMessage());
     }
 
     /** GetConnection. */
@@ -117,11 +140,11 @@ final class GlueErrors {
     }
 
     static AwsException triggerPredicateRequired() {
-        return invalid("Predicate cannot be null or empty");
+        return invalidInput("Predicate cannot be null or empty");
     }
 
-    static AwsException invalidSchedule(String expression) {
-        return invalid("The schedule " + expression + " is invalid.");
+    static String invalidScheduleMessage(String expression) {
+        return "The schedule " + expression + " is invalid.";
     }
 
     static AwsException dataQualityRulesetNotFound(String name, String accountId) {
@@ -135,6 +158,6 @@ final class GlueErrors {
 
     /** A malformed ResourceArn on the tagging calls is refused with an empty message. */
     static AwsException invalidArn() {
-        return invalid("");
+        return invalidInput("");
     }
 }

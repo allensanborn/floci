@@ -1844,7 +1844,7 @@ class GlueServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> glueService.getTableVersion("db1", "plain", "7"));
         assertEquals("EntityNotFoundException", missing.getErrorCode());
-        assertEquals("Table version not found.", missing.getMessage());
+        assertEquals("Version not found.", missing.getMessage());
         AwsException notAnInteger = assertThrows(AwsException.class,
                 () -> glueService.getTableVersion("db1", "plain", "latest"));
         assertEquals("InvalidInputException", notAnInteger.getErrorCode());
@@ -2169,7 +2169,7 @@ class GlueServiceTest {
 
         assertEquals(List.of("keep-a", "keep-b"), result.succeeded());
         assertEquals(1, result.errors().size());
-        assertEquals("EntityNotFoundException", result.errors().get("absent").errorCode());
+        assertEquals("InternalException", result.errors().get("absent").errorCode());
         assertTrue(glueService.getConnections(null, null, null, false, null, null).items().isEmpty());
 
         // The reference caps ConnectionNameList at 25 entries.

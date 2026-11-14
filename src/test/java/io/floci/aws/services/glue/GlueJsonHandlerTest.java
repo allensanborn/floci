@@ -811,7 +811,7 @@ class GlueJsonHandlerTest {
         batch.putArray("ConnectionNameList").add("orders").add("absent");
         JsonNode batchBody = mapper.valueToTree(handler.handle("BatchDeleteConnection", batch, REGION).getEntity());
         assertEquals("orders", batchBody.get("Succeeded").get(0).asText());
-        assertEquals("EntityNotFoundException", batchBody.get("Errors").get("absent").get("ErrorCode").asText());
+        assertEquals("InternalException", batchBody.get("Errors").get("absent").get("ErrorCode").asText());
 
         AwsException gone = assertThrows(AwsException.class, () -> handler.handle(
                 "DeleteConnection", mapper.createObjectNode().put("ConnectionName", "orders"), REGION));

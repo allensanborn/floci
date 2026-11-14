@@ -112,7 +112,11 @@ class GlueErrorMessagesIntegrationTest {
         fails("DeleteTableVersion", "{" + key + ",\"VersionId\":\"2\"}", INVALID,
                 "VersionId cannot be equal to the latest.");
         ok("DeleteTableVersion", "{" + key + ",\"VersionId\":\"0\"}");
+        // The wording follows the version's state: minted once (deleted) vs never minted.
         fails("GetTableVersion", "{" + key + ",\"VersionId\":\"0\"}", NOT_FOUND, "Table version not found.");
+        fails("DeleteTableVersion", "{" + key + ",\"VersionId\":\"0\"}", NOT_FOUND, "Table version not found.");
+        fails("GetTableVersion", "{" + key + ",\"VersionId\":\"9999\"}", NOT_FOUND, "Version not found.");
+        fails("DeleteTableVersion", "{" + key + ",\"VersionId\":\"9999\"}", NOT_FOUND, "Version not found.");
         given().contentType(CONTENT_TYPE).header("X-Amz-Target", "AWSGlue.BatchDeleteTableVersion")
                 .body("{" + key + ",\"VersionIds\":[\"9999\"]}")
                 .when().post("/")
@@ -132,6 +136,22 @@ class GlueErrorMessagesIntegrationTest {
     }
 
     @Test
+    void partitionOperationsNameTheMissingTable() {
+        String db = createDatabase();
+        String table = unique("err-gone");
+        String key = "\"DatabaseName\":\"" + db + "\",\"TableName\":\"" + table + "\"";
+        String named = "Table " + table + " not found.";
+        fails("GetPartition", "{" + key + ",\"PartitionValues\":[\"2023\"]}", NOT_FOUND, named);
+        fails("CreatePartition", "{" + key + ",\"PartitionInput\":{\"Values\":[\"2023\"]}}", NOT_FOUND, named);
+        fails("UpdatePartition", "{" + key + ",\"PartitionValueList\":[\"2023\"],"
+                + "\"PartitionInput\":{\"Values\":[\"2023\"]}}", NOT_FOUND, named);
+        fails("DeletePartition", "{" + key + ",\"PartitionValues\":[\"2023\"]}", NOT_FOUND, named);
+        fails("BatchGetPartition", "{" + key + ",\"PartitionsToGet\":[{\"Values\":[\"2023\"]}]}", NOT_FOUND, named);
+        // The table-version operations keep GetTable's constant.
+        fails("GetTableVersions", "{" + key + "}", NOT_FOUND, "Entity Not Found");
+    }
+
+    @Test
     void jobErrors() {
         String job = unique("err-missing-job");
         fails("GetJob", "{\"JobName\":\"" + job + "\"}", NOT_FOUND, "Job not found.");
@@ -144,6 +164,11 @@ class GlueErrorMessagesIntegrationTest {
         String real = createJob();
         fails("GetJobRun", "{\"JobName\":\"" + real + "\",\"RunId\":\"jr_nope\"}", NOT_FOUND,
                 "Job run not found for the given job name and runId.");
+        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "AWSGlue.BatchStopJobRun")
+                .body("{\"JobName\":\"" + real + "\",\"JobRunIds\":[\"jr_nope\"]}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Errors[0].ErrorDetail.ErrorMessage", equalTo("Job run not found for the given job name and runId."));
     }
 
     @Test
@@ -151,6 +176,8 @@ class GlueErrorMessagesIntegrationTest {
         String name = unique("err-classifier");
         String doubled = "Classifier " + name + " not found. not found.";
         fails("GetClassifier", "{\"Name\":\"" + name + "\"}", NOT_FOUND, doubled);
+        fails("DeleteClassifier", "{\"Name\":\"" + name + "\"}", NOT_FOUND,
+                "Classifier " + ACCOUNT + ":" + name + " not found.");
         fails("UpdateClassifier", "{\"CsvClassifier\":{\"Name\":\"" + name + "\",\"Delimiter\":\";\"}}",
                 NOT_FOUND, doubled);
     }
@@ -182,8 +209,8 @@ class GlueErrorMessagesIntegrationTest {
                 .body("{\"ConnectionNameList\":[\"" + name + "\"]}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("Errors." + name + ".ErrorCode", equalTo(NOT_FOUND))
-                .body("Errors." + name + ".ErrorMessage", equalTo("Connection not found: " + name));
+                .body("Errors." + name + ".ErrorCode", equalTo("InternalException"))
+                .body("Errors." + name + ".ErrorMessage", equalTo("Connection with name " + name + " in account " + ACCOUNT + " is not found"));
     }
 
     @Test
@@ -207,6 +234,7 @@ class GlueErrorMessagesIntegrationTest {
         fails("UpdateDataQualityRuleset", "{\"Name\":\"" + ruleset + "\",\"Description\":\"v2\"}", NOT_FOUND, missing);
 
         fails("GetSecurityConfiguration", "{\"Name\":\"" + unique("err-sec") + "\"}", NOT_FOUND, "");
+        fails("DeleteSecurityConfiguration", "{\"Name\":\"" + unique("err-sec") + "\"}", NOT_FOUND, "");
         fails("TagResource", "{\"ResourceArn\":\"not-a-valid-arn\",\"TagsToAdd\":{\"k\":\"v\"}}", INVALID, "");
     }
 }

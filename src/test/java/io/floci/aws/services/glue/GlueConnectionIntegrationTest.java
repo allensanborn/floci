@@ -224,7 +224,7 @@ class GlueConnectionIntegrationTest {
         .then()
                 .statusCode(200)
                 .body("Succeeded[0]", equalTo(name))
-                .body("Errors.'%s-absent'.ErrorCode".formatted(name), equalTo("EntityNotFoundException"));
+                .body("Errors.'%s-absent'.ErrorCode".formatted(name), equalTo("InternalException"));
     }
 
     @Test
