@@ -912,7 +912,7 @@ public class CloudWatchMetricsService {
         synchronized (this) {
             String key = region + "::" + alarmName;
             Alarm alarm = alarmStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFound", "Alarm not found: " + alarmName, 404));
+                    .orElseThrow(() -> new AwsException("ResourceNotFound", null, 404));
 
             String oldState = alarm.getStateValue();
             changeState(alarm, region, stateValue, stateReason, stateReasonData);

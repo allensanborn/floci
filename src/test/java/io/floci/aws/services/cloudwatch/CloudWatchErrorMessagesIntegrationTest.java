@@ -120,6 +120,18 @@ class CloudWatchErrorMessagesIntegrationTest {
         }
     }
 
+    /** SetAlarmState's ResourceNotFound carries no message, and the missing alarm is not created. */
+    @Test
+    void setAlarmStateOnAMissingAlarmAnswersNotFoundWithNoMessage() throws Exception {
+        String alarm = unique("no-such-alarm-");
+        assertRefusal("SetAlarmState", form("AlarmName", alarm, "StateValue", "OK", "StateReason", "test"),
+                404, "ResourceNotFound", null);
+
+        // The refusal left nothing behind: a separate read finds no alarm of that name.
+        String described = query("DescribeAlarms", form("AlarmNames.member.1", alarm)).when().post("/").asString();
+        assertFalse(described.contains(alarm), described);
+    }
+
     /** GetMetricStream's ResourceNotFoundException carries no message. */
     @Test
     void getMetricStreamOnAMissingStreamAnswersNotFoundWithNoMessage() throws Exception {
