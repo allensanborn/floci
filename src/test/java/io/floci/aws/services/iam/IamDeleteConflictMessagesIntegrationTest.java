@@ -59,36 +59,64 @@ class IamDeleteConflictMessagesIntegrationTest {
     }
 
     @Test
-    void groupWithAttachedPolicyInlinePolicyAndMember() {
+    void groupWithAttachedPolicy() {
         String group = name("dc-grp-");
-        String user = name("dc-usr-");
         String arn = createPolicy();
         call("CreateGroup", "GroupName", group).statusCode(200);
-        call("CreateUser", "UserName", user).statusCode(200);
         call("AttachGroupPolicy", "GroupName", group, "PolicyArn", arn).statusCode(200);
-        call("PutGroupPolicy", "GroupName", group, "PolicyName", "inl", "PolicyDocument", POLICY_DOC).statusCode(200);
-        call("AddUserToGroup", "GroupName", group, "UserName", user).statusCode(200);
 
         conflict(DETACH, "DeleteGroup", "GroupName", group);
         call("DetachGroupPolicy", "GroupName", group, "PolicyArn", arn).statusCode(200);
-        conflict(DELETE_POLICIES, "DeleteGroup", "GroupName", group);
-        call("DeleteGroupPolicy", "GroupName", group, "PolicyName", "inl").statusCode(200);
-        conflict(USERS_FROM_GROUP, "DeleteGroup", "GroupName", group);
-        call("RemoveUserFromGroup", "GroupName", group, "UserName", user).statusCode(200);
         call("DeleteGroup", "GroupName", group).statusCode(200);
         call("GetGroup", "GroupName", group).statusCode(404);
     }
 
     @Test
-    void roleWithAttachedAndInlinePolicy() {
+    void groupWithInlinePolicy() {
+        String group = name("dc-grp-");
+        call("CreateGroup", "GroupName", group).statusCode(200);
+        call("PutGroupPolicy", "GroupName", group, "PolicyName", "inl", "PolicyDocument", POLICY_DOC).statusCode(200);
+
+        conflict(DELETE_POLICIES, "DeleteGroup", "GroupName", group);
+        call("DeleteGroupPolicy", "GroupName", group, "PolicyName", "inl").statusCode(200);
+        call("DeleteGroup", "GroupName", group).statusCode(200);
+        call("GetGroup", "GroupName", group).statusCode(404);
+    }
+
+    @Test
+    void groupWithMember() {
+        String group = name("dc-grp-");
+        String user = name("dc-usr-");
+        call("CreateGroup", "GroupName", group).statusCode(200);
+        call("CreateUser", "UserName", user).statusCode(200);
+        call("AddUserToGroup", "GroupName", group, "UserName", user).statusCode(200);
+
+        conflict(USERS_FROM_GROUP, "DeleteGroup", "GroupName", group);
+        call("RemoveUserFromGroup", "GroupName", group, "UserName", user).statusCode(200);
+        call("DeleteGroup", "GroupName", group).statusCode(200);
+        call("GetGroup", "GroupName", group).statusCode(404);
+        call("DeleteUser", "UserName", user).statusCode(200);
+    }
+
+    @Test
+    void roleWithAttachedPolicy() {
         String role = name("dc-role-");
         String arn = createPolicy();
         call("CreateRole", "RoleName", role, "AssumeRolePolicyDocument", TRUST_DOC).statusCode(200);
         call("AttachRolePolicy", "RoleName", role, "PolicyArn", arn).statusCode(200);
-        call("PutRolePolicy", "RoleName", role, "PolicyName", "inl", "PolicyDocument", POLICY_DOC).statusCode(200);
 
         conflict(DETACH, "DeleteRole", "RoleName", role);
         call("DetachRolePolicy", "RoleName", role, "PolicyArn", arn).statusCode(200);
+        call("DeleteRole", "RoleName", role).statusCode(200);
+        call("GetRole", "RoleName", role).statusCode(404);
+    }
+
+    @Test
+    void roleWithInlinePolicy() {
+        String role = name("dc-role-");
+        call("CreateRole", "RoleName", role, "AssumeRolePolicyDocument", TRUST_DOC).statusCode(200);
+        call("PutRolePolicy", "RoleName", role, "PolicyName", "inl", "PolicyDocument", POLICY_DOC).statusCode(200);
+
         conflict(DELETE_POLICIES, "DeleteRole", "RoleName", role);
         call("DeleteRolePolicy", "RoleName", role, "PolicyName", "inl").statusCode(200);
         call("DeleteRole", "RoleName", role).statusCode(200);
@@ -96,17 +124,26 @@ class IamDeleteConflictMessagesIntegrationTest {
     }
 
     @Test
-    void userAttachedPolicyAndGroupMembership() {
+    void userWithAttachedPolicy() {
         String user = name("dc-usr-");
-        String group = name("dc-grp-");
         String arn = createPolicy();
         call("CreateUser", "UserName", user).statusCode(200);
-        call("CreateGroup", "GroupName", group).statusCode(200);
         call("AttachUserPolicy", "UserName", user, "PolicyArn", arn).statusCode(200);
-        call("AddUserToGroup", "GroupName", group, "UserName", user).statusCode(200);
 
         conflict(DETACH, "DeleteUser", "UserName", user);
         call("DetachUserPolicy", "UserName", user, "PolicyArn", arn).statusCode(200);
+        call("DeleteUser", "UserName", user).statusCode(200);
+        call("GetUser", "UserName", user).statusCode(404);
+    }
+
+    @Test
+    void userInGroup() {
+        String user = name("dc-usr-");
+        String group = name("dc-grp-");
+        call("CreateUser", "UserName", user).statusCode(200);
+        call("CreateGroup", "GroupName", group).statusCode(200);
+        call("AddUserToGroup", "GroupName", group, "UserName", user).statusCode(200);
+
         conflict(USERS_FROM_GROUP, "DeleteUser", "UserName", user);
         call("RemoveUserFromGroup", "GroupName", group, "UserName", user).statusCode(200);
         call("DeleteUser", "UserName", user).statusCode(200);
