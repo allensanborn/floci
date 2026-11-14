@@ -261,6 +261,52 @@ class S3RestoreStateIntegrationTest {
     }
 
     @Test
+    void fasterTierUpgradesRunningRestoreAndSlowerTierIsRefused() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.path() + "?versionId=" + fixture.currentVersion();
+            String bulk = "<RestoreRequest><Days>1</Days><GlacierJobParameters><Tier>Bulk</Tier>"
+                    + "</GlacierJobParameters></RestoreRequest>";
+            String standard = bulk.replace("Bulk", "Standard");
+            given().body(bulk).when().post(path + "&restore").then().statusCode(202);
+            given().body(bulk).when().post(path + "&restore").then().statusCode(409)
+                    .body("Error.Code", equalTo("RestoreAlreadyInProgress"));
+            given().body(standard).when().post(path + "&restore").then().statusCode(202);
+            given().body(bulk).when().post(path + "&restore").then().statusCode(409)
+                    .body("Error.Code", equalTo("RestoreAlreadyInProgress"))
+                    .body("Error.Message", equalTo("Object restore is already in progress"));
+            given().when().head(path).then().statusCode(200)
+                    .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
+
+            // The upgrade kept the original due time: the copy arrives 60s after the first request.
+            clock.advance(Duration.ofSeconds(61));
+            given().when().get(path).then().statusCode(200).body(equalTo("current"));
+        }
+    }
+
+    @Test
+    void copyStorageClassIsStandardUnlessTheHeaderNamesOne() {
+        try (Fixture fixture = new Fixture()) {
+            String ia = fixture.bucketPath() + "/ia.txt";
+            String iaVersion = given().header("x-amz-storage-class", "STANDARD_IA").body("cool")
+                    .when().put(ia).then().statusCode(200).extract().header("x-amz-version-id");
+            String source = fixture.bucket() + "/ia.txt";
+            String plain = given().header("x-amz-copy-source", source).when().put(fixture.bucketPath() + "/plain.txt")
+                    .then().statusCode(200).extract().header("x-amz-version-id");
+            given().when().head(fixture.bucketPath() + "/plain.txt").then().statusCode(200)
+                    .header("x-amz-storage-class", equalTo("STANDARD"));
+            String explicit = given().header("x-amz-copy-source", source)
+                    .header("x-amz-storage-class", "ONEZONE_IA")
+                    .when().put(fixture.bucketPath() + "/explicit.txt")
+                    .then().statusCode(200).extract().header("x-amz-version-id");
+            given().when().head(fixture.bucketPath() + "/explicit.txt").then().statusCode(200)
+                    .header("x-amz-storage-class", equalTo("ONEZONE_IA"));
+            given().when().delete(fixture.bucketPath() + "/plain.txt?versionId=" + plain).then().statusCode(204);
+            given().when().delete(fixture.bucketPath() + "/explicit.txt?versionId=" + explicit).then().statusCode(204);
+            given().when().delete(ia + "?versionId=" + iaVersion).then().statusCode(204);
+        }
+    }
+
+    @Test
     void restoreOfAnyNonArchivedClassIsRejected() {
         try (Fixture fixture = new Fixture()) {
             for (String storageClass : List.of("GLACIER_IR", "INTELLIGENT_TIERING")) {

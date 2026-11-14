@@ -2877,7 +2877,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object copyPinnedSource(String sourceBucket, String sourceKey, String destBucket, String destKey,
                                       CopySource source, CopyObjectOptions effectiveOptions) {
         try {
-            requireArchivedCopySourceReadable(source.object());
+            requireArchivedObjectReadable(source.object(), ARCHIVED_COPY_SOURCE_MESSAGE);
             checkCopySourcePreconditions(source.object(), effectiveOptions.getCopySourceConditions());
             validateSseCustomerAccess(source.object(),
                     effectiveOptions.getCopySourceSseCustomerAlgorithm(),
@@ -5123,7 +5123,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // the part has to fit in memory in the disk-backed modes.
         try (ObjectRead read = openObject(sourceBucket, sourceKey, sourceVersionId)) {
             S3Object source = read.object();
-            requireArchivedCopySourceReadable(source);
+            requireArchivedObjectReadable(source, ARCHIVED_COPY_SOURCE_MESSAGE);
             checkCopySourcePreconditions(source, copySourceConditions);
             validateSseCustomerAccess(source,
                     copySourceSseCustomerHeaders.algorithm(),
@@ -6857,15 +6857,15 @@ public class S3Service implements Resettable, ResourceProvider {
         return restoreStatus(object, clock.instant());
     }
 
+    private static final String ARCHIVED_READ_MESSAGE = "The operation is not valid for the object's storage class";
+    private static final String ARCHIVED_COPY_SOURCE_MESSAGE =
+            "Operation is not valid for the source object's storage class";
+
     public void requireArchivedObjectReadable(S3Object object) {
-        requireArchivedObjectReadable(object, "The operation is not valid for the object's storage class");
+        requireArchivedObjectReadable(object, ARCHIVED_READ_MESSAGE);
     }
 
-    /** The same bar for the source of a copy, which S3 words for the object being copied from. */
-    private void requireArchivedCopySourceReadable(S3Object source) {
-        requireArchivedObjectReadable(source, "Operation is not valid for the source object's storage class");
-    }
-
+    /** The bar is the same for a copy source, which S3 words for the object being copied from. */
     private void requireArchivedObjectReadable(S3Object object, String message) {
         if (isArchivedStorageClass(object.getStorageClass())) {
             RestoreStatus restore = restoreStatus(object);
@@ -6898,7 +6898,8 @@ public class S3Service implements Resettable, ResourceProvider {
                         "The specified bucket does not exist.", 404));
         synchronized (ownedBucket.value()) {
             S3Object object = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
-            int days = restoreDays(restoreXml, object.getStorageClass());
+            ParsedRestore request = parseRestore(restoreXml, object.getStorageClass());
+            int days = request.days();
             if (!isArchivedStorageClass(object.getStorageClass())) {
                 throw new AwsException("InvalidObjectState",
                         "Restore is not allowed for the object's current storage class", 403);
@@ -6907,8 +6908,16 @@ public class S3Service implements Resettable, ResourceProvider {
             Instant now = clock.instant();
             RestoreStatus status = restoreStatus(object, now);
             if (status != null && status.inProgress()) {
-                throw new AwsException("RestoreAlreadyInProgress", "Object restore is already in progress", 409);
+                // A faster tier upgrades the running restore, keeping its due time and expiry;
+                // the same or a slower tier asks for the restore already running.
+                if (!isFasterTier(request.tier(), object.getRestoreTier())) {
+                    throw new AwsException("RestoreAlreadyInProgress", "Object restore is already in progress", 409);
+                }
+                object.setRestoreTier(request.tier());
+                putObjectMetadataForAccount(ownedBucket.account(), bucketName, key, object);
+                return true;
             }
+            object.setRestoreTier(request.tier());
             boolean started = status == null;
             try {
                 Instant completedAt = started ? now.plusSeconds(restoreCompletionDelaySeconds) : now;
@@ -6926,7 +6935,16 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private static int restoreDays(String restoreXml, String storageClass) {
+    private record ParsedRestore(int days, String tier) { }
+
+    private static final List<String> RESTORE_TIERS_FASTEST_FIRST = List.of("Expedited", "Standard", "Bulk");
+
+    private static boolean isFasterTier(String requested, String running) {
+        return RESTORE_TIERS_FASTEST_FIRST.indexOf(requested)
+                < RESTORE_TIERS_FASTEST_FIRST.indexOf(running == null ? "Standard" : running);
+    }
+
+    private static ParsedRestore parseRestore(String restoreXml, String storageClass) {
         XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(restoreXml);
         if (root == null || !"RestoreRequest".equals(root.name()) || !root.text().isEmpty()
                 || root.count("Days") != 1
@@ -6942,7 +6960,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw malformedRestoreRequest();
         }
         XmlParser.XmlElement tier = root.child("Tier");
-        boolean expedited = tier != null && "Expedited".equals(tier.text());
+        String requestedTier = tier != null ? tier.text() : "Standard";
         if (tier != null) {
             validateRestoreTier(tier);
         }
@@ -6954,20 +6972,20 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             XmlParser.XmlElement glacierTier = glacierJobParameters.child("Tier");
             validateRestoreTier(glacierTier);
-            expedited |= "Expedited".equals(glacierTier.text());
+            requestedTier = tier != null ? requestedTier : glacierTier.text();
         }
         XmlParser.XmlElement description = root.child("Description");
         if (description != null && !description.children().isEmpty()) {
             throw malformedRestoreRequest();
         }
-        if ("DEEP_ARCHIVE".equals(storageClass) && expedited) {
+        if ("DEEP_ARCHIVE".equals(storageClass) && "Expedited".equals(requestedTier)) {
             throw new AwsException("InvalidTier",
                     "Retrieval option is not supported by this storage class.", 400);
         }
         try {
             int days = Integer.parseInt(daysElement.text());
             if (days > 0) {
-                return days;
+                return new ParsedRestore(days, requestedTier);
             }
             throw new AwsException("InvalidArgument", "restoration days should be at least 1", 400);
         } catch (NumberFormatException ignored) {
