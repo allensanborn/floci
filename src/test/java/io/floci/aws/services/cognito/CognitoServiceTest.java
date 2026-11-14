@@ -648,7 +648,7 @@ class CognitoServiceTest {
                 pool, client, flow, "nobody", "wrong"));
 
         assertEquals("NotAuthorizedException", wrongPassword.getErrorCode());
-        assertEquals("Incorrect username or password", wrongPassword.getMessage());
+        assertEquals("Incorrect username or password.", wrongPassword.getMessage());
         assertEquals(wrongPassword.getErrorCode(), unknownUser.getErrorCode());
         assertEquals(wrongPassword.getMessage(), unknownUser.getMessage());
         assertEquals(wrongPassword.getHttpStatus(), unknownUser.getHttpStatus());
@@ -3191,7 +3191,7 @@ class CognitoServiceTest {
         AwsException live = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
                 client.getClientId(), "PASSWORD", liveSession,
                 Map.of("USERNAME", "missing-1", "PASSWORD", "anything")));
-        assertEquals("Incorrect username or password", live.getMessage());
+        assertEquals("Incorrect username or password.", live.getMessage());
 
         String expiredSession = (String) clockedService.initiateAuth(client.getClientId(), "USER_AUTH",
                 Map.of("USERNAME", "missing-2")).get("Session");
@@ -3327,7 +3327,7 @@ class CognitoServiceTest {
         AwsException exception = assertThrows(AwsException.class, () -> service.respondToAuthChallenge(
                 client.getClientId(), challenge, session, response));
         assertEquals("NotAuthorizedException", exception.getErrorCode());
-        assertEquals("Incorrect username or password", exception.getMessage());
+        assertEquals("Incorrect username or password.", exception.getMessage());
     }
 
     @Test
@@ -3401,7 +3401,7 @@ class CognitoServiceTest {
         AwsException newException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
                 client.getClientId(), "PASSWORD", newSession,
                 Map.of("USERNAME", "missing-new", "PASSWORD", "anything")));
-        assertEquals("Incorrect username or password", newException.getMessage());
+        assertEquals("Incorrect username or password.", newException.getMessage());
     }
 
     @Test
@@ -3471,7 +3471,7 @@ class CognitoServiceTest {
         AwsException newestException = assertThrows(AwsException.class, () -> clockedService.respondToAuthChallenge(
                 client.getClientId(), "PASSWORD", newestSession,
                 Map.of("USERNAME", "missing-overflow", "PASSWORD", "anything")));
-        assertEquals("Incorrect username or password", newestException.getMessage());
+        assertEquals("Incorrect username or password.", newestException.getMessage());
 
         Map<String, Object> authResult = clockedService.respondToAuthChallenge(
                 client.getClientId(), "PASSWORD", realSession,

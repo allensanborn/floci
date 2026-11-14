@@ -2002,7 +2002,7 @@ class CognitoLambdaTriggersTest {
                         Map.of("USERNAME", "ghost", "PASSWORD", "x")));
         boolean hidden = "ENABLED".equals(prevention);
         assertEquals(hidden ? "NotAuthorizedException" : "UserNotFoundException", ex.getErrorCode());
-        assertEquals(hidden ? "Incorrect username or password" : "User does not exist.", ex.getMessage());
+        assertEquals(hidden ? "Incorrect username or password." : "User does not exist.", ex.getMessage());
     }
 
     @Test

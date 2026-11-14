@@ -4366,7 +4366,7 @@ public class CognitoService implements ResourceProvider {
             String proposedPassword) {
         CognitoUser user = adminGetUser(poolId, username);
         if (user.getPasswordHash() != null && !user.getPasswordHash().equals(hashPassword(previousPassword))) {
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
 
         updateUserPassword(user, proposedPassword);

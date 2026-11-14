@@ -66,8 +66,6 @@ final class CognitoAuthFlowHandler {
     /** The {@code callerContext.clientId} AWS sends for an admin action, which names no app client. */
     private static final String CLIENT_ID_NOT_APPLICABLE = "CLIENT_ID_NOT_APPLICABLE";
     private static final String CLIENT_CREDENTIALS_TRIGGER_SOURCE = "TokenGeneration_ClientCredentials";
-    /** The message of a wrong password, which managed login also shows for an unknown user. */
-    static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
     /** VerifySoftwareToken's {@code FriendlyDeviceName} length limit in the service model. */
     static final int MAX_FRIENDLY_DEVICE_NAME_LENGTH = 131_072;
@@ -746,7 +744,7 @@ final class CognitoAuthFlowHandler {
                     "UserMigration_Authentication");
             if (user == null) {
                 if ("ENABLED".equals(client.getPreventUserExistenceErrors())) {
-                    throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+                    throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
                 }
                 throw ae;
             }
@@ -759,7 +757,7 @@ final class CognitoAuthFlowHandler {
             if (recordAuthEvent) {
                 service.recordSignInEvent(pool, user, false);
             }
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         return user;
     }
@@ -1063,7 +1061,7 @@ final class CognitoAuthFlowHandler {
             if (srp.recordAuthEvent()) {
                 service.recordSignInEvent(pool, user, false);
             }
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         return user;
     }
@@ -1387,7 +1385,7 @@ final class CognitoAuthFlowHandler {
 
     private void rejectSimulatedUser(UserAuthSession session) {
         if (!session.userExists()) {
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
     }
 
@@ -1400,7 +1398,7 @@ final class CognitoAuthFlowHandler {
                                                            String preferred) {
         List<String> available = configuredUserAuthChallenges(pool);
         if (available.isEmpty()) {
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         String challenge;
         if (preferred == null) {
@@ -1706,7 +1704,7 @@ final class CognitoAuthFlowHandler {
         }
         if (!passwordOK) {
             customAuthSessions.remove(session);
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);

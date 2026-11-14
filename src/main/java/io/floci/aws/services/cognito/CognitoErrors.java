@@ -9,6 +9,9 @@ import io.floci.aws.core.common.AwsException;
  */
 final class CognitoErrors {
 
+    /** The refusal for a wrong password, which Cognito words alike whether or not the user exists. */
+    static final String INCORRECT_CREDENTIALS = "Incorrect username or password.";
+
     private CognitoErrors() {
     }
 

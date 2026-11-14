@@ -97,4 +97,13 @@ class CognitoErrorMessagesIntegrationTest {
                 {"ClientId":"%s","Username":"nobody"}
                 """.formatted(clientId)), "UserNotFoundException", pair);
     }
+
+    @Test
+    void wrongPasswordCarriesTheTrailingPeriod() {
+        String message = "Incorrect username or password.";
+        assertError(cognitoAction("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"alice","PASSWORD":"wrong"}}
+                """.formatted(clientId)), "NotAuthorizedException", message);
+    }
 }
