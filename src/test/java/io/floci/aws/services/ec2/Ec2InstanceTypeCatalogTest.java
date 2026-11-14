@@ -60,6 +60,14 @@ class Ec2InstanceTypeCatalogTest {
                 expected.add(family + "." + size);
             }
         }
+        expected.addAll(List.of(
+                "m5.xlarge",
+                "m5.2xlarge",
+                "m5.4xlarge",
+                "m5.8xlarge",
+                "m5.12xlarge",
+                "m5.16xlarge",
+                "m5.24xlarge"));
         expected.addAll(List.of("c8g.24xlarge", "c8g.48xlarge", "m8g.24xlarge", "m8g.48xlarge"));
         assertEquals(expected, instanceTypes);
     }

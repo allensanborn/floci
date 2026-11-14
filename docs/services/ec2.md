@@ -51,6 +51,13 @@ processors, 468 GB of local NVMe SSD storage, and one network card supporting
 [AWS storage optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html).
 Both describe APIs and the existing container resource limits use this entry.
 
+The catalog also includes the M5 general purpose types `m5.xlarge`, `m5.2xlarge`, `m5.4xlarge`, `m5.8xlarge`, `m5.12xlarge`, `m5.16xlarge`, `m5.24xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
