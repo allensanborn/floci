@@ -30,8 +30,12 @@ class AwsConfigServiceErrorMessagesTest {
     }
 
     private void putRule(String name, String identifier) {
+        putRule(name, "AWS", identifier);
+    }
+
+    private void putRule(String name, String owner, String identifier) {
         service.putConfigRule(REGION, new ConfigRule(name, null, null, null, null,
-                new ConfigRuleSource("AWS", identifier, null, null), null, null, null, null, null));
+                new ConfigRuleSource(owner, identifier, null, null), null, null, null, null, null));
     }
 
     @Test
@@ -96,5 +100,51 @@ class AwsConfigServiceErrorMessagesTest {
                 "Failed to delete last specified delivery channel with name 'dc', "
                         + "because there is a running configuration recorder.",
                 () -> service.deleteDeliveryChannel(REGION, "dc"));
+    }
+
+    @Test
+    void evaluationStatusAndStartNameTheMissingRuleWhileComplianceStaysPlural() {
+        String named = "The ConfigRule 'ghost' provided in the request is invalid. Please check the configRule name.";
+        assertError("NoSuchConfigRuleException", named,
+                () -> service.describeConfigRuleEvaluationStatus(REGION, List.of("ghost"), null, null));
+        putRule("real", "S3_BUCKET_VERSIONING_ENABLED");
+        assertError("NoSuchConfigRuleException", named,
+                () -> service.startConfigRulesEvaluation(REGION, List.of("real", "ghost")));
+        assertError("NoSuchConfigRuleException",
+                "One or more ConfigRules provided in the request are invalid. Please check the configRule names.",
+                () -> service.describeComplianceByConfigRule(REGION, List.of("ghost"), null, null));
+    }
+
+    @Test
+    void recorderSiblingsUseTheByNameWording() {
+        String notFound = "The name of the configuration recorder you entered cannot be found. "
+                + "Verify the configuration recorder name, and try again.";
+        assertError("NoSuchConfigurationRecorderException", notFound,
+                () -> service.stopConfigurationRecorder(REGION, "ghost"));
+        assertError("NoSuchConfigurationRecorderException", notFound,
+                () -> service.deleteConfigurationRecorder(REGION, "ghost"));
+        assertError("NoSuchConfigurationRecorderException", notFound,
+                () -> service.describeConfigurationRecorderStatus(REGION, List.of("ghost"), null));
+        service.putConfigurationRecorder(REGION, new ConfigurationRecorder(null, "rec",
+                "arn:aws:iam::000000000000:role/r", null, null), null);
+        assertError("NoSuchConfigurationRecorderException", notFound,
+                () -> service.describeConfigurationRecorderStatus(REGION, List.of("ghost"), null));
+    }
+
+    @Test
+    void describeRetentionNamesTheMissingConfiguration() {
+        assertError("NoSuchRetentionConfigurationException",
+                "Cannot find retention configuration with specified name 'r'.",
+                () -> service.describeRetentionConfigurations(REGION, List.of("r")));
+    }
+
+    @Test
+    void putExternalEvaluationRequiresOwnerAwsToo() {
+        putRule("custom", "CUSTOM_LAMBDA", "AWS_CONFIG_PROCESS_CHECK");
+        ConfigEvaluation evaluation = new ConfigEvaluation("AWS::S3::Bucket", "b", "COMPLIANT", null,
+                1700000000.0, null, null);
+        assertError("InvalidParameterValueException",
+                "This API can only be applied to rules with sourceIdentifier as AWS_CONFIG_PROCESS_CHECK.",
+                () -> service.putExternalEvaluation(REGION, "custom", evaluation));
     }
 }

@@ -51,8 +51,6 @@ public class AwsConfigService {
 
     private static final Set<String> VALID_COMPLIANCE_TYPES =
             Set.of("COMPLIANT", "NON_COMPLIANT", "NOT_APPLICABLE", "INSUFFICIENT_DATA");
-    private static final String NO_SUCH_CONFIG_RULE_MESSAGE =
-            "The ConfigRule provided in the request is invalid. Please check the configRule name.";
     private static final String NO_SUCH_CONFIG_RULES_MESSAGE =
             "One or more ConfigRules provided in the request are invalid. Please check the configRule names.";
     private static final String NO_SUCH_RECORDER_BY_NAME_MESSAGE =
@@ -316,6 +314,11 @@ public class AwsConfigService {
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
+        return describeConfigRules(region, ruleNames, false);
+    }
+
+    /** {@code namedNotFound}: a missing rule is reported by name (evaluation status) rather than as "one or more". */
+    private List<ConfigRule> describeConfigRules(String region, List<String> ruleNames, boolean namedNotFound) {
         if (ruleNames != null && ruleNames.size() > MAX_DESCRIBE_CONFIG_RULE_NAMES) {
             throw new AwsException("InvalidParameterValueException",
                     "ConfigRuleNames accepts at most " + MAX_DESCRIBE_CONFIG_RULE_NAMES + " values.", 400);
@@ -328,7 +331,8 @@ public class AwsConfigService {
             for (String name : ruleNames) {
                 ConfigRule rule = store.get(name);
                 if (rule == null) {
-                    throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULES_MESSAGE, 400);
+                    throw namedNotFound ? noSuchConfigRule(name)
+                            : new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULES_MESSAGE, 400);
                 }
                 result.add(rule);
             }
@@ -345,7 +349,7 @@ public class AwsConfigService {
     public Paged<ConfigRuleEvaluationStatus> describeConfigRuleEvaluationStatus(String region,
             List<String> ruleNames, Integer limit, String nextToken) {
         List<ConfigRuleEvaluationStatus> statuses = new ArrayList<>();
-        for (ConfigRule rule : describeConfigRules(region, ruleNames)) {
+        for (ConfigRule rule : describeConfigRules(region, ruleNames, true)) {
             String key = ruleKey(region, rule.configRuleName());
             Map<String, ConfigEvaluation> ruleEvaluations =
                     evaluationsFor(region).getOrDefault(rule.configRuleName(), Map.of());
@@ -367,7 +371,7 @@ public class AwsConfigService {
         Map<String, ConfigRule> store = rulesFor(region);
         for (String name : ruleNames) {
             if (!store.containsKey(name)) {
-                throw new AwsException("NoSuchConfigRuleException", NO_SUCH_CONFIG_RULE_MESSAGE, 400);
+                throw noSuchConfigRule(name);
             }
         }
         for (String name : ruleNames) {
@@ -405,7 +409,8 @@ public class AwsConfigService {
         validateEvaluation(evaluation);
         synchronized (lockFor(ruleKey(region, ruleName))) {
             ConfigRule rule = requireRule(region, ruleName);
-            if (rule.source() == null || !"AWS_CONFIG_PROCESS_CHECK".equals(rule.source().sourceIdentifier())) {
+            if (rule.source() == null || !"AWS".equals(rule.source().owner())
+                    || !"AWS_CONFIG_PROCESS_CHECK".equals(rule.source().sourceIdentifier())) {
                 throw new AwsException("InvalidParameterValueException",
                         "This API can only be applied to rules with sourceIdentifier as "
                                 + "AWS_CONFIG_PROCESS_CHECK.", 400);
@@ -770,7 +775,7 @@ public class AwsConfigService {
             ConfigurationRecorder recorder = configurationRecorders.get(region);
             if (recorder == null || !recorder.name().equals(name)) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
-                        "Cannot find configuration recorder with the specified name.", 400);
+                        NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
             }
             configurationRecorders.remove(region);
             tags.remove(recorder.arn());
@@ -798,7 +803,7 @@ public class AwsConfigService {
         ConfigurationRecorder recorder = configurationRecorders.get(region);
         if (recorder == null || !recorder.name().equals(name)) {
             throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified name.", 400);
+                    NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
         }
         recorderRunning.put(runtimeKey(region), false);
         recorderLastStopTime.put(runtimeKey(region), now());
@@ -812,7 +817,7 @@ public class AwsConfigService {
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
-                        "Cannot find configuration recorder with the specified name.", 400);
+                        NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
             }
             return Collections.emptyList();
         }
@@ -820,7 +825,7 @@ public class AwsConfigService {
             for (String name : names) {
                 if (!name.equals(recorder.name())) {
                     throw new AwsException("NoSuchConfigurationRecorderException",
-                            "Cannot find configuration recorder with the specified name.", 400);
+                            NO_SUCH_RECORDER_BY_NAME_MESSAGE, 400);
                 }
             }
         }
@@ -899,7 +904,7 @@ public class AwsConfigService {
             for (String name : names) {
                 if (configuration == null || !configuration.name().equals(name)) {
                     throw new AwsException("NoSuchRetentionConfigurationException",
-                            "Cannot find retention configuration with the specified name.", 400);
+                            "Cannot find retention configuration with specified name '" + name + "'.", 400);
                 }
             }
         }
