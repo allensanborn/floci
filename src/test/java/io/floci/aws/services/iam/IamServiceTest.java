@@ -54,6 +54,7 @@ import java.util.function.Predicate;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.IDENTITY_POLICY;
 import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1056,7 +1057,7 @@ class IamServiceTest {
     void deleteUserWithAttachedPolicyFails() {
         iamService.createUser("alice", "/");
         String policyArn = iamService.createPolicy("MyPolicy", "/", null,
-                EMPTY_POLICY_DOCUMENT, null).getArn();
+                IDENTITY_POLICY, null).getArn();
         iamService.attachUserPolicy("alice", policyArn);
         assertThrows(AwsException.class, () -> iamService.deleteUser("alice"));
     }
@@ -1775,7 +1776,7 @@ class IamServiceTest {
 
     @Test
     void permissionsBoundaryWritesRefuseARoleRecreatedUnderTheSameName() {
-        String boundary = iamService.createPolicy("Bound", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
+        String boundary = iamService.createPolicy("Bound", "/", null, IDENTITY_POLICY, null).getArn();
         String staleId = iamService.createRole("Reused", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getRoleId();
         iamService.deleteRole("Reused");
         iamService.createRole("Reused", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
@@ -1792,7 +1793,7 @@ class IamServiceTest {
 
     @Test
     void permissionsBoundaryWritesRefuseAUserRecreatedUnderTheSameName() {
-        String boundary = iamService.createPolicy("Bound", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
+        String boundary = iamService.createPolicy("Bound", "/", null, IDENTITY_POLICY, null).getArn();
         String staleId = iamService.createUser("reused", "/").getUserId();
         iamService.deleteUser("reused");
         iamService.createUser("reused", "/");
@@ -1843,7 +1844,7 @@ class IamServiceTest {
     @Test
     void deleteRoleWithAttachedPolicyFails() {
         iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
-        String policyArn = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
+        String policyArn = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null).getArn();
         iamService.attachRolePolicy("LambdaExec", policyArn);
         assertThrows(AwsException.class, () -> iamService.deleteRole("LambdaExec"));
     }
@@ -1866,7 +1867,7 @@ class IamServiceTest {
 
     @Test
     void createAndGetPolicy() {
-        String doc = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String doc = IDENTITY_POLICY;
         IamPolicy policy = iamService.createPolicy("ReadOnly", "/", "Read-only access", doc, null);
 
         assertEquals("ReadOnly", policy.getPolicyName());
@@ -1879,10 +1880,10 @@ class IamServiceTest {
 
     @Test
     void createPolicyRejectsCaseInsensitiveNameAcrossPaths() {
-        iamService.createPolicy("CasePolicy", "/first/", null, EMPTY_POLICY_DOCUMENT, null);
+        iamService.createPolicy("CasePolicy", "/first/", null, IDENTITY_POLICY, null);
 
         AwsException error = assertThrows(AwsException.class,
-                () -> iamService.createPolicy("casepolicy", "/second/", null, EMPTY_POLICY_DOCUMENT, null));
+                () -> iamService.createPolicy("casepolicy", "/second/", null, IDENTITY_POLICY, null));
 
         assertEquals("EntityAlreadyExists", error.getErrorCode());
         assertEquals(409, error.getHttpStatus());
@@ -2006,14 +2007,14 @@ class IamServiceTest {
 
     @Test
     void deletePolicyVersionDefaultFails() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         assertThrows(AwsException.class,
                 () -> iamService.deletePolicyVersion(policy.getArn(), "v1"));
     }
 
     @Test
     void policyVersionLimit() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
             iamService.createPolicyVersion(arn, policyDocument(i), false);
@@ -2024,7 +2025,7 @@ class IamServiceTest {
 
     @Test
     void createPolicyVersionAfterDeletionDoesNotReuseVersionIds() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
             iamService.createPolicyVersion(arn, policyDocument(i), true);
@@ -2043,7 +2044,7 @@ class IamServiceTest {
         // Deleting the HIGHEST surviving version (not the oldest, as above) is the case that
         // breaks a "derive from the live keys" implementation: with v5 gone, the live max is v4,
         // so a naive next-id computation reissues v5 rather than advancing to v6.
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         String arn = policy.getArn();
         for (int i = 2; i <= 5; i++) {
             iamService.createPolicyVersion(arn, policyDocument(i), false);
@@ -2149,14 +2150,14 @@ class IamServiceTest {
     @Test
     void deletePolicyWithAttachmentsFails() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         iamService.attachUserPolicy("alice", policy.getArn());
         assertThrows(AwsException.class, () -> iamService.deletePolicy(policy.getArn()));
     }
 
     @Test
     void tagAndUntagPolicy() {
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         iamService.tagPolicy(policy.getArn(), Map.of("team", "security"));
         assertEquals("security", iamService.listPolicyTags(policy.getArn()).get("team"));
         iamService.untagPolicy(policy.getArn(), List.of("team"));
@@ -2170,7 +2171,7 @@ class IamServiceTest {
     @Test
     void attachAndDetachUserPolicy() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         iamService.attachUserPolicy("alice", policy.getArn());
 
         List<IamPolicy> attached = iamService.listAttachedUserPolicies("alice", null);
@@ -2186,7 +2187,7 @@ class IamServiceTest {
     @Test
     void attachAndDetachGroupPolicy() {
         iamService.createGroup("dev", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         iamService.attachGroupPolicy("dev", policy.getArn());
 
         assertEquals(1, iamService.listAttachedGroupPolicies("dev", null).size());
@@ -2197,7 +2198,7 @@ class IamServiceTest {
     @Test
     void attachAndDetachRolePolicy() {
         iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         iamService.attachRolePolicy("LambdaExec", policy.getArn());
 
         assertEquals(1, iamService.listAttachedRolePolicies("LambdaExec", null).size());
@@ -2208,7 +2209,7 @@ class IamServiceTest {
     @Test
     void detachNonAttachedPolicyThrows() {
         iamService.createUser("alice", "/");
-        IamPolicy policy = iamService.createPolicy("P", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy policy = iamService.createPolicy("P", "/", null, IDENTITY_POLICY, null);
         assertThrows(AwsException.class, () -> iamService.detachUserPolicy("alice", policy.getArn()));
     }
 
@@ -3131,7 +3132,7 @@ class IamServiceTest {
     @Test
     void listPoliciesScopeFiltering() {
         iamService.seedAwsManagedPolicies();
-        iamService.createPolicy("MyCustomPolicy", "/", null, EMPTY_POLICY_DOCUMENT, null);
+        iamService.createPolicy("MyCustomPolicy", "/", null, IDENTITY_POLICY, null);
 
         List<IamPolicy> awsOnly = iamService.listPolicies("AWS", "/");
         assertTrue(awsOnly.stream().allMatch(p -> p.getArn().startsWith("arn:aws:iam::aws:policy")));

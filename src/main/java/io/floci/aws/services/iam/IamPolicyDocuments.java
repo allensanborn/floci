@@ -150,8 +150,8 @@ final class IamPolicyDocuments {
 
     private static void checkIdentityGrammar(String document, boolean statementElements) {
         Grammar defect = grammarDefect(document);
-        if (defect == null && statementElements) {
-            defect = statementElementDefect(document);
+        if (defect == null) {
+            defect = statementElementDefect(document, statementElements);
         }
         if (defect == null) {
             return;
@@ -208,15 +208,27 @@ final class IamPolicyDocuments {
      * statement names both. A statement that is not an object is no statement, which is the syntax
      * defect rather than a missing element.
      */
-    private static Grammar statementElementDefect(String document) {
+    private static Grammar statementElementDefect(String document, boolean managed) {
         JsonNode root = parse(document);
         JsonNode declared = root == null ? null : root.get("Statement");
         if (declared == null) {
             return null;
         }
+        // Statement is one statement object or a list of them: a string, a number or null is no
+        // statement, for an inline policy as much as a managed one.
+        if (!declared.isObject() && !declared.isArray()) {
+            return Grammar.SYNTAX;
+        }
+        // A managed policy with no statement at all is refused; an inline one pinned as accepted.
+        if (managed && declared.isArray() && declared.isEmpty()) {
+            return Grammar.SYNTAX;
+        }
         for (JsonNode statement : declared.isArray() ? declared : List.of(declared)) {
             if (!statement.isObject()) {
                 return Grammar.SYNTAX;
+            }
+            if (!managed) {
+                continue;
             }
             if (!namesSomething(statement, "Action", "NotAction")) {
                 return Grammar.NO_ACTIONS;
