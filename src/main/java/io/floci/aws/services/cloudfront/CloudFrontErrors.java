@@ -29,12 +29,28 @@ final class CloudFrontErrors {
                 ? "The specified response headers policy does not exist." : ID_FORMAT_INVALID, 404);
     }
 
+    static AwsException noSuchResponseHeadersPolicy() {
+        return new AwsException("NoSuchResponseHeadersPolicy",
+                "The specified response headers policy does not exist.", 404);
+    }
+
+    static AwsException noSuchKeyGroup() {
+        return new AwsException("NoSuchResource", "The specified key group does not exist.", 404);
+    }
+
+    /** GetKeyGroup alone treats an id outside the UUID shape as unreadable. */
     static AwsException noSuchKeyGroup(String id) {
         return new AwsException("NoSuchResource", UUID_ID.matcher(id).matches()
                 ? "The specified key group does not exist." : ID_FORMAT_INVALID, 404);
     }
 
     /** The id of another resource kind (an E- or K-prefixed id) was never a profile id. */
+    static AwsException noSuchFieldLevelEncryptionProfile() {
+        return new AwsException("NoSuchFieldLevelEncryptionProfile",
+                "The specified field level encryption profile does not exist.", 404);
+    }
+
+    /** GetFieldLevelEncryptionProfile alone applies the other-kind id rule. */
     static AwsException noSuchFieldLevelEncryptionProfile(String id) {
         return new AwsException("NoSuchFieldLevelEncryptionProfile", PREFIXED_ID.matcher(id).matches()
                 ? ID_FORMAT_INVALID : "The specified field level encryption profile does not exist.", 404);

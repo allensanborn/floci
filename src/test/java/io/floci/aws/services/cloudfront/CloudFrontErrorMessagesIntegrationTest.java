@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * Exact code, status and message of the CloudFront refusals whose wording AWS fixes. Each assertion
@@ -128,6 +129,11 @@ class CloudFrontErrorMessagesIntegrationTest {
         assertError(given().get(API + "key-group/" + keyId), 404, "NoSuchResource", "Id format is invalid");
         assertError(given().get(API + "key-group/" + uid()), 404, "NoSuchResource",
                 "The specified key group does not exist.");
+        // only GetKeyGroup reads the shape of the id; the config read reports plain absence
+        assertError(given().get(API + "key-group/KGCBOGUS0000000000/config"), 404, "NoSuchResource",
+                "The specified key group does not exist.");
+        assertError(delete("key-group/KGCBOGUS0000000000", "x"), 404, "NoSuchResource",
+                "The specified key group does not exist.");
     }
 
     @Test
@@ -202,6 +208,12 @@ class CloudFrontErrorMessagesIntegrationTest {
                 "NoSuchResponseHeadersPolicy", "Id format is invalid");
         assertError(given().get(API + "response-headers-policy/" + uid() + "/config"), 404,
                 "NoSuchResponseHeadersPolicy", "The specified response headers policy does not exist.");
+        // a distribution's policy reference is a plain lookup: no id-shape message
+        assertError(post("distribution", distributionBody("<CustomOriginConfig><HTTPPort>80</HTTPPort>"
+                + "<HTTPSPort>443</HTTPSPort><OriginProtocolPolicy>http-only</OriginProtocolPolicy>"
+                + "</CustomOriginConfig>",
+                "<ResponseHeadersPolicyId>NOSUCHPOLICYID000000</ResponseHeadersPolicyId>")), 404,
+                "NoSuchResponseHeadersPolicy", "The specified response headers policy does not exist.");
     }
 
     private static String rhpBody(String name, String csp) {
@@ -220,7 +232,10 @@ class CloudFrontErrorMessagesIntegrationTest {
                         "function handler(e) { return e.request; }".getBytes(StandardCharsets.UTF_8))
                 + "</FunctionCode></CreateFunctionRequest>";
         assertEquals(201, post("function", body).statusCode());
-        assertError(post("function", body), 409, "FunctionAlreadyExists", "");
+        Response dup = post("function", body);
+        assertError(dup, 409, "FunctionAlreadyExists", "");
+        // botocore reads an empty <Message/> as None but an absent element as "": AWS omits it
+        assertFalse(dup.asString().contains("<Message"), dup.asString());
     }
 
     @Test
@@ -228,6 +243,9 @@ class CloudFrontErrorMessagesIntegrationTest {
         Response key = post("public-key", publicKeyBody(uid(), "pk-" + uid(), publicKeyPem()));
         assertError(given().get(API + "field-level-encryption-profile/" + id(key)), 404,
                 "NoSuchFieldLevelEncryptionProfile", "Id format is invalid");
+        assertError(delete("field-level-encryption-profile/" + id(key), "x"), 404,
+                "NoSuchFieldLevelEncryptionProfile",
+                "The specified field level encryption profile does not exist.");
         assertError(given().get(API + "field-level-encryption-profile/" + uid()), 404,
                 "NoSuchFieldLevelEncryptionProfile",
                 "The specified field level encryption profile does not exist.");

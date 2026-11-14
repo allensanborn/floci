@@ -752,7 +752,7 @@ class CloudFrontCfnProvisionerTest {
     void deletesPublicKeyWithItsEtagAndToleratesItBeingGone() {
         when(cloudFront.getPublicKey("K36X4X2EO997HM")).thenReturn(publicKey("K36X4X2EO997HM", ETAG));
         when(cloudFront.getPublicKey("gone")).thenThrow(
-                new AwsException("NoSuchPublicKey", "The specified public key does not exist.", 404));
+                new AwsException("NoSuchPublicKey", "The specified CloudFront public key does not exist.", 404));
 
         provisioner.delete(PUBLIC_KEY, "K36X4X2EO997HM", REGION);
         provisioner.delete(PUBLIC_KEY, "gone", REGION);

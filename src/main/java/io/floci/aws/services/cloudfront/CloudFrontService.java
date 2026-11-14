@@ -1220,7 +1220,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     private void requireResponseHeadersPolicy(String policyId) {
         if (policyId != null && !policyId.isBlank()) {
-            getResponseHeadersPolicy(policyId);
+            rhpStore.get(policyId)
+                    .or(() -> Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(policyId)))
+                    .orElseThrow(CloudFrontErrors::noSuchResponseHeadersPolicy);
         }
     }
 
@@ -2253,6 +2255,11 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public KeyGroup getKeyGroup(String id) {
+        return keyGroupStore.get(id).orElseThrow(CloudFrontErrors::noSuchKeyGroup);
+    }
+
+    /** GetKeyGroup: an id outside the UUID shape is reported as unreadable. */
+    public KeyGroup describeKeyGroup(String id) {
         return keyGroupStore.get(id).orElseThrow(() -> CloudFrontErrors.noSuchKeyGroup(id));
     }
 
@@ -2588,6 +2595,11 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public FieldLevelEncryptionProfile getFieldLevelEncryptionProfile(String id) {
+        return fleProfileStore.get(id).orElseThrow(CloudFrontErrors::noSuchFieldLevelEncryptionProfile);
+    }
+
+    /** GetFieldLevelEncryptionProfile: an id of another resource kind is reported as unreadable. */
+    public FieldLevelEncryptionProfile describeFieldLevelEncryptionProfile(String id) {
         return fleProfileStore.get(id).orElseThrow(() -> CloudFrontErrors.noSuchFieldLevelEncryptionProfile(id));
     }
 
