@@ -4971,8 +4971,7 @@ public class CognitoService implements ResourceProvider {
 
         String[] parts = parseRefreshToken(token);
         if (parts == null) {
-            throw new AwsException("UnsupportedTokenTypeException",
-                    "Only refresh tokens can be revoked", 400);
+            throw CognitoErrors.unsupportedTokenType();
         }
 
         String poolId = parts[0];

@@ -234,4 +234,29 @@ class CognitoErrorMessagesIntegrationTest {
                 """.formatted(poolId)), "InvalidParameterException",
                 "Entity Type: USER, Message: AttributeName: tier, DataType: STRING, Error: Attribute name is not unique");
     }
+
+    @Test
+    void revokingAnAccessTokenIsAnUnsupportedTokenType() {
+        Response auth = cognitoAction("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"alice","PASSWORD":"%s"}}
+                """.formatted(clientId, PASSWORD));
+        String accessToken = auth.then().statusCode(200).extract().path("AuthenticationResult.AccessToken");
+        String refreshToken = auth.then().extract().path("AuthenticationResult.RefreshToken");
+
+        assertError(cognitoAction("RevokeToken", """
+                {"ClientId":"%s","Token":"%s"}
+                """.formatted(clientId, accessToken)), "UnsupportedTokenTypeException", "Unsupported token type");
+
+        // the refusal revoked nothing, and a real revocation is read back through another call
+        cognitoAction("GetTokensFromRefreshToken", """
+                {"ClientId":"%s","RefreshToken":"%s"}
+                """.formatted(clientId, refreshToken)).then().statusCode(200);
+        cognitoAction("RevokeToken", """
+                {"ClientId":"%s","Token":"%s"}
+                """.formatted(clientId, refreshToken)).then().statusCode(200);
+        assertError(cognitoAction("GetTokensFromRefreshToken", """
+                {"ClientId":"%s","RefreshToken":"%s"}
+                """.formatted(clientId, refreshToken)), "NotAuthorizedException", "Refresh Token has been revoked");
+    }
 }

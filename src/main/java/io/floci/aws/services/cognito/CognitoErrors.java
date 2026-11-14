@@ -93,4 +93,9 @@ final class CognitoErrors {
                 "Entity Type: USER, Message: AttributeName: " + bareName + ", DataType: "
                         + dataType.toUpperCase(Locale.ROOT) + ", Error: Attribute name is not unique", 400);
     }
+
+    /** A token RevokeToken cannot revoke, which is any but a refresh token. */
+    static AwsException unsupportedTokenType() {
+        return new AwsException("UnsupportedTokenTypeException", "Unsupported token type", 400);
+    }
 }
