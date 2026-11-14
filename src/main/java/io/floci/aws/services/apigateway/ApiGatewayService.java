@@ -309,8 +309,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                         throw new AwsException("BadRequestException",
                                 "/throttleSettings value cannot be changed this way", 400);
                     }
-                    throw new AwsException("BadRequestException",
-                            "Unsupported patch path: " + path, 400);
+                    throw ApiGatewayErrors.invalidPatchPath(path, opType, "[/cloudwatchRoleArn]");
                 }
             }
         }
@@ -359,11 +358,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             epMap.forEach((k, v) -> {
                 if (k instanceof String ks && v instanceof List<?> list) {
                     if (EPC_TYPES_KEY.equals(ks)) {
-                        List<EndpointType> types = list.stream()
+                        List<String> names = list.stream()
                                 .filter(String.class::isInstance)
                                 .map(String.class::cast)
-                                .map(ApiGatewayService::endpointType)
                                 .toList();
+                        if (!names.stream().allMatch(typeName -> ENDPOINT_TYPE_ENUM.contains(typeName.toUpperCase()))) {
+                            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notAllInEnum(
+                                    names, "createRestApiInput.endpointConfiguration.types", ENDPOINT_TYPE_ENUM));
+                        }
+                        List<EndpointType> types = names.stream().map(ApiGatewayService::endpointType).toList();
                         endpointConfiguration.setTypes(types);
                     } else if (EPC_VPC_IDS_KEY.equals(ks)) {
                         List<String> vpcIds = list.stream()
@@ -412,6 +415,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
     }
 
+    /** The EndpointType enum, in the order API Gateway lists it. */
+    private static final List<String> ENDPOINT_TYPE_ENUM = List.of("PRIVATE", "EDGE", "REGIONAL");
+
     /** The endpoint type {@code value} names, in any case. */
     private static EndpointType endpointType(String value) {
         try {
@@ -438,7 +444,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public RestApi getRestApi(String region, String apiId) {
         return apiStore.get(apiKey(region, apiId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid API id specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.restApiNotFound(regionResolver.getAccountId(), apiId));
     }
 
     public boolean hasRestApi(String apiId) {
@@ -540,7 +546,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public ApiGatewayResource getResource(String region, String apiId, String resourceId) {
         return resourceStore.get(resourceKey(region, apiId, resourceId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid resource id specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Resource"));
     }
 
     public ApiGatewayResource createResource(String region, String apiId, String parentId, Map<String, Object> request) {
@@ -569,7 +575,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         // new resource on, a state that has no way back short of recreating the API.
         if ("/".equals(resource.getPath())) {
             throw new AwsException("BadRequestException",
-                    "Invalid resource identifier specified: the root resource cannot be deleted", 400);
+                    "Root resource cannot be deleted", 400);
         }
         resourceStore.delete(resourceKey(region, apiId, resourceId));
     }
@@ -662,7 +668,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
         MethodConfig method = resource.getResourceMethods().get(httpMethod.toUpperCase());
         if (method == null) {
-            throw new AwsException("NotFoundException", "Invalid method specified", 404);
+            throw ApiGatewayErrors.notFound("Method");
         }
         return method;
     }
@@ -691,7 +697,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
         MethodResponse mr = method.getMethodResponses().get(statusCode);
         if (mr == null) {
-            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+            throw new AwsException("NotFoundException", "Invalid Response status code specified", 404);
         }
         return mr;
     }
@@ -734,7 +740,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                                      String httpMethod, String statusCode) {
         MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
         if (method.getMethodResponses().remove(statusCode) == null) {
-            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+            throw new AwsException("NotFoundException", "Invalid Response status code specified", 404);
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
     }
@@ -793,9 +799,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     }
 
     public Integration getIntegration(String region, String apiId, String resourceId, String httpMethod) {
-        MethodConfig method = getMethod(region, apiId, resourceId, httpMethod);
-        if (method.getMethodIntegration() == null) {
-            throw new AwsException("NotFoundException", "Integration not found", 404);
+        // A method that does not exist has no integration either, and AWS names the integration.
+        MethodConfig method = getResource(region, apiId, resourceId).getResourceMethods().get(httpMethod.toUpperCase());
+        if (method == null || method.getMethodIntegration() == null) {
+            throw ApiGatewayErrors.notFound("Integration");
         }
         return method.getMethodIntegration();
     }
@@ -803,9 +810,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     public void deleteIntegration(String region, String apiId, String resourceId, String httpMethod) {
         ApiGatewayResource resource = getResource(region, apiId, resourceId);
         MethodConfig method = resource.getResourceMethods().get(httpMethod.toUpperCase());
-        if (method == null || method.getMethodIntegration() == null) {
-            throw new AwsException("NotFoundException", "Integration not found", 404);
+        if (method == null) {
+            throw ApiGatewayErrors.notFound("Method");
         }
+        // A method with no integration is a no-op success, as on AWS.
         method.setMethodIntegration(null);
         resourceStore.put(resourceKey(region, apiId, resourceId), resource);
     }
@@ -838,7 +846,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
         IntegrationResponse ir = integration.getIntegrationResponses().get(statusCode);
         if (ir == null) {
-            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+            throw new AwsException("NotFoundException", "Invalid Response status code specified", 404);
         }
         return ir;
     }
@@ -847,7 +855,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                                           String httpMethod, String statusCode) {
         Integration integration = getIntegration(region, apiId, resourceId, httpMethod);
         if (integration.getIntegrationResponses().remove(statusCode) == null) {
-            throw new AwsException("NotFoundException", "Invalid response status code specified", 404);
+            throw new AwsException("NotFoundException", "Invalid Response status code specified", 404);
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
     }
@@ -938,7 +946,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public Deployment getDeployment(String region, String apiId, String deploymentId) {
         return deploymentStore.get(deploymentKey(region, apiId, deploymentId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Deployment not found", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Deployment"));
     }
 
     public void deleteDeployment(String region, String apiId, String deploymentId) {
@@ -1041,7 +1049,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         String deploymentId = (String) request.get("deploymentId");
 
         if (stageName == null || stageName.isBlank()) {
-            throw new AwsException("BadRequestException", "stageName is required", 400);
+            throw new AwsException("BadRequestException", "Stage name must be non-empty", 400);
         }
         if (deploymentId == null || deploymentId.isBlank()) {
             throw new AwsException("BadRequestException", "deploymentId is required", 400);
@@ -1083,7 +1091,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     public Stage getStage(String region, String apiId, String stageName) {
         getRestApi(region, apiId);
         return stageStore.get(stageKey(region, apiId, stageName))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Stage not found", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("stage"));
     }
 
     public List<Stage> getStages(String region, String apiId) {
@@ -1242,7 +1250,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public Authorizer getAuthorizer(String region, String apiId, String authorizerId) {
         return authorizerStore.get(authorizerKey(region, apiId, authorizerId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Authorizer not found", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Authorizer"));
     }
 
     public List<Authorizer> getAuthorizers(String region, String apiId) {
@@ -1400,7 +1408,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         int keyIndex = columns.containsKey("key") ? columns.get("key") : columns.getOrDefault("value", -1);
         if (nameIndex < 0 || keyIndex < 0) {
             throw new AwsException("BadRequestException",
-                    "CSV header must contain Name and Key columns", 400);
+                    "Invalid API Key import content specified for format: csv", 400);
         }
         int descriptionIndex = columns.getOrDefault("description", -1);
         int enabledIndex = columns.getOrDefault("enabled", -1);
@@ -1586,7 +1594,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public UsagePlan getUsagePlan(String region, String usagePlanId) {
         return usagePlanStore.get(usagePlanKey(region, usagePlanId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid Usage Plan ID specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.usagePlanNotFound());
     }
 
     /** Reads the stored plan under the lock patches hold, so the reader sees one revision of it. */
@@ -1764,7 +1772,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
         return usagePlanKeyStore.get(usagePlanKeyPathKey(region, usagePlanId, keyId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Usage Plan Key not found", 404));
+                // The unknown key is what AWS names when there is no such API key; a real key the plan
+                // does not hold is reported against the plan.
+                .orElseThrow(() -> findApiKey(region, keyId).isEmpty()
+                        ? ApiGatewayErrors.notFound("API Key") : ApiGatewayErrors.usagePlanNotFound());
     }
 
     /**
@@ -2005,6 +2016,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Gateway Responses ────────────────────────────
 
+    private static final String GATEWAY_STATUS_CODE_PATTERN = "[1-5]\\d\\d";
     private static final String GATEWAY_RESPONSE_HEADER_PREFIX = "gatewayresponse.header.";
     private static final List<String> GATEWAY_RESPONSE_PARAMETER_SOURCES = List.of(
             "method.request.header.", "method.request.querystring.", "method.request.path.",
@@ -2024,7 +2036,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
         GatewayResponse response = new GatewayResponse();
         response.setResponseType(type.name());
-        response.setStatusCode(validatedGatewayStatusCode(body.get("statusCode")));
+        response.setStatusCode(putGatewayResponseStatusCode(body.get("statusCode")));
         response.setResponseParameters(validatedGatewayResponseParameters(stringMap(body.get("responseParameters"))));
         response.setResponseTemplates(stringMap(body.get("responseTemplates")));
         response.setDefaultResponse(false);
@@ -2061,7 +2073,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         GatewayResponseType type = requireGatewayResponseType(responseType);
         String key = gatewayResponseKey(region, apiId, type);
         if (gatewayResponseStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException", "Gateway response not found", 404);
+            throw new AwsException("NotFoundException", "Gateway response type not defined on api", 404);
         }
         gatewayResponseStore.delete(key);
     }
@@ -2175,6 +2187,15 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                         "Invalid Gateway response type specified: " + responseType, 400));
     }
 
+    /** PutGatewayResponse refuses a malformed statusCode in the request model, before the operation runs. */
+    private static String putGatewayResponseStatusCode(Object statusCode) {
+        if (statusCode != null && !String.valueOf(statusCode).matches(GATEWAY_STATUS_CODE_PATTERN)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.pattern(
+                    "putGatewayResponseInput.statusCode", String.valueOf(statusCode), GATEWAY_STATUS_CODE_PATTERN));
+        }
+        return validatedGatewayStatusCode(statusCode);
+    }
+
     private static String validatedGatewayStatusCode(Object statusCode) {
         if (statusCode == null) {
             return null;
@@ -2186,18 +2207,22 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return value;
     }
 
+    private static AwsException invalidMappingExpression(String expression) {
+        return new AwsException("BadRequestException",
+                "Invalid mapping expression specified: Validation Result: warnings : [], errors : "
+                        + "[Invalid mapping expression specified: " + expression + "]", 400);
+    }
+
     private static Map<String, String> validatedGatewayResponseParameters(Map<String, String> parameters) {
         for (Map.Entry<String, String> entry : parameters.entrySet()) {
             String destination = entry.getKey();
             String source = entry.getValue();
             if (!destination.startsWith(GATEWAY_RESPONSE_HEADER_PREFIX)
                     || destination.length() == GATEWAY_RESPONSE_HEADER_PREFIX.length()) {
-                throw new AwsException("BadRequestException",
-                        "Invalid mapping expression specified: " + destination, 400);
+                throw invalidMappingExpression(destination);
             }
             if (!isValidGatewayResponseParameterSource(source)) {
-                throw new AwsException("BadRequestException",
-                        "Invalid mapping expression specified: " + source, 400);
+                throw invalidMappingExpression(source);
             }
         }
         return parameters;
@@ -2233,7 +2258,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     // ──────────────────────────── Request Validators ────────────────────────────
 
     public RequestValidator createRequestValidator(String region, String apiId, Map<String, Object> request) {
-        getRestApi(region, apiId);
+        if (!restApiExists(region, apiId)) {
+            throw new AwsException("BadRequestException", "Invalid REST API identifier specified", 400);
+        }
         RequestValidator validator = saveRequestValidator(region, apiId, shortId(6), request);
         LOG.infov("Created request validator {0} for API {1}", validator.getId(), apiId);
         return validator;
@@ -2253,7 +2280,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public RequestValidator getRequestValidator(String region, String apiId, String validatorId) {
         return requestValidatorStore.get(requestValidatorKey(region, apiId, validatorId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Request validator not found", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Request Validator"));
     }
 
     public List<RequestValidator> getRequestValidators(String region, String apiId) {
@@ -2337,7 +2364,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public Model getModel(String region, String apiId, String modelName) {
         return modelStore.get(modelKey(region, apiId, modelName))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid model name specified", 404));
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid model name specified: " + modelName, 404));
     }
 
     public Model updateModel(String region, String apiId, String modelName, List<Map<String, String>> patchOperations) {
@@ -2367,12 +2394,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                     newSchema = value;
                 } else if ("/contentType".equals(path)) {
                     newContentType = value;
-                } else if ("/name".equals(path)) {
-                    // AWS treats the model name as an immutable identifier.
-                    throw new AwsException("BadRequestException",
-                            "Model name cannot be changed", 400);
                 } else {
-                    throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                    // AWS treats the model name as an immutable identifier, so /name is refused like any other path.
+                    throw ApiGatewayErrors.invalidPatchPath(path, opType, "[/description, /schema]");
                 }
             }
         }
@@ -2396,6 +2420,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Documentation Parts ────────────────────────────
 
+    /** The DocumentationPartLocationType enum, in the order API Gateway lists it. */
+    private static final List<String> DOCUMENTATION_PART_TYPES = List.of("RESPONSE_BODY", "RESPONSE", "METHOD",
+            "MODEL", "AUTHORIZER", "RESPONSE_HEADER", "RESOURCE", "PATH_PARAMETER", "REQUEST_BODY",
+            "QUERY_PARAMETER", "API", "REQUEST_HEADER");
     private static final Set<String> DOCUMENTATION_PART_NAMED_TYPES = Set.of("AUTHORIZER", "MODEL",
             "PATH_PARAMETER", "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE_HEADER");
     private static final Set<String> DOCUMENTATION_PART_PATH_TYPES = Set.of("RESOURCE", "METHOD", "PATH_PARAMETER",
@@ -2410,6 +2438,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getRestApi(region, apiId);
         if (request == null) {
             throw new AwsException("BadRequestException", "Documentation part request is required", 400);
+        }
+        if (request.get("location") instanceof Map<?, ?> input && input.get("type") instanceof String type
+                && !DOCUMENTATION_PART_TYPES.contains(type)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(type,
+                    "createDocumentationPartInput.location.type", DOCUMENTATION_PART_TYPES));
         }
         ObjectNode modeledRequest = JSON.valueToTree(request);
         modeledRequest.put("restApiId", apiId);
@@ -2440,7 +2473,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     public DocumentationPart getDocumentationPart(String region, String apiId, String partId) {
         getRestApi(region, apiId);
         return documentationPartStore.get(documentationPartKey(region, apiId, partId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid documentation part id specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Documentation part"));
     }
 
     public record DocumentationPartPage(List<DocumentationPart> items, String position) {}
@@ -2694,8 +2727,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public CustomDomain getDomainName(String region, String domainName) {
         return domainStore.get(domainKey(region, domainName))
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "Invalid domain name identifier specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("domain name"));
     }
 
     public List<CustomDomain> getDomainNames(String region) {
@@ -2781,7 +2813,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 }
                 newEndpointConfigurationType = value;
             } else {
-                throw new AwsException("BadRequestException", "Unsupported path: " + path, 400);
+                throw new AwsException("BadRequestException", path + " Invalid request input", 400);
             }
         }
         if (!Objects.equals(newSecurityPolicy, domain.getSecurityPolicy())) {
@@ -2856,9 +2888,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     }
 
     public BasePathMapping getBasePathMapping(String region, String domainName, String basePath) {
+        getDomainName(region, domainName);
         String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
         return basePathMappingStore.get(mappingKey(region, domainName, path))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Base path mapping not found", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("base path mapping"));
     }
 
     public List<BasePathMapping> getBasePathMappings(String region, String domainName) {
@@ -2907,7 +2940,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         String key = mappingKey(region, domainName, storedBasePath == null ? "" : storedBasePath);
         synchronized (domainNameLock) {
             if (basePathMappingStore.get(key).isEmpty()) {
-                throw new AwsException("NotFoundException", "Base path mapping not found", 404);
+                throw ApiGatewayErrors.notFound("base path mapping");
             }
             basePathMappingStore.delete(key);
         }
@@ -4117,8 +4150,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         if (mode != null && !"merge".equals(mode) && !"overwrite".equals(mode)) {
             // AWS PutRestApi accepts only merge (the default) and overwrite; reject anything
             // else before parsing or mutating so a typo cannot take the destructive overwrite path.
-            throw new AwsException("BadRequestException",
-                    "Invalid mode specified. Valid modes are 'merge' and 'overwrite'.", 400);
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notInEnum(mode, "mode", List.of("overwrite", "merge")));
         }
         ParsedOpenApi parsed = parseOpenApiSpec(region, specBody, failOnWarnings);
         RestApiSnapshot snapshot = snapshotRestApi(region, apiId);
@@ -4241,14 +4274,19 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         entries.forEach(store::put);
     }
 
+    /** A document whose first key is {@code swagger}, as JSON or YAML. */
+    private static final Pattern SWAGGER_FIRST_KEY = Pattern.compile("\\A\\s*\\{?\\s*[\"']?swagger[\"']?\\s*:");
+
     private record ParsedOpenApi(OpenAPI openAPI, List<String> warnings) {}
 
     private ParsedOpenApi parseOpenApiSpec(String region, String specBody, boolean failOnWarnings) {
         SwaggerParseResult result = new OpenAPIParser()
                 .readContents(resolveOpenApiAwsVariables(region, specBody), null, null);
         if (result.getOpenAPI() == null) {
-            String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
-            throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
+            // ponytail: AWS names the parser that refused the document; a leading "swagger" key tells
+            // the two apart for the truncated bodies seen so far, a real version probe if that stops holding.
+            throw new AwsException("BadRequestException",
+                    SWAGGER_FIRST_KEY.matcher(specBody).find() ? "Invalid OpenAPI input." : "Invalid OAS input", 400);
         }
         OpenAPI openAPI = result.getOpenAPI();
         validateImportedAuthorizers(openAPI);
@@ -5124,7 +5162,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 ? (List<String>) arns : List.of();
         if (targetArns.isEmpty()) {
             throw new AwsException("BadRequestException",
-                    "At least one target ARN must be specified", 400);
+                    "Need at least one target arn to create a vpc link", 400);
         }
 
         VpcLink link = new VpcLink();
@@ -5151,7 +5189,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     public VpcLink getVpcLink(String region, String vpcLinkId) {
         return vpcLinkStore.get(vpcLinkKey(region, vpcLinkId))
-                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid VPC link identifier specified", 404));
+                .orElseThrow(() -> ApiGatewayErrors.notFound("Vpc Link"));
     }
 
     /**

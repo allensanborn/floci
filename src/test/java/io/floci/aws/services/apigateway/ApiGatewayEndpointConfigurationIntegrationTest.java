@@ -91,7 +91,8 @@ class ApiGatewayEndpointConfigurationIntegrationTest {
                 .when().post("/restapis")
                 .then()
                 .statusCode(400)
-                .body("message", containsString("REGIONAL, EDGE, or PRIVATE"));
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("[Member must satisfy enum value set: [PRIVATE, EDGE, REGIONAL]]"));
 
         // Private without VPC IDs
         given()

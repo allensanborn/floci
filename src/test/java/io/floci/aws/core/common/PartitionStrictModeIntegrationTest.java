@@ -87,7 +87,7 @@ class PartitionStrictModeIntegrationTest {
         .when().get("/execute-api/nosuchapi/prod/items").then()
             .statusCode(404)
             .header("X-Amzn-Errortype", not(equalTo("UnknownOperationException")))
-            .body("message", equalTo("Invalid API id specified"))
+            .body("message", equalTo("Invalid API identifier specified 000000000000:nosuchapi"))
             .body(not(containsString("has no endpoint in partition")));
     }
 
