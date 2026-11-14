@@ -1043,6 +1043,18 @@ class GlueServiceTest {
     }
 
     @Test
+    void internalTableLookupNamesTheMissingTableButTheApiAndVersionReadsKeepTheConstant() {
+        AwsException internal = assertThrows(AwsException.class, () -> glueService.getTable("db1", "ghost"));
+        assertEquals("EntityNotFoundException", internal.getErrorCode());
+        assertEquals("Table ghost not found.", internal.getMessage());
+
+        assertEquals("Entity Not Found", assertThrows(AwsException.class,
+                () -> glueService.getTableEntity("db1", "ghost")).getMessage());
+        assertEquals("Entity Not Found", assertThrows(AwsException.class,
+                () -> glueService.getTableVersions("db1", "ghost")).getMessage());
+    }
+
+    @Test
     void deleteTableForMissingTableThrows() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> glueService.deleteTable("db1", "missing_table"));

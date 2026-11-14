@@ -462,18 +462,19 @@ public class GlueService {
         LOG.infov("Created Glue Table: {0}.{1}", databaseName, table.getName());
     }
 
+    /** A missing table, named, as the operations that resolve a table internally word it ("Table T not found."). */
     public Table getTable(String databaseName, String tableName) {
-        Table table = tableStore.get(tableKey(databaseName, tableName))
-                .orElseThrow(GlueErrors::tableEntityNotFound);
-        return withResolvedSchemaReference(table);
+        return getTableOrElse(databaseName, tableName, () -> GlueErrors.tableNotFound(tableName));
     }
 
-    /** For the operations whose AWS miss names the table ("Table X not found.") instead of GetTable's constant. */
-    private Table requireTableNamedOnMiss(String databaseName, String tableName) {
-        if (tableStore.get(tableKey(databaseName, tableName)).isEmpty()) {
-            throw GlueErrors.tableNotFound(tableName);
-        }
-        return getTable(databaseName, tableName);
+    /** As {@link #getTable}, but a miss is GetTable's constant "Entity Not Found", which the table-version and statistics operations share. */
+    Table getTableEntity(String databaseName, String tableName) {
+        return getTableOrElse(databaseName, tableName, GlueErrors::tableEntityNotFound);
+    }
+
+    private Table getTableOrElse(String databaseName, String tableName, Supplier<AwsException> miss) {
+        Table table = tableStore.get(tableKey(databaseName, tableName)).orElseThrow(miss);
+        return withResolvedSchemaReference(table);
     }
 
     public List<Table> getTables(String databaseName) {
@@ -710,7 +711,7 @@ public class GlueService {
     }
 
     public List<Map<String, Object>> getTableVersions(String databaseName, String tableName) {
-        Table current = getTable(databaseName, tableName);
+        Table current = getTableEntity(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         List<Table> versions = new ArrayList<>();
         versions.add(current);
@@ -733,7 +734,7 @@ public class GlueService {
 
     /** One archived version, or the current table when no VersionId is given, as AWS answers. */
     public Map<String, Object> getTableVersion(String databaseName, String tableName, String versionId) {
-        Table current = getTable(databaseName, tableName);
+        Table current = getTableEntity(databaseName, tableName);
         Table version;
         if (versionId == null || versionId.isBlank() || versionId.equals(current.getVersionId())) {
             version = current;
@@ -751,7 +752,7 @@ public class GlueService {
      * the way to drop it), so it is refused rather than silently kept.
      */
     public synchronized void deleteTableVersion(String databaseName, String tableName, String versionId) {
-        Table current = getTable(databaseName, tableName);
+        Table current = getTableEntity(databaseName, tableName);
         requireIntegerVersionId(versionId);
         if (versionId.equals(current.getVersionId())) {
             throw GlueErrors.cannotDeleteLatestVersion();
@@ -766,7 +767,7 @@ public class GlueService {
 
     public synchronized List<TableVersionError> batchDeleteTableVersions(
             String databaseName, String tableName, List<String> versionIds) {
-        Table current = getTable(databaseName, tableName);
+        Table current = getTableEntity(databaseName, tableName);
         if (versionIds.size() > 100) {
             throw new AwsException("InvalidInputException",
                     "VersionIds must contain at most 100 versions.", 400);
@@ -795,7 +796,7 @@ public class GlueService {
     }
 
     public synchronized void deleteTable(String databaseName, String tableName) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
         tableVersionStore.keys().stream()
@@ -844,7 +845,7 @@ public class GlueService {
             String databaseName,
             String tableName,
             List<Map<String, Object>> columnStatistics) {
-        Table table = getTable(databaseName, tableName);
+        Table table = getTableEntity(databaseName, tableName);
         for (Map<String, Object> statistics : columnStatistics) {
             String columnNameString = requireColumnStatisticsString(statistics, COLUMN_NAME);
             requireColumnStatisticsString(statistics, COLUMN_TYPE);
@@ -860,7 +861,7 @@ public class GlueService {
             String databaseName,
             String tableName,
             List<String> columnNames) {
-        Table table = getTable(databaseName, tableName);
+        Table table = getTableEntity(databaseName, tableName);
         List<Map<String, Object>> columnStatistics = new ArrayList<>();
         List<ColumnError> errors = new ArrayList<>();
         for (String columnName : columnNames) {
@@ -879,13 +880,13 @@ public class GlueService {
     }
 
     public void deleteColumnStatisticsForTable(String databaseName, String tableName, String columnName) {
-        getTable(databaseName, tableName);
+        getTableEntity(databaseName, tableName);
         columnStatisticsStore.delete(columnStatisticsKey(databaseName, tableName, columnName));
     }
 
     public synchronized void createPartition(String databaseName, String tableName, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
-        Table table = requireTableNamedOnMiss(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
         if (partitionStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
@@ -908,7 +909,7 @@ public class GlueService {
                     descriptorOf(partitions.get(index))));
         }
         requireValidSortColumns(violations);
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         List<BatchCreatePartitionError> errors = new ArrayList<>();
         for (Partition partition : partitions) {
             String key = partitionKey(databaseName, tableName, partition.getValues());
@@ -928,13 +929,13 @@ public class GlueService {
     }
 
     public Partition getPartition(String databaseName, String tableName, List<String> partitionValues) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         return partitionStore.get(partitionKey(databaseName, tableName, partitionValues))
                 .orElseThrow(GlueErrors::partitionNotFound);
     }
 
     public List<Partition> batchGetPartitions(String databaseName, String tableName, List<List<String>> partitionValues) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         List<Partition> partitions = new ArrayList<>();
         for (List<String> values : partitionValues) {
             partitionStore.get(partitionKey(databaseName, tableName, values)).ifPresent(partitions::add);
@@ -953,7 +954,7 @@ public class GlueService {
                     entry == null ? null : descriptorOf(entry.partitionInput())));
         }
         requireValidSortColumns(violations);
-        Table table = requireTableNamedOnMiss(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
         List<BatchUpdatePartitionError> errors = new ArrayList<>();
         for (BatchUpdatePartitionEntry entry : entries) {
             String key = partitionKey(databaseName, tableName, entry.partitionValueList());
@@ -984,7 +985,7 @@ public class GlueService {
      */
     public List<Partition> getPartitions(String databaseName, String tableName, String expression, Segment segment) {
         validateSegment(segment);
-        Table table = requireTableNamedOnMiss(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(partition -> segment == null || Math.floorMod(Objects.hashCode(partition.getValues()),
@@ -1059,7 +1060,7 @@ public class GlueService {
      * otherwise both pass a check that only one of them should.
      */
     public synchronized void createPartitionIndex(String databaseName, String tableName, PartitionIndex index) {
-        Table table = requireTableNamedOnMiss(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
 
         if (index == null || index.getIndexName() == null || index.getIndexName().isBlank()) {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
@@ -1119,7 +1120,7 @@ public class GlueService {
     }
 
     public synchronized void deletePartitionIndex(String databaseName, String tableName, String indexName) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         if (indexName == null || indexName.isBlank()) {
             throw new AwsException("InvalidInputException", "IndexName is required", 400);
         }
@@ -1168,7 +1169,7 @@ public class GlueService {
 
     /** Reads the stored indexes without advancing the lifecycle. */
     private List<PartitionIndexDescriptor> readPartitionIndexes(String databaseName, String tableName) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionIndexStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(PartitionIndexDescriptor::getIndexName))
@@ -1226,7 +1227,7 @@ public class GlueService {
     /** Deletes what exists and reports the rest, the batch shape BatchCreatePartition uses. */
     public List<BatchCreatePartitionError> batchDeletePartitions(
             String databaseName, String tableName, List<List<String>> partitionsToDelete) {
-        requireTableNamedOnMiss(databaseName, tableName);
+        getTable(databaseName, tableName);
         if (partitionsToDelete.size() > 25) {
             throw new AwsException("InvalidInputException",
                     "PartitionsToDelete must contain at most 25 partitions.", 400);
@@ -1245,7 +1246,7 @@ public class GlueService {
 
     public void updatePartition(String databaseName, String tableName, List<String> partitionValues, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
-        Table table = requireTableNamedOnMiss(databaseName, tableName);
+        Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partitionValues);
         Partition existing = partitionStore.get(key)
                 .orElseThrow(() -> GlueErrors.partitionNotFound(partitionValues));

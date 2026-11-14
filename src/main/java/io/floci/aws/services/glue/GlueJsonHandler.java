@@ -112,7 +112,7 @@ public class GlueJsonHandler {
             case "GetTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
-                Table table = glueService.getTable(dbName, tableName);
+                Table table = glueService.getTableEntity(dbName, tableName);
                 yield Response.ok(Map.of("Table", GlueService.withReadDefaults(table))).build();
             }
             case "CreatePartitionIndex" -> {
