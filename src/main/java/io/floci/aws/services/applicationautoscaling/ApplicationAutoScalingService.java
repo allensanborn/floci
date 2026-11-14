@@ -259,13 +259,6 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         }
     }
 
-    public ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
-                                               String schedule, boolean actionSupplied, Integer min, Integer max,
-                                               String timezone, String region) {
-        return putScheduledAction(namespace, resourceId, dimension, name, schedule, actionSupplied, min, max,
-                timezone, region, Instant.now());
-    }
-
     ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
                                        String schedule, boolean actionSupplied, Integer min, Integer max,
                                        String timezone, String region, Instant now) {
@@ -291,6 +284,10 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         if (timezone != null && !ZoneId.getAvailableZoneIds().contains(timezone)) {
             throw new AwsException("ValidationException", "Invalid schedule timezone: " + timezone, 400);
         }
+        // Omitted StartTime/EndTime clear the stored window, unlike every other member.
+        if (startTime != null && endTime != null && endTime < startTime) {
+            throw new AwsException("ValidationException", "StartTime must be before EndTime", 400);
+        }
         synchronized (targetLock(region, namespace, resourceId, dimension)) {
             requireTarget(region, namespace, resourceId, dimension);
             String key = policyKey(region, namespace, resourceId, dimension, name);
@@ -300,10 +297,6 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
             }
             if (existing == null && !actionSupplied) {
                 throw new AwsException("ValidationException", "Schedule and ScalableTargetAction are required.", 400);
-            }
-            // Omitted StartTime/EndTime clear the stored window, unlike every other member.
-            if (startTime != null && endTime != null && endTime < startTime) {
-                throw new AwsException("ValidationException", "StartTime must be before EndTime", 400);
             }
             ScheduledAction action = existing == null ? new ScheduledAction() : new ScheduledAction(existing);
             if (existing == null) {
@@ -316,17 +309,20 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                         "scheduledAction:" + UUID.randomUUID() + ":resource/" + namespace + "/" + resourceId
                                 + ":scheduledActionName/" + name));
             }
+            boolean zoneChanged = timezone != null && !timezone.equals(action.getTimezone());
             if (timezone != null) {
                 action.setTimezone(timezone);
             }
             action.setStartTime(startTime);
             action.setEndTime(endTime);
-            if (schedule != null) {
-                action.setSchedule(schedule);
+            if (schedule != null || zoneChanged && action.getSchedule().startsWith("at(")) {
+                if (schedule != null) {
+                    action.setSchedule(schedule);
+                }
                 // ponytail: only at() on ECS fires; other schedules and dimensions are stored and described, never
                 // executed. Add cron/rate evaluation and per-dimension CapacityAdjusters to dispatch them.
-                Instant deadline = "ecs".equals(namespace) && schedule.startsWith("at(")
-                        ? parseAt(schedule, action.getTimezone()) : null;
+                Instant deadline = "ecs".equals(namespace) && action.getSchedule().startsWith("at(")
+                        ? parseAt(action.getSchedule(), action.getTimezone()) : null;
                 action.setDeadline(deadline);
                 action.setState(deadline == null ? null
                         : deadline.isBefore(now.truncatedTo(ChronoUnit.SECONDS)) ? State.SKIPPED : State.PENDING);

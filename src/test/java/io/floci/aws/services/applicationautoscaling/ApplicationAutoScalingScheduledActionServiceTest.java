@@ -504,4 +504,22 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         action.setState(State.CLAIMED);
         return action;
     }
+
+    @Test
+    void timezoneOnlyUpdateRecomputesTheAtDeadline() {
+        service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "zoned", "at(2099-06-15T10:00:00)", true, 0, 4,
+                null, REGION, NOW);
+        Instant utc = action("zoned").getDeadline();
+        service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "zoned", null, false, null, null,
+                "Asia/Tokyo", REGION, NOW);
+        assertEquals(utc.minusSeconds(9 * 3600), action("zoned").getDeadline());
+        assertEquals("at(2099-06-15T10:00:00)", action("zoned").getSchedule());
+    }
+
+    @Test
+    void windowOrderIsCheckedBeforeTargetAndScheduleRequirements() {
+        AwsException e = assertThrows(AwsException.class, () -> service.putScheduledAction(NAMESPACE, "service/none/x",
+                DIMENSION, "w", null, false, null, null, null, 2.0, 1.0, REGION, NOW));
+        assertEquals("StartTime must be before EndTime", e.getMessage());
+    }
 }
