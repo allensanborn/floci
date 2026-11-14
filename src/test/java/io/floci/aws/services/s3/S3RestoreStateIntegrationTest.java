@@ -255,7 +255,68 @@ class S3RestoreStateIntegrationTest {
             String path = fixture.path() + "?versionId=" + fixture.currentVersion() + "&restore";
             given().body(RESTORE_REQUEST).when().post(path).then().statusCode(202);
             given().body(RESTORE_REQUEST).when().post(path).then().statusCode(409)
-                    .body("Error.Code", equalTo("RestoreAlreadyInProgress"));
+                    .body("Error.Code", equalTo("RestoreAlreadyInProgress"))
+                    .body("Error.Message", equalTo("Object restore is already in progress"));
+        }
+    }
+
+    @Test
+    void restoreOfAnyNonArchivedClassIsRejected() {
+        try (Fixture fixture = new Fixture()) {
+            for (String storageClass : List.of("GLACIER_IR", "INTELLIGENT_TIERING")) {
+                String path = fixture.bucketPath() + "/" + storageClass + ".txt";
+                String version = given().header("x-amz-storage-class", storageClass).body("warm")
+                        .when().put(path).then().statusCode(200).extract().header("x-amz-version-id");
+                given().body(RESTORE_REQUEST).when().post(path + "?versionId=" + version + "&restore")
+                        .then().statusCode(403).body("Error.Code", equalTo("InvalidObjectState"))
+                        .body("Error.Message", equalTo("Restore is not allowed for the object's current storage class"));
+                given().when().head(path).then().statusCode(200).header("x-amz-restore", nullValue());
+                given().when().delete(path + "?versionId=" + version).then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
+    void restoreWithFewerThanOneDayIsRejectedWithoutStateChange() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.path() + "?versionId=" + fixture.currentVersion();
+            for (String days : List.of("0", "-1")) {
+                given().body("<RestoreRequest><Days>" + days + "</Days></RestoreRequest>")
+                        .when().post(path + "&restore").then().statusCode(400)
+                        .body("Error.Code", equalTo("InvalidArgument"))
+                        .body("Error.Message", equalTo("restoration days should be at least 1"));
+            }
+            given().when().head(path).then().statusCode(200).header("x-amz-restore", nullValue());
+        }
+    }
+
+    @Test
+    void copyOfArchivedSourceRequiresCompletedRestore() {
+        try (Fixture fixture = new Fixture()) {
+            String source = fixture.path() + "?versionId=" + fixture.currentVersion();
+            String copySource = fixture.bucket() + "/archived.txt?versionId=" + fixture.currentVersion();
+            String destination = fixture.bucketPath() + "/copy.txt";
+            given().header("x-amz-copy-source", copySource).when().put(destination).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"))
+                    .body("Error.Message", equalTo("Operation is not valid for the source object's storage class"));
+            String uploadId = XmlParser.extractFirst(given().when().post(fixture.bucketPath() + "/mpu.txt?uploads")
+                    .then().statusCode(200).extract().asString(), "UploadId", null);
+            given().header("x-amz-copy-source", copySource).when()
+                    .put(fixture.bucketPath() + "/mpu.txt?partNumber=1&uploadId=" + uploadId)
+                    .then().statusCode(403).body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().delete(fixture.bucketPath() + "/mpu.txt?uploadId=" + uploadId).then().statusCode(204);
+            given().when().head(destination).then().statusCode(404);
+
+            given().body(RESTORE_REQUEST).when().post(source + "&restore").then().statusCode(202);
+            given().header("x-amz-copy-source", copySource).when().put(destination).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+
+            clock.advance(Duration.ofSeconds(61));
+            String copyVersion = given().header("x-amz-copy-source", copySource).when().put(destination)
+                    .then().statusCode(200).extract().header("x-amz-version-id");
+            given().when().get(destination).then().statusCode(200).body(equalTo("current"))
+                    .header("x-amz-storage-class", equalTo("STANDARD"));
+            given().when().delete(destination + "?versionId=" + copyVersion).then().statusCode(204);
         }
     }
 
@@ -310,7 +371,8 @@ class S3RestoreStateIntegrationTest {
                         "<RestoreRequest><Days>1</Days><GlacierJobParameters><Tier>Expedited</Tier>"
                                 + "</GlacierJobParameters></RestoreRequest>")) {
                     given().body(request).when().post(path + "?versionId=" + version + "&restore")
-                            .then().statusCode(400);
+                            .then().statusCode(400).body("Error.Code", equalTo("InvalidTier"))
+                            .body("Error.Message", equalTo("Retrieval option is not supported by this storage class."));
                     given().when().head(path + "?versionId=" + version).then().statusCode(200)
                             .header("x-amz-restore", nullValue());
                 }
@@ -369,7 +431,6 @@ class S3RestoreStateIntegrationTest {
         try (Fixture fixture = new Fixture()) {
             String path = fixture.path() + "?versionId=" + fixture.currentVersion();
             for (String invalid : List.of("<RestoreRequest/>",
-                    "<RestoreRequest><Days>0</Days></RestoreRequest>",
                     "<RestoreRequest><Days>invalid</Days></RestoreRequest>",
                     "<RestoreRequest><Nested><Days>1</Days></Nested></RestoreRequest>",
                     "<RestoreRequest><Days>1</Days><Days>2</Days></RestoreRequest>",
@@ -397,7 +458,8 @@ class S3RestoreStateIntegrationTest {
                     .when().put(fixture.bucketPath() + "/ordinary.txt").then().statusCode(200)
                     .extract().header("x-amz-version-id");
             given().body(RESTORE_REQUEST).when().post(fixture.bucketPath() + "/ordinary.txt?restore")
-                    .then().statusCode(403).body("Error.Code", equalTo("ObjectAlreadyInActiveTierError"));
+                    .then().statusCode(403).body("Error.Code", equalTo("InvalidObjectState"))
+                    .body("Error.Message", equalTo("Restore is not allowed for the object's current storage class"));
             given().when().head(fixture.bucketPath() + "/ordinary.txt").then().statusCode(200)
                     .header("x-amz-restore", nullValue());
             given().when().get(fixture.bucketPath() + "/ordinary.txt")
@@ -449,6 +511,7 @@ class S3RestoreStateIntegrationTest {
 
         private void trackVersion(String version) { versions.add(version); }
 
+        private String bucket() { return bucket; }
         private String bucketPath() { return "/" + bucket; }
         private String path() { return path; }
         private String olderVersion() { return olderVersion; }

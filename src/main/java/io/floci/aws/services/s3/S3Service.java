@@ -2877,6 +2877,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object copyPinnedSource(String sourceBucket, String sourceKey, String destBucket, String destKey,
                                       CopySource source, CopyObjectOptions effectiveOptions) {
         try {
+            requireArchivedCopySourceReadable(source.object());
             checkCopySourcePreconditions(source.object(), effectiveOptions.getCopySourceConditions());
             validateSseCustomerAccess(source.object(),
                     effectiveOptions.getCopySourceSseCustomerAlgorithm(),
@@ -5122,6 +5123,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // the part has to fit in memory in the disk-backed modes.
         try (ObjectRead read = openObject(sourceBucket, sourceKey, sourceVersionId)) {
             S3Object source = read.object();
+            requireArchivedCopySourceReadable(source);
             checkCopySourcePreconditions(source, copySourceConditions);
             validateSseCustomerAccess(source,
                     copySourceSseCustomerHeaders.algorithm(),
@@ -6856,14 +6858,26 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public void requireArchivedObjectReadable(S3Object object) {
-        if ("GLACIER".equals(object.getStorageClass()) || "DEEP_ARCHIVE".equals(object.getStorageClass())) {
+        requireArchivedObjectReadable(object, "The operation is not valid for the object's storage class");
+    }
+
+    /** The same bar for the source of a copy, which S3 words for the object being copied from. */
+    private void requireArchivedCopySourceReadable(S3Object source) {
+        requireArchivedObjectReadable(source, "Operation is not valid for the source object's storage class");
+    }
+
+    private void requireArchivedObjectReadable(S3Object object, String message) {
+        if (isArchivedStorageClass(object.getStorageClass())) {
             RestoreStatus restore = restoreStatus(object);
             if (restore == null || restore.inProgress()) {
-                throw new AwsException("InvalidObjectState",
-                        "The operation is not valid for the object's storage class", 403,
+                throw new AwsException("InvalidObjectState", message, 403,
                         Map.of("StorageClass", object.getStorageClass()));
             }
         }
+    }
+
+    private static boolean isArchivedStorageClass(String storageClass) {
+        return "GLACIER".equals(storageClass) || "DEEP_ARCHIVE".equals(storageClass);
     }
 
     private static RestoreStatus restoreStatus(S3Object object, Instant now) {
@@ -6885,15 +6899,15 @@ public class S3Service implements Resettable, ResourceProvider {
         synchronized (ownedBucket.value()) {
             S3Object object = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
             int days = restoreDays(restoreXml, object.getStorageClass());
-            if (!"GLACIER".equals(object.getStorageClass()) && !"DEEP_ARCHIVE".equals(object.getStorageClass())) {
-                throw new AwsException("ObjectAlreadyInActiveTierError",
-                        "This operation is not valid for objects in the active storage tier.", 403);
+            if (!isArchivedStorageClass(object.getStorageClass())) {
+                throw new AwsException("InvalidObjectState",
+                        "Restore is not allowed for the object's current storage class", 403);
             }
 
             Instant now = clock.instant();
             RestoreStatus status = restoreStatus(object, now);
             if (status != null && status.inProgress()) {
-                throw new AwsException("RestoreAlreadyInProgress", "Object restore is already in progress.", 409);
+                throw new AwsException("RestoreAlreadyInProgress", "Object restore is already in progress", 409);
             }
             boolean started = status == null;
             try {
@@ -6947,14 +6961,15 @@ public class S3Service implements Resettable, ResourceProvider {
             throw malformedRestoreRequest();
         }
         if ("DEEP_ARCHIVE".equals(storageClass) && expedited) {
-            throw new AwsException("InvalidArgument",
-                    "Expedited retrievals are not supported for S3 Glacier Deep Archive.", 400);
+            throw new AwsException("InvalidTier",
+                    "Retrieval option is not supported by this storage class.", 400);
         }
         try {
             int days = Integer.parseInt(daysElement.text());
             if (days > 0) {
                 return days;
             }
+            throw new AwsException("InvalidArgument", "restoration days should be at least 1", 400);
         } catch (NumberFormatException ignored) {
             // Fall through to the same protocol error as non-positive Days.
         }
@@ -8519,9 +8534,9 @@ public class S3Service implements Resettable, ResourceProvider {
         String effectiveContentType = replaceMetadata && effectiveOptions.getContentType() != null
                 ? effectiveOptions.getContentType()
                 : source.getContentType();
-        String effectiveStorageClass = effectiveOptions.getStorageClass() != null
-                ? effectiveOptions.getStorageClass()
-                : source.getStorageClass();
+        // A copy does not inherit the source's storage class: absent the header it is STANDARD, which
+        // is what makes a copy of a restored archive object readable.
+        String effectiveStorageClass = effectiveOptions.getStorageClass();
         String effectiveContentEncoding = replaceMetadata && effectiveOptions.getContentEncoding() != null
                 ? effectiveOptions.getContentEncoding()
                 : source.getContentEncoding();
