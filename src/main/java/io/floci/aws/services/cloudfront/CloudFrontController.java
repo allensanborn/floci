@@ -1382,7 +1382,7 @@ public class CloudFrontController {
     @Path("/key-group/{Id}")
     public Response getKeyGroup(@PathParam("Id") String id) {
         try {
-            KeyGroup group = service.getKeyGroup(id);
+            KeyGroup group = service.describeKeyGroup(id);
             return Response.ok(xmlKeyGroupResponse(group), XML).header("ETag", group.getEtag()).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1758,7 +1758,7 @@ public class CloudFrontController {
     @Path("/field-level-encryption-profile/{Id}")
     public Response getFieldLevelEncryptionProfile(@PathParam("Id") String id) {
         try {
-            FieldLevelEncryptionProfile profile = service.getFieldLevelEncryptionProfile(id);
+            FieldLevelEncryptionProfile profile = service.describeFieldLevelEncryptionProfile(id);
             return Response.ok(xmlFieldLevelEncryptionProfileResponse(profile), XML)
                     .header("ETag", profile.getEtag()).build();
         } catch (AwsException e) {
@@ -2640,7 +2640,8 @@ public class CloudFrontController {
                 .start("Error")
                 .elem("Type", "Client")
                 .elem("Code", e.getErrorCode())
-                .elem("Message", e.getMessage())
+                // AWS omits the element for an empty message (botocore reads it back as "")
+                .elem("Message", e.getMessage().isEmpty() ? null : e.getMessage())
                 .end("Error")
                 .elem("RequestId", "00000000-0000-0000-0000-000000000000")
                 .end("ErrorResponse")
@@ -3574,20 +3575,14 @@ public class CloudFrontController {
                     400);
         }
         if (quantity != itemCount) {
-            throw new AwsException(
-                    "InconsistentQuantities",
-                    "The value of Quantity does not match the number of items.",
-                    400);
+            throw CloudFrontErrors.inconsistentTrustedKeyGroupQuantity(quantity, itemCount);
         }
     }
 
     private static void validateEnabledTrustedKeyGroups(
             boolean enabled, int itemCount) {
         if (enabled && itemCount == 0) {
-            throw new AwsException(
-                    "InvalidArgument",
-                    "TrustedKeyGroups cannot be enabled without a key group.",
-                    400);
+            throw CloudFrontErrors.trustedKeyGroupsEnabledWithoutItems();
         }
     }
 
