@@ -29,6 +29,8 @@ class S3ObjectLockVersionedWriteTest {
     private static final String BUCKET = "lock-bucket";
     private static final byte[] BODY = "body".getBytes(StandardCharsets.UTF_8);
 
+    private static final String LOCK_DENIED = "Access Denied because object protected by object lock.";
+
     private S3Service s3Service;
 
     @TempDir
@@ -169,5 +171,20 @@ class S3ObjectLockVersionedWriteTest {
     private static void assertAccessDenied(Runnable action) {
         AwsException exception = assertThrows(AwsException.class, action::run);
         assertEquals("AccessDenied", exception.getErrorCode());
+        assertEquals(403, exception.getHttpStatus());
+        assertEquals(LOCK_DENIED, exception.getMessage());
+    }
+
+    @Test
+    void retentionRefusalsUseTheMessageS3Sends() {
+        S3Object governed = putRetention("g.txt", "GOVERNANCE");
+        S3Object compliance = putRetention("c.txt", "COMPLIANCE");
+        Instant sooner = Instant.now().plusSeconds(60);
+        assertAccessDenied(() -> s3Service.putObjectRetention(BUCKET, "g.txt", governed.getVersionId(),
+                "GOVERNANCE", sooner, false));
+        assertAccessDenied(() -> s3Service.putObjectRetention(BUCKET, "c.txt", compliance.getVersionId(),
+                "COMPLIANCE", sooner, false));
+        assertAccessDenied(() -> s3Service.putObjectRetention(BUCKET, "c.txt", compliance.getVersionId(),
+                "GOVERNANCE", Instant.now().plusSeconds(7200), false));
     }
 }

@@ -1916,16 +1916,19 @@ public class S3Service implements Resettable, ResourceProvider {
                 .isPresent();
     }
 
+    /** The message S3 sends beside the 403 AccessDenied of any call an Object Lock retention or legal hold bars. */
+    private static final String OBJECT_LOCK_DENIED = "Access Denied because object protected by object lock.";
+
     private void checkLockProtection(S3Object obj, boolean bypassGovernance) {
         if ("ON".equals(obj.getLegalHoldStatus())) {
-            throw new AwsException("AccessDenied", "Object has an active legal hold", 403);
+            throw new AwsException("AccessDenied", OBJECT_LOCK_DENIED, 403);
         }
         if (obj.getRetainUntilDate() != null && Instant.now().isBefore(obj.getRetainUntilDate())) {
             if ("COMPLIANCE".equals(obj.getObjectLockMode())) {
-                throw new AwsException("AccessDenied", "Object is protected by COMPLIANCE retention", 403);
+                throw new AwsException("AccessDenied", OBJECT_LOCK_DENIED, 403);
             }
             if ("GOVERNANCE".equals(obj.getObjectLockMode()) && !bypassGovernance) {
-                throw new AwsException("AccessDenied", "Object is protected by GOVERNANCE retention", 403);
+                throw new AwsException("AccessDenied", OBJECT_LOCK_DENIED, 403);
             }
         }
     }
@@ -4610,7 +4613,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // retention date is unchanged or extended.
             if (activeComplianceRetention && !"COMPLIANCE".equals(mode)) {
                 throw new AwsException("AccessDenied",
-                        "COMPLIANCE retention mode cannot be changed", 403);
+                        OBJECT_LOCK_DENIED, 403);
             }
 
             // Active COMPLIANCE mode: retainUntil cannot be shortened.
@@ -4618,7 +4621,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     && retainUntil != null
                     && retainUntil.isBefore(obj.getRetainUntilDate())) {
                 throw new AwsException("AccessDenied",
-                        "COMPLIANCE retention period cannot be shortened", 403);
+                        OBJECT_LOCK_DENIED, 403);
             }
 
             // Check bypass permission for existing governance lock when shortening/removing
@@ -4628,7 +4631,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     && !bypassGovernance) {
                 if (retainUntil == null || retainUntil.isBefore(obj.getRetainUntilDate())) {
                     throw new AwsException("AccessDenied",
-                            "Object is protected by GOVERNANCE retention", 403);
+                            OBJECT_LOCK_DENIED, 403);
                 }
             }
 
