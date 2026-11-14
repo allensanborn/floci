@@ -118,12 +118,12 @@ public class Ec2QueryHandler {
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
-                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
-                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
-                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
-                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
+                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(params, region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(params, region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(params, region);
+                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(params, region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
-                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(params, region);
                 // AMI block public access
                 case "EnableImageBlockPublicAccess" -> handleEnableImageBlockPublicAccess(params, region);
                 case "DisableImageBlockPublicAccess" -> handleDisableImageBlockPublicAccess(params, region);
@@ -197,9 +197,8 @@ public class Ec2QueryHandler {
                         handleCreateTransitGatewayPeeringAttachment(params, region);
                 case "DescribeTransitGatewayPeeringAttachments" ->
                         handleDescribeTransitGatewayPeeringAttachments(params, region);
-                case "AcceptTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
-                        "AcceptTransitGatewayPeeringAttachmentResponse", service.acceptTransitGatewayPeeringAttachment(
-                                region, params.getFirst("TransitGatewayAttachmentId")));
+                case "AcceptTransitGatewayPeeringAttachment" ->
+                        handleAcceptTransitGatewayPeeringAttachment(params, region);
                 case "DeleteTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
                         "DeleteTransitGatewayPeeringAttachmentResponse", service.deleteTransitGatewayPeeringAttachment(
                                 region, params.getFirst("TransitGatewayAttachmentId")));
@@ -462,7 +461,7 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Boolean parseOptionalBoolean(String value, String name) {
+    private static Boolean parseOptionalBoolean(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
         }
@@ -673,32 +672,37 @@ public class Ec2QueryHandler {
 
     // ─── EBS encryption defaults ─────────────────────────────────────────────
 
-    private Response handleGetEbsEncryptionByDefault(String region) {
+    private Response handleGetEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("GetEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.getEbsEncryptionByDefault(region));
     }
 
-    private Response handleEnableEbsEncryptionByDefault(String region) {
+    private Response handleEnableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.enableEbsEncryptionByDefault(region));
     }
 
-    private Response handleDisableEbsEncryptionByDefault(String region) {
+    private Response handleDisableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.disableEbsEncryptionByDefault(region));
     }
 
-    private Response handleGetEbsDefaultKmsKeyId(String region) {
+    private Response handleGetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("GetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.getEbsDefaultKmsKeyId(region));
     }
 
     private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
         return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
-                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId"), dryRun(p)));
     }
 
-    private Response handleResetEbsDefaultKmsKeyId(String region) {
+    private Response handleResetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
     }
@@ -1948,6 +1952,7 @@ public class Ec2QueryHandler {
             return Ec2ErrorResponses.of(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2195,6 +2200,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "FlowLogId");
         if (ids.isEmpty()) {
             ids = getList(p, "FlowLogIds.member");
@@ -2360,14 +2366,14 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private void checkDryRun(MultivaluedMap<String, String> params) {
+    static void checkDryRun(MultivaluedMap<String, String> params) {
         if (dryRun(params)) {
             throw Ec2Service.dryRunOperation();
         }
     }
 
     /** The request's DryRun flag. A blank or non-boolean value is refused rather than read as false. */
-    private boolean dryRun(MultivaluedMap<String, String> params) {
+    static boolean dryRun(MultivaluedMap<String, String> params) {
         String value = params.getFirst("DryRun");
         if (value != null && value.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
@@ -2670,6 +2676,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2708,6 +2715,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2782,6 +2790,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeTransitGateways(MultivaluedMap<String, String> p, String region) {
         List<TransitGateway> gateways = service.describeTransitGateways(
                 region, getList(p, "TransitGatewayIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2812,7 +2821,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteTransitGateway(MultivaluedMap<String, String> p, String region) {
-        TransitGateway gateway = service.deleteTransitGateway(region, p.getFirst("TransitGatewayId"));
+        TransitGateway gateway = service.deleteTransitGateway(region, p.getFirst("TransitGatewayId"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteTransitGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2857,6 +2866,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayVpcAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2876,6 +2886,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2906,6 +2917,7 @@ public class Ec2QueryHandler {
     /** floci does not yet support creating Connect attachments, so this is always an empty list. */
     private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
         service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2956,14 +2968,24 @@ public class Ec2QueryHandler {
                         parseTagsForResource(p, "transit-gateway-attachment")));
     }
 
+    private Response handleAcceptTransitGatewayPeeringAttachment(MultivaluedMap<String, String> p, String region) {
+        // AWS answers DryRun once the id is well formed and before it looks the attachment up.
+        Ec2Service.requirePeeringAttachmentIdForm(p.getFirst("TransitGatewayAttachmentId"));
+        checkDryRun(p);
+        return peeringAttachmentResponse("AcceptTransitGatewayPeeringAttachmentResponse",
+                service.acceptTransitGatewayPeeringAttachment(region, p.getFirst("TransitGatewayAttachmentId")));
+    }
+
     private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
                                                                    String region) {
+        List<TransitGatewayPeeringAttachment> attachments = service.describeTransitGatewayPeeringAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("transitGatewayPeeringAttachments");
-        for (TransitGatewayPeeringAttachment attachment : service.describeTransitGatewayPeeringAttachments(
-                region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p))) {
+        for (TransitGatewayPeeringAttachment attachment : attachments) {
             xml.start("item").raw(peeringAttachmentXml(attachment)).end("item");
         }
         xml.end("transitGatewayPeeringAttachments").end("DescribeTransitGatewayPeeringAttachmentsResponse");
@@ -3027,6 +3049,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
         List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
                 region, getList(p, "TransitGatewayRouteTableIds"), getFiltersList(p));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayRouteTablesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3052,7 +3075,8 @@ public class Ec2QueryHandler {
 
     private Response handleAssociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
         TransitGatewayVpcAttachment attachment = service.associateTransitGatewayRouteTable(
-                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"),
+                dryRun(p));
         // Verified live: the call reports the transitional state even though the association is
         // already recorded.
         return xmlResponse(new XmlBuilder()
@@ -3107,7 +3131,8 @@ public class Ec2QueryHandler {
     private Response handleDisableTransitGatewayRouteTablePropagation(
             MultivaluedMap<String, String> p, String region) {
         TransitGatewayRouteTablePropagation propagation = service.disableTransitGatewayRouteTablePropagation(
-                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"),
+                dryRun(p));
         return xmlResponse(new XmlBuilder()
                 .start("DisableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3138,7 +3163,8 @@ public class Ec2QueryHandler {
                 p.getFirst("TransitGatewayRouteTableId"),
                 p.getFirst("DestinationCidrBlock"),
                 p.getFirst("TransitGatewayAttachmentId"),
-                Boolean.parseBoolean(p.getFirst("Blackhole")));
+                Boolean.parseBoolean(p.getFirst("Blackhole")),
+                dryRun(p));
         return xmlResponse(new XmlBuilder()
                 .start("CreateTransitGatewayRouteResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3189,6 +3215,7 @@ public class Ec2QueryHandler {
     private Response handleExportTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
         String s3Location = service.exportTransitGatewayRoutes(
                 region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("S3Bucket"));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("ExportTransitGatewayRoutesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3875,6 +3902,7 @@ public class Ec2QueryHandler {
         if (noName && noId) {
             throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
         }
+        checkDryRun(p);
         KeyPair deleted = service.deleteKeyPair(region, keyName, keyPairId);
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteKeyPairResponse", AwsNamespaces.EC2)
@@ -4320,6 +4348,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "RouteTableId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<RouteTable> rts = service.describeRouteTables(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeRouteTablesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4546,6 +4575,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "NetworkAclId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNetworkAclsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4628,6 +4658,7 @@ public class Ec2QueryHandler {
         List<String> natGatewayIds = getList(p, "NatGatewayId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4772,6 +4803,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "CapacityReservationId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4790,7 +4822,8 @@ public class Ec2QueryHandler {
                 intOrNull(p, "InstanceCount"),
                 instantOrNull(p, "EndDate"),
                 p.getFirst("EndDateType"),
-                p.getFirst("InstanceMatchCriteria"));
+                p.getFirst("InstanceMatchCriteria"),
+                dryRun(p));
         return booleanResponse("ModifyCapacityReservation");
     }
 
@@ -5000,7 +5033,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDisassociateAddress(MultivaluedMap<String, String> p, String region) {
-        service.disassociateAddress(region, p.getFirst("AssociationId"));
+        service.disassociateAddress(region, p.getFirst("AssociationId"), dryRun(p));
         return booleanResponse("DisassociateAddress");
     }
 
@@ -5075,6 +5108,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeRegions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         // The partition the request is scoped to, not the region's own: a region no partition
         // publishes is served in the deployment's partition, where its ARNs are minted too.
         AwsPartition partition = AwsPartitions.byId(regionResolver.partitionForRegion(region));
@@ -5099,6 +5133,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeAccountAttributes(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Map<String, String> attrs = service.describeAccountAttributes(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAccountAttributesResponse", AwsNamespaces.EC2)
@@ -5119,6 +5154,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeInstanceTypes(MultivaluedMap<String, String> p, String region) {
         List<String> typeNames = getList(p, "InstanceType");
         List<Map<String, Object>> types = service.describeInstanceTypes(typeNames);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceTypesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5287,7 +5323,7 @@ public class Ec2QueryHandler {
 
     private Response handleDeleteLaunchTemplate(MultivaluedMap<String, String> p, String region) {
         LaunchTemplate launchTemplate = service.deleteLaunchTemplate(
-                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"));
+                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5335,6 +5371,7 @@ public class Ec2QueryHandler {
         String nextToken = p.getFirst("NextToken");
 
         NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
+        checkDryRun(p);
         List<NetworkInterface> nis = result.networkInterfaces();
 
         XmlBuilder xml = new XmlBuilder()
