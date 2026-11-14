@@ -670,7 +670,7 @@ class CognitoServiceTest {
                 pool, client, flow, "nobody", "wrong"));
 
         assertEquals("UserNotFoundException", unknownUser.getErrorCode());
-        assertEquals("User not found", unknownUser.getMessage());
+        assertEquals("User does not exist.", unknownUser.getMessage());
     }
 
     private Map<String, Object> passwordAuth(UserPool pool, UserPoolClient client, String flow,

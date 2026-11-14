@@ -64,7 +64,7 @@ class CognitoPasswordUserExistenceIntegrationTest {
             passwordAuth(poolId, clientId, flow, "nobody", "wrong").then()
                     .statusCode(400)
                     .body("__type", equalTo(hidden ? "NotAuthorizedException" : "UserNotFoundException"))
-                    .body("message", equalTo(hidden ? "Incorrect username or password" : "User not found"))
+                    .body("message", equalTo(hidden ? "Incorrect username or password" : "User does not exist."))
                     .body("AuthenticationResult", nullValue());
 
             passwordAuth(poolId, clientId, flow, "alice", "Perm1234!").then()

@@ -2413,7 +2413,7 @@ public class CognitoService implements ResourceProvider {
             existing = findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username);
         }
         if (existing == null) {
-            throw new AwsException("UserNotFoundException", "User not found", 400);
+            throw CognitoErrors.userNotFound();
         }
         if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
             final String userStateExceptionMessage = """
@@ -2739,6 +2739,21 @@ public class CognitoService implements ResourceProvider {
         LOG.infov("DeleteUser: deleted user {0} in pool {1}", username, poolId);
     }
 
+    /**
+     * {@link #adminGetUser} for the public operations that name the user by {@code ClientId} and
+     * {@code Username} rather than by pool, which report a miss as the pair not being found.
+     */
+    private CognitoUser adminGetUserForClient(String userPoolId, String username) {
+        try {
+            return adminGetUser(userPoolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())) {
+                throw CognitoErrors.usernameClientNotFound();
+            }
+            throw e;
+        }
+    }
+
     public CognitoUser adminGetUser(String userPoolId, String username) {
         UserPool pool = poolStore.get(userPoolId).orElseThrow(
                 () -> userPoolNotFound(userPoolId));
@@ -2750,7 +2765,7 @@ public class CognitoService implements ResourceProvider {
                 .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username))
                 .forEach(u -> matches.putIfAbsent(u.getUsername(), u));
         if (matches.isEmpty()) {
-            throw new AwsException("UserNotFoundException", "User not found", 400);
+            throw CognitoErrors.userNotFound();
         }
         if (matches.size() > 1) {
             throw new AwsException("InvalidParameterException",
@@ -3682,7 +3697,7 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
-        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        CognitoUser resolvedUser = adminGetUserForClient(userPoolId, username);
         UserPool pool;
         CognitoUser triggerUser;
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
@@ -3744,7 +3759,7 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         UserPool pool = describeUserPool(client.getUserPoolId());
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         if (!"UNCONFIRMED".equals(user.getUserStatus())) {
             throw new AwsException("NotAuthorizedException",
                     "User cannot be confirmed. Current status is " + user.getUserStatus(), 400);
@@ -4372,7 +4387,7 @@ public class CognitoService implements ResourceProvider {
         if (accountRecoveryMechanisms(pool).contains("admin_only")) {
             throw new AwsException("NotAuthorizedException", "Contact administrator to reset password.", 400);
         }
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         ensureVerificationWiring();
         DeliveryTarget deliveryTarget = resolveForgotPasswordDeliveryTarget(pool, user);
 
@@ -4406,7 +4421,7 @@ public class CognitoService implements ResourceProvider {
                                       Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         ensureVerificationWiring();
         try {
             verificationCodeService.consume(client.getUserPoolId(), user.getUsername(),
