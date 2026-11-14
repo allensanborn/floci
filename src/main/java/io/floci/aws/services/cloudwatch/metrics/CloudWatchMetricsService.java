@@ -912,7 +912,7 @@ public class CloudWatchMetricsService {
         synchronized (this) {
             String key = region + "::" + alarmName;
             Alarm alarm = alarmStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFound", "Alarm not found: " + alarmName, 404));
+                    .orElseThrow(() -> new AwsException("ResourceNotFound", null, 404));
 
             String oldState = alarm.getStateValue();
             changeState(alarm, region, stateValue, stateReason, stateReasonData);
@@ -1042,19 +1042,17 @@ public class CloudWatchMetricsService {
      * and {@code GetDashboard} declare; the SDK maps the two codes to two exception classes,
      * so the tag path uses the longer one rather than the code used elsewhere in this service.
      *
-     * <p>The message names the ARN rather than asserting it was an alarm, because both tag
-     * handlers route every ARN that is not a dashboard and not a metric stream here. That
-     * includes kinds AWS considers taggable and Floci does not serve, a Contributor Insights
-     * {@code insight-rule/} ARN being the one AWS documents; reporting that no resource
-     * matches the ARN is true of those, where "alarm not found" would not be.
+     * <p>The refusal carries no message, as AWS sends it, so it is the same whichever kind of
+     * resource the ARN named. Both tag handlers route every ARN that is not a dashboard and not a
+     * metric stream here, including kinds AWS considers taggable and Floci does not serve, a
+     * Contributor Insights {@code insight-rule/} ARN being the one AWS documents.
      */
     private Alarm requireAlarm(String resourceArn, String region) {
         return alarmStore.scan(k -> k.startsWith(region + "::"))
                 .stream()
                 .filter(a -> a.getAlarmArn() != null && a.getAlarmArn().equals(resourceArn))
                 .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "No CloudWatch resource matches the ARN " + resourceArn + ".", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", null, 404));
     }
 
     public synchronized Map<String, String> listTagsForResource(String resourceArn, String region) {

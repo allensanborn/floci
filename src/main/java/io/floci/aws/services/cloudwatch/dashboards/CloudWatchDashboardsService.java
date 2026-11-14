@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * CloudWatch dashboards. Dashboards are pure metadata: the DashboardBody is an opaque JSON
@@ -40,6 +41,9 @@ public class CloudWatchDashboardsService {
     // leading object and the rest is silently dropped, so a document AWS rejects would be stored.
     /** AWS's documented ceiling for PutDashboard's Tags. */
     private static final int MAX_TAGS = 50;
+
+    private static final int MAX_NAME_LENGTH = 255;
+    private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]+");
 
     private static final ObjectReader JSON = new ObjectMapper()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -80,6 +84,18 @@ public class CloudWatchDashboardsService {
         if (dashboardName == null || dashboardName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DashboardName is required.", 400);
         }
+        // PutDashboardInput$DashboardName: "The maximum length is 255, and valid characters are A-Z, a-z, 0-9, "-", and "_"". AWS
+        // closes the sentence with a newline, and checks the name before it reads the body.
+        if (dashboardName.length() > MAX_NAME_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "The value for field DashboardName is too long. It must have length less than or equal to "
+                            + MAX_NAME_LENGTH + ".\n", 400);
+        }
+        if (!VALID_NAME.matcher(dashboardName).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The value for field DashboardName contains invalid characters. "
+                            + "It can only contain alphanumerics, dash (-) and underscore (_).\n", 400);
+        }
         if (dashboardBody == null) {
             throw new AwsException("InvalidParameterValue", "DashboardBody is required.", 400);
         }
@@ -115,19 +131,22 @@ public class CloudWatchDashboardsService {
         try {
             parsed = JSON.readValue(dashboardBody);
         } catch (JsonProcessingException e) {
-            throw new AwsException("InvalidParameterInput",
-                    "The dashboard body is invalid: " + e.getOriginalMessage(), 400);
+            throw invalidBody();
         }
         if (parsed == null || !parsed.isObject()) {
-            throw new AwsException("InvalidParameterInput",
-                    "The dashboard body is invalid: it must be a JSON object.", 400);
+            throw invalidBody();
         }
+    }
+
+    private static AwsException invalidBody() {
+        return new AwsException("InvalidParameterInput", "The field DashboardBody must be a valid JSON object", 400);
     }
 
     public Dashboard getDashboard(String dashboardName, String region) {
         return dashboardStore.get(key(region, dashboardName))
                 .map(CloudWatchDashboardsService::withRegionlessArn)
-                .orElseThrow(() -> notFound(dashboardName));
+                .orElseThrow(() -> new AwsException("ResourceNotFound",
+                        "Dashboard " + dashboardName + " does not exist", 404));
     }
 
     public List<Dashboard> listDashboards(String dashboardNamePrefix, String region) {
@@ -221,8 +240,7 @@ public class CloudWatchDashboardsService {
      */
     private Dashboard requireDashboard(String resourceArn, String region) {
         return findByArn(resourceArn, region).orElseThrow(() ->
-                new AwsException("ResourceNotFoundException",
-                        "Dashboard does not exist: " + resourceArn, 404));
+                new AwsException("ResourceNotFoundException", null, 404));
     }
 
     private Optional<Dashboard> findByArn(String resourceArn, String region) {

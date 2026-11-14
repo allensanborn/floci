@@ -90,7 +90,7 @@ public class JsonErrorResponseUtils {
         }
         return Response.status(httpStatusCode)
                 .header("x-amzn-query-error", queryError + ";" + queryErrorFault)
-                .entity(new AwsErrorResponse(errorType, errorMessage))
+                .entity(AwsErrorResponse.omittingNullMessage(errorType, errorMessage))
                 .build();
     }
 }

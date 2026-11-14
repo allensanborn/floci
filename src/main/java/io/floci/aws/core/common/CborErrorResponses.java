@@ -29,7 +29,7 @@ public final class CborErrorResponses {
 
     public static Response of(AwsException e, String mediaType) {
         try {
-            byte[] body = CBOR_MAPPER.writeValueAsBytes(new AwsErrorResponse(e.jsonType(), e.getMessage()));
+            byte[] body = CBOR_MAPPER.writeValueAsBytes(AwsErrorResponse.omittingNullMessage(e.jsonType(), e.getMessage()));
             String fault = e.getHttpStatus() < 500 ? "Sender" : "Receiver";
             return Response.status(e.getHttpStatus())
                     .header("smithy-protocol", "rpc-v2-cbor")
