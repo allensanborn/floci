@@ -1,0 +1,157 @@
+package io.floci.aws.services.iam;
+
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+
+/**
+ * Pins the exact error codes and messages IAM returns for missing and duplicate entities.
+ * RestAssured is used deliberately so the raw wire messages are asserted, not SDK-rewritten ones.
+ */
+@QuarkusTest
+class IamEntityMessagesIntegrationTest {
+
+    private static final String ACCOUNT = "000000000000";
+    private static final String DOC = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+
+    private static String id() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private static RequestSpecification request() {
+        return given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
+                        + "/20260215/us-east-1/iam/aws4_request, SignedHeaders=host, Signature=abc");
+    }
+
+    private static void call(int status, String code, String message, String... params) {
+        RequestSpecification req = request();
+        for (int i = 0; i < params.length; i += 2) {
+            req = req.formParam(params[i], params[i + 1]);
+        }
+        ValidatableResponse resp = req.when().post("/").then().statusCode(status);
+        if (code != null) {
+            resp.body("ErrorResponse.Error.Code", equalTo(code))
+                    .body("ErrorResponse.Error.Message", equalTo(message));
+        }
+    }
+
+    private static String createPolicy(String name) {
+        return request()
+                .formParam("Action", "CreatePolicy").formParam("PolicyName", name)
+                .formParam("PolicyDocument", DOC)
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+    }
+
+    @Test
+    void managedPolicyMessages() {
+        String name = "pol-" + id();
+        String arn = createPolicy(name);
+        call(409, "EntityAlreadyExists",
+                "A policy called " + name + " already exists. Duplicate names are not allowed.",
+                "Action", "CreatePolicy", "PolicyName", name, "PolicyDocument", DOC);
+        String missing = "arn:aws:iam::" + ACCOUNT + ":policy/missing-" + id();
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "GetPolicy", "PolicyArn", missing);
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "DeletePolicy", "PolicyArn", missing);
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "TagPolicy", "PolicyArn", missing, "Tags.member.1.Key", "k", "Tags.member.1.Value", "v");
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "UntagPolicy", "PolicyArn", missing, "TagKeys.member.1", "k");
+
+        // policy-version and attach messages
+        String notAttachable = " does not exist or is not attachable.";
+        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
+                "Action", "GetPolicyVersion", "PolicyArn", arn, "VersionId", "v99");
+        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
+                "Action", "DeletePolicyVersion", "PolicyArn", arn, "VersionId", "v99");
+        call(404, "NoSuchEntity", "Policy " + arn + " version v99" + notAttachable,
+                "Action", "SetDefaultPolicyVersion", "PolicyArn", arn, "VersionId", "v99");
+        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
+                "Action", "ListPolicyVersions", "PolicyArn", missing);
+        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
+                "Action", "ListEntitiesForPolicy", "PolicyArn", missing);
+        String user = "u-" + id();
+        call(200, null, null, "Action", "CreateUser", "UserName", user);
+        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
+                "Action", "AttachUserPolicy", "UserName", user, "PolicyArn", missing);
+        call(404, "NoSuchEntity", "Policy " + missing + notAttachable,
+                "Action", "CreatePolicyVersion", "PolicyArn", missing, "PolicyDocument", DOC);
+        call(404, "NoSuchEntity", "Policy " + missing + " version v1" + notAttachable,
+                "Action", "GetPolicyVersion", "PolicyArn", missing, "VersionId", "v1");
+        call(404, "NoSuchEntity", "Policy " + missing + " was not found.",
+                "Action", "ListPolicyTags", "PolicyArn", missing);
+
+        // permissions boundary on a missing policy
+        String scope = "Scope ARN: " + missing + notAttachable;
+        call(404, "NoSuchEntity", scope,
+                "Action", "PutUserPermissionsBoundary", "UserName", user, "PermissionsBoundary", missing);
+        call(404, "NoSuchEntity", scope,
+                "Action", "CreateUser", "UserName", "ub-" + id(), "PermissionsBoundary", missing);
+
+        // detach of a policy that is not attached
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachUserPolicy", "UserName", user, "PolicyArn", arn);
+        String group = "g-" + id();
+        call(200, null, null, "Action", "CreateGroup", "GroupName", group);
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachGroupPolicy", "GroupName", group, "PolicyArn", arn);
+        String role = "r-" + id();
+        call(200, null, null, "Action", "CreateRole", "RoleName", role, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        call(404, "NoSuchEntity", "Policy " + arn + " was not found.",
+                "Action", "DetachRolePolicy", "RoleName", role, "PolicyArn", arn);
+        call(404, "NoSuchEntity", scope,
+                "Action", "PutRolePermissionsBoundary", "RoleName", role, "PermissionsBoundary", missing);
+    }
+
+    @Test
+    void inlinePolicyMessages() {
+        String user = "u-" + id();
+        String group = "g-" + id();
+        String role = "r-" + id();
+        call(200, null, null, "Action", "CreateUser", "UserName", user);
+        call(200, null, null, "Action", "CreateGroup", "GroupName", group);
+        call(200, null, null, "Action", "CreateRole", "RoleName", role, "AssumeRolePolicyDocument",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}");
+        call(404, "NoSuchEntity", "The user policy with name nope cannot be found.",
+                "Action", "GetUserPolicy", "UserName", user, "PolicyName", "nope");
+        call(404, "NoSuchEntity", "The user policy with name nope cannot be found.",
+                "Action", "DeleteUserPolicy", "UserName", user, "PolicyName", "nope");
+        call(404, "NoSuchEntity", "The group policy with name nope cannot be found.",
+                "Action", "GetGroupPolicy", "GroupName", group, "PolicyName", "nope");
+        call(404, "NoSuchEntity", "The group policy with name nope cannot be found.",
+                "Action", "DeleteGroupPolicy", "GroupName", group, "PolicyName", "nope");
+        call(404, "NoSuchEntity", "The role policy with name nope cannot be found.",
+                "Action", "GetRolePolicy", "RoleName", role, "PolicyName", "nope");
+        call(404, "NoSuchEntity", "The role policy with name nope cannot be found.",
+                "Action", "DeleteRolePolicy", "RoleName", role, "PolicyName", "nope");
+    }
+
+    @Test
+    void instanceProfileMessages() {
+        String name = "ip-" + id();
+        call(200, null, null, "Action", "CreateInstanceProfile", "InstanceProfileName", name);
+        call(409, "EntityAlreadyExists", "Instance Profile " + name + " already exists.",
+                "Action", "CreateInstanceProfile", "InstanceProfileName", name);
+        String missing = "missing-" + id();
+        String msg = "Instance Profile " + missing + " cannot be found.";
+        call(404, "NoSuchEntity", msg, "Action", "GetInstanceProfile", "InstanceProfileName", missing);
+        call(404, "NoSuchEntity", msg, "Action", "DeleteInstanceProfile", "InstanceProfileName", missing);
+        call(404, "NoSuchEntity", msg, "Action", "TagInstanceProfile", "InstanceProfileName", missing,
+                "Tags.member.1.Key", "k", "Tags.member.1.Value", "v");
+        call(404, "NoSuchEntity", msg, "Action", "UntagInstanceProfile", "InstanceProfileName", missing,
+                "TagKeys.member.1", "k");
+    }
+}

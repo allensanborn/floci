@@ -788,7 +788,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamUser createUser(String userName, String path, String permissionsBoundaryArn) {
         if (permissionsBoundaryArn != null) {
-            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+            requireBoundaryPolicy(permissionsBoundaryArn); // validate before anything is created
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
@@ -1187,7 +1187,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamPolicyDocuments.checkTrustPolicy(assumeRolePolicyDocument);
         validateRoleDescription(description);
         if (permissionsBoundaryArn != null) {
-            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+            requireBoundaryPolicy(permissionsBoundaryArn); // validate before anything is created
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
@@ -1663,7 +1663,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     .anyMatch(existingName -> existingName != null && existingName.equalsIgnoreCase(policyName));
             if (nameTaken) {
                 throw new AwsException("EntityAlreadyExists",
-                        "Policy " + arn + " already exists.", 409);
+                        "A policy called " + policyName
+                                + " already exists. Duplicate names are not allowed.", 409);
             }
             String policyId = "ANPA" + randomId(16);
             IamPolicy policy = new IamPolicy(policyId, policyName, normalizedPath, arn, description, document);
@@ -1675,17 +1676,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public IamPolicy getPolicy(String policyArn) {
-        IamPolicy policy = requirePolicy(policyArn);
+        IamPolicy policy = resolvePolicy(policyArn).orElseThrow(() -> new AwsException("NoSuchEntity",
+                "Policy " + policyArn + " was not found.", 404));
         if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policyArn));
         }
         return policy;
     }
 
+    private void requireBoundaryPolicy(String arn) {
+        if (resolvePolicy(arn).isEmpty()) {
+            throw new AwsException("NoSuchEntity",
+                    "Scope ARN: " + arn + " does not exist or is not attachable.", 404);
+        }
+    }
+
     private IamPolicy requirePolicy(String policyArn) {
         return resolvePolicy(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "Policy " + policyArn + " does not exist.", 404));
+                        "Policy " + policyArn + " does not exist or is not attachable.", 404));
     }
 
     /**
@@ -1939,7 +1948,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamPolicyDocuments.checkManagedPolicy(document);
         }
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn);
         Map<String, PolicyVersion> versions = policy.getVersions();
         PolicyVersion version;
         synchronized (versions) {
@@ -1980,12 +1989,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return version;
     }
 
+    private static AwsException policyVersionNotFound(String policyArn, String versionId) {
+        return new AwsException("NoSuchEntity",
+                "Policy " + policyArn + " version " + versionId + " does not exist or is not attachable.", 404);
+    }
+
     public PolicyVersion getPolicyVersion(String policyArn, String versionId) {
-        IamPolicy policy = requirePolicy(policyArn);
+        IamPolicy policy = resolvePolicy(policyArn).orElseThrow(() -> policyVersionNotFound(policyArn, versionId));
         PolicyVersion version = policy.getVersions().get(versionId);
         if (version == null) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+            throw policyVersionNotFound(policyArn, versionId);
         }
         return version;
     }
@@ -2000,8 +2013,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, PolicyVersion> versions = policy.getVersions();
         synchronized (versions) {
             if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+                throw policyVersionNotFound(policyArn, versionId);
             }
             versions.remove(versionId);
         }
@@ -2021,8 +2033,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Map<String, PolicyVersion> versions = policy.getVersions();
         synchronized (versions) {
             if (!versions.containsKey(versionId)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy version " + versionId + " does not exist.", 404);
+                throw policyVersionNotFound(policyArn, versionId);
             }
             versions.values().forEach(v -> v.setDefaultVersion(false));
             versions.get(versionId).setDefaultVersion(true);
@@ -2050,7 +2061,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public Map<String, String> listPolicyTags(String policyArn) {
-        return requirePolicy(policyArn).getTags();
+        return getPolicy(policyArn).getTags();
     }
 
     // =========================================================================
@@ -2071,7 +2082,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamUser user = getUser(userName);
         if (!user.getAttachedPolicyArns().remove(policyArn)) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to user " + userName + ".", 404);
+                    "Policy " + policyArn + " was not found.", 404);
         }
         users.put(userName, user);
         decrementCustomerManagedPolicyAttachmentCount(policyArn);
@@ -2102,7 +2113,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamGroup group = getGroup(groupName);
         if (!group.getAttachedPolicyArns().remove(policyArn)) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to group " + groupName + ".", 404);
+                    "Policy " + policyArn + " was not found.", 404);
         }
         groups.put(groupName, group);
         decrementCustomerManagedPolicyAttachmentCount(policyArn);
@@ -2137,7 +2148,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         requireNotServiceLinked(role, roleName);
         if (!role.getAttachedPolicyArns().remove(policyArn)) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+                    "Policy " + policyArn + " was not found.", 404);
         }
         roles.put(roleName, role);
         decrementCustomerManagedPolicyAttachmentCount(policyArn);
@@ -2175,7 +2186,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = user.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for user " + userName + ".", 404);
+                    "The user policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2185,7 +2196,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamUser user = getUser(userName);
             if (user.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for user " + userName + ".", 404);
+                        "The user policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("User", user.getUserId(), policyName);
             users.put(userName, user);
@@ -2220,7 +2231,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = group.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for group " + groupName + ".", 404);
+                    "The group policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2230,7 +2241,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamGroup group = getGroup(groupName);
             if (group.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for group " + groupName + ".", 404);
+                        "The group policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("Group", group.getGroupId(), policyName);
             groups.put(groupName, group);
@@ -2443,7 +2454,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         String doc = role.getInlinePolicies().get(policyName);
         if (doc == null) {
             throw new AwsException("NoSuchEntity",
-                    "Policy " + policyName + " not found for role " + roleName + ".", 404);
+                    "The role policy with name " + policyName + " cannot be found.", 404);
         }
         return doc;
     }
@@ -2455,7 +2466,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             requireNotServiceLinked(role, roleName);
             if (role.getInlinePolicies().remove(policyName) == null) {
                 throw new AwsException("NoSuchEntity",
-                        "Policy " + policyName + " not found for role " + roleName + ".", 404);
+                        "The role policy with name " + policyName + " cannot be found.", 404);
             }
             invalidateInlinePolicyOwner("Role", role.getRoleId(), policyName);
             roles.put(roleName, role);
@@ -2593,7 +2604,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (containsNameIgnoreCase(
                     instanceProfiles, InstanceProfile::getInstanceProfileName, instanceProfileName)) {
                 throw new AwsException("EntityAlreadyExists",
-                        "Instance profile " + instanceProfileName + " already exists.", 409);
+                        "Instance Profile " + instanceProfileName + " already exists.", 409);
             }
             String profileId = "AIPA" + randomId(16);
             String normalizedPath = normalizePath(path);
@@ -2615,7 +2626,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public InstanceProfile getInstanceProfile(String instanceProfileName) {
         return instanceProfiles.get(instanceProfileName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "Instance profile " + instanceProfileName + " cannot be found.", 404));
+                        "Instance Profile " + instanceProfileName + " cannot be found.", 404));
     }
 
     public void deleteInstanceProfile(String instanceProfileName) {
@@ -5938,7 +5949,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@link #updateUser(String, String, String, String)}. A null ID skips the check.
      */
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
-        requirePolicy(permissionsBoundaryArn); // validate policy exists
+        requireBoundaryPolicy(permissionsBoundaryArn); // validate policy exists
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             requireSameUser(user, userName, expectedUserId);
@@ -5982,7 +5993,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            requirePolicy(permissionsBoundaryArn); // validate policy exists
+            requireBoundaryPolicy(permissionsBoundaryArn); // validate policy exists
             role.setPermissionsBoundaryArn(permissionsBoundaryArn);
             roles.put(roleName, role);
         }
