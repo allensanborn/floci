@@ -388,16 +388,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             Set<String> arnSet = new HashSet<>(arns);
             result = result.stream().filter(lb -> arnSet.contains(lb.getLoadBalancerArn())).collect(Collectors.toList());
             if (result.isEmpty() && !arns.isEmpty()) {
-                throw new AwsException("LoadBalancerNotFound",
-                        "One or more load balancers not found.", 400);
+                throw ElbV2Errors.loadBalancerSelectionNotFound();
             }
         }
         if (names != null && !names.isEmpty()) {
             Set<String> nameSet = new HashSet<>(names);
             result = result.stream().filter(lb -> nameSet.contains(lb.getLoadBalancerName())).collect(Collectors.toList());
             if (result.isEmpty() && !names.isEmpty()) {
-                throw new AwsException("LoadBalancerNotFound",
-                        "One or more load balancers not found.", 400);
+                throw ElbV2Errors.loadBalancersNotFoundByName(names);
             }
         }
         return result;
@@ -599,14 +597,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             Set<String> arnSet = new HashSet<>(tgArns);
             result = result.stream().filter(tg -> arnSet.contains(tg.getTargetGroupArn())).collect(Collectors.toList());
             if (result.size() != arnSet.size()) {
-                throw new AwsException("TargetGroupNotFound", "One or more target groups not found.", 400);
+                throw ElbV2Errors.targetGroupSelectionNotFound();
             }
         }
         if (names != null && !names.isEmpty()) {
             Set<String> nameSet = new HashSet<>(names);
             result = result.stream().filter(tg -> nameSet.contains(tg.getTargetGroupName())).collect(Collectors.toList());
             if (result.size() != nameSet.size()) {
-                throw new AwsException("TargetGroupNotFound", "One or more target groups not found.", 400);
+                throw ElbV2Errors.targetGroupSelectionNotFound();
             }
         }
         return result;
@@ -760,7 +758,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         if (listenerArns != null && !listenerArns.isEmpty()) {
             Set<String> arnSet = new HashSet<>(listenerArns);
             for (String arn : arnSet) {
-                requireListener(region, arn);
+                if (!regionListeners.containsKey(arn)) {
+                    throw ElbV2Errors.listenerSelectionNotFound();
+                }
             }
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
@@ -1008,7 +1008,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
         if (ruleArns != null && !ruleArns.isEmpty()) {
             return ruleArns.stream()
-                    .map(arn -> requireRule(region, arn))
+                    .map(arn -> {
+                        Rule rule = regionRules.get(arn);
+                        if (rule == null) {
+                            throw ElbV2Errors.ruleSelectionNotFound();
+                        }
+                        return rule;
+                    })
                     .collect(Collectors.toList());
         }
         if (listenerArn != null && !listenerArn.isEmpty()) {
@@ -1060,7 +1066,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         for (Map.Entry<String, Integer> e : arnToPriority.entrySet()) {
             Rule rule = regionRules.get(e.getKey());
             if (rule == null) {
-                throw new AwsException("RuleNotFound", "Rule not found: " + e.getKey(), 400);
+                throw ElbV2Errors.rulePrioritiesRefusal("RuleNotFound");
             }
             if (rule.isDefault()) {
                 throw new AwsException("OperationNotPermitted", "Cannot change priority of the default rule.", 400);
@@ -1091,8 +1097,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             }
             int existingPriority = Integer.parseInt(existing.getPriority());
             if (newPriorities.contains(existingPriority)) {
-                throw new AwsException("PriorityInUse",
-                        "Priority " + existingPriority + " is already in use.", 400);
+                throw ElbV2Errors.rulePrioritiesRefusal("PriorityInUse");
             }
         }
 
@@ -1354,7 +1359,10 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * named twice, "once with IsDefault set to true and once with IsDefault set to false".
      */
     public List<ListenerCertificate> describeListenerCertificates(String region, String listenerArn) {
-        Listener listener = requireListener(region, listenerArn);
+        Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
+        if (listener == null) {
+            throw ElbV2Errors.listenerSelectionNotFound();
+        }
         List<ListenerCertificate> certificates = new ArrayList<>();
         if (listener.getDefaultCertificate() != null) {
             certificates.add(new ListenerCertificate(listener.getDefaultCertificate(), true));
@@ -1452,7 +1460,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     private void requireCanonicalLoadBalancer(String region, LoadBalancer lb) {
         if (loadBalancers.getOrDefault(region, Map.of()).get(lb.getLoadBalancerArn()) != lb) {
-            throw new AwsException("LoadBalancerNotFound", "One or more load balancers not found.", 400);
+            throw ElbV2Errors.loadBalancerNotFound(lb.getLoadBalancerArn());
         }
     }
 
@@ -1666,8 +1674,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private LoadBalancer requireLoadBalancer(String region, String arn) {
         LoadBalancer lb = loadBalancers.getOrDefault(region, Map.of()).get(arn);
         if (lb == null) {
-            throw new AwsException("LoadBalancerNotFound",
-                    "One or more load balancers not found.", 400);
+            throw ElbV2Errors.loadBalancerNotFound(arn);
         }
         return lb;
     }
@@ -1737,8 +1744,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private TargetGroup requireTargetGroup(String region, String arn) {
         TargetGroup tg = targetGroups.getOrDefault(region, Map.of()).get(arn);
         if (tg == null) {
-            throw new AwsException("TargetGroupNotFound",
-                    "One or more target groups not found.", 400);
+            throw ElbV2Errors.targetGroupNotFound(arn);
         }
         return tg;
     }
@@ -1746,8 +1752,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private Listener requireListener(String region, String arn) {
         Listener l = listeners.getOrDefault(region, Map.of()).get(arn);
         if (l == null) {
-            throw new AwsException("ListenerNotFound",
-                    "One or more listeners not found.", 400);
+            throw ElbV2Errors.listenerNotFound(arn);
         }
         return l;
     }
@@ -1755,9 +1760,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private Rule requireRule(String region, String arn) {
         Rule r = rules.getOrDefault(region, Map.of()).get(arn);
         if (r == null) {
-            throw new AwsException("RuleNotFound", "One or more rules not found.", 400);
+            throw ElbV2Errors.ruleNotFound(arn);
         }
         return r;
+    }
+
+    Rule getRule(String region, String arn) {
+        return rules.getOrDefault(region, Map.of()).get(arn);
     }
 
     public TargetGroup getTargetGroup(String region, String arn) {

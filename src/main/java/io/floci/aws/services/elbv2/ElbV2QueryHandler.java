@@ -473,8 +473,8 @@ public class ElbV2QueryHandler {
         List<String> certs = parseCertificateList(p, "Certificates");
         List<Action> defaultActions = parseActions(p, "DefaultActions", false);
         applyExistingClientSecrets(defaultActions,
-                service.describeListeners(region, null, List.of(listenerArn)).stream()
-                        .findFirst().map(Listener::getDefaultActions).orElse(null));
+                Optional.ofNullable(service.getListener(region, listenerArn))
+                        .map(Listener::getDefaultActions).orElse(null));
         List<String> alpnPolicy = memberList(p, "AlpnPolicy");
 
         Listener listener = service.modifyListener(region, listenerArn, protocol, port, sslPolicy,
@@ -590,8 +590,7 @@ public class ElbV2QueryHandler {
         List<RuleCondition> conditions = parseConditions(p);
         List<Action> actions = parseActions(p, "Actions", false);
         applyExistingClientSecrets(actions,
-                service.describeRules(region, null, List.of(ruleArn)).stream()
-                        .findFirst().map(Rule::getActions).orElse(null));
+                Optional.ofNullable(service.getRule(region, ruleArn)).map(Rule::getActions).orElse(null));
 
         Rule rule = service.modifyRule(region, ruleArn,
                 conditions.isEmpty() ? null : conditions,
