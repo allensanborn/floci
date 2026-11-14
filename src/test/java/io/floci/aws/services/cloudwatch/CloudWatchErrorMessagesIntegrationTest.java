@@ -197,6 +197,42 @@ class CloudWatchErrorMessagesIntegrationTest {
                 "Dashboard " + present + " does not exist");
     }
 
+    /**
+     * PutDashboard refuses a body that is not a JSON object, whatever way it is not one, and a name
+     * outside [A-Za-z0-9_-] (the name first, as AWS does), and stores nothing either time.
+     */
+    @Test
+    void putDashboardRefusesABadBodyOrNameAndStoresNothing() throws Exception {
+        String body = "The field DashboardBody must be a valid JSON object";
+        String name = unique("bad-body-");
+        for (String bad : new String[] {"{not valid json", "[]", "\"text\"", "{} garbage"}) {
+            assertRefusal("PutDashboard", form("DashboardName", name, "DashboardBody", bad),
+                    400, "InvalidParameterInput", body);
+        }
+        assertRefusal("GetDashboard", form("DashboardName", name), 404, "ResourceNotFound",
+                "Dashboard " + name + " does not exist");
+
+        String badName = unique("bad name.");
+        assertRefusal("PutDashboard", form("DashboardName", badName, "DashboardBody", "{not valid json"),
+                400, "InvalidParameterValue",
+                "The value for field DashboardName contains invalid characters. "
+                        + "It can only contain alphanumerics, dash (-) and underscore (_).\n");
+        assertRefusal("GetDashboard", form("DashboardName", badName), 404, "ResourceNotFound",
+                "Dashboard " + badName + " does not exist");
+
+        String tooLong = "A".repeat(256);
+        assertRefusal("PutDashboard", form("DashboardName", tooLong, "DashboardBody", "{\"widgets\":[]}"),
+                400, "InvalidParameterValue",
+                "The value for field DashboardName is too long. It must have length less than or equal to 255.\n");
+        query("PutDashboard", form("DashboardName", "A".repeat(255), "DashboardBody", "{\"widgets\":[]}"))
+                .when().post("/").then().statusCode(200);
+
+        // A well-formed call for the same name is accepted, so the refusals above were about the body.
+        query("PutDashboard", form("DashboardName", name, "DashboardBody", "{\"widgets\":[]}"))
+                .when().post("/").then().statusCode(200);
+        query("GetDashboard", form("DashboardName", name)).when().post("/").then().statusCode(200);
+    }
+
     /** GetMetricStream's ResourceNotFoundException carries no message. */
     @Test
     void getMetricStreamOnAMissingStreamAnswersNotFoundWithNoMessage() throws Exception {
