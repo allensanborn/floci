@@ -309,7 +309,7 @@ class ApiGatewayUserRequestIntegrationTest {
                     .when().get("/restapis/" + localApiId + "/dev/_user_request_/hello")
                     .then()
                     .statusCode(404)
-                    .body("message", equalTo("Invalid API id specified"));
+                    .body("message", equalTo("Invalid API identifier specified 000000000000:" + localApiId));
         } finally {
             if (localApiId != null) {
                 given()

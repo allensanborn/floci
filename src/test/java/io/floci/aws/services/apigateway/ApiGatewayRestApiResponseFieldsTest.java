@@ -121,7 +121,7 @@ class ApiGatewayRestApiResponseFieldsTest {
             .delete("/restapis/" + apiId + "/resources/" + rootId)
         .then()
             .statusCode(400)
-            .body("message", containsString("root resource"));
+            .body("message", equalTo("Root resource cannot be deleted"));
 
         // And the API still reports it, rather than silently losing the member.
         given()
