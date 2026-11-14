@@ -898,7 +898,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .count();
         if (activeServices > 0) {
             throw new AwsException("ClusterContainsServicesException",
-                    "The cluster cannot be deleted while services are active.", 400);
+                    "The Cluster cannot be deleted while Services are active.", 400);
         }
         String instancePrefix = containerInstanceKey(cluster.getClusterArn(), "");
         long registeredInstances = containerInstances.entrySet().stream()
@@ -3124,7 +3124,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
-                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+                throw new AwsException("ServiceNotFoundException", "Service not found.", 404);
             }
             synchronized (svc) {
                 if ("INACTIVE".equals(svc.getStatus())) {
@@ -3392,14 +3392,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
-                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+                // AWS answers DeleteService on a missing service with an empty message
+                throw new AwsException("ServiceNotFoundException", "", 404);
             }
             if ("INACTIVE".equals(svc.getStatus())) {
                 return svc;
             }
             if (!force && svc.getDesiredCount() > 0) {
                 throw new AwsException("InvalidParameterException",
-                        "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
+                        "The service cannot be stopped while it is scaled above 0.", 400);
             }
             svc.setStatus("INACTIVE");
             svc.setDesiredCount(0);
@@ -3511,7 +3512,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         mergeTagsOnResource(resource, tags);
     }
@@ -3519,7 +3520,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void untagResource(String resourceArn, List<String> tagKeys) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         removeTagsFromResource(resource, tagKeys);
     }
@@ -3527,9 +3528,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public Map<String, String> listTagsForResource(String resourceArn) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         return getTagsFromResource(resource);
+    }
+
+    /**
+     * The refusal a tagging call earns for an ARN naming nothing: another account's ARN is an invalid
+     * ARN, a missing cluster is {@code ClusterNotFoundException}, a missing task definition is a
+     * {@code ClientException}, and any other resource kind stays an {@code InvalidParameterException}.
+     */
+    private AwsException taggedResourceNotFound(String resourceArn) {
+        String[] fields = resourceArn.split(":", 6);
+        if (fields.length == 6) {
+            if (!fields[4].isEmpty() && !fields[4].equals(regionResolver.getAccountId())) {
+                return new AwsException("InvalidParameterException", "The ARN provided is invalid.", 400);
+            }
+            if (fields[5].startsWith("cluster/")) {
+                return new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
+            }
+            if (fields[5].startsWith("task-definition/")) {
+                return new AwsException("ClientException", "Unable to describe task definition.", 400);
+            }
+        }
+        return new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
     }
 
     private Object findByArn(String arn) {
@@ -6101,7 +6123,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         EcsCluster cluster = resolveCluster(clusterRef, region);
         if (cluster == null) {
-            throw new AwsException("ClusterNotFoundException", "Cluster not found: " + clusterRef, 400);
+            throw new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
         }
         return cluster;
     }
@@ -6119,7 +6141,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private EcsCluster resolveClusterOrThrow(String clusterRef, String region) {
         EcsCluster cluster = resolveCluster(clusterRef, region);
         if (cluster == null) {
-            throw new AwsException("ClusterNotFoundException", "Cluster not found: " + clusterRef, 400);
+            throw new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
         }
         return cluster;
     }
@@ -6133,7 +6155,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
         TaskDefinition td = findTaskDefinition(ref, region);
         if (td == null) {
-            throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+            throw new AwsException("ClientException", "Unable to describe task definition.", 400);
         }
         return td;
     }
@@ -6214,7 +6236,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code DELETE_IN_PROGRESS} revision, while the tasks already on it keep running.
      */
     private TaskDefinition resolveLaunchableTaskDefinition(String ref, String region) {
-        TaskDefinition td = resolveTaskDefinitionOrThrow(ref, region);
+        TaskDefinition td = findTaskDefinition(ref, region);
+        if (td == null) {
+            // a call that puts the revision to work words the miss differently from a read of it
+            throw new AwsException("ClientException", "TaskDefinition not found.", 400);
+        }
         if (STATUS_DELETE_IN_PROGRESS.equals(td.getStatus())) {
             throw new AwsException("ClientException",
                     "The task definition " + td.getTaskDefinitionArn() + " is being deleted and "
