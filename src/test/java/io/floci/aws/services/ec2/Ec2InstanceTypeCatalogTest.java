@@ -102,6 +102,11 @@ class Ec2InstanceTypeCatalogTest {
                 "m6i.2xlarge",
                 "m6i.4xlarge",
                 "m8i.large"));
+        expected.addAll(List.of(
+                "i3.large",
+                "i4i.metal",
+                "g4dn.2xlarge",
+                "p4d.24xlarge"));
         expected.addAll(List.of("c8g.24xlarge", "c8g.48xlarge", "m8g.24xlarge", "m8g.48xlarge"));
         assertEquals(expected, instanceTypes);
     }

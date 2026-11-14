@@ -79,6 +79,13 @@ values come from the
 [AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
 as checked on 2026-11-14. They were not captured from the API.
 
+The catalog also includes the storage optimized, GPU and accelerated computing types `i3.large`, `i4i.metal`, `g4dn.2xlarge`, `p4d.24xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS so instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html),
+as checked on 2026-11-14. The accelerated computing types follow the [AWS accelerated computing specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html). They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled

@@ -721,6 +721,72 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 3
 
+  - instanceType: i3.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 15616
+    localStorageGiB: 475
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: false
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: i4i.metal
+    processorManufacturer: Intel
+    vcpu: 128
+    memoryMib: 1048576
+    localStorageGiB: 30000
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 15
+
+  - instanceType: g4dn.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    localStorageGiB: 225
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: p4d.24xlarge
+    processorManufacturer: Intel
+    vcpu: 96
+    memoryMib: 1179648
+    localStorageGiB: 8000
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 15
+      - networkCardIndex: 1
+        maximumNetworkInterfaces: 15
+      - networkCardIndex: 2
+        maximumNetworkInterfaces: 15
+      - networkCardIndex: 3
+        maximumNetworkInterfaces: 15
+
   - instanceType: r5.large
     processorManufacturer: Intel
     vcpu: 2
