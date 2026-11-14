@@ -627,21 +627,23 @@ public class S3Service implements Resettable, ResourceProvider {
             ensureBucketExists(bucketName);
             Bucket bucket = bucketStore.get(bucketName)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
-                            "The specified bucket does not exist.", 404));
+                            "The specified bucket does not exist", 404));
 
             // Multipart operations take the stripe before the bucket monitor, so a delete cannot
             // sweep their temporary parts or miss an upload created just after its scan.
             synchronized (bucket) {
-                deleteBucketLocked(bucketName);
+                deleteBucketLocked(bucketName, bucket.getVersioningStatus() != null);
             }
             LOG.infov("Deleted bucket: {0}", bucketName);
         });
     }
 
-    private void deleteBucketLocked(String bucketName) {
+    private void deleteBucketLocked(String bucketName, boolean hasVersioningState) {
         if (!objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
             throw new AwsException("BucketNotEmpty",
-                    "The bucket you tried to delete is not empty.", 409);
+                    hasVersioningState
+                            ? "The bucket you tried to delete is not empty. You must delete all versions in the bucket."
+                            : "The bucket you tried to delete is not empty", 409);
         }
 
         // Outstanding uploads belong to this bucket incarnation. Do not let a later
@@ -694,18 +696,18 @@ public class S3Service implements Resettable, ResourceProvider {
     public String getBucketOwnerAccountId(String bucketName) {
         return resolveBucketEntry(bucketName)
                 .map(AccountAwareStorageBackend.OwnedEntry::account)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
     }
 
     boolean bucketOwnershipIsEnforced(String bucketName) {
         return resolveBucketEntry(bucketName)
                 .map(entry -> ownershipIsEnforced(entry.value()))
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
     }
 
     public void putBucketLogging(String bucketName, String loggingConfigurationXml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
 
         if (loggingConfigurationXml == null || loggingConfigurationXml.isBlank()) {
             bucket.setLoggingConfiguration(null);
@@ -723,7 +725,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketLogging(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
 
         if (bucket.getLoggingConfiguration() == null || bucket.getLoggingConfiguration().isBlank()) {
             return new XmlBuilder()
@@ -812,7 +814,7 @@ public class S3Service implements Resettable, ResourceProvider {
         checksums.requireWellFormedContentMd5();
         AccountAwareStorageBackend.OwnedEntry<Bucket> checkedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         rejectUploadAclWhenOwnershipEnforced(checkedBucket.value(), checkedBucket.account(), effectiveOptions, ownerId());
         rejectObjectLockWithoutLockEnabled(checkedBucket.value(), effectiveOptions);
         rejectConflictingServerSideEncryption(
@@ -937,14 +939,14 @@ public class S3Service implements Resettable, ResourceProvider {
                                  String aclRequestAccount) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
         synchronized (bucket) {
             // Rechecked under the bucket's monitor, which deleting the bucket also holds.
             if (checkedBucket != null && resolveBucketEntry(bucketName)
                     .map(current -> current.value() != checkedBucket.value())
                     .orElse(true)) {
-                throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
+                throw new AwsException("NoSuchBucket", "The specified bucket does not exist", 404);
             }
             return storeObjectInternal(ownedBucket.account(), bucket, bucketName, key, body,
                     contentType, metadata, checksum, parts, options, eTag, aclRequestAccount);
@@ -1353,7 +1355,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
-                        new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                        new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         String resourceArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
@@ -1414,7 +1416,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
 
         // AWS lets only an identity in the bucket owner's account manage the bucket policy; the
         // policy itself can never grant PutBucketPolicy or DeleteBucketPolicy to an anonymous caller.
@@ -1504,7 +1506,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
@@ -1577,7 +1579,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
@@ -1632,7 +1634,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucketEntry = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException(
-                        "NoSuchBucket", "The specified bucket does not exist.", 404));
+                        "NoSuchBucket", "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucketEntry.value();
         String bucketOwner = ownedBucketEntry.account();
 
@@ -1760,7 +1762,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException(
-                        "NoSuchBucket", "The specified bucket does not exist.", 404));
+                        "NoSuchBucket", "The specified bucket does not exist", 404));
         String policy = ownedBucket.value().getPolicy();
         ResourcePolicyDecision decision = policy == null || policy.isBlank()
                 ? ResourcePolicyDecision.NEUTRAL
@@ -1949,7 +1951,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // never reused by a later PUT, so this pairing can never race a concurrent overwrite.
             String bucketOwnerAccount = resolveBucketEntry(bucketName)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
-                            "The specified bucket does not exist.", 404))
+                            "The specified bucket does not exist", 404))
                     .account();
             S3Object obj = getObjectMetadata(bucketName, key, versionId);
             obj.setData(readVersionedFile(bucketOwnerAccount, bucketName, key, versionId));
@@ -2000,7 +2002,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                                     Consumer<B> discard) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
         String accountId = ownedBucket.account();
         for (int attempt = 0; attempt < 10_000; attempt++) {
@@ -2066,7 +2068,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                                Function<String, B> readBody, Consumer<B> discard) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
         String bucketOwnerAccount = ownedBucket.account();
         String storeKey = objectKey(bucketName, key);
@@ -2156,7 +2158,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         String bucketOwnerAccount = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404))
+                        "The specified bucket does not exist", 404))
                 .account();
         S3Object obj = getObjectMetadata(bucketName, key, versionId);
         return objectRead(obj, openForRead(
@@ -2236,7 +2238,7 @@ public class S3Service implements Resettable, ResourceProvider {
         getObjectMetadata(bucketName, key, versionId);
         String bucketOwnerAccount = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404))
+                        "The specified bucket does not exist", 404))
                 .account();
         if (inMemory) {
             byte[] data = versionId != null
@@ -2302,7 +2304,7 @@ public class S3Service implements Resettable, ResourceProvider {
             String bucketName, String key, String versionId) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
 
         return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(),
                 requireStoredObject(ownedBucket, bucketName, key, versionId));
@@ -2438,7 +2440,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                  String ifMatch) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         Bucket bucket = ownedBucket.value();
 
         // The bucket monitor serializes this against PutObject's annotation cleanup and the
@@ -2467,7 +2469,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public int deleteObjectsWithPrefix(String bucketName, String prefix, Consumer<String> authorizeDelete) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         synchronized (bucket) {
             List<String> keys = new ArrayList<>();
             String continuationToken = null;
@@ -2692,7 +2694,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                                      String continuationToken, String startAfter) {
         String bucketOwnerAccount = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404))
+                        "The specified bucket does not exist", 404))
                 .account();
 
         String keyPrefix = bucketName + "/";
@@ -2986,7 +2988,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         String bucketOwnerAccount = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404))
+                        "The specified bucket does not exist", 404))
                 .account();
         S3Object obj = getObjectMetadata(bucketName, key, versionId);
         return checkedCopySource(obj, pinFile(
@@ -3104,7 +3106,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public String getBucketVersioning(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         return bucket.getVersioningStatus();
     }
 
@@ -3112,7 +3114,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public String snapshotBucketConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         ObjectNode snapshot = objectMapper.createObjectNode();
         snapshot.put("bucketName", bucketName);
         snapshot.put("versioningStatus", bucket.getVersioningStatus());
@@ -3158,7 +3160,7 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         bucket.setVersioningStatus(versioning);
         bucket.setCorsConfiguration(cors);
         bucket.setPublicAccessBlockConfiguration(publicAccessBlock);
@@ -3454,7 +3456,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                        Map<String, String> tags) {
         Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         synchronized (bucket) {
             AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                     getTaggingTargetEntry(bucketName, key, versionId, method);
@@ -3476,7 +3478,7 @@ public class S3Service implements Resettable, ResourceProvider {
             String bucketName, String key, String versionId, String method) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         // GetObjectTagging names the key with its bucket.
         String namedKey = "GET".equals(method) ? bucketName + "/" + key : key;
         S3Object object = findStoredVersionForAccount(ownedBucket.account(), bucketName, key, versionId)
@@ -3781,7 +3783,7 @@ public class S3Service implements Resettable, ResourceProvider {
             int codePoint = annotationPrefix.codePointAt(i);
             if (!isAllowedAnnotationNameCodePoint(codePoint)) {
                 throw new AwsException("InvalidPrefix",
-                        "The annotation prefix you provided is invalid.", 400);
+                        "The annotation prefix you have provided is invalid.", 400);
             }
             i += Character.charCount(codePoint);
         }
@@ -3950,7 +3952,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? bucketStore.get(bucketName)
                 : aware.getForAccount(account, bucketName);
         return bucket.orElseThrow(() -> new AwsException("NoSuchBucket",
-                "The specified bucket does not exist.", 404));
+                "The specified bucket does not exist", 404));
     }
 
     /** Writes a bucket back to the partition {@link #bucketForAccount} read it from. */
@@ -3977,7 +3979,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketWebsite(String bucketName, WebsiteConfiguration config) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         bucket.setWebsiteConfiguration(config);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Set website configuration for bucket: {0}", bucketName);
@@ -3986,7 +3988,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public WebsiteConfiguration getBucketWebsite(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         if (bucket.getWebsiteConfiguration() == null) {
             throw new AwsException("NoSuchWebsiteConfiguration", "The specified bucket does not have a website configuration.", 404);
         }
@@ -3996,7 +3998,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public void deleteBucketWebsite(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         bucket.setWebsiteConfiguration(null);
         bucketStore.put(bucketName, bucket);
         LOG.infov("Deleted website configuration for bucket: {0}", bucketName);
@@ -4137,7 +4139,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public void deleteBucketTagging(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         bucket.setTags(new java.util.HashMap<>());
         bucketStore.put(bucketName, bucket);
         LOG.debugv("Deleted tags from bucket: {0}", bucketName);
@@ -4225,7 +4227,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private Bucket requireBucket(String bucketName) {
         return bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
     }
 
     /**
@@ -4236,7 +4238,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     private void requireSameRecord(String bucketName, Bucket resolved) {
         if (bucketStore.get(bucketName).orElse(null) != resolved) {
-            throw new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404);
+            throw new AwsException("NoSuchBucket", "The specified bucket does not exist", 404);
         }
     }
 
@@ -4493,7 +4495,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public void setBucketObjectLockEnabled(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         bucket.setBucketObjectLockEnabled();
         bucketStore.put(bucketName, bucket);
         LOG.infov("Enabled Object Lock for bucket: {0}", bucketName);
@@ -4542,7 +4544,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public ObjectLockRetention getObjectLockConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         if (!bucket.isObjectLockEnabled()) {
             throw new AwsException("ObjectLockConfigurationNotFoundError",
                     "Object Lock configuration does not exist for this bucket", 404);
@@ -4580,14 +4582,14 @@ public class S3Service implements Resettable, ResourceProvider {
             String bucketName, String key, String versionId) {
         requireObjectLockEnabled(resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404)));
+                        "The specified bucket does not exist", 404)));
         return getStoredObjectEntry(bucketName, key, versionId);
     }
 
     public void putObjectRetention(String bucketName, String key, String versionId,
                                    String mode, Instant retainUntil, boolean bypassGovernance) {
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         synchronized (bucket) {
             AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                     getLockableObjectEntry(bucketName, key, versionId);
@@ -4655,7 +4657,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putObjectLegalHold(String bucketName, String key, String versionId, String status) {
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         synchronized (bucket) {
             AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                     getLockableObjectEntry(bucketName, key, versionId);
@@ -4767,7 +4769,7 @@ public class S3Service implements Resettable, ResourceProvider {
             ensureBucketExists(bucket);
             Bucket destination = resolveBucket(bucket)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
-                            "The specified bucket does not exist.", 404));
+                            "The specified bucket does not exist", 404));
             String ownerAccount = getBucketOwnerAccountId(bucket);
             rejectUploadAclWhenOwnershipEnforced(destination, ownerAccount, objectOptions, ownerId());
             rejectObjectLockWithoutLockEnabled(destination, objectOptions);
@@ -5346,7 +5348,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 String bucketOwnerAccount = resolveBucketEntry(bucket)
                         .map(AccountAwareStorageBackend.OwnedEntry::account)
                         .orElseThrow(() -> new AwsException("NoSuchBucket",
-                                "The specified bucket does not exist.", 404));
+                                "The specified bucket does not exist", 404));
                 putObjectMetadataForAccount(bucketOwnerAccount, bucket, key, object);
 
                 // Cleanup
@@ -5599,7 +5601,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 || (upload.getOwnerAccountId() != null
                         && !upload.getOwnerAccountId().equals(getBucketOwnerAccountId(bucket)))) {
             throw new AwsException("NoSuchUpload",
-                    "The specified multipart upload does not exist.", 404);
+                    "The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.", 404);
         }
         return upload;
     }
@@ -5614,7 +5616,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                                    boolean skipDestinationValidation) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
 
         List<NotificationDestination> destinations = notificationDestinations(config);
         if (!skipDestinationValidation) {
@@ -5777,7 +5779,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public NotificationConfiguration getBucketNotificationConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         NotificationConfiguration config = bucket.getNotificationConfiguration();
         return config != null ? config : new NotificationConfiguration();
     }
@@ -5816,7 +5818,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketPolicy(String bucketName) {
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getPolicy() == null) {
             throw new AwsException("NoSuchBucketPolicy", "The bucket policy does not exist", 404);
         }
@@ -5848,7 +5850,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketCors(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getCorsConfiguration() == null) {
             throw new AwsException("NoSuchCORSConfiguration", "The CORS configuration does not exist", 404);
         }
@@ -5965,14 +5967,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putBucketCors(String bucketName, String cors) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setCorsConfiguration(cors);
         bucketStore.put(bucketName, bucket);
     }
 
     public void deleteBucketCors(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setCorsConfiguration(null);
         bucketStore.put(bucketName, bucket);
     }
@@ -5983,7 +5985,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public LifecycleConfigurationResult getBucketLifecycle(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getLifecycleConfiguration() == null) {
             throw new AwsException("NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist", 404);
         }
@@ -6000,7 +6002,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public String putBucketLifecycle(String bucketName, String lifecycle, String transitionDefaultMinimumObjectSize) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         String size = (transitionDefaultMinimumObjectSize == null || transitionDefaultMinimumObjectSize.isBlank())
                 ? DEFAULT_TRANSITION_DEFAULT_MIN_OBJECT_SIZE
                 : transitionDefaultMinimumObjectSize;
@@ -6014,7 +6016,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void deleteBucketLifecycle(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         synchronized (bucket) {
             bucket.setLifecycleConfiguration(null);
             bucket.setTransitionDefaultMinimumObjectSize(null);
@@ -6340,7 +6342,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketAcl(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         return !ownershipIsEnforced(bucket) && bucket.getAcl() != null
                 ? bucket.getAcl() : defaultAclXml(ownerId(), DEFAULT_OWNER_DISPLAY_NAME);
     }
@@ -6348,7 +6350,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketAcl(String bucketName, String bodyAcl, String cannedAcl, String grantRead,
                               String grantWrite, String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         rejectAclWhenOwnershipEnforced(bucket);
         String resolvedAcl = resolveObjectAclXml(
                 cannedAcl, grantRead, grantWrite, grantFullControl, grantReadAcp, grantWriteAcp);
@@ -6363,7 +6365,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 getStoredObjectEntry(bucketName, key, versionId);
         S3Object obj = ownedObject.value();
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         boolean enforced = ownershipIsEnforced(bucket);
         return !enforced && obj.getAcl() != null
                 ? obj.getAcl()
@@ -6375,7 +6377,7 @@ public class S3Service implements Resettable, ResourceProvider {
                               String grantRead, String grantWrite, String grantFullControl,
                               String grantReadAcp, String grantWriteAcp) {
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         synchronized (bucket) {
             AccountAwareStorageBackend.OwnedEntry<S3Object> ownedObject =
                     getStoredObjectEntry(bucketName, key, versionId);
@@ -6469,7 +6471,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public String getBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getEncryptionConfiguration() == null) {
             return new XmlBuilder()
                     .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3)
@@ -6487,14 +6489,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putBucketEncryption(String bucketName, String encryptionXml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setEncryptionConfiguration(encryptionXml);
         bucketStore.put(bucketName, bucket);
     }
 
     public void deleteBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setEncryptionConfiguration(null);
         bucketStore.put(bucketName, bucket);
     }
@@ -6515,7 +6517,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getPublicAccessBlock(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getPublicAccessBlockConfiguration() != null) {
             return bucket.getPublicAccessBlockConfiguration();
         }
@@ -6528,7 +6530,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putPublicAccessBlock(String bucketName, String xml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setPublicAccessBlockConfiguration(xml);
         bucket.setPublicAccessBlockDeleted(false);
         bucketStore.put(bucketName, bucket);
@@ -6536,7 +6538,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void deletePublicAccessBlock(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setPublicAccessBlockConfiguration(null);
         bucket.setPublicAccessBlockDeleted(true);
         bucketStore.put(bucketName, bucket);
@@ -6635,7 +6637,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public String getBucketOwnershipControls(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getOwnershipControlsConfiguration() == null) {
             throw new AwsException("OwnershipControlsNotFoundError",
                     "The bucket ownership controls were not found.", 404);
@@ -6645,7 +6647,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void putBucketOwnershipControls(String bucketName, String ownershipControlsXml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         validateOwnershipControls(ownershipControlsXml);
         if (XmlParser.containsValue(ownershipControlsXml, "ObjectOwnership", "BucketOwnerEnforced")
                 && S3AclPublicAccessEvaluator.aclGrantsNonOwner(bucket.getAcl(), ownerId())) {
@@ -6678,14 +6680,14 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public void deleteBucketOwnershipControls(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         bucket.setOwnershipControlsConfiguration(null);
         bucketStore.put(bucketName, bucket);
     }
 
     public String getBucketReplication(String bucketName) {
         Bucket bucket = resolveBucket(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (bucket.getReplicationConfiguration() == null) {
             throw new AwsException("ReplicationConfigurationNotFoundError",
                     "The replication configuration was not found", 404);
@@ -6772,7 +6774,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public void putBucketRequestPayment(String bucketName, String requestPaymentXml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         String payer = XmlParser.extractFirst(requestPaymentXml, "Payer", null);
         if (payer == null) {
             throw new AwsException("MalformedXML",
@@ -6796,7 +6798,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public String getBucketRequestPayment(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         String payer = bucket.getRequestPaymentPayer() != null ? bucket.getRequestPaymentPayer() : "BucketOwner";
         return new XmlBuilder()
                 .start("RequestPaymentConfiguration", AwsNamespaces.S3)
@@ -6814,7 +6816,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public void putBucketAccelerateConfiguration(String bucketName, String accelerateXml) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         if (!"AccelerateConfiguration".equals(XmlParser.rootElementName(accelerateXml))) {
             throw new AwsException("MalformedXML",
                     "The XML you provided was not well-formed or did not validate against our published schema.",
@@ -6841,7 +6843,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public String getBucketAccelerateConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
         return new XmlBuilder()
                 .start("AccelerateConfiguration", AwsNamespaces.S3)
                 .elem("Status", bucket.getAccelerateStatus())
@@ -6881,7 +6883,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public boolean restoreObject(String bucketName, String key, String versionId, String restoreXml) {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         synchronized (ownedBucket.value()) {
             S3Object object = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
             int days = restoreDays(restoreXml, object.getStorageClass());
@@ -7683,7 +7685,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private void ensureBucketExists(String bucketName) {
         if (resolveBucket(bucketName).isEmpty()) {
             throw new AwsException("NoSuchBucket",
-                    "The specified bucket does not exist.", 404);
+                    "The specified bucket does not exist", 404);
         }
     }
 
@@ -7756,13 +7758,13 @@ public class S3Service implements Resettable, ResourceProvider {
             AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
             AccountAwareStorageBackend.OwnedEntry<Bucket> owned = typed.findAnyAccountEntry(bucketName)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
-                            "The specified bucket does not exist.", 404));
+                            "The specified bucket does not exist", 404));
             mutation.accept(owned.value());
             typed.putForAccount(owned.account(), bucketName, owned.value());
         } else {
             Bucket bucket = bucketStore.get(bucketName)
                     .orElseThrow(() -> new AwsException("NoSuchBucket",
-                            "The specified bucket does not exist.", 404));
+                            "The specified bucket does not exist", 404));
             mutation.accept(bucket);
             bucketStore.put(bucketName, bucket);
         }
@@ -7862,7 +7864,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private void putObjectMetadataForAccount(String accountId, String bucketName, String key, S3Object object) {
         Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         synchronized (bucket) {
             String latestKey = objectKey(bucketName, key);
             String versionId = object.getVersionId();
@@ -8570,7 +8572,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // another account, and this must be the same instance the write path (storeObject) locks.
         Bucket sourceMonitor = resolveBucket(sourceBucket)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
+                        "The specified bucket does not exist", 404));
         List<AnnotationSnapshot> sourceAnnotations = List.of();
         if (copyAnnotations && !selfCopy) {
             // Cross-bucket copy: the destination overwrite cannot touch the source's annotation
@@ -8616,7 +8618,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3Object[] result = {null};
         synchronized (resolveBucket(destBucket)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404))) {
+                        "The specified bucket does not exist", 404))) {
             result[0] = storeObjectCopy(destBucket, destKey, body, metadata,
                     effectiveContentType, effectiveStorageClass, effectiveContentEncoding,
                     effectiveContentDisposition, effectiveCacheControl, effectiveServerSideEncryption,
