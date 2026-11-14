@@ -633,6 +633,61 @@ class CodeDeployServiceTest {
         assertFalse(service.listApplications(REGION).contains("new-app"));
     }
 
+    @Test
+    void deploymentGroupErrorsUseAwsMessages() {
+        service.createApplication(REGION, "dg-app", "Server", null);
+        service.createDeploymentGroup(REGION, "dg-app", "g1", null, ROLE_ARN, Map.of(), null);
+        assertAws("DeploymentGroupAlreadyExistsException",
+                "An Deployment Group with the name g1 already exists for this application.",
+                () -> service.createDeploymentGroup(REGION, "dg-app", "g1", null, ROLE_ARN, Map.of(), null));
+        assertAws("DeploymentGroupDoesNotExistException", "No Deployment Group found for name: nogroup",
+                () -> service.getDeploymentGroup(REGION, "dg-app", "nogroup"));
+        assertAws("DeploymentGroupDoesNotExistException", "No Deployment Group found for name: nogroup",
+                () -> service.createDeployment(REGION, "dg-app", "nogroup", null, Map.of(), null));
+        service.deleteDeploymentGroup(REGION, "dg-app", "nogroup");
+    }
+
+    @Test
+    void createDeploymentGroupRejectsUnknownDeploymentConfigAndCreatesNothing() {
+        service.createApplication(REGION, "cfg-app", "Server", null);
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: nocfg",
+                () -> service.createDeploymentGroup(REGION, "cfg-app", "g", "nocfg", ROLE_ARN, Map.of(), null));
+        assertTrue(service.listDeploymentGroups(REGION, "cfg-app").isEmpty());
+        service.createDeploymentGroup(REGION, "cfg-app", "g", "CodeDeployDefault.AllAtOnce", ROLE_ARN, Map.of(), null);
+        assertEquals("CodeDeployDefault.AllAtOnce",
+                service.getDeploymentGroup(REGION, "cfg-app", "g").getDeploymentConfigName());
+    }
+
+    @Test
+    void deploymentConfigErrorsUseAwsMessages() {
+        service.createDeploymentConfig(REGION, "cfg", Map.of("type", "HOST_COUNT", "value", 1), "Server", null, null);
+        assertAws("DeploymentConfigAlreadyExistsException", "cfg already exists.",
+                () -> service.createDeploymentConfig(REGION, "cfg", Map.of("type", "HOST_COUNT", "value", 42),
+                        "Server", null, null));
+        assertEquals(1, service.getDeploymentConfig(REGION, "cfg").getMinimumHealthyHosts().get("value"));
+        assertAws("InvalidOperationException", "Can not delete a predefined deployment configuration",
+                () -> service.deleteDeploymentConfig(REGION, "CodeDeployDefault.OneAtATime"));
+        assertEquals("CodeDeployDefault.OneAtATime",
+                service.getDeploymentConfig(REGION, "CodeDeployDefault.OneAtATime").getDeploymentConfigName());
+        assertTrue(service.listDeploymentConfigs(REGION).contains("CodeDeployDefault.OneAtATime"));
+        service.deleteDeploymentConfig(REGION, "cfg");
+        service.deleteDeploymentConfig(REGION, "cfg");
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: cfg",
+                () -> service.getDeploymentConfig(REGION, "cfg"));
+    }
+
+    @Test
+    void updateDeploymentGroupRejectsUnknownConfigAndDeleteSurvivesMissingApplication() {
+        service.createApplication(REGION, "upd-app", "Server", null);
+        service.createDeploymentGroup(REGION, "upd-app", "g", null, ROLE_ARN, Map.of(), null);
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: nocfg",
+                () -> service.updateDeploymentGroup(REGION, "upd-app", "g", null, "nocfg", null, Map.of()));
+        assertEquals("CodeDeployDefault.OneAtATime",
+                service.getDeploymentGroup(REGION, "upd-app", "g").getDeploymentConfigName());
+        service.deleteApplication(REGION, "upd-app");
+        service.deleteDeploymentGroup(REGION, "upd-app", "g");
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, String> diagnosticsOf(Map<String, Object> event) {
         return (Map<String, String>) event.get("diagnostics");

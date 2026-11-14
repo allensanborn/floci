@@ -421,6 +421,6 @@ class CodeDeployIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", containsString("InvalidDeploymentConfigNameException"));
+            .body("__type", containsString("InvalidOperationException"));
     }
 }

@@ -431,7 +431,11 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
         if (groupStore.containsKey(groupName)) {
             throw new AwsException("DeploymentGroupAlreadyExistsException",
-                    "Deployment group already exists: " + groupName, 400);
+                    "An Deployment Group with the name " + groupName + " already exists for this application.", 400);
+        }
+
+        if (deploymentConfigName != null) {
+            getDeploymentConfig(region, deploymentConfigName);
         }
 
         DeploymentGroup group = new DeploymentGroup();
@@ -456,7 +460,7 @@ public class CodeDeployService {
         DeploymentGroup group = groupStore != null ? groupStore.get(groupName) : null;
         if (group == null) {
             throw new AwsException("DeploymentGroupDoesNotExistException",
-                    "Deployment group does not exist: " + groupName, 400);
+                    "No Deployment Group found for name: " + groupName, 400);
         }
         return group;
     }
@@ -472,10 +476,13 @@ public class CodeDeployService {
         if (newGroupName != null && !newGroupName.equals(currentGroupName)
                 && groupStore.containsKey(newGroupName)) {
             throw new AwsException("DeploymentGroupAlreadyExistsException",
-                    "Deployment group already exists: " + newGroupName, 400);
+                    "An Deployment Group with the name " + newGroupName + " already exists for this application.", 400);
         }
 
-        if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
+        if (deploymentConfigName != null) {
+            getDeploymentConfig(region, deploymentConfigName);
+            group.setDeploymentConfigName(deploymentConfigName);
+        }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
 
@@ -494,12 +501,16 @@ public class CodeDeployService {
     }
 
     public void deleteDeploymentGroup(String region, String appName, String groupName) {
+        // AWS: succeeds when the application is already gone too (delete is idempotent end to end).
+        if (appName != null && !appName.isBlank() && !applicationsFor(region).containsKey(appName)) {
+            return;
+        }
         getApplication(region, appName);
         Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
         Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        // AWS: DeleteDeploymentGroup on an unknown group succeeds (no not-found error in its model).
         if (groupStore == null || groupStore.remove(groupName) == null) {
-            throw new AwsException("DeploymentGroupDoesNotExistException",
-                    "Deployment group does not exist: " + groupName, 400);
+            return;
         }
         tags.remove(deploymentGroupArn(region, appName, groupName));
         persistRegion(deploymentGroups, region);
@@ -535,7 +546,7 @@ public class CodeDeployService {
         Map<String, DeploymentConfig> store = deploymentConfigsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("DeploymentConfigAlreadyExistsException",
-                    "Deployment configuration already exists: " + name, 400);
+                    name + " already exists.", 400);
         }
         if (name.startsWith("CodeDeployDefault.")) {
             throw new AwsException("InvalidDeploymentConfigNameException",
@@ -558,21 +569,20 @@ public class CodeDeployService {
         DeploymentConfig cfg = deploymentConfigsFor(region).get(name);
         if (cfg == null) {
             throw new AwsException("DeploymentConfigDoesNotExistException",
-                    "Deployment configuration does not exist: " + name, 400);
+                    "No deployment configuration found for name: " + name, 400);
         }
         return cfg;
     }
 
     public void deleteDeploymentConfig(String region, String name) {
         if (name.startsWith("CodeDeployDefault.")) {
-            throw new AwsException("InvalidDeploymentConfigNameException",
-                    "Cannot delete a built-in deployment configuration.", 400);
+            throw new AwsException("InvalidOperationException",
+                    "Can not delete a predefined deployment configuration", 400);
         }
-        if (deploymentConfigsFor(region).remove(name) == null) {
-            throw new AwsException("DeploymentConfigDoesNotExistException",
-                    "Deployment configuration does not exist: " + name, 400);
+        // AWS: DeleteDeploymentConfig on an unknown name succeeds (no not-found error in its model).
+        if (deploymentConfigsFor(region).remove(name) != null) {
+            persistRegion(deploymentConfigs, region);
         }
-        persistRegion(deploymentConfigs, region);
     }
 
     public List<String> listDeploymentConfigs(String region) {
