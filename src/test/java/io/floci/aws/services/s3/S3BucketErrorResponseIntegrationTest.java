@@ -24,6 +24,22 @@ class S3BucketErrorResponseIntegrationTest {
     }
 
     @Test
+    void noSuchBucketAndNoSuchUploadCarryAwsMessages() {
+        String bucket = "error-message-bucket";
+
+        given().when().get("/" + bucket).then().statusCode(404)
+                .body(containsString("<Code>NoSuchBucket</Code>"))
+                .body(containsString("<Message>The specified bucket does not exist</Message>"));
+
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().when().delete("/" + bucket + "/key?uploadId=missing").then().statusCode(404)
+                .body(containsString("<Code>NoSuchUpload</Code>"))
+                .body(containsString("<Message>The specified upload does not exist. The upload ID may be invalid, "
+                        + "or the upload may have been aborted or completed.</Message>"));
+        given().when().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
     void bucketConfigurationErrorsIncludeBucketName() {
         String bucket = "error-response-config-bucket";
         given().when().put("/" + bucket).then().statusCode(200);
