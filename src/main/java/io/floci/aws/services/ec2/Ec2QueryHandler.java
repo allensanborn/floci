@@ -461,7 +461,7 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Boolean parseOptionalBoolean(String value, String name) {
+    private static Boolean parseOptionalBoolean(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
         }
@@ -2365,14 +2365,14 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private void checkDryRun(MultivaluedMap<String, String> params) {
+    static void checkDryRun(MultivaluedMap<String, String> params) {
         if (dryRun(params)) {
             throw Ec2Service.dryRunOperation();
         }
     }
 
     /** The request's DryRun flag. A blank or non-boolean value is refused rather than read as false. */
-    private boolean dryRun(MultivaluedMap<String, String> params) {
+    static boolean dryRun(MultivaluedMap<String, String> params) {
         String value = params.getFirst("DryRun");
         if (value != null && value.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);

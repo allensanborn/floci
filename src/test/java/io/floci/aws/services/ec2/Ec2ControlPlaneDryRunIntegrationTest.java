@@ -47,9 +47,15 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DescribeTransitGatewayPeeringAttachments|",
             "DescribeTransitGatewayVpcAttachments|",
             "DescribeTransitGatewayRouteTables|",
+            "DescribeClientVpnEndpoints|",
             "DeleteKeyPair|KeyName=no-such-key",
             "DeleteFlowLogs|FlowLogId.1=fl-0123456789abcdef0",
-            "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=" + ATTACHMENT
+            "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=" + ATTACHMENT,
+            "ApplySecurityGroupsToClientVpnTargetNetwork|ClientVpnEndpointId=" + CLIENT_VPN
+                    + "&VpcId=vpc-0123456789abcdef0&SecurityGroupId.1=sg-0123456789abcdef0",
+            "DescribeClientVpnTargetNetworks|ClientVpnEndpointId=" + CLIENT_VPN,
+            "DescribeClientVpnAuthorizationRules|ClientVpnEndpointId=" + CLIENT_VPN,
+            "DescribeClientVpnRoutes|ClientVpnEndpointId=" + CLIENT_VPN
     })
     void aDryRunIsAnsweredWithDryRunOperation(String action, String query) {
         dryRun(action, query).then()
@@ -73,6 +79,18 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=not-an-attachment"
                     + "|InvalidTransitGatewayAttachmentID.Malformed",
             "DescribeTransitGateways|TransitGatewayIds.1=" + TGW + "|InvalidTransitGatewayID.NotFound",
+            "ModifyClientVpnEndpoint|ClientVpnEndpointId=" + CLIENT_VPN + "&Description=d"
+                    + "|InvalidClientVpnEndpointId.NotFound",
+            "DeleteClientVpnEndpoint|ClientVpnEndpointId=" + CLIENT_VPN + "|InvalidClientVpnEndpointId.NotFound",
+            "DisassociateClientVpnTargetNetwork|ClientVpnEndpointId=" + CLIENT_VPN
+                    + "&AssociationId=cvpn-assoc-0123456789abcdef0|InvalidClientVpnEndpointId.NotFound",
+            "AuthorizeClientVpnIngress|ClientVpnEndpointId=" + CLIENT_VPN
+                    + "&TargetNetworkCidr=10.0.0.0/16&AuthorizeAllGroups=true|InvalidClientVpnEndpointId.NotFound",
+            "DeleteClientVpnRoute|ClientVpnEndpointId=" + CLIENT_VPN
+                    + "&DestinationCidrBlock=10.0.0.0/16|InvalidClientVpnEndpointId.NotFound",
+            "ExportClientVpnClientConfiguration|ClientVpnEndpointId=" + CLIENT_VPN
+                    + "|InvalidClientVpnEndpointId.NotFound",
+            "DescribeClientVpnTargetNetworks|ClientVpnEndpointId=not-an-endpoint|InvalidParameterValue",
             "DeleteLaunchTemplate|LaunchTemplateName=no-such-template|InvalidLaunchTemplateName.NotFoundException",
             "ModifyEbsDefaultKmsKeyId||MissingParameter",
             "DeleteKeyPair||MissingParameter",
@@ -96,6 +114,7 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DeleteTransitGateway, ''",
             "DeleteKeyPair, maybe",
             "DeleteLaunchTemplate, ''",
+            "ModifyClientVpnEndpoint, maybe",
             "EnableEbsEncryptionByDefault, ''"
     })
     void aDryRunValueThatIsNotABooleanIsRefused(String action, String value) {
@@ -175,6 +194,27 @@ class Ec2ControlPlaneDryRunIntegrationTest {
         assertEquals(0, ec2("SearchTransitGatewayRoutes", "TransitGatewayRouteTableId", routeTable,
                 "Filter.1.Name", "type", "Filter.1.Value.1", "static")
                 .getList("SearchTransitGatewayRoutesResponse.routeSet.item").size());
+    }
+
+    @Test
+    void aDryRunModifyAndDeleteLeaveTheClientVpnEndpointAsItWas() {
+        String endpoint = ec2("CreateClientVpnEndpoint", "ClientCidrBlock", "10.100.0.0/16",
+                "ServerCertificateArn", "arn:aws:acm:us-east-1:000000000000:certificate/dry-run",
+                "Authentication.1.Type", "certificate-authentication",
+                "Authentication.1.MutualAuthentication.ClientRootCertificateChainArn",
+                "arn:aws:acm:us-east-1:000000000000:certificate/dry-run-client",
+                "ConnectionLogOptions.Enabled", "false", "Description", "original")
+                .getString("CreateClientVpnEndpointResponse.clientVpnEndpointId");
+
+        dryRun("ModifyClientVpnEndpoint", "ClientVpnEndpointId=" + endpoint + "&Description=changed")
+                .then().statusCode(412);
+        dryRun("DeleteClientVpnEndpoint", "ClientVpnEndpointId=" + endpoint).then().statusCode(412);
+
+        XmlPath described = ec2("DescribeClientVpnEndpoints", "ClientVpnEndpointId.1", endpoint);
+        assertEquals("original", described.getString("DescribeClientVpnEndpointsResponse.clientVpnEndpoint"
+                + ".item.description"));
+        assertEquals(endpoint, described.getString("DescribeClientVpnEndpointsResponse.clientVpnEndpoint"
+                + ".item.clientVpnEndpointId"));
     }
 
     private Response dryRun(String action, String query) {
