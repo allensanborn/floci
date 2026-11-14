@@ -130,4 +130,24 @@ class EcsErrorMessagesIntegrationTest {
         call("DescribeClusters", "{\"clusters\":[\"errmsg-del-cluster\"]}")
                 .then().body("clusters[0].status", equalTo("ACTIVE"));
     }
+
+    // ── Tagging a resource that does not exist ────────────────────────────────
+
+    @Test
+    void taggingMissingResourceIsWordedByResourceKind() {
+        String arnBase = "arn:aws:ecs:us-east-1:000000000000:";
+        String missingCluster = arnBase + "cluster/errmsg-tag-missing";
+        String missingTaskDef = arnBase + "task-definition/errmsg-tag-missing:5001";
+        String foreign = "arn:aws:ecs:us-east-1:111111111111:cluster/errmsg-tag-missing";
+        for (String op : new String[] {"TagResource", "UntagResource", "ListTagsForResource"}) {
+            String tail = op.equals("TagResource") ? ",\"tags\":[{\"key\":\"a\",\"value\":\"b\"}]"
+                    : op.equals("UntagResource") ? ",\"tagKeys\":[\"a\"]" : "";
+            expectError(op, "{\"resourceArn\":\"" + missingCluster + "\"" + tail + "}",
+                    400, "ClusterNotFoundException", "Cluster not found.");
+            expectError(op, "{\"resourceArn\":\"" + missingTaskDef + "\"" + tail + "}",
+                    400, "ClientException", "Unable to describe task definition.");
+            expectError(op, "{\"resourceArn\":\"" + foreign + "\"" + tail + "}",
+                    400, "InvalidParameterException", "The ARN provided is invalid.");
+        }
+    }
 }

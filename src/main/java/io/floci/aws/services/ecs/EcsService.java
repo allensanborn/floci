@@ -3512,7 +3512,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         mergeTagsOnResource(resource, tags);
     }
@@ -3520,7 +3520,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public void untagResource(String resourceArn, List<String> tagKeys) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         removeTagsFromResource(resource, tagKeys);
     }
@@ -3528,9 +3528,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public Map<String, String> listTagsForResource(String resourceArn) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
-            throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
+            throw taggedResourceNotFound(resourceArn);
         }
         return getTagsFromResource(resource);
+    }
+
+    /**
+     * The refusal a tagging call earns for an ARN naming nothing: another account's ARN is an invalid
+     * ARN, a missing cluster is {@code ClusterNotFoundException}, a missing task definition is a
+     * {@code ClientException}, and any other resource kind stays an {@code InvalidParameterException}.
+     */
+    private AwsException taggedResourceNotFound(String resourceArn) {
+        String[] fields = resourceArn.split(":", 6);
+        if (fields.length == 6) {
+            if (!fields[4].isEmpty() && !fields[4].equals(regionResolver.getAccountId())) {
+                return new AwsException("InvalidParameterException", "The ARN provided is invalid.", 400);
+            }
+            if (fields[5].startsWith("cluster/")) {
+                return new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
+            }
+            if (fields[5].startsWith("task-definition/")) {
+                return new AwsException("ClientException", "Unable to describe task definition.", 400);
+            }
+        }
+        return new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
     }
 
     private Object findByArn(String arn) {
