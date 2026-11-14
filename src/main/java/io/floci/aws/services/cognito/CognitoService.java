@@ -103,6 +103,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
@@ -136,7 +137,6 @@ public class CognitoService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String INVALID_ACCESS_TOKEN_MESSAGE = "Invalid access token";
     /** The scope of every access token from an API sign-in such as InitiateAuth, and what the user's own operations need. */
     private static final String USER_ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final List<String> API_SIGN_IN_SCOPES = List.of(USER_ADMIN_SCOPE);
@@ -502,7 +502,7 @@ public class CognitoService implements ResourceProvider {
     public UserPool updateUserPool(Map<String, Object> request, String region) {
         String id = (String) request.get("UserPoolId");
         synchronized (poolLock(id)) {
-            UserPool pool = describeUserPool(id);
+            UserPool pool = describeUserPoolRefusingSilently(id);
             UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
             populateUserPool(updatedPool, request);
@@ -623,7 +623,9 @@ public class CognitoService implements ResourceProvider {
             String finalName = (String) attr.get("Name");
             boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
             if (exists) {
-                throw new AwsException("InvalidParameterException", "Attribute already exists in schema: " + finalName, 400);
+                // AttributeDataType defaults to String when the request leaves it out
+                Object dataType = attr.get("AttributeDataType");
+                throw CognitoErrors.attributeNameNotUnique(finalName, dataType == null ? "String" : dataType.toString());
             }
 
             schema.add(attr);
@@ -828,6 +830,14 @@ public class CognitoService implements ResourceProvider {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("AttributesRequireVerificationBeforeUpdate", new ArrayList<>(normalized));
         return result;
+    }
+
+    /** {@link #describeUserPool} for the operations whose refusal of a missing pool carries no message. */
+    private UserPool describeUserPoolRefusingSilently(String id) {
+        if (poolStore.get(id).isEmpty()) {
+            throw CognitoErrors.userPoolNotFoundWithoutMessage();
+        }
+        return describeUserPool(id);
     }
 
     public UserPool describeUserPool(String id) {
@@ -1264,7 +1274,7 @@ public class CognitoService implements ResourceProvider {
                                                Boolean enableTokenRevocation, Integer authSessionValidity) {
 
         validateAuthSessionValidity(authSessionValidity);
-        UserPool userPool = describeUserPool(userPoolId);
+        UserPool userPool = describeUserPoolRefusingSilently(userPoolId);
         String clientId = clientIdFor(userPool, clientName);
         UserPoolClient client = requestedClientSettings(clientName, allowedOAuthFlowsUserPoolClient,
                 allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs, defaultRedirectURI,
@@ -1301,10 +1311,22 @@ public class CognitoService implements ResourceProvider {
         return client;
     }
 
+    /** The client in this pool, a miss naming the id: for the operations that reach a client on the way to something else. */
     public UserPoolClient describeUserPoolClient(String userPoolId, String clientId) {
-        UserPoolClient client = describeUserPoolClient(clientId);
+        return userPoolClient(userPoolId, clientId, () -> CognitoErrors.userPoolClientNotFound(clientId));
+    }
+
+    /** The client in this pool, a miss not naming the id: DescribeUserPoolClient and UpdateUserPoolClient's own wording. */
+    public UserPoolClient addressedUserPoolClient(String userPoolId, String clientId) {
+        return userPoolClient(userPoolId, clientId, CognitoErrors::userPoolClientDoesNotExist);
+    }
+
+    private UserPoolClient userPoolClient(String userPoolId, String clientId,
+                                          Supplier<AwsException> missing) {
+        describeUserPool(userPoolId);
+        UserPoolClient client = clientStore.get(clientId).orElseThrow(missing);
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
+            throw CognitoErrors.userPoolClientNotInPool(clientId, userPoolId);
         }
         return client;
     }
@@ -1336,7 +1358,7 @@ public class CognitoService implements ResourceProvider {
     /** By id alone, for callers that hold only the client id, such as a CloudFormation stack resource. */
     public UserPoolClient describeUserPoolClient(String clientId) {
         return clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
     }
 
     public List<UserPoolClient> listUserPoolClients(String userPoolId) {
@@ -1345,7 +1367,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void deleteUserPoolClient(String clientId) {
-        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+        clientStore.get(clientId).orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         clientStore.delete(clientId);
     }
 
@@ -1428,7 +1450,7 @@ public class CognitoService implements ResourceProvider {
                                                List<String> writeAttributes, Map<String, Object> refreshTokenRotation,
                                                Boolean enableTokenRevocation, Integer authSessionValidity) {
         validateAuthSessionValidity(authSessionValidity);
-        UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
+        UserPoolClient client = addressedUserPoolClient(userPoolId, clientId);
         UserPoolClient settings = requestedClientSettings(clientName != null ? clientName : client.getClientName(),
                 Boolean.TRUE.equals(allowedOAuthFlowsUserPoolClient), allowedOAuthFlows, allowedOAuthScopes,
                 analyticsConfiguration, callbackURLs, defaultRedirectURI, explicitAuthFlows, accessTokenValidity,
@@ -1578,18 +1600,18 @@ public class CognitoService implements ResourceProvider {
 
     public List<UserPoolClientSecret> listUserPoolClientSecrets(String userPoolId, String clientId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
+            throw CognitoErrors.userPoolClientNotInPool(clientId, userPoolId);
         }
         return client.getUserPoolClientSecrets();
     }
 
     public UserPoolClientSecret addUserPoolClientSecret(String clientId, String clientSecret, String userPoolId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
+            throw CognitoErrors.userPoolClientNotInPool(clientId, userPoolId);
         }
 
         if (client.getUserPoolClientSecrets().size() >= 2) {
@@ -1616,9 +1638,9 @@ public class CognitoService implements ResourceProvider {
 
     public void deleteUserPoolClientSecret(String clientId, String clientSecretId, String userPoolId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
+            throw CognitoErrors.userPoolClientNotInPool(clientId, userPoolId);
         }
 
         UserPoolClientSecret userPoolClientSecret = client.getUserPoolClientSecrets().stream()
@@ -1849,8 +1871,7 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Domain is required", 400);
         }
         if (!findDomains(domain).isEmpty()) {
-            throw new AwsException("InvalidParameterException",
-                    "Domain " + domain + " already associated with another user pool", 400);
+            throw CognitoErrors.domainExists();
         }
 
         UserPoolDomain userPoolDomain = new UserPoolDomain();
@@ -1882,8 +1903,7 @@ public class CognitoService implements ResourceProvider {
         // ambiguous for routing.
         synchronized (domainLock) {
             if (!findDomains(domain).isEmpty()) {
-                throw new AwsException("InvalidParameterException",
-                        "Domain " + domain + " already associated with another user pool", 400);
+                throw CognitoErrors.domainExists();
             }
             if (userPoolDomain.isCustomDomain()) {
                 registerCertificateUse(userPoolDomain.getCertificateArn(), userPoolDomain);
@@ -2413,7 +2433,7 @@ public class CognitoService implements ResourceProvider {
             existing = findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username);
         }
         if (existing == null) {
-            throw new AwsException("UserNotFoundException", "User not found", 400);
+            throw CognitoErrors.userNotFound();
         }
         if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
             final String userStateExceptionMessage = """
@@ -2701,7 +2721,7 @@ public class CognitoService implements ResourceProvider {
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
             }
             throw e;
         }
@@ -2731,12 +2751,27 @@ public class CognitoService implements ResourceProvider {
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
             }
             throw e;
         }
 
         LOG.infov("DeleteUser: deleted user {0} in pool {1}", username, poolId);
+    }
+
+    /**
+     * {@link #adminGetUser} for the public operations that name the user by {@code ClientId} and
+     * {@code Username} rather than by pool, which report a miss as the pair not being found.
+     */
+    private CognitoUser adminGetUserForClient(String userPoolId, String username) {
+        try {
+            return adminGetUser(userPoolId, username);
+        } catch (AwsException e) {
+            if ("UserNotFoundException".equals(e.getErrorCode())) {
+                throw CognitoErrors.usernameClientNotFound();
+            }
+            throw e;
+        }
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
@@ -2750,7 +2785,7 @@ public class CognitoService implements ResourceProvider {
                 .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username))
                 .forEach(u -> matches.putIfAbsent(u.getUsername(), u));
         if (matches.isEmpty()) {
-            throw new AwsException("UserNotFoundException", "User not found", 400);
+            throw CognitoErrors.userNotFound();
         }
         if (matches.size() > 1) {
             throw new AwsException("InvalidParameterException",
@@ -3409,8 +3444,7 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         validateGroupName(groupName);
         return groupStore.get(groupKey(userPoolId, groupName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Group not found: " + groupName, 400));
+                .orElseThrow(CognitoErrors::groupNotFound);
     }
 
     public List<CognitoGroup> listGroups(String userPoolId) {
@@ -3535,8 +3569,7 @@ public class CognitoService implements ResourceProvider {
     public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes,
             Map<String, String> validationData, Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
-                        400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         String userPoolId = client.getUserPoolId();
         UserPool pool = describeUserPool(userPoolId);
         String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, signInKey(pool, username));
@@ -3616,7 +3649,7 @@ public class CognitoService implements ResourceProvider {
         synchronized (userLock(userPoolId, username)) {
             UserPool currentPool = describeUserPool(userPoolId);
             if (clientStore.get(client.getClientId()).isEmpty()) {
-                throw new AwsException("ResourceNotFoundException", "Client not found", 400);
+                throw CognitoErrors.userPoolClientNotFound(client.getClientId());
             }
             requireAvailableSignUpUsername(currentPool, username);
             userStore.put(key, user);
@@ -3679,10 +3712,9 @@ public class CognitoService implements ResourceProvider {
     public void confirmSignUp(String clientId, String username, String confirmationCode,
                               Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
-                        400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         String userPoolId = client.getUserPoolId();
-        CognitoUser resolvedUser = adminGetUser(userPoolId, username);
+        CognitoUser resolvedUser = adminGetUserForClient(userPoolId, username);
         UserPool pool;
         CognitoUser triggerUser;
         synchronized (userLock(userPoolId, resolvedUser.getUsername())) {
@@ -3741,10 +3773,9 @@ public class CognitoService implements ResourceProvider {
     public Map<String, String> resendConfirmationCode(String clientId, String username,
                                                       Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
-                        400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         UserPool pool = describeUserPool(client.getUserPoolId());
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         if (!"UNCONFIRMED".equals(user.getUserStatus())) {
             throw new AwsException("NotAuthorizedException",
                     "User cannot be confirmed. Current status is " + user.getUserStatus(), 400);
@@ -4351,7 +4382,7 @@ public class CognitoService implements ResourceProvider {
             String proposedPassword) {
         CognitoUser user = adminGetUser(poolId, username);
         if (user.getPasswordHash() != null && !user.getPasswordHash().equals(hashPassword(previousPassword))) {
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
 
         updateUserPassword(user, proposedPassword);
@@ -4367,12 +4398,12 @@ public class CognitoService implements ResourceProvider {
 
     public Map<String, Object> forgotPassword(String clientId, String username, Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         UserPool pool = describeUserPool(client.getUserPoolId());
         if (accountRecoveryMechanisms(pool).contains("admin_only")) {
             throw new AwsException("NotAuthorizedException", "Contact administrator to reset password.", 400);
         }
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         ensureVerificationWiring();
         DeliveryTarget deliveryTarget = resolveForgotPasswordDeliveryTarget(pool, user);
 
@@ -4405,8 +4436,8 @@ public class CognitoService implements ResourceProvider {
     public void confirmForgotPassword(String clientId, String username, String confirmationCode, String newPassword,
                                       Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
-        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
+        CognitoUser user = adminGetUserForClient(client.getUserPoolId(), username);
         ensureVerificationWiring();
         try {
             verificationCodeService.consume(client.getUserPoolId(), user.getUsername(),
@@ -4441,16 +4472,7 @@ public class CognitoService implements ResourceProvider {
      * SetUserMFAPreference accepts SMS settings without keeping them.
      */
     public Map<String, Object> getUserAuthFactors(String accessToken) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
 
         CognitoUser user = adminGetUser(token.poolId(), token.username());
@@ -4470,16 +4492,7 @@ public class CognitoService implements ResourceProvider {
 
     public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName,
                                                                 Map<String, String> clientMetadata) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
@@ -4539,16 +4552,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void verifyUserAttribute(String accessToken, String attributeName, String code) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
@@ -4802,7 +4806,7 @@ public class CognitoService implements ResourceProvider {
                                                            Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .filter(c -> requiredPoolId == null || requiredPoolId.equals(c.getUserPoolId()))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         UserPool pool = describeUserPool(client.getUserPoolId());
         validateClientAllowsClientCredentials(client);
         validateClientSecret(client, clientSecret);
@@ -4870,7 +4874,7 @@ public class CognitoService implements ResourceProvider {
 
     UserPoolClient findClientById(String clientId) {
         return clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
     }
 
     /**
@@ -4883,17 +4887,17 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
         }
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+                .orElseThrow(() -> CognitoErrors.userPoolClientNotFound(clientId));
         String[] parts = parseRefreshToken(refreshToken);
         if (parts == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         String poolId = parts[0];
         String username = parts[1];
         String refreshTokenUuid = parts[4]; // UUID from refresh token
 
         if (!client.getUserPoolId().equals(poolId)) {
-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         requireRefreshTokenOfClient(client, parts);
         List<String> scopes = refreshTokenScopes(parts);
@@ -4967,8 +4971,7 @@ public class CognitoService implements ResourceProvider {
 
         String[] parts = parseRefreshToken(token);
         if (parts == null) {
-            throw new AwsException("UnsupportedTokenTypeException",
-                    "Only refresh tokens can be revoked", 400);
+            throw CognitoErrors.unsupportedTokenType();
         }
 
         String poolId = parts[0];
@@ -6170,7 +6173,7 @@ public class CognitoService implements ResourceProvider {
             throw e;
         } catch (Exception e) {
             LOG.debug("API Gateway Cognito token verification failed", e);
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 
@@ -6183,7 +6186,7 @@ public class CognitoService implements ResourceProvider {
     private void requireTokenUserExists(String poolId, String username, String subject) {
         CognitoUser user = username == null ? null : userStore.get(userKey(poolId, username)).orElse(null);
         if (user == null || !subject.equals(user.getAttributes().getOrDefault("sub", user.getUsername()))) {
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 
@@ -6223,7 +6226,7 @@ public class CognitoService implements ResourceProvider {
             throw e;
         } catch (Exception e) {
             LOG.debug("Access token verification failed", e);
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 
@@ -7091,8 +7094,7 @@ public class CognitoService implements ResourceProvider {
         long preferredCount = List.of(sms, email, softwareToken).stream()
                 .filter(update -> Boolean.TRUE.equals(update.preferredMfa())).count();
         if (preferredCount > 1) {
-            throw new AwsException("InvalidParameterException",
-                    "Only one MFA method can be set as preferred.", 400);
+            throw CognitoErrors.twoPreferredMfaTypes();
         }
         SmsMfaSettings smsSettings = user.getSmsMfaSettings();
         EmailMfaSettings emailSettings = user.getEmailMfaSettings();
@@ -7187,8 +7189,7 @@ public class CognitoService implements ResourceProvider {
         boolean enabled = update.enabled() != null ? update.enabled() : current.enabled();
         boolean preferred = update.preferredMfa() != null ? update.preferredMfa() : current.preferred();
         if (!enabled && Boolean.TRUE.equals(update.preferredMfa())) {
-            throw new AwsException("InvalidParameterException",
-                    "Preferred MFA setting cannot be enabled when the MFA method is disabled.", 400);
+            throw CognitoErrors.preferredMfaDisabled();
         }
         return new FactorState(enabled, enabled && preferred);
     }

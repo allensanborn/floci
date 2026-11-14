@@ -66,8 +66,6 @@ final class CognitoAuthFlowHandler {
     /** The {@code callerContext.clientId} AWS sends for an admin action, which names no app client. */
     private static final String CLIENT_ID_NOT_APPLICABLE = "CLIENT_ID_NOT_APPLICABLE";
     private static final String CLIENT_CREDENTIALS_TRIGGER_SOURCE = "TokenGeneration_ClientCredentials";
-    /** The message of a wrong password, which managed login also shows for an unknown user. */
-    static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
     /** VerifySoftwareToken's {@code FriendlyDeviceName} length limit in the service model. */
     static final int MAX_FRIENDLY_DEVICE_NAME_LENGTH = 131_072;
@@ -245,15 +243,15 @@ final class CognitoAuthFlowHandler {
 
         return switch (authFlow) {
             case "ADMIN_USER_PASSWORD_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
             case "ADMIN_NO_SRP_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
             case "USER_PASSWORD_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH",
+                requireAdminFlowEnabled(client, "ALLOW_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH",
                         "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
@@ -262,15 +260,15 @@ final class CognitoAuthFlowHandler {
                 yield handleRefreshToken(pool, client, authParameters, clientMetadata);
             }
             case "ADMIN_USER_SRP_AUTH", "USER_SRP_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_USER_SRP_AUTH");
                 yield handleUserSrpAuth(pool, client, authParameters, clientMetadata, true);
             }
             case "CUSTOM_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_CUSTOM_AUTH", "CUSTOM_AUTH_FLOW_ONLY");
+                requireAdminFlowEnabled(client, "ALLOW_CUSTOM_AUTH", "CUSTOM_AUTH_FLOW_ONLY");
                 yield handleCustomAuth(pool, client, authParameters, clientMetadata);
             }
             case "USER_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_USER_AUTH");
                 yield handleUserAuth(pool, client, authParameters, clientMetadata);
             }
             default -> throw unsupportedAuthFlow(authFlow);
@@ -282,13 +280,26 @@ final class CognitoAuthFlowHandler {
      * {@code acceptedValues}.
      */
     private static void requireFlowEnabled(UserPoolClient client, String authFlow, String... acceptedValues) {
+        if (!flowEnabled(client, acceptedValues)) {
+            throw CognitoErrors.authFlowNotEnabled(authFlow);
+        }
+    }
+
+    /** {@link #requireFlowEnabled} for AdminInitiateAuth, which words the refusal without the flow. */
+    private static void requireAdminFlowEnabled(UserPoolClient client, String... acceptedValues) {
+        if (!flowEnabled(client, acceptedValues)) {
+            throw CognitoErrors.adminAuthFlowNotEnabled();
+        }
+    }
+
+    private static boolean flowEnabled(UserPoolClient client, String... acceptedValues) {
         List<String> enabled = enabledAuthFlows(client);
         for (String accepted : acceptedValues) {
             if (enabled.contains(accepted)) {
-                return;
+                return true;
             }
         }
-        throw new AwsException("InvalidParameterException", authFlow + " flow not enabled for this client", 400);
+        return false;
     }
 
     /**
@@ -746,7 +757,7 @@ final class CognitoAuthFlowHandler {
                     "UserMigration_Authentication");
             if (user == null) {
                 if ("ENABLED".equals(client.getPreventUserExistenceErrors())) {
-                    throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+                    throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
                 }
                 throw ae;
             }
@@ -759,7 +770,7 @@ final class CognitoAuthFlowHandler {
             if (recordAuthEvent) {
                 service.recordSignInEvent(pool, user, false);
             }
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         return user;
     }
@@ -770,14 +781,14 @@ final class CognitoAuthFlowHandler {
         if (refreshToken == null) throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
         String[] parts = service.parseRefreshToken(refreshToken);
         if (parts == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         // Scope the token to the pool that minted it. HMAC verification only proves the token
         // was signed by parts[0]'s pool, not that parts[0] is the pool serving this request, so
         // a token legitimately issued for pool A must not be replayed against pool B's client.
         // Mirrors getTokensFromRefreshToken's pool-id check.
         if (!pool.getId().equals(parts[0])) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         CognitoService.requireRefreshTokenOfClient(client, parts);
         List<String> scopes = CognitoService.refreshTokenScopes(parts);
@@ -787,7 +798,7 @@ final class CognitoAuthFlowHandler {
         try {
             iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
         } catch (NumberFormatException e) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
 
@@ -805,7 +816,7 @@ final class CognitoAuthFlowHandler {
             // Real Cognito never reveals whether the encoded username exists; any
             // refresh token that doesn't resolve to a real user is simply invalid.
             if ("UserNotFoundException".equals(ae.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
             }
             throw ae;
         }
@@ -1063,7 +1074,7 @@ final class CognitoAuthFlowHandler {
             if (srp.recordAuthEvent()) {
                 service.recordSignInEvent(pool, user, false);
             }
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         return user;
     }
@@ -1387,7 +1398,7 @@ final class CognitoAuthFlowHandler {
 
     private void rejectSimulatedUser(UserAuthSession session) {
         if (!session.userExists()) {
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
     }
 
@@ -1400,7 +1411,7 @@ final class CognitoAuthFlowHandler {
                                                            String preferred) {
         List<String> available = configuredUserAuthChallenges(pool);
         if (available.isEmpty()) {
-            throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
         String challenge;
         if (preferred == null) {
@@ -1706,7 +1717,7 @@ final class CognitoAuthFlowHandler {
         }
         if (!passwordOK) {
             customAuthSessions.remove(session);
-            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INCORRECT_CREDENTIALS, 400);
         }
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
