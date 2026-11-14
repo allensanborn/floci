@@ -214,12 +214,11 @@ public class CloudWatchMetricStreamsService {
     /**
      * Resolves the stream an ARN names, or reports that nothing does. The tag operations declare
      * {@code ResourceNotFoundException}, the same code {@code GetMetricStream} already answers
-     * with, so an unknown ARN here reads the same way an unknown name does.
+     * with, so an unknown ARN here reads the same way an unknown name does: no message.
      */
     private MetricStream requireStream(String resourceArn, String region) {
         return findByArn(resourceArn, region).orElseThrow(() ->
-                new AwsException("ResourceNotFoundException",
-                        "Metric stream " + resourceArn + " does not exist.", 404));
+                notFound());
     }
 
     private Optional<MetricStream> findByArn(String resourceArn, String region) {

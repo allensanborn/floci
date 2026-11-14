@@ -81,6 +81,12 @@ class CloudWatchErrorMessagesIntegrationTest {
                                       String code, String message) throws Exception {
         ObjectNode request = JSON.createObjectNode();
         form.forEach(request::put);
+        assertRefusal(action, form, request, status, code, message);
+    }
+
+    /** As above, for a request whose JSON and CBOR body is not the Query form's flat parameters. */
+    private static void assertRefusal(String action, Map<String, String> form, ObjectNode request,
+                                      int status, String code, String message) throws Exception {
 
         Response xml = query(action, form).when().post("/");
         assertEquals(status, xml.statusCode(), action + " Query status");
@@ -130,6 +136,49 @@ class CloudWatchErrorMessagesIntegrationTest {
         // The refusal left nothing behind: a separate read finds no alarm of that name.
         String described = query("DescribeAlarms", form("AlarmNames.member.1", alarm)).when().post("/").asString();
         assertFalse(described.contains(alarm), described);
+    }
+
+    /**
+     * Tag, Untag and ListTagsForResource answer an ARN naming nothing with ResourceNotFoundException
+     * and no message, whichever kind of resource the ARN names. Each kind is created first and its
+     * real ARN accepted, so a malformed ARN cannot be what the refusal is about.
+     */
+    @Test
+    void tagOperationsOnAMissingResourceAnswerNotFoundWithNoMessage() throws Exception {
+        String dashboard = unique("tag-dash-");
+        String stream = unique("tag-stream-");
+        String alarm = unique("tag-alarm-");
+        query("PutDashboard", form("DashboardName", dashboard, "DashboardBody", "{\"widgets\":[]}"))
+                .when().post("/").then().statusCode(200);
+        query("PutMetricStream", form("Name", stream, "FirehoseArn", "arn:aws:firehose:us-east-1:000000000000:deliverystream/m",
+                "RoleArn", "arn:aws:iam::000000000000:role/r", "OutputFormat", "json")).when().post("/").then().statusCode(200);
+        query("PutMetricAlarm", form("AlarmName", alarm, "MetricName", "CPU", "Namespace", "AWS/EC2",
+                "ComparisonOperator", "GreaterThanThreshold", "EvaluationPeriods", "1", "Period", "60",
+                "Statistic", "Average", "Threshold", "80")).when().post("/").then().statusCode(200);
+
+        String prefix = "arn:aws:cloudwatch:us-east-1:000000000000:";
+        String[][] kinds = {
+                {prefix + "dashboard/" + dashboard, prefix + "dashboard/" + dashboard + "-gone"},
+                {prefix + "metric-stream/" + stream, prefix + "metric-stream/" + stream + "-gone"},
+                {prefix + "alarm:" + alarm, prefix + "alarm:" + alarm + "-gone"}};
+        for (String[] arns : kinds) {
+            // The real ARN resolves, read back through a separate call.
+            query("TagResource", form("ResourceARN", arns[0], "Tags.member.1.Key", "k", "Tags.member.1.Value", "v"))
+                    .when().post("/").then().statusCode(200);
+            String tags = query("ListTagsForResource", form("ResourceARN", arns[0])).when().post("/").asString();
+            assertTrue(tags.contains("<Key>k</Key>"), tags);
+
+            ObjectNode tag = body("ResourceARN", arns[1]);
+            tag.putArray("Tags").addObject().put("Key", "k").put("Value", "v");
+            assertRefusal("TagResource", form("ResourceARN", arns[1], "Tags.member.1.Key", "k",
+                    "Tags.member.1.Value", "v"), tag, 404, "ResourceNotFoundException", null);
+            ObjectNode untag = body("ResourceARN", arns[1]);
+            untag.putArray("TagKeys").add("k");
+            assertRefusal("UntagResource", form("ResourceARN", arns[1], "TagKeys.member.1", "k"),
+                    untag, 404, "ResourceNotFoundException", null);
+            assertRefusal("ListTagsForResource", form("ResourceARN", arns[1]),
+                    404, "ResourceNotFoundException", null);
+        }
     }
 
     /** GetMetricStream's ResourceNotFoundException carries no message. */

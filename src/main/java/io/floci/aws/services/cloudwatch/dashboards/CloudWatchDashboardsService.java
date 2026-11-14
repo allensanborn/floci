@@ -221,8 +221,7 @@ public class CloudWatchDashboardsService {
      */
     private Dashboard requireDashboard(String resourceArn, String region) {
         return findByArn(resourceArn, region).orElseThrow(() ->
-                new AwsException("ResourceNotFoundException",
-                        "Dashboard does not exist: " + resourceArn, 404));
+                new AwsException("ResourceNotFoundException", null, 404));
     }
 
     private Optional<Dashboard> findByArn(String resourceArn, String region) {
