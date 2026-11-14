@@ -885,7 +885,7 @@ class GlueServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> glueService.updatePartition("db1", "plain", List.of("missing"), missing));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
-        assertEquals("Partition not found.", ex.getMessage());
+        assertEquals("Partition [missing] not found", ex.getMessage());
     }
 
     @Test
@@ -1048,7 +1048,7 @@ class GlueServiceTest {
                 () -> glueService.deleteTable("db1", "missing_table"));
 
         assertEquals("EntityNotFoundException", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("db1.missing_table"));
+        assertEquals("Table missing_table not found.", ex.getMessage());
     }
 
     @Test
@@ -1844,7 +1844,7 @@ class GlueServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> glueService.getTableVersion("db1", "plain", "7"));
         assertEquals("EntityNotFoundException", missing.getErrorCode());
-        assertEquals("Version not found.", missing.getMessage());
+        assertEquals("Table version not found.", missing.getMessage());
         AwsException notAnInteger = assertThrows(AwsException.class,
                 () -> glueService.getTableVersion("db1", "plain", "latest"));
         assertEquals("InvalidInputException", notAnInteger.getErrorCode());

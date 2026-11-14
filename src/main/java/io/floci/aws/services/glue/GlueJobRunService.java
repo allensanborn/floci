@@ -96,7 +96,7 @@ public class GlueJobRunService {
      */
     public synchronized JobRun startJobRun(String jobName, String previousRunId, JobRun overrides,
                                            String originRunId, String workflowRunId) {
-        Job job = glueService.getJob(jobName);
+        Job job = glueService.findJob(jobName).orElseThrow(GlueErrors::jobStartMetadataMissing);
         // The job's own Timeout is stored as given by CreateJob/UpdateJob, so check what the run inherits.
         Integer timeout = firstNonNull(overrides.getTimeout(), job.getTimeout());
         if (timeout != null && timeout < 1) {
@@ -322,8 +322,7 @@ public class GlueJobRunService {
     private JobRun findRun(String jobName, String runId) {
         return runStore.get(runId)
                 .filter(run -> jobName.equals(run.getJobName()))
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Job run " + runId + " not found for job " + jobName, 400));
+                .orElseThrow(GlueErrors::jobRunNotFound);
     }
 
     private List<JobRun> runsOf(String jobName) {

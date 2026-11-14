@@ -322,8 +322,7 @@ public class GlueService {
     public SecurityConfiguration getSecurityConfiguration(String name, String region) {
         validateSecurityConfigurationName(name);
         return securityConfigurationStore.get(securityConfigurationKey(region, name))
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Security configuration not found: " + name, 400));
+                .orElseThrow(GlueErrors::securityConfigurationNotFound);
     }
 
     public void deleteSecurityConfiguration(String name, String region) {
@@ -370,7 +369,7 @@ public class GlueService {
     public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
         String databaseName = normalizeName(database.getName());
         if (databaseStore.get(databaseName).isPresent()) {
-            throw new AwsException("AlreadyExistsException", "Database already exists: " + database.getName(), 400);
+            throw GlueErrors.databaseAlreadyExists();
         }
         database.setName(databaseName);
         database.setCatalogId(regionResolver.getAccountId());
@@ -383,7 +382,7 @@ public class GlueService {
 
     public Database getDatabase(String name) {
         Database database = databaseStore.get(normalizeName(name))
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Database not found: " + name, 400));
+                .orElseThrow(() -> GlueErrors.databaseNotFound(name));
         backfillCatalogId(database);
         return database;
     }
@@ -451,7 +450,7 @@ public class GlueService {
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
         if (tableStore.get(key).isPresent()) {
-            throw new AwsException("AlreadyExistsException", "Table already exists: " + table.getName(), 400);
+            throw GlueErrors.tableAlreadyExists();
         }
         validateSchemaReference(table);
         table.setName(normalizeName(table.getName()));
@@ -466,8 +465,16 @@ public class GlueService {
 
     public Table getTable(String databaseName, String tableName) {
         Table table = tableStore.get(tableKey(databaseName, tableName))
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Table not found: " + databaseName + "." + tableName, 400));
+                .orElseThrow(GlueErrors::tableEntityNotFound);
         return withResolvedSchemaReference(table);
+    }
+
+    /** For the operations whose AWS miss names the table ("Table X not found.") instead of GetTable's constant. */
+    private Table requireTableNamedOnMiss(String databaseName, String tableName) {
+        if (tableStore.get(tableKey(databaseName, tableName)).isEmpty()) {
+            throw GlueErrors.tableNotFound(tableName);
+        }
+        return getTable(databaseName, tableName);
     }
 
     public List<Table> getTables(String databaseName) {
@@ -684,8 +691,7 @@ public class GlueService {
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
         Table existing = tableStore.get(key)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException",
-                        "Table not found: " + databaseName + "." + table.getName(), 400));
+                .orElseThrow(() -> GlueErrors.tableNotFound(table.getName()));
         if (versionId != null && !versionId.equals(existing.getVersionId())) {
             throw new AwsException("ConcurrentModificationException",
                     "Update table failed due to concurrent modifications.", 400);
@@ -736,7 +742,7 @@ public class GlueService {
             requireIntegerVersionId(versionId);
             version = tableVersionStore.get(tableVersionKey(databaseName, tableName, versionId))
                     .map(this::withResolvedSchemaReference)
-                    .orElseThrow(() -> new AwsException("EntityNotFoundException", "Version not found.", 400));
+                    .orElseThrow(GlueErrors::tableVersionNotFound);
         }
         return Map.of("Table", withReadDefaults(version), "VersionId", version.getVersionId());
     }
@@ -749,13 +755,11 @@ public class GlueService {
         Table current = getTable(databaseName, tableName);
         requireIntegerVersionId(versionId);
         if (versionId.equals(current.getVersionId())) {
-            throw new AwsException("InvalidInputException",
-                    "Cannot delete the latest version " + versionId + " of table " + tableName
-                    + "; delete the table instead.", 400);
+            throw GlueErrors.cannotDeleteLatestVersion();
         }
         String key = tableVersionKey(databaseName, tableName, versionId);
         if (tableVersionStore.get(key).isEmpty()) {
-            throw new AwsException("EntityNotFoundException", "Version not found.", 400);
+            throw GlueErrors.versionNotFound();
         }
         tableVersionStore.delete(key);
         LOG.infov("Deleted Glue Table version: {0}.{1} v{2}", databaseName, tableName, versionId);
@@ -792,7 +796,7 @@ public class GlueService {
     }
 
     public synchronized void deleteTable(String databaseName, String tableName) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
         tableVersionStore.keys().stream()
@@ -927,7 +931,7 @@ public class GlueService {
     public Partition getPartition(String databaseName, String tableName, List<String> partitionValues) {
         getTable(databaseName, tableName);
         return partitionStore.get(partitionKey(databaseName, tableName, partitionValues))
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Cannot find partition.", 400));
+                .orElseThrow(GlueErrors::partitionNotFound);
     }
 
     public List<Partition> batchGetPartitions(String databaseName, String tableName, List<List<String>> partitionValues) {
@@ -960,7 +964,7 @@ public class GlueService {
                         entry.partitionValueList(),
                         new ErrorDetail(
                                 "EntityNotFoundException",
-                                "Partition [" + String.join(", ", entry.partitionValueList()) + "] not found")));
+                                GlueErrors.partitionNotFoundMessage(entry.partitionValueList()))));
                 continue;
             }
 
@@ -1165,7 +1169,7 @@ public class GlueService {
 
     /** Reads the stored indexes without advancing the lifecycle. */
     private List<PartitionIndexDescriptor> readPartitionIndexes(String databaseName, String tableName) {
-        getTable(databaseName, tableName);
+        requireTableNamedOnMiss(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionIndexStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(PartitionIndexDescriptor::getIndexName))
@@ -1245,7 +1249,8 @@ public class GlueService {
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partitionValues);
         Partition existing = partitionStore.get(key)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Partition not found.", 400));
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        GlueErrors.partitionNotFoundMessage(partitionValues), 400));
         putUpdatedPartition(table, key, existing, partition);
     }
 
@@ -2062,9 +2067,12 @@ public class GlueService {
     }
 
     public Job getJob(String name) {
+        return findJob(name).orElseThrow(GlueErrors::jobNotFound);
+    }
+
+    Optional<Job> findJob(String name) {
         validateRequired(name, "JobName");
-        return jobStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+        return jobStore.get(name);
     }
 
     public List<Job> getJobs() {
@@ -2122,8 +2130,7 @@ public class GlueService {
         validateRequired(update, "JobUpdate");
         // Jobs and crawlers skip normalizeName because AWS preserves their case
         String normalizedName = name;
-        Job existing = jobStore.get(normalizedName)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Job " + name + " not found.", 400));
+        Job existing = jobStore.get(normalizedName).orElseThrow(GlueErrors::jobNotFound);
 
         // UpdateJob replaces unspecified configuration with nulls (full replacement) rather than merging.
         // This is deliberate and matches AWS behavior. We only copy fields that the user cannot specify.
@@ -2191,8 +2198,7 @@ public class GlueService {
     public Classifier getClassifier(String name) {
         validateClassifierName(name);
         return classifierStore.get(name)
-                .orElseThrow(() -> new AwsException(
-                        "EntityNotFoundException", "Classifier " + name + " not found.", 400));
+                .orElseThrow(() -> GlueErrors.classifierNotFound(name));
     }
 
     public Page<Classifier> getClassifiers(Integer maxResults, String nextToken) {
@@ -2349,7 +2355,7 @@ public class GlueService {
                              (t.getMongoDBTargets() != null && !t.getMongoDBTargets().isEmpty()) ||
                              (t.getHudiTargets() != null && !t.getHudiTargets().isEmpty());
         if (!hasTargets) {
-            throw new AwsException("InvalidInputException", "At least one crawl target must be specified.", 400);
+            throw GlueErrors.crawlerTargetsNotDefined();
         }
 
         // Jobs and crawlers skip normalizeName because AWS preserves their case
@@ -2372,7 +2378,7 @@ public class GlueService {
     public Crawler getCrawler(String name) {
         validateRequired(name, "Name");
         return crawlerStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400));
+                .orElseThrow(() -> GlueErrors.crawlerNotFound(name));
     }
 
     public List<Crawler> getCrawlers() {
@@ -2443,17 +2449,22 @@ public class GlueService {
      * with {@code ?} in exactly one of the two day fields.
      */
     static void validateCronExpression(String expression) {
-        String message = "Schedule must be a cron expression, for example cron(15 12 * * ? *).";
+        validateCronExpression(expression, new AwsException("InvalidInputException",
+                "Schedule must be a cron expression, for example cron(15 12 * * ? *).", 400));
+    }
+
+    /** {@code malformed} is what a trigger or a crawler reports for a schedule that is not a cron expression. */
+    static void validateCronExpression(String expression, AwsException malformed) {
         if (expression == null || !expression.startsWith("cron(") || !expression.endsWith(")")) {
-            throw new AwsException("InvalidInputException", message, 400);
+            throw malformed;
         }
         String[] fields = expression.substring(5, expression.length() - 1).trim().split("\\s+");
         if (fields.length != 6) {
-            throw new AwsException("InvalidInputException", message, 400);
+            throw malformed;
         }
         for (String field : fields) {
             if (!CRON_FIELD.matcher(field).matches()) {
-                throw new AwsException("InvalidInputException", message, 400);
+                throw malformed;
             }
         }
         if ("?".equals(fields[2]) == "?".equals(fields[4])) {
@@ -2617,7 +2628,7 @@ public class GlueService {
     public Trigger getTrigger(String name) {
         validateRequired(name, "Name");
         return triggerStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Trigger " + name + " not found.", 400));
+                .orElseThrow(GlueErrors::triggerNotFound);
     }
 
     public List<Trigger> allTriggers() {
@@ -2752,7 +2763,7 @@ public class GlueService {
             }
         }
         if ("SCHEDULED".equals(trigger.getType())) {
-            validateCronExpression(trigger.getSchedule());
+            validateCronExpression(trigger.getSchedule(), GlueErrors.invalidSchedule(trigger.getSchedule()));
         }
         if ("CONDITIONAL".equals(trigger.getType())) {
             validatePredicate(trigger.getPredicate());
@@ -2761,7 +2772,7 @@ public class GlueService {
 
     private void validatePredicate(Predicate predicate) {
         if (predicate == null || predicate.getConditions() == null || predicate.getConditions().isEmpty()) {
-            throw new AwsException("InvalidInputException", "A CONDITIONAL trigger needs a predicate.", 400);
+            throw GlueErrors.triggerPredicateRequired();
         }
         if (predicate.getLogical() != null && !Set.of("AND", "ANY").contains(predicate.getLogical())) {
             throw new AwsException("InvalidInputException", "Logical must be AND or ANY.", 400);
@@ -2794,7 +2805,7 @@ public class GlueService {
         // Jobs and crawlers skip normalizeName because AWS preserves their case
         String name = update.getName();
         Crawler existing = crawlerStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Crawler " + update.getName() + " not found.", 400));
+                .orElseThrow(() -> GlueErrors.crawlerNotFound(name));
 
         Crawler updated = new Crawler();
         updated.setName(existing.getName());
@@ -2826,7 +2837,7 @@ public class GlueService {
         // Jobs and crawlers skip normalizeName because AWS preserves their case
         String normalizedName = name;
         if (crawlerStore.get(normalizedName).isEmpty()) {
-            throw new AwsException("EntityNotFoundException", "Crawler " + name + " not found.", 400);
+            throw GlueErrors.crawlerNotFound(name);
         }
         crawlerStore.delete(normalizedName);
         resourceGroupsTaggingService.deleteResources(List.of(crawlerArn(region, normalizedName)), region);
@@ -2859,7 +2870,7 @@ public class GlueService {
     public Connection getConnection(String name, boolean hidePassword) {
         validateRequired(name, "Name");
         Connection connection = connectionStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400));
+                .orElseThrow(() -> GlueErrors.connectionNotFound(name, regionResolver.getAccountId()));
         return hidePassword ? connection.withoutPassword() : connection;
     }
 
@@ -2900,7 +2911,7 @@ public class GlueService {
         validateRequired(name, "Name");
         validateRequired(input, "ConnectionInput");
         Connection existing = connectionStore.get(name)
-                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400));
+                .orElseThrow(() -> GlueErrors.connectionNotFoundNamed(name));
         validateConnectionInput(input);
         Connection updated = toConnection(input);
         encryptConnectionPasswords(updated.getConnectionProperties(), region);
@@ -2914,7 +2925,7 @@ public class GlueService {
     public void deleteConnection(String name, String region) {
         validateRequired(name, "ConnectionName");
         if (connectionStore.get(name).isEmpty()) {
-            throw new AwsException("EntityNotFoundException", "Connection " + name + " not found.", 400);
+            throw GlueErrors.connectionNotFoundForDelete();
         }
         connectionStore.delete(name);
         resourceGroupsTaggingService.deleteResources(List.of(connectionArn(region, name)), region);
@@ -2935,7 +2946,10 @@ public class GlueService {
                 deleteConnection(name, region);
                 succeeded.add(name);
             } catch (AwsException e) {
-                errors.put(name, new ErrorDetail(e.getErrorCode(), e.getMessage()));
+                // The per-entry error names the connection; the single DeleteConnection miss does not.
+                String message = "EntityNotFoundException".equals(e.getErrorCode())
+                        ? GlueErrors.connectionNotFoundNamed(name).getMessage() : e.getMessage();
+                errors.put(name, new ErrorDetail(e.getErrorCode(), message));
             }
         }
         return new BatchDeleteConnectionResult(succeeded, errors);
@@ -3225,7 +3239,7 @@ public class GlueService {
 
     private void validateArn(String arn) {
         if (!AwsArnUtils.looksLikeArn(arn)) {
-            throw new AwsException("InvalidInputException", "Invalid ARN", 400);
+            throw GlueErrors.invalidArn();
         }
     }
 
@@ -3455,8 +3469,8 @@ public class GlueService {
         return region + ":" + name;
     }
 
-    private static AwsException dataQualityRulesetNotFound(String name) {
-        return new AwsException("EntityNotFoundException", "Data quality ruleset not found: " + name, 400);
+    private AwsException dataQualityRulesetNotFound(String name) {
+        return GlueErrors.dataQualityRulesetNotFound(name, regionResolver.getAccountId());
     }
 
     private static void validateDataQualityName(String value, String field) {
