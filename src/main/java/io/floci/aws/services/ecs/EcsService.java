@@ -6134,7 +6134,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private TaskDefinition resolveTaskDefinitionOrThrow(String ref, String region) {
         TaskDefinition td = findTaskDefinition(ref, region);
         if (td == null) {
-            throw new AwsException("ClientException", "Unable to describe task definition: " + ref, 400);
+            throw new AwsException("ClientException", "Unable to describe task definition.", 400);
         }
         return td;
     }
@@ -6215,7 +6215,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * {@code DELETE_IN_PROGRESS} revision, while the tasks already on it keep running.
      */
     private TaskDefinition resolveLaunchableTaskDefinition(String ref, String region) {
-        TaskDefinition td = resolveTaskDefinitionOrThrow(ref, region);
+        TaskDefinition td = findTaskDefinition(ref, region);
+        if (td == null) {
+            // a call that puts the revision to work words the miss differently from a read of it
+            throw new AwsException("ClientException", "TaskDefinition not found.", 400);
+        }
         if (STATUS_DELETE_IN_PROGRESS.equals(td.getStatus())) {
             throw new AwsException("ClientException",
                     "The task definition " + td.getTaskDefinitionArn() + " is being deleted and "

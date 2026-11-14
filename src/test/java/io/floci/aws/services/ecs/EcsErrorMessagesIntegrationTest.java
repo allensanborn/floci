@@ -82,4 +82,22 @@ class EcsErrorMessagesIntegrationTest {
         expectError("DeleteService", "{\"cluster\":\"errmsg-svc-cluster\",\"service\":\"nope\"}",
                 404, "ServiceNotFoundException", "");
     }
+
+    // ── Missing task definition ───────────────────────────────────────────────
+
+    @Test
+    void missingTaskDefinitionIsWordedByWhetherItIsReadOrRun() {
+        ok("CreateCluster", "{\"clusterName\":\"errmsg-td-cluster\"}");
+        String describeMsg = "Unable to describe task definition.";
+        expectError("DescribeTaskDefinition", "{\"taskDefinition\":\"errmsg-no-family:1\"}",
+                400, "ClientException", describeMsg);
+        expectError("DeregisterTaskDefinition", "{\"taskDefinition\":\"errmsg-no-family:1\"}",
+                400, "ClientException", describeMsg);
+        // RunTask and CreateService put the revision to work: AWS words the miss differently
+        expectError("RunTask", "{\"cluster\":\"errmsg-td-cluster\",\"taskDefinition\":\"errmsg-no-family:1\"}",
+                400, "ClientException", "TaskDefinition not found.");
+        expectError("CreateService", "{\"cluster\":\"errmsg-td-cluster\",\"serviceName\":\"s\","
+                + "\"taskDefinition\":\"errmsg-no-family:1\",\"desiredCount\":0}",
+                400, "ClientException", "TaskDefinition not found.");
+    }
 }
