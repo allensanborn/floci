@@ -632,16 +632,18 @@ public class S3Service implements Resettable, ResourceProvider {
             // Multipart operations take the stripe before the bucket monitor, so a delete cannot
             // sweep their temporary parts or miss an upload created just after its scan.
             synchronized (bucket) {
-                deleteBucketLocked(bucketName);
+                deleteBucketLocked(bucketName, bucket.getVersioningStatus() != null);
             }
             LOG.infov("Deleted bucket: {0}", bucketName);
         });
     }
 
-    private void deleteBucketLocked(String bucketName) {
+    private void deleteBucketLocked(String bucketName, boolean hasVersioningState) {
         if (!objectStore.scan(key -> key.startsWith(bucketPrefix(bucketName))).isEmpty()) {
             throw new AwsException("BucketNotEmpty",
-                    "The bucket you tried to delete is not empty.", 409);
+                    hasVersioningState
+                            ? "The bucket you tried to delete is not empty. You must delete all versions in the bucket."
+                            : "The bucket you tried to delete is not empty", 409);
         }
 
         // Outstanding uploads belong to this bucket incarnation. Do not let a later
@@ -3781,7 +3783,7 @@ public class S3Service implements Resettable, ResourceProvider {
             int codePoint = annotationPrefix.codePointAt(i);
             if (!isAllowedAnnotationNameCodePoint(codePoint)) {
                 throw new AwsException("InvalidPrefix",
-                        "The annotation prefix you provided is invalid.", 400);
+                        "The annotation prefix you have provided is invalid.", 400);
             }
             i += Character.charCount(codePoint);
         }

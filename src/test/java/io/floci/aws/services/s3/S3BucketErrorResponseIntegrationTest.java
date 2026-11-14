@@ -40,6 +40,39 @@ class S3BucketErrorResponseIntegrationTest {
     }
 
     @Test
+    void bucketNotEmptyMessageDependsOnVersioningState() {
+        String plain = "error-message-not-empty";
+        given().when().put("/" + plain).then().statusCode(200);
+        given().body("data").when().put("/" + plain + "/key").then().statusCode(200);
+        given().when().delete("/" + plain).then().statusCode(409)
+                .body(containsString("<Code>BucketNotEmpty</Code>"))
+                .body(containsString("<Message>The bucket you tried to delete is not empty</Message>"));
+        given().when().delete("/" + plain + "/key").then().statusCode(204);
+        given().when().delete("/" + plain).then().statusCode(204);
+
+        String versioned = "error-message-not-empty-versioned";
+        given().when().put("/" + versioned).then().statusCode(200);
+        given().contentType("application/xml")
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + versioned + "?versioning").then().statusCode(200);
+        given().when().delete("/" + versioned + "/never-written").then().statusCode(204);
+        given().when().delete("/" + versioned).then().statusCode(409)
+                .body(containsString("<Code>BucketNotEmpty</Code>"))
+                .body(containsString("<Message>The bucket you tried to delete is not empty. "
+                        + "You must delete all versions in the bucket.</Message>"));
+    }
+
+    @Test
+    void invalidAnnotationPrefixMessage() {
+        String bucket = "error-message-annotation-prefix";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("data").when().put("/" + bucket + "/key").then().statusCode(200);
+        given().when().get("/" + bucket + "/key?annotation&annotation-prefix=bad%20prefix")
+                .then().statusCode(400).body(containsString("<Code>InvalidPrefix</Code>"))
+                .body(containsString("<Message>The annotation prefix you have provided is invalid.</Message>"));
+    }
+
+    @Test
     void bucketConfigurationErrorsIncludeBucketName() {
         String bucket = "error-response-config-bucket";
         given().when().put("/" + bucket).then().statusCode(200);
