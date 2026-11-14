@@ -65,6 +65,13 @@ values come from the
 [AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
 as checked on 2026-11-14. They were not captured from the API.
 
+The catalog also includes the C4, C5 and C6i compute optimized types `c5.large`, `c5.xlarge`, `c5.2xlarge`, `c5.4xlarge`, `c5.9xlarge`, `c5.12xlarge`, `c5.18xlarge`, `c5.24xlarge`, `c4.large`, `c6i.large`, `c6i.xlarge`, `c6i.2xlarge`, `c6i.4xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS co instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html),
+as checked on 2026-11-14. They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
