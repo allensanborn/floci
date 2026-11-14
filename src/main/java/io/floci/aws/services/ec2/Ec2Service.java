@@ -349,6 +349,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // released between the launch's availability check and the store of its instance.
     private final Object hostLock = new Object();
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
+    // AWS keeps a deleted gateway or peering visible for a while, and deleting it again succeeds.
+    // Only that repeat delete reads these; ponytail: in memory, so a restart forgets them.
+    private final Map<String, TransitGateway> deletedTransitGateways = new ConcurrentHashMap<>();
+    private final Map<String, TransitGatewayPeeringAttachment> deletedPeeringAttachments =
+            new ConcurrentHashMap<>();
     // References held while a group assignment applies firewall state before publishing its instance.
     private final Map<String, Integer> pendingSecurityGroupAssignments = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RefCountedLock> instanceGroupLocks = new ConcurrentHashMap<>();
@@ -1500,6 +1505,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             capacityGroupInstanceIds.clear();
         }
         seededAccountRegions.clear();
+        deletedTransitGateways.clear();
+        deletedPeeringAttachments.clear();
         seedDefaultRegionIfEnabled();
     }
 
@@ -2646,6 +2653,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // agree on who goes first.
         synchronized (attachmentTopologyLock(region)) {
         synchronized (lockFor(key(region, transitGatewayId))) {
+            TransitGateway alreadyDeleted =
+                    deletedTransitGateways.get(callerAccountId() + "::" + key(region, transitGatewayId));
+            if (alreadyDeleted != null) {
+                return alreadyDeleted;
+            }
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
             // AWS refuses while anything is still attached, naming the attachments in the message.
             List<String> attached = transitGatewayVpcAttachments.scan(k -> true).stream()
@@ -2695,6 +2707,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             transitGateways.delete(key(region, transitGatewayId));
             removeTags(region, transitGatewayId);
             gateway.setState("deleted");
+            deletedTransitGateways.put(callerAccountId() + "::" + key(region, transitGatewayId), gateway);
             return gateway;
         }
         }
@@ -3160,6 +3173,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** Either side may delete. AWS reports {@code deleting} first; the settled state is returned. */
     public TransitGatewayPeeringAttachment deleteTransitGatewayPeeringAttachment(String region, String attachmentId) {
         synchronized (lockFor(attachmentId)) {
+            TransitGatewayPeeringAttachment alreadyDeleted =
+                    deletedPeeringAttachments.get(callerAccountId() + "::" + key(region, attachmentId));
+            if (alreadyDeleted != null) {
+                return alreadyDeleted;
+            }
             OwnedPeeringAttachment owned = getRequiredPeeringAttachment(region, attachmentId);
             TransitGatewayPeeringAttachment attachment = withStoredTags(owned.attachment(), region);
             if (owned.storageAccountId() != null) {
@@ -3178,6 +3196,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 removeTags(accepter.getRegion(), attachmentId);
             }
             attachment.setState("deleted");
+            deletedPeeringAttachments.put(callerAccountId() + "::" + key(region, attachmentId), attachment);
             return attachment;
         }
     }

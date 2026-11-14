@@ -8554,6 +8554,33 @@ class Ec2ServiceTest {
     }
 
     /**
+     * A repeat delete answers with the already-deleted gateway or peering, but only until the
+     * service is reset: an id from before the reset is unknown, not remembered as deleted.
+     */
+    @Test
+    void aResetForgetsWhichGatewaysAndPeeringsWereDeleted() {
+        Ec2Service service = prefixListService();
+        TransitGateway requester = service.createTransitGateway("us-east-1", "a", null, List.of());
+        String gatewayId = requester.getTransitGatewayId();
+        String peerId = service.createTransitGateway("us-east-1", "b", null, List.of()).getTransitGatewayId();
+        String peeringId = service.createTransitGatewayPeeringAttachment("us-east-1", gatewayId, peerId,
+                requester.getOwnerId(), "us-east-1", null, List.of()).getTransitGatewayAttachmentId();
+        service.deleteTransitGatewayPeeringAttachment("us-east-1", peeringId);
+        service.deleteTransitGateway("us-east-1", gatewayId);
+
+        assertEquals("deleted", service.deleteTransitGateway("us-east-1", gatewayId).getState());
+        assertEquals("deleted",
+                service.deleteTransitGatewayPeeringAttachment("us-east-1", peeringId).getState());
+
+        service.clear();
+
+        assertEquals("InvalidTransitGatewayID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteTransitGateway("us-east-1", gatewayId)).getErrorCode());
+        assertEquals("InvalidTransitGatewayAttachmentID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteTransitGatewayPeeringAttachment("us-east-1", peeringId)).getErrorCode());
+    }
+
+    /**
      * The attachment's option defaults are its own, not the gateway's. Verified on a live account:
      * securityGroupReferencingSupport is enabled here and disabled on the gateway that owns it.
      */

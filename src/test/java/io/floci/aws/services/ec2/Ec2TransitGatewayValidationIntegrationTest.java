@@ -47,6 +47,15 @@ class Ec2TransitGatewayValidationIntegrationTest {
                 .extract().path("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
     }
 
+    private static String createPeering(String requester, String accepter) {
+        return call("CreateTransitGatewayPeeringAttachment",
+                "TransitGatewayId", requester, "PeerTransitGatewayId", accepter,
+                "PeerAccountId", "000000000000", "PeerRegion", "us-east-1")
+                .statusCode(200)
+                .extract().path("CreateTransitGatewayPeeringAttachmentResponse.transitGatewayPeeringAttachment"
+                        + ".transitGatewayAttachmentId");
+    }
+
     @Test
     void maxResultsOutsideFiveToThousandIsRefusedByEveryDescribe() {
         String[] actions = {"DescribeTransitGateways", "DescribeTransitGatewayAttachments",
@@ -111,5 +120,36 @@ class Ec2TransitGatewayValidationIntegrationTest {
                 "Filter.1.Name", "route-search.exact-match", "Filter.1.Value.1", "10.215.99.0/24")
                 .statusCode(200)
                 .body("SearchTransitGatewayRoutesResponse.routeSet.item.destinationCidrBlock", equalTo("10.215.99.0/24"));
+    }
+
+    @Test
+    void deletingAGatewayAgainReturnsItDeletedAndAnUnknownOneIsRefused() {
+        String gateway = createGateway();
+        call("DeleteTransitGateway", "TransitGatewayId", gateway).statusCode(200);
+
+        call("DeleteTransitGateway", "TransitGatewayId", gateway).statusCode(200)
+                .body("DeleteTransitGatewayResponse.transitGateway.transitGatewayId", equalTo(gateway))
+                .body("DeleteTransitGatewayResponse.transitGateway.state", equalTo("deleted"));
+
+        refused(call("DeleteTransitGateway", "TransitGatewayId", "tgw-0123456789abcdef0"),
+                "InvalidTransitGatewayID.NotFound",
+                "Transit Gateway tgw-0123456789abcdef0 was deleted or does not exist.");
+    }
+
+    @Test
+    void deletingAPeeringAgainSucceedsAndAnUnknownOneIsRefused() {
+        String attachmentId = createPeering(createGateway(), createGateway());
+        call("DeleteTransitGatewayPeeringAttachment", "TransitGatewayAttachmentId", attachmentId)
+                .statusCode(200);
+
+        call("DeleteTransitGatewayPeeringAttachment", "TransitGatewayAttachmentId", attachmentId)
+                .statusCode(200)
+                .body("DeleteTransitGatewayPeeringAttachmentResponse.transitGatewayPeeringAttachment.state",
+                        equalTo("deleted"));
+
+        refused(call("DeleteTransitGatewayPeeringAttachment", "TransitGatewayAttachmentId",
+                        "tgw-attach-0123456789abcdef0"),
+                "InvalidTransitGatewayAttachmentID.NotFound",
+                "Transit Gateway Attachment tgw-attach-0123456789abcdef0 was deleted or does not exist.");
     }
 }
