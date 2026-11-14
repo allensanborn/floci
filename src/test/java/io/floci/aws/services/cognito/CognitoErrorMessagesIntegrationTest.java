@@ -205,4 +205,18 @@ class CognitoErrorMessagesIntegrationTest {
                 {"UserPoolId":"%s","Domain":"%s"}
                 """.formatted(poolId, domain)).then().statusCode(200);
     }
+
+    @Test
+    void adminInitiateAuthDoesNotNameTheDisabledFlow() {
+        assertError(cognitoAction("AdminInitiateAuth", """
+                {"UserPoolId":"%s","ClientId":"%s","AuthFlow":"ADMIN_USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"alice","PASSWORD":"%s"}}
+                """.formatted(poolId, clientId, PASSWORD)),
+                "InvalidParameterException", "Auth flow not enabled for this client");
+        // InitiateAuth words the same refusal with the flow
+        assertError(cognitoAction("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"CUSTOM_AUTH","AuthParameters":{"USERNAME":"alice"}}
+                """.formatted(clientId)),
+                "InvalidParameterException", "CUSTOM_AUTH flow not enabled for this client");
+    }
 }

@@ -68,4 +68,14 @@ final class CognitoErrors {
     static AwsException domainExists() {
         return new AwsException("InvalidParameterException", "Domain already exists.", 400);
     }
+
+    /** A flow the app client does not allow, as InitiateAuth words it: naming the flow asked for. */
+    static AwsException authFlowNotEnabled(String authFlow) {
+        return new AwsException("InvalidParameterException", authFlow + " flow not enabled for this client", 400);
+    }
+
+    /** A flow the app client does not allow, as AdminInitiateAuth words it: one sentence for every flow. */
+    static AwsException adminAuthFlowNotEnabled() {
+        return new AwsException("InvalidParameterException", "Auth flow not enabled for this client", 400);
+    }
 }

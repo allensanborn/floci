@@ -243,15 +243,15 @@ final class CognitoAuthFlowHandler {
 
         return switch (authFlow) {
             case "ADMIN_USER_PASSWORD_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
             case "ADMIN_NO_SRP_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
             case "USER_PASSWORD_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH",
+                requireAdminFlowEnabled(client, "ALLOW_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH",
                         "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH");
                 yield authenticateWithPassword(pool, client, authParameters, clientMetadata, true);
             }
@@ -260,15 +260,15 @@ final class CognitoAuthFlowHandler {
                 yield handleRefreshToken(pool, client, authParameters, clientMetadata);
             }
             case "ADMIN_USER_SRP_AUTH", "USER_SRP_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_SRP_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_USER_SRP_AUTH");
                 yield handleUserSrpAuth(pool, client, authParameters, clientMetadata, true);
             }
             case "CUSTOM_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_CUSTOM_AUTH", "CUSTOM_AUTH_FLOW_ONLY");
+                requireAdminFlowEnabled(client, "ALLOW_CUSTOM_AUTH", "CUSTOM_AUTH_FLOW_ONLY");
                 yield handleCustomAuth(pool, client, authParameters, clientMetadata);
             }
             case "USER_AUTH" -> {
-                requireFlowEnabled(client, authFlow, "ALLOW_USER_AUTH");
+                requireAdminFlowEnabled(client, "ALLOW_USER_AUTH");
                 yield handleUserAuth(pool, client, authParameters, clientMetadata);
             }
             default -> throw unsupportedAuthFlow(authFlow);
@@ -280,13 +280,26 @@ final class CognitoAuthFlowHandler {
      * {@code acceptedValues}.
      */
     private static void requireFlowEnabled(UserPoolClient client, String authFlow, String... acceptedValues) {
+        if (!flowEnabled(client, acceptedValues)) {
+            throw CognitoErrors.authFlowNotEnabled(authFlow);
+        }
+    }
+
+    /** {@link #requireFlowEnabled} for AdminInitiateAuth, which words the refusal without the flow. */
+    private static void requireAdminFlowEnabled(UserPoolClient client, String... acceptedValues) {
+        if (!flowEnabled(client, acceptedValues)) {
+            throw CognitoErrors.adminAuthFlowNotEnabled();
+        }
+    }
+
+    private static boolean flowEnabled(UserPoolClient client, String... acceptedValues) {
         List<String> enabled = enabledAuthFlows(client);
         for (String accepted : acceptedValues) {
             if (enabled.contains(accepted)) {
-                return;
+                return true;
             }
         }
-        throw new AwsException("InvalidParameterException", authFlow + " flow not enabled for this client", 400);
+        return false;
     }
 
     /**

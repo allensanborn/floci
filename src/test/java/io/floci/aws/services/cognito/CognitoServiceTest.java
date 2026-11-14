@@ -541,7 +541,7 @@ class CognitoServiceTest {
             AwsException exception = assertThrows(AwsException.class, () ->
                     service.adminInitiateAuth(pool.getId(), client.getClientId(), flow, passwordParams));
             assertEquals("InvalidParameterException", exception.getErrorCode());
-            assertEquals(flow + " flow not enabled for this client", exception.getMessage());
+            assertEquals("Auth flow not enabled for this client", exception.getMessage());
         }
     }
 
@@ -572,7 +572,7 @@ class CognitoServiceTest {
         AwsException admin = assertThrows(AwsException.class, () ->
                 service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_AUTH", params));
         assertEquals("InvalidParameterException", admin.getErrorCode());
-        assertEquals("USER_AUTH flow not enabled for this client", admin.getMessage());
+        assertEquals("Auth flow not enabled for this client", admin.getMessage());
     }
 
     @Test
@@ -608,7 +608,7 @@ class CognitoServiceTest {
 
         assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", passwordParams)).getMessage());
-        assertEquals("ADMIN_USER_PASSWORD_AUTH flow not enabled for this client", assertThrows(AwsException.class,
+        assertEquals("Auth flow not enabled for this client", assertThrows(AwsException.class,
                 () -> service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
                         passwordParams)).getMessage());
 
