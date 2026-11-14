@@ -857,7 +857,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (!user.getGroupNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must remove from all groups first.", 409);
+                        "Cannot delete entity, must remove users from group first.", 409);
             }
             if (loginProfiles.get(userName).isPresent()) {
                 throw new AwsException("DeleteConflict",
@@ -1121,13 +1121,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void deleteGroup(String groupName) {
         synchronized (resourceNameLock) {
             IamGroup group = getGroup(groupName);
-            if (!group.getAttachedPolicyArns().isEmpty() || !group.getInlinePolicies().isEmpty()) {
+            if (!group.getAttachedPolicyArns().isEmpty()) {
                 throw new AwsException("DeleteConflict",
                         "Cannot delete entity, must detach all policies first.", 409);
             }
+            if (!group.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must delete policies first.", 409);
+            }
             if (!group.getUserNames().isEmpty()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must remove all users from group first.", 409);
+                        "Cannot delete entity, must remove users from group first.", 409);
             }
             groups.delete(groupName);
             LOG.infov("Deleted IAM group: {0}", groupName);
@@ -1412,9 +1416,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireNotServiceLinked(role, roleName);
-            if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
+            if (!role.getAttachedPolicyArns().isEmpty()) {
                 throw new AwsException("DeleteConflict",
                         "Cannot delete entity, must detach all policies first.", 409);
+            }
+            if (!role.getInlinePolicies().isEmpty()) {
+                throw new AwsException("DeleteConflict",
+                        "Cannot delete entity, must delete policies first.", 409);
             }
             roles.delete(roleName);
             LOG.infov("Deleted IAM role: {0}", roleName);
@@ -1780,7 +1788,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamPolicy policy = getPolicy(policyArn);
         if (policy.getAttachmentCount() > 0) {
             throw new AwsException("DeleteConflict",
-                    "Cannot delete a policy attached to entities. Detach it first.", 409);
+                    "Cannot delete a policy attached to entities.", 409);
         }
         policies.delete(policyArn);
         LOG.infov("Deleted IAM policy: {0}", policyArn);
@@ -2622,7 +2630,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         if (!profile.getRoleNames().isEmpty()) {
             throw new AwsException("DeleteConflict",
-                    "Cannot delete instance profile with associated roles.", 409);
+                    "Cannot delete entity, must remove roles from instance profile first.", 409);
         }
         instanceProfiles.delete(instanceProfileName);
     }
@@ -4207,8 +4215,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             VirtualMfaDevice device = getVirtualMfaDevice(serialNumber);
             if (device.isAssigned()) {
                 throw new AwsException("DeleteConflict",
-                        "Cannot delete entity, must deactivate the MFA device from user "
-                                + device.getUserName() + " first.", 409);
+                        "MFA VirtualDevice in use. Must deactivate first.", 409);
             }
             virtualMfaDevices.delete(serialNumber);
         }
