@@ -20,6 +20,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.IDENTITY_POLICY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -106,11 +107,11 @@ class IamCaseInsensitiveLegacyNamesTest {
         policies.put(mirrorKey, mirror);
         IamService service = serviceFor(DEFAULT_ACCOUNT);
 
-        IamPolicy customerPolicy = service.createPolicy("AdministratorAccess", "/customer/", null, EMPTY_POLICY_DOCUMENT, null);
+        IamPolicy customerPolicy = service.createPolicy("AdministratorAccess", "/customer/", null, IDENTITY_POLICY, null);
 
         assertEquals("arn:aws:iam::000000000000:policy/customer/AdministratorAccess", customerPolicy.getArn());
         assertEquals("ANPALEGACYAWS", policies.get(mirrorKey).orElseThrow().getPolicyId());
-        assertAlreadyExists(() -> service.createPolicy("administratoraccess", "/other/", null, EMPTY_POLICY_DOCUMENT, null));
+        assertAlreadyExists(() -> service.createPolicy("administratoraccess", "/other/", null, IDENTITY_POLICY, null));
     }
 
     @Test
@@ -149,7 +150,7 @@ class IamCaseInsensitiveLegacyNamesTest {
             case USER -> service.createUser(name, "/legacy/").getUserId();
             case GROUP -> service.createGroup(name, "/legacy/").getGroupId();
             case ROLE -> service.createRole(name, "/legacy/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getRoleId();
-            case POLICY -> service.createPolicy(name, "/legacy/", null, EMPTY_POLICY_DOCUMENT, null).getPolicyId();
+            case POLICY -> service.createPolicy(name, "/legacy/", null, IDENTITY_POLICY, null).getPolicyId();
             case INSTANCE_PROFILE -> service.createInstanceProfile(name, "/legacy/").getInstanceProfileId();
         };
     }

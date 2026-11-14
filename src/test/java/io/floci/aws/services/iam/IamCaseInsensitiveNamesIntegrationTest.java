@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.floci.aws.testing.IamTestPolicies.IDENTITY_POLICY;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -22,8 +23,7 @@ class IamCaseInsensitiveNamesIntegrationTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
             + "\"Action\":\"sts:AssumeRole\"}]}";
-    private static final String POLICY_DOCUMENT =
-            "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+    private static final String POLICY_DOCUMENT = IDENTITY_POLICY;
 
     @Test
     void createActionsRejectNamesThatDifferOnlyByCase() {
