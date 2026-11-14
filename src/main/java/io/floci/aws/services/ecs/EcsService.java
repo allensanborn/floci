@@ -3124,7 +3124,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
-                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+                throw new AwsException("ServiceNotFoundException", "Service not found.", 404);
             }
             synchronized (svc) {
                 if ("INACTIVE".equals(svc.getStatus())) {
@@ -3392,7 +3392,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (serviceLock(key)) {
             EcsServiceModel svc = services.get(key);
             if (svc == null) {
-                throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+                // AWS answers DeleteService on a missing service with an empty message
+                throw new AwsException("ServiceNotFoundException", "", 404);
             }
             if ("INACTIVE".equals(svc.getStatus())) {
                 return svc;
@@ -6101,7 +6102,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         EcsCluster cluster = resolveCluster(clusterRef, region);
         if (cluster == null) {
-            throw new AwsException("ClusterNotFoundException", "Cluster not found: " + clusterRef, 400);
+            throw new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
         }
         return cluster;
     }
@@ -6119,7 +6120,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private EcsCluster resolveClusterOrThrow(String clusterRef, String region) {
         EcsCluster cluster = resolveCluster(clusterRef, region);
         if (cluster == null) {
-            throw new AwsException("ClusterNotFoundException", "Cluster not found: " + clusterRef, 400);
+            throw new AwsException("ClusterNotFoundException", "Cluster not found.", 400);
         }
         return cluster;
     }
