@@ -898,7 +898,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .count();
         if (activeServices > 0) {
             throw new AwsException("ClusterContainsServicesException",
-                    "The cluster cannot be deleted while services are active.", 400);
+                    "The Cluster cannot be deleted while Services are active.", 400);
         }
         String instancePrefix = containerInstanceKey(cluster.getClusterArn(), "");
         long registeredInstances = containerInstances.entrySet().stream()

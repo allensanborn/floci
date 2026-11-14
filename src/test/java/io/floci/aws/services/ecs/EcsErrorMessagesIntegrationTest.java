@@ -115,4 +115,19 @@ class EcsErrorMessagesIntegrationTest {
         call("DescribeServices", "{\"cluster\":\"errmsg-del-svc-cluster\",\"services\":[\"scaled\"]}")
                 .then().body("services[0].status", equalTo("ACTIVE"));
     }
+
+    // ── DeleteCluster with an active service ──────────────────────────────────
+
+    @Test
+    void deleteClusterWithActiveServiceIsRefused() {
+        ok("CreateCluster", "{\"clusterName\":\"errmsg-del-cluster\"}");
+        String td = registerTaskDef("errmsg-del-cluster-td");
+        ok("CreateService", "{\"cluster\":\"errmsg-del-cluster\",\"serviceName\":\"svc\","
+                + "\"taskDefinition\":\"" + td + "\",\"desiredCount\":0}");
+        expectError("DeleteCluster", "{\"cluster\":\"errmsg-del-cluster\"}",
+                400, "ClusterContainsServicesException",
+                "The Cluster cannot be deleted while Services are active.");
+        call("DescribeClusters", "{\"clusters\":[\"errmsg-del-cluster\"]}")
+                .then().body("clusters[0].status", equalTo("ACTIVE"));
+    }
 }
