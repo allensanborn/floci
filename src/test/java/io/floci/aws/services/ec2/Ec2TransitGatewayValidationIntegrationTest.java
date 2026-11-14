@@ -56,6 +56,13 @@ class Ec2TransitGatewayValidationIntegrationTest {
                         + ".transitGatewayAttachmentId");
     }
 
+    private static String peeringState(String attachmentId) {
+        return call("DescribeTransitGatewayPeeringAttachments", "TransitGatewayAttachmentIds.1", attachmentId)
+                .statusCode(200)
+                .extract().path("DescribeTransitGatewayPeeringAttachmentsResponse"
+                        + ".transitGatewayPeeringAttachments.item.state");
+    }
+
     @Test
     void maxResultsOutsideFiveToThousandIsRefusedByEveryDescribe() {
         String[] actions = {"DescribeTransitGateways", "DescribeTransitGatewayAttachments",
@@ -120,6 +127,30 @@ class Ec2TransitGatewayValidationIntegrationTest {
                 "Filter.1.Name", "route-search.exact-match", "Filter.1.Value.1", "10.215.99.0/24")
                 .statusCode(200)
                 .body("SearchTransitGatewayRoutesResponse.routeSet.item.destinationCidrBlock", equalTo("10.215.99.0/24"));
+    }
+
+    @Test
+    void creatingAPeeringToAnUnknownOwnGatewayIsRefusedAndStoresNothing() {
+        String requester = createGateway();
+        refused(call("CreateTransitGatewayPeeringAttachment",
+                        "TransitGatewayId", requester, "PeerTransitGatewayId", BOGUS_GATEWAY,
+                        "PeerAccountId", "000000000000", "PeerRegion", "us-east-1"),
+                "InvalidTransitGatewayID.NotFound",
+                "Transit Gateway " + BOGUS_GATEWAY + " was deleted or does not exist.");
+        noItems(call("DescribeTransitGatewayPeeringAttachments",
+                "Filter.1.Name", "transit-gateway-id", "Filter.1.Value.1", requester).statusCode(200),
+                "DescribeTransitGatewayPeeringAttachmentsResponse.transitGatewayPeeringAttachments.item");
+    }
+
+    @Test
+    void theRequesterCannotAcceptItsOwnPeeringAndTheAttachmentStaysPending() {
+        String attachmentId = createPeering(createGateway(), createGateway());
+
+        refused(call("AcceptTransitGatewayPeeringAttachment", "TransitGatewayAttachmentId", attachmentId),
+                "InvalidParameterValue",
+                "Cannot accept " + attachmentId + " as the source of the peering request.");
+
+        Assertions.assertEquals("pendingAcceptance", peeringState(attachmentId));
     }
 
     @Test

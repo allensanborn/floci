@@ -3061,10 +3061,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Transit Gateway Peering Attachments ───────────────────────────────────
 
     /**
-     * Requests a peering between a local transit gateway and a peer one. The peer gateway is not
-     * resolved: it may live in another account this store cannot see, and AWS settles that
-     * asynchronously. AWS passes through {@code initiatingRequest}; nothing is slow locally, so
-     * the attachment is created already waiting for the peer.
+     * Requests a peering between a local transit gateway and a peer one. A peer gateway in the
+     * caller's own account must exist; one in another account is not resolved, since this store
+     * cannot see it, and AWS settles that asynchronously. AWS passes through
+     * {@code initiatingRequest}; nothing is slow locally, so the attachment is created already
+     * waiting for the peer.
      */
     public TransitGatewayPeeringAttachment createTransitGatewayPeeringAttachment(
             String region, String transitGatewayId, String peerTransitGatewayId, String peerAccountId,
@@ -3079,6 +3080,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // Under the lock DeleteTransitGateway checks peerings under, so neither lands in between.
         synchronized (attachmentTopologyLock(region)) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            // Only the caller's own peer can be looked up; another account's is settled at accept.
+            if (callerAccountId().equals(peerAccountId)) {
+                getRequiredTransitGateway(peerRegion, peerTransitGatewayId);
+            }
             TransitGatewayPeeringAttachment attachment = new TransitGatewayPeeringAttachment();
             String attachmentId = "tgw-attach-" + randomHex(17);
             attachment.setTransitGatewayAttachmentId(attachmentId);
@@ -3133,6 +3138,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             TransitGatewayPeeringAttachment attachment = owned.attachment();
             if (!isGatewayOf(attachment.getAccepterTgwInfo(), callerAccountId(), region)) {
                 throw peeringAttachmentNotFound(attachmentId);
+            }
+            if (isGatewayOf(attachment.getRequesterTgwInfo(), callerAccountId(), region)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Cannot accept " + attachmentId + " as the source of the peering request.", 400);
             }
             if (!"pendingAcceptance".equals(attachment.getState())) {
                 throw new AwsException("IncorrectState", "tgw-attach " + attachmentId
