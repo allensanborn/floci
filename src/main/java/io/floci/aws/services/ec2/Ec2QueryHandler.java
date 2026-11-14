@@ -1952,6 +1952,7 @@ public class Ec2QueryHandler {
             return Ec2ErrorResponses.of(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2675,6 +2676,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2713,6 +2715,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4345,6 +4348,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "RouteTableId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<RouteTable> rts = service.describeRouteTables(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeRouteTablesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4571,6 +4575,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "NetworkAclId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNetworkAclsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4653,6 +4658,7 @@ public class Ec2QueryHandler {
         List<String> natGatewayIds = getList(p, "NatGatewayId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4797,6 +4803,7 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "CapacityReservationId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4815,7 +4822,8 @@ public class Ec2QueryHandler {
                 intOrNull(p, "InstanceCount"),
                 instantOrNull(p, "EndDate"),
                 p.getFirst("EndDateType"),
-                p.getFirst("InstanceMatchCriteria"));
+                p.getFirst("InstanceMatchCriteria"),
+                dryRun(p));
         return booleanResponse("ModifyCapacityReservation");
     }
 
@@ -5025,7 +5033,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDisassociateAddress(MultivaluedMap<String, String> p, String region) {
-        service.disassociateAddress(region, p.getFirst("AssociationId"));
+        service.disassociateAddress(region, p.getFirst("AssociationId"), dryRun(p));
         return booleanResponse("DisassociateAddress");
     }
 
@@ -5100,6 +5108,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeRegions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         // The partition the request is scoped to, not the region's own: a region no partition
         // publishes is served in the deployment's partition, where its ARNs are minted too.
         AwsPartition partition = AwsPartitions.byId(regionResolver.partitionForRegion(region));
@@ -5124,6 +5133,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeAccountAttributes(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Map<String, String> attrs = service.describeAccountAttributes(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAccountAttributesResponse", AwsNamespaces.EC2)
@@ -5144,6 +5154,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeInstanceTypes(MultivaluedMap<String, String> p, String region) {
         List<String> typeNames = getList(p, "InstanceType");
         List<Map<String, Object>> types = service.describeInstanceTypes(typeNames);
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceTypesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5360,6 +5371,7 @@ public class Ec2QueryHandler {
         String nextToken = p.getFirst("NextToken");
 
         NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
+        checkDryRun(p);
         List<NetworkInterface> nis = result.networkInterfaces();
 
         XmlBuilder xml = new XmlBuilder()

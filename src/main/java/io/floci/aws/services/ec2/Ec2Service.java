@@ -11735,6 +11735,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public CapacityReservation modifyCapacityReservation(String region, String capacityReservationId,
             Integer instanceCount, java.time.Instant endDate, String endDateType, String instanceMatchCriteria) {
+        return modifyCapacityReservation(region, capacityReservationId, instanceCount, endDate, endDateType,
+                instanceMatchCriteria, false);
+    }
+
+    /** As above; with {@code dryRun} the checks are made and the reservation is left as it is. */
+    public CapacityReservation modifyCapacityReservation(String region, String capacityReservationId,
+            Integer instanceCount, java.time.Instant endDate, String endDateType, String instanceMatchCriteria,
+            boolean dryRun) {
         synchronized (capacityReservationLock) {
             ensureDefaultResources(region);
             reconcileCapacityMembership(region);
@@ -11771,6 +11779,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             if (instanceMatchCriteria != null) {
                 reservation.setInstanceMatchCriteria(instanceMatchCriteria);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             capacityReservations.put(key(region, capacityReservationId), reservation);
             return reservation;
@@ -13946,6 +13957,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void disassociateAddress(String region, String associationId) {
+        disassociateAddress(region, associationId, false);
+    }
+
+    /** As above; with {@code dryRun} the checks are made and the address stays associated. */
+    public void disassociateAddress(String region, String associationId, boolean dryRun) {
         ensureDefaultResources(region);
         // Under the lock NAT create and delete take, so the gateway check and the clear see the
         // same association.
@@ -13959,6 +13975,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         throw new AwsException("InvalidParameterValue", "The association " + associationId
                                 + " belongs to a NAT gateway and cannot be disassociated; delete the NAT gateway.",
                                 400);
+                    }
+                    if (dryRun) {
+                        throw dryRunOperation();
                     }
                     // An address a retained interface carries names no instance; the instance that
                     // interface is attached to now holds it.
@@ -13987,6 +14006,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     }
                     return;
                 }
+            }
+            // An association that is not there is no error, as for the real call.
+            if (dryRun) {
+                throw dryRunOperation();
             }
         }
     }

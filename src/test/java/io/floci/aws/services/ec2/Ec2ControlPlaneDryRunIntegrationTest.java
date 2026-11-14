@@ -41,6 +41,8 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "GetEbsDefaultKmsKeyId|",
             "ModifyEbsDefaultKmsKeyId|KmsKeyId=alias/aws/ebs",
             "ResetEbsDefaultKmsKeyId|",
+            "DescribeAccountAttributes|",
+            "DescribeCapacityReservations|",
             "DescribeTransitGateways|",
             "DescribeTransitGatewayAttachments|",
             "DescribeTransitGatewayConnects|",
@@ -48,7 +50,17 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DescribeTransitGatewayVpcAttachments|",
             "DescribeTransitGatewayRouteTables|",
             "DescribeClientVpnEndpoints|",
+            "DescribeInstanceTypes|",
+            "DescribePrefixLists|",
+            "DescribeManagedPrefixLists|",
+            "DescribeRegions|",
+            "DescribeRouteTables|",
+            "DescribeVpcEndpointServices|",
+            "DescribeNatGateways|",
+            "DescribeNetworkAcls|",
+            "DescribeNetworkInterfaces|",
             "DeleteKeyPair|KeyName=no-such-key",
+            "DisassociateAddress|AssociationId=eipassoc-0123456789abcdef0",
             "DeleteFlowLogs|FlowLogId.1=fl-0123456789abcdef0",
             "AcceptTransitGatewayPeeringAttachment|TransitGatewayAttachmentId=" + ATTACHMENT,
             "ApplySecurityGroupsToClientVpnTargetNetwork|ClientVpnEndpointId=" + CLIENT_VPN
@@ -92,6 +104,12 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                     + "|InvalidClientVpnEndpointId.NotFound",
             "DescribeClientVpnTargetNetworks|ClientVpnEndpointId=not-an-endpoint|InvalidParameterValue",
             "DeleteLaunchTemplate|LaunchTemplateName=no-such-template|InvalidLaunchTemplateName.NotFoundException",
+            "ModifyCapacityReservation|CapacityReservationId=cr-0123456789abcdef0&InstanceCount=2"
+                    + "|InvalidCapacityReservationId.NotFound",
+            "DescribeCapacityReservations|CapacityReservationId.1=cr-0123456789abcdef0"
+                    + "|InvalidCapacityReservationId.NotFound",
+            "DescribeNetworkInterfaces|NetworkInterfaceId.1=eni-0123456789abcdef0"
+                    + "|InvalidNetworkInterfaceID.NotFound",
             "ModifyEbsDefaultKmsKeyId||MissingParameter",
             "DeleteKeyPair||MissingParameter",
             "ExportTransitGatewayRoutes|TransitGatewayRouteTableId=" + ROUTE_TABLE + "&S3Bucket=b"
@@ -114,6 +132,8 @@ class Ec2ControlPlaneDryRunIntegrationTest {
             "DeleteTransitGateway, ''",
             "DeleteKeyPair, maybe",
             "DeleteLaunchTemplate, ''",
+            "DescribeRegions, maybe",
+            "DescribeNatGateways, ''",
             "ModifyClientVpnEndpoint, maybe",
             "EnableEbsEncryptionByDefault, ''"
     })
@@ -215,6 +235,19 @@ class Ec2ControlPlaneDryRunIntegrationTest {
                 + ".item.description"));
         assertEquals(endpoint, described.getString("DescribeClientVpnEndpointsResponse.clientVpnEndpoint"
                 + ".item.clientVpnEndpointId"));
+    }
+
+    @Test
+    void aDryRunModifyLeavesTheStoredCapacityReservationAsItWas() {
+        String reservation = ec2("CreateCapacityReservation", "InstanceType", "t3.micro", "InstancePlatform",
+                "Linux/UNIX", "AvailabilityZone", "us-east-1a", "InstanceCount", "1")
+                .getString("CreateCapacityReservationResponse.capacityReservation.capacityReservationId");
+
+        dryRun("ModifyCapacityReservation", "CapacityReservationId=" + reservation + "&InstanceCount=5")
+                .then().statusCode(412);
+
+        assertEquals("1", ec2("DescribeCapacityReservations", "CapacityReservationId.1", reservation)
+                .getString("DescribeCapacityReservationsResponse.capacityReservationSet.item.totalInstanceCount"));
     }
 
     private Response dryRun(String action, String query) {
