@@ -72,6 +72,13 @@ values come from the
 [AWS co instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html),
 as checked on 2026-11-14. They were not captured from the API.
 
+The catalog also includes the M5d, M6i and M8i general purpose types `m5d.large`, `m5d.xlarge`, `m5d.2xlarge`, `m5d.4xlarge`, `m6i.large`, `m6i.xlarge`, `m6i.2xlarge`, `m6i.4xlarge`, `m8i.large`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled

@@ -591,6 +591,136 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 8
 
+  - instanceType: m5d.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    localStorageGiB: 75
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: m5d.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 16384
+    localStorageGiB: 150
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: m5d.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    localStorageGiB: 300
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: m5d.4xlarge
+    processorManufacturer: Intel
+    vcpu: 16
+    memoryMib: 65536
+    localStorageGiB: 600
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 8
+
+  - instanceType: m6i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
+  - instanceType: m6i.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: m6i.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 4
+
+  - instanceType: m6i.4xlarge
+    processorManufacturer: Intel
+    vcpu: 16
+    memoryMib: 65536
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 8
+
+  - instanceType: m8i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 20
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
   - instanceType: r5.large
     processorManufacturer: Intel
     vcpu: 2
