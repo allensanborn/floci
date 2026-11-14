@@ -136,7 +136,6 @@ public class CognitoService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String INVALID_ACCESS_TOKEN_MESSAGE = "Invalid access token";
     /** The scope of every access token from an API sign-in such as InitiateAuth, and what the user's own operations need. */
     private static final String USER_ADMIN_SCOPE = "aws.cognito.signin.user.admin";
     private static final List<String> API_SIGN_IN_SCOPES = List.of(USER_ADMIN_SCOPE);
@@ -2701,7 +2700,7 @@ public class CognitoService implements ResourceProvider {
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
             }
             throw e;
         }
@@ -2731,7 +2730,7 @@ public class CognitoService implements ResourceProvider {
         } catch (AwsException e) {
             if ("UserNotFoundException".equals(e.getErrorCode())
                     || "ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
             }
             throw e;
         }
@@ -4456,16 +4455,7 @@ public class CognitoService implements ResourceProvider {
      * SetUserMFAPreference accepts SMS settings without keeping them.
      */
     public Map<String, Object> getUserAuthFactors(String accessToken) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
 
         CognitoUser user = adminGetUser(token.poolId(), token.username());
@@ -4485,16 +4475,7 @@ public class CognitoService implements ResourceProvider {
 
     public Map<String, Object> getUserAttributeVerificationCode(String accessToken, String attributeName,
                                                                 Map<String, String> clientMetadata) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
@@ -4554,16 +4535,7 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void verifyUserAttribute(String accessToken, String attributeName, String code) {
-        VerifiedAccessToken token;
-        try {
-            token = verifyAccessToken(accessToken);
-        } catch (AwsException e) {
-            if ("NotAuthorizedException".equals(e.getErrorCode())
-                    && INVALID_ACCESS_TOKEN_MESSAGE.equals(e.getMessage())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Access Token", 400);
-            }
-            throw e;
-        }
+        VerifiedAccessToken token = verifyAccessToken(accessToken);
         requireScope(accessToken, USER_ADMIN_SCOPE);
         String username = token.username();
         String poolId = token.poolId();
@@ -4901,14 +4873,14 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         String[] parts = parseRefreshToken(refreshToken);
         if (parts == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         String poolId = parts[0];
         String username = parts[1];
         String refreshTokenUuid = parts[4]; // UUID from refresh token
 
         if (!client.getUserPoolId().equals(poolId)) {
-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         requireRefreshTokenOfClient(client, parts);
         List<String> scopes = refreshTokenScopes(parts);
@@ -6185,7 +6157,7 @@ public class CognitoService implements ResourceProvider {
             throw e;
         } catch (Exception e) {
             LOG.debug("API Gateway Cognito token verification failed", e);
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 
@@ -6198,7 +6170,7 @@ public class CognitoService implements ResourceProvider {
     private void requireTokenUserExists(String poolId, String username, String subject) {
         CognitoUser user = username == null ? null : userStore.get(userKey(poolId, username)).orElse(null);
         if (user == null || !subject.equals(user.getAttributes().getOrDefault("sub", user.getUsername()))) {
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 
@@ -6238,7 +6210,7 @@ public class CognitoService implements ResourceProvider {
             throw e;
         } catch (Exception e) {
             LOG.debug("Access token verification failed", e);
-            throw new AwsException("NotAuthorizedException", INVALID_ACCESS_TOKEN_MESSAGE, 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_ACCESS_TOKEN, 400);
         }
     }
 

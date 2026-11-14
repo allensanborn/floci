@@ -768,14 +768,14 @@ final class CognitoAuthFlowHandler {
         if (refreshToken == null) throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
         String[] parts = service.parseRefreshToken(refreshToken);
         if (parts == null) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         // Scope the token to the pool that minted it. HMAC verification only proves the token
         // was signed by parts[0]'s pool, not that parts[0] is the pool serving this request, so
         // a token legitimately issued for pool A must not be replayed against pool B's client.
         // Mirrors getTokensFromRefreshToken's pool-id check.
         if (!pool.getId().equals(parts[0])) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         CognitoService.requireRefreshTokenOfClient(client, parts);
         List<String> scopes = CognitoService.refreshTokenScopes(parts);
@@ -785,7 +785,7 @@ final class CognitoAuthFlowHandler {
         try {
             iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
         } catch (NumberFormatException e) {
-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+            throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
         }
         String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
 
@@ -803,7 +803,7 @@ final class CognitoAuthFlowHandler {
             // Real Cognito never reveals whether the encoded username exists; any
             // refresh token that doesn't resolve to a real user is simply invalid.
             if ("UserNotFoundException".equals(ae.getErrorCode())) {
-                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+                throw new AwsException("NotAuthorizedException", CognitoErrors.INVALID_REFRESH_TOKEN, 400);
             }
             throw ae;
         }

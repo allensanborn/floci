@@ -106,4 +106,14 @@ class CognitoErrorMessagesIntegrationTest {
                  "AuthParameters":{"USERNAME":"alice","PASSWORD":"wrong"}}
                 """.formatted(clientId)), "NotAuthorizedException", message);
     }
+
+    @Test
+    void invalidTokensAreCapitalised() {
+        assertError(cognitoAction("GetUser", """
+                {"AccessToken":"not-a-token"}
+                """), "NotAuthorizedException", "Invalid Access Token");
+        assertError(cognitoAction("GetTokensFromRefreshToken", """
+                {"ClientId":"%s","RefreshToken":"not-a-token"}
+                """.formatted(clientId)), "NotAuthorizedException", "Invalid Refresh Token");
+    }
 }

@@ -12,6 +12,12 @@ final class CognitoErrors {
     /** The refusal for a wrong password, which Cognito words alike whether or not the user exists. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password.";
 
+    /** A token that is no access token Cognito issued, malformed or from another pool. */
+    static final String INVALID_ACCESS_TOKEN = "Invalid Access Token";
+
+    /** A token that is no refresh token Cognito issued to this client. */
+    static final String INVALID_REFRESH_TOKEN = "Invalid Refresh Token";
+
     private CognitoErrors() {
     }
 
