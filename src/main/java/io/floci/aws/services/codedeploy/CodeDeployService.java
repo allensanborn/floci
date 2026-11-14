@@ -672,7 +672,7 @@ public class CodeDeployService {
         Deployment d = deploymentsFor(region).get(deploymentId);
         if (d == null) {
             throw new AwsException("DeploymentDoesNotExistException",
-                    "Deployment does not exist: " + deploymentId, 400);
+                    "The deployment " + deploymentId + " could not be found", 400);
         }
         return d;
     }
@@ -706,7 +706,7 @@ public class CodeDeployService {
                     Deployment d = store.get(id);
                     if (d == null) {
                         throw new AwsException("DeploymentDoesNotExistException",
-                                "Deployment does not exist: " + id, 400);
+                                "The deployment " + id + " could not be found", 400);
                     }
                     return d;
                 })
@@ -755,7 +755,7 @@ public class CodeDeployService {
         OnPremisesInstance inst = new OnPremisesInstance();
         inst.setInstanceName(instanceName);
         inst.setInstanceArn(AwsArnUtils.Arn.of("codedeploy", region, regionResolver.getAccountId(),
-                "instance/" + instanceName).toString());
+                "instance/" + instanceName + "_" + UUID.randomUUID()).toString());
         inst.setIamSessionArn(iamSessionArn);
         inst.setIamUserArn(iamUserArn);
         inst.setRegisterTime(EpochSeconds.fromInstant(Instant.now()));
@@ -766,10 +766,17 @@ public class CodeDeployService {
     }
 
     public void deregisterOnPremisesInstance(String region, String instanceName) {
-        OnPremisesInstance inst = requireOnPremisesInstance(region, instanceName);
-        inst.setDeregisterTime(EpochSeconds.fromInstant(Instant.now()));
-        inst.setRegistrationStatus("Deregistered");
-        persistRegion(onPremisesInstances, region);
+        if (instanceName == null || instanceName.isEmpty()) {
+            throw new AwsException("InstanceNameRequiredException", "Instance name is missing", 400);
+        }
+        // AWS purges the record on deregister: Get raises InstanceNotRegisteredException, neither status
+        // filter lists it, and re-registering mints a new instanceArn with no tags; repeating the call
+        // on a gone instance succeeds. Evidence:
+        // https://github.com/aws/aws-emulator-evaluation-suite/blob/main/behavioral/codedeploy/check_on_premises_instance_deregister_reflects_in_status_filters.py and
+        // https://github.com/aws/aws-emulator-evaluation-suite/blob/main/behavioral/codedeploy/check_deregister_onprem_instance_missing_name_rejected.py.
+        if (onPremisesFor(region).remove(instanceName) != null) {
+            persistRegion(onPremisesInstances, region);
+        }
     }
 
     public OnPremisesInstance getOnPremisesInstance(String region, String instanceName) {
@@ -777,7 +784,9 @@ public class CodeDeployService {
     }
 
     public List<OnPremisesInstance> batchGetOnPremisesInstances(String region, List<String> names) {
-        return names.stream().map(n -> requireOnPremisesInstance(region, n)).collect(Collectors.toList());
+        // AWS omits unknown names: BatchGetOnPremisesInstances models no not-found error.
+        Map<String, OnPremisesInstance> store = onPremisesFor(region);
+        return names.stream().map(store::get).filter(i -> i != null).collect(Collectors.toList());
     }
 
     public List<String> listOnPremisesInstances(String region, String registrationStatus,
@@ -791,8 +800,9 @@ public class CodeDeployService {
     }
 
     public void addTagsToOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> newTags) {
+        requireRegistered(region, instanceNames);
         for (String name : instanceNames) {
-            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            OnPremisesInstance inst = onPremisesFor(region).get(name);
             for (Map<String, String> t : newTags) {
                 inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
                 inst.getTags().add(t);
@@ -802,8 +812,9 @@ public class CodeDeployService {
     }
 
     public void removeTagsFromOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> tagsToRemove) {
+        requireRegistered(region, instanceNames);
         for (String name : instanceNames) {
-            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            OnPremisesInstance inst = onPremisesFor(region).get(name);
             for (Map<String, String> t : tagsToRemove) {
                 inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
             }
@@ -811,11 +822,20 @@ public class CodeDeployService {
         persistRegion(onPremisesInstances, region);
     }
 
+    /** AddTags/RemoveTags check every name before touching any, and word the refusal "Host X is not registered". */
+    private void requireRegistered(String region, List<String> instanceNames) {
+        for (String name : instanceNames) {
+            if (!onPremisesFor(region).containsKey(name)) {
+                throw new AwsException("InstanceNotRegisteredException", "Host " + name + " is not registered", 400);
+            }
+        }
+    }
+
     private OnPremisesInstance requireOnPremisesInstance(String region, String instanceName) {
         OnPremisesInstance inst = onPremisesFor(region).get(instanceName);
         if (inst == null) {
-            throw new AwsException("InstanceNameRequiredException",
-                    "On-premises instance not found: " + instanceName, 400);
+            throw new AwsException("InstanceNotRegisteredException",
+                    "The requested host does not exist. Host: " + instanceName, 400);
         }
         return inst;
     }

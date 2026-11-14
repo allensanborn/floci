@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.codedeploy.model.Deployment;
+import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.Reservation;
@@ -686,6 +687,50 @@ class CodeDeployServiceTest {
                 service.getDeploymentGroup(REGION, "upd-app", "g").getDeploymentConfigName());
         service.deleteApplication(REGION, "upd-app");
         service.deleteDeploymentGroup(REGION, "upd-app", "g");
+    }
+
+    @Test
+    void getDeploymentUnknownIdUsesAwsMessage() {
+        assertAws("DeploymentDoesNotExistException", "The deployment d-NOPE could not be found",
+                () -> service.getDeployment(REGION, "d-NOPE"));
+    }
+
+    @Test
+    void deregisterOnPremisesInstanceRemovesRecordAndIsRepeatable() {
+        service.registerOnPremisesInstance(REGION, "host-1", null, "arn:aws:iam::000000000000:user/u");
+        service.deregisterOnPremisesInstance(REGION, "host-1");
+        assertAws("InstanceNotRegisteredException", "The requested host does not exist. Host: host-1",
+                () -> service.getOnPremisesInstance(REGION, "host-1"));
+        assertTrue(service.listOnPremisesInstances(REGION, null, null).isEmpty());
+        service.deregisterOnPremisesInstance(REGION, "host-1");
+        assertAws("InstanceNameRequiredException", "Instance name is missing",
+                () -> service.deregisterOnPremisesInstance(REGION, ""));
+    }
+
+    @Test
+    void onPremisesBatchGetOmitsUnknownAndTagOpsUseHostNotRegisteredMessage() {
+        service.registerOnPremisesInstance(REGION, "h1", null, "arn:aws:iam::000000000000:user/u");
+        assertEquals(List.of("h1"), service.batchGetOnPremisesInstances(REGION, List.of("h1", "gone")).stream()
+                .map(i -> i.getInstanceName()).toList());
+        assertAws("InstanceNotRegisteredException", "Host gone is not registered",
+                () -> service.addTagsToOnPremisesInstances(REGION, List.of("h1", "gone"),
+                        List.of(Map.of("Key", "k", "Value", "v"))));
+        assertTrue(service.getOnPremisesInstance(REGION, "h1").getTags().isEmpty());
+        assertAws("InstanceNotRegisteredException", "Host gone is not registered",
+                () -> service.removeTagsFromOnPremisesInstances(REGION, List.of("gone"),
+                        List.of(Map.of("Key", "k"))));
+    }
+
+    @Test
+    void reRegisteringAfterDeregisterMintsNewArnAndNoTags() {
+        String first = service.registerOnPremisesInstance(REGION, "h2", null, "arn:aws:iam::000000000000:user/u")
+                .getInstanceArn();
+        service.addTagsToOnPremisesInstances(REGION, List.of("h2"), List.of(Map.of("Key", "k", "Value", "v")));
+        service.deregisterOnPremisesInstance(REGION, "h2");
+        OnPremisesInstance reborn = service.registerOnPremisesInstance(REGION, "h2", null, "arn:aws:iam::000000000000:user/u");
+        assertTrue(reborn.getInstanceArn().contains(":instance/h2_"));
+        assertFalse(first.equals(reborn.getInstanceArn()));
+        assertTrue(reborn.getTags().isEmpty());
     }
 
     @SuppressWarnings("unchecked")
