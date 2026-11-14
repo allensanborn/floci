@@ -43,9 +43,10 @@ class CognitoErrorMessagesIntegrationTest {
 
     @AfterEach
     void deletePool() {
+        // a test may have deleted the pool already
         cognitoAction("DeleteUserPool", """
                 {"UserPoolId":"%s"}
-                """.formatted(poolId)).then().statusCode(200);
+                """.formatted(poolId));
     }
 
     private static void createConfirmedUser(String username) {
@@ -125,5 +126,50 @@ class CognitoErrorMessagesIntegrationTest {
         assertError(cognitoAction("AdminAddUserToGroup", """
                 {"UserPoolId":"%s","Username":"alice","GroupName":"missing"}
                 """.formatted(poolId)), "ResourceNotFoundException", "Group not found.");
+    }
+
+    @Test
+    void missingClientIsWordedPerOperation() throws Exception {
+        String otherPool = cognitoJson("CreateUserPool", """
+                {"PoolName":"other-pool"}
+                """).path("UserPool").path("Id").asText();
+        try {
+            String doomed = cognitoJson("CreateUserPoolClient", """
+                    {"UserPoolId":"%s","ClientName":"doomed"}
+                    """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+            cognitoAction("DeleteUserPoolClient", """
+                    {"UserPoolId":"%s","ClientId":"%s"}
+                    """.formatted(poolId, doomed)).then().statusCode(200);
+
+            String notFound = "ResourceNotFoundException";
+            assertError(cognitoAction("DescribeUserPoolClient", """
+                    {"UserPoolId":"%s","ClientId":"%s"}
+                    """.formatted(poolId, doomed)), notFound, "User pool client does not exist.");
+            assertError(cognitoAction("UpdateUserPoolClient", """
+                    {"UserPoolId":"%s","ClientId":"%s","ClientName":"x"}
+                    """.formatted(poolId, doomed)), notFound, "User pool client does not exist.");
+            assertError(cognitoAction("DeleteUserPoolClient", """
+                    {"UserPoolId":"%s","ClientId":"%s"}
+                    """.formatted(poolId, doomed)), notFound, "User pool client " + doomed + " does not exist.");
+            assertError(cognitoAction("InitiateAuth", """
+                    {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                     "AuthParameters":{"USERNAME":"alice","PASSWORD":"x"}}
+                    """.formatted(doomed)), notFound, "User pool client " + doomed + " does not exist.");
+            assertError(cognitoAction("DescribeUserPoolClient", """
+                    {"UserPoolId":"%s","ClientId":"%s"}
+                    """.formatted(otherPool, clientId)), notFound,
+                    "User pool client " + clientId + " does not exist in user pool " + otherPool + ".");
+        } finally {
+            cognitoAction("DeleteUserPool", """
+                    {"UserPoolId":"%s"}
+                    """.formatted(otherPool)).then().statusCode(200);
+        }
+        cognitoAction("DeleteUserPool", """
+                {"UserPoolId":"%s"}
+                """.formatted(poolId));
+        assertError(cognitoAction("DescribeUserPoolClient", """
+                {"UserPoolId":"%s","ClientId":"%s"}
+                """.formatted(poolId, clientId)), "ResourceNotFoundException",
+                "User pool " + poolId + " does not exist.");
     }
 }

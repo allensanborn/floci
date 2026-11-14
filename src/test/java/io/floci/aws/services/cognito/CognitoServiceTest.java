@@ -2496,7 +2496,7 @@ class CognitoServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.confirmSignUp(client.getClientId(), "carol", "123456"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
-        assertEquals("Client not found", ex.getMessage());
+        assertEquals("User pool client " + client.getClientId() + " does not exist.", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 

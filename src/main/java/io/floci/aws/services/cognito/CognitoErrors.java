@@ -38,4 +38,21 @@ final class CognitoErrors {
     static AwsException groupNotFound() {
         return new AwsException("ResourceNotFoundException", "Group not found.", 400);
     }
+
+    /** An app client that is not there, for the operations that address it by pool and id together. */
+    static AwsException userPoolClientDoesNotExist() {
+        return new AwsException("ResourceNotFoundException", "User pool client does not exist.", 400);
+    }
+
+    /** An app client that is not there, for the operations that name the id they were asked for. */
+    static AwsException userPoolClientNotFound(String clientId) {
+        return new AwsException("ResourceNotFoundException",
+                "User pool client " + clientId + " does not exist.", 400);
+    }
+
+    /** An app client that exists, but in a pool other than the one the request named. */
+    static AwsException userPoolClientNotInPool(String clientId, String userPoolId) {
+        return new AwsException("ResourceNotFoundException",
+                "User pool client " + clientId + " does not exist in user pool " + userPoolId + ".", 400);
+    }
 }
