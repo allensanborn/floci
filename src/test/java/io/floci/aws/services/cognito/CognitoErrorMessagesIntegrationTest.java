@@ -219,4 +219,19 @@ class CognitoErrorMessagesIntegrationTest {
                 """.formatted(clientId)),
                 "InvalidParameterException", "CUSTOM_AUTH flow not enabled for this client");
     }
+
+    @Test
+    void duplicateCustomAttributeIsReportedAsAnEntityRecord() {
+        String add = """
+                {"UserPoolId":"%s","CustomAttributes":[{"Name":"tier","AttributeDataType":"String"}]}
+                """.formatted(poolId);
+        cognitoAction("AddCustomAttributes", add).then().statusCode(200);
+        assertError(cognitoAction("AddCustomAttributes", add), "InvalidParameterException",
+                "Entity Type: USER, Message: AttributeName: tier, DataType: STRING, Error: Attribute name is not unique");
+        // a request that leaves the data type out is reported as String, never as NULL
+        assertError(cognitoAction("AddCustomAttributes", """
+                {"UserPoolId":"%s","CustomAttributes":[{"Name":"tier"}]}
+                """.formatted(poolId)), "InvalidParameterException",
+                "Entity Type: USER, Message: AttributeName: tier, DataType: STRING, Error: Attribute name is not unique");
+    }
 }

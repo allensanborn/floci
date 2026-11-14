@@ -623,7 +623,9 @@ public class CognitoService implements ResourceProvider {
             String finalName = (String) attr.get("Name");
             boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
             if (exists) {
-                throw new AwsException("InvalidParameterException", "Attribute already exists in schema: " + finalName, 400);
+                // AttributeDataType defaults to String when the request leaves it out
+                Object dataType = attr.get("AttributeDataType");
+                throw CognitoErrors.attributeNameNotUnique(finalName, dataType == null ? "String" : dataType.toString());
             }
 
             schema.add(attr);

@@ -2,6 +2,8 @@ package io.floci.aws.services.cognito;
 
 import io.floci.aws.core.common.AwsException;
 
+import java.util.Locale;
+
 /**
  * The error messages Cognito User Pools gives for refusals Floci used to word its own way. Each
  * constant or factory is the exact text AWS answers, so a caller that matches on it, or an SDK that
@@ -77,5 +79,18 @@ final class CognitoErrors {
     /** A flow the app client does not allow, as AdminInitiateAuth words it: one sentence for every flow. */
     static AwsException adminAuthFlowNotEnabled() {
         return new AwsException("InvalidParameterException", "Auth flow not enabled for this client", 400);
+    }
+
+    /**
+     * A custom attribute the pool's schema already declares. AWS reports it as a record of the
+     * entity the schema belongs to, the attribute as the request named it (without the
+     * {@code custom:} or {@code dev:} prefix it is stored under), and its data type in upper case.
+     */
+    static AwsException attributeNameNotUnique(String storedName, String dataType) {
+        String bareName = storedName.startsWith("custom:") ? storedName.substring("custom:".length())
+                : storedName.startsWith("dev:") ? storedName.substring("dev:".length()) : storedName;
+        return new AwsException("InvalidParameterException",
+                "Entity Type: USER, Message: AttributeName: " + bareName + ", DataType: "
+                        + dataType.toUpperCase(Locale.ROOT) + ", Error: Attribute name is not unique", 400);
     }
 }
