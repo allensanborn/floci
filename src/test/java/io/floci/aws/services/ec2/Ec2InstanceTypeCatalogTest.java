@@ -60,6 +60,53 @@ class Ec2InstanceTypeCatalogTest {
                 expected.add(family + "." + size);
             }
         }
+        expected.addAll(List.of(
+                "m5.xlarge",
+                "m5.2xlarge",
+                "m5.4xlarge",
+                "m5.8xlarge",
+                "m5.12xlarge",
+                "m5.16xlarge",
+                "m5.24xlarge"));
+        expected.addAll(List.of(
+                "t3.large",
+                "t3.xlarge",
+                "t3.2xlarge",
+                "t3a.micro",
+                "t3a.small",
+                "t3a.medium",
+                "t3a.large",
+                "t3a.xlarge",
+                "t3a.2xlarge"));
+        expected.addAll(List.of(
+                "c5.large",
+                "c5.xlarge",
+                "c5.2xlarge",
+                "c5.4xlarge",
+                "c5.9xlarge",
+                "c5.12xlarge",
+                "c5.18xlarge",
+                "c5.24xlarge",
+                "c4.large",
+                "c6i.large",
+                "c6i.xlarge",
+                "c6i.2xlarge",
+                "c6i.4xlarge"));
+        expected.addAll(List.of(
+                "m5d.large",
+                "m5d.xlarge",
+                "m5d.2xlarge",
+                "m5d.4xlarge",
+                "m6i.large",
+                "m6i.xlarge",
+                "m6i.2xlarge",
+                "m6i.4xlarge",
+                "m8i.large"));
+        expected.addAll(List.of(
+                "i3.large",
+                "i4i.metal",
+                "g4dn.2xlarge",
+                "p4d.24xlarge"));
         expected.addAll(List.of("c8g.24xlarge", "c8g.48xlarge", "m8g.24xlarge", "m8g.48xlarge"));
         assertEquals(expected, instanceTypes);
     }
@@ -101,10 +148,10 @@ class Ec2InstanceTypeCatalogTest {
 
     @Test
     void defaultCpuSnapshotDoesNotInventOtherDescribeMetadata() {
-        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("t3.large"));
+        assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("c5n.large"));
         assertEquals(Optional.of(144), instanceTypeCatalog.defaultVcpus("p6e-gb200.36xlarge"));
         assertEquals(Optional.of(2), instanceTypeCatalog.defaultVcpus("cc1.4xlarge"));
-        assertTrue(instanceTypeCatalog.find("t3.large").isEmpty());
+        assertTrue(instanceTypeCatalog.find("c5n.large").isEmpty());
         assertTrue(instanceTypeCatalog.find("p6e-gb200.36xlarge").isEmpty());
         assertTrue(instanceTypeCatalog.defaultVcpus("m9g.metal-24xl").isEmpty());
         assertTrue(instanceTypeCatalog.defaultVcpus("m9gd.metal-24xl").isEmpty());

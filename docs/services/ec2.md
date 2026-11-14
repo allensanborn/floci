@@ -51,6 +51,41 @@ processors, 468 GB of local NVMe SSD storage, and one network card supporting
 [AWS storage optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html).
 Both describe APIs and the existing container resource limits use this entry.
 
+The catalog also includes the M5 general purpose types `m5.xlarge`, `m5.2xlarge`, `m5.4xlarge`, `m5.8xlarge`, `m5.12xlarge`, `m5.16xlarge`, `m5.24xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
+The catalog also includes the T3 and T3a burstable general purpose types `t3.large`, `t3.xlarge`, `t3.2xlarge`, `t3a.micro`, `t3a.small`, `t3a.medium`, `t3a.large`, `t3a.xlarge`, `t3a.2xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
+The catalog also includes the C4, C5 and C6i compute optimized types `c5.large`, `c5.xlarge`, `c5.2xlarge`, `c5.4xlarge`, `c5.9xlarge`, `c5.12xlarge`, `c5.18xlarge`, `c5.24xlarge`, `c4.large`, `c6i.large`, `c6i.xlarge`, `c6i.2xlarge`, `c6i.4xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS co instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html),
+as checked on 2026-11-14. They were not captured from the API.
+
+The catalog also includes the M5d, M6i and M8i general purpose types `m5d.large`, `m5d.xlarge`, `m5d.2xlarge`, `m5d.4xlarge`, `m6i.large`, `m6i.xlarge`, `m6i.2xlarge`, `m6i.4xlarge`, `m8i.large`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS gp instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html),
+as checked on 2026-11-14. They were not captured from the API.
+
+The catalog also includes the storage optimized, GPU and accelerated computing types `i3.large`, `i4i.metal`, `g4dn.2xlarge`, `p4d.24xlarge`.
+`DescribeInstanceTypes`, `DescribeInstanceTypeOfferings` and the container resource
+limits use these entries. Their vCPU, memory, local storage, network-card and IPv4
+values come from the
+[AWS so instance type specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html),
+as checked on 2026-11-14. The accelerated computing types follow the [AWS accelerated computing specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html). They were not captured from the API.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
