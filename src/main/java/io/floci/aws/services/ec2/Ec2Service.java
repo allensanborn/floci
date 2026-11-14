@@ -14294,10 +14294,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String effectiveLocationType = locationType != null && !locationType.isBlank()
                 ? locationType
                 : "availability-zone";
+        String zoneKey = "availability-zone-id".equals(effectiveLocationType) ? "zoneId" : "zoneName";
         List<String> locations = "region".equals(effectiveLocationType)
                 ? List.of(region)
                 : describeAvailabilityZones(region, List.of(), List.of(), null).stream()
-                        .map(zone -> zone.get("zoneName"))
+                        .map(zone -> zone.get(zoneKey))
                         .toList();
         List<List<String>> locationFilters = filterValues(filters, "location");
 
