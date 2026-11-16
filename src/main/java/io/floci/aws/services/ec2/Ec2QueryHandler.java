@@ -4816,8 +4816,16 @@ public class Ec2QueryHandler {
                 .start("ipv4")
                 .elem("dnsName", endpoint.getDnsName())
                 .elem("fipsDnsName", endpoint.getFipsDnsName())
-                .end("ipv4")
-                .end("publicDnsNames");
+                .end("ipv4");
+        // The dualstack name pattern AWS uses is not published; this reuses the ipv4 name with a
+        // "dualstack" label. Only the member's presence is modelled (InstanceConnectEndpointPublicDnsNames).
+        if (!"ipv4".equals(endpoint.getIpAddressType())) {
+            xml.start("dualstack")
+                    .elem("dnsName", endpoint.getDnsName().replaceFirst("\\.", ".dualstack."))
+                    .elem("fipsDnsName", endpoint.getFipsDnsName().replaceFirst("\\.", ".dualstack."))
+                    .end("dualstack");
+        }
+        xml.end("publicDnsNames");
         xml.raw(tagSetXml(endpoint.getTags()));
         return xml.build();
     }
