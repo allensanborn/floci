@@ -117,6 +117,16 @@ class Ec2SystemdGuestDockerIntegrationTest {
             assertEquals(0, writable.exitCode(),
                     "guest's /lib/modules outside " + modulesDir + " is not writable: " + writable.summary());
 
+            // The bound tree is usable, not just present: modprobe resolves a module from the host's
+            // modules.dep. Docker Desktop/OrbStack VMs may ship no module tree, leaving the mount empty.
+            ContainerExec.Result dep = ContainerExec.runMerged(docker, containerId,
+                    new String[]{"sh", "-c", "sed -n '1s/:.*//p' " + modulesDir + "/modules.dep"}, 30);
+            String module = dep.stdout().trim().replaceAll(".*/", "").replaceAll("\\..*", "");
+            assumeTrue(dep.exitCode() == 0 && !module.isEmpty(), "docker host has no " + modulesDir + "/modules.dep to modprobe from");
+            ContainerExec.Result probe = ContainerExec.runMerged(docker, containerId,
+                    new String[]{"modprobe", "-D", module}, 30);
+            assertEquals(0, probe.exitCode(), "guest's modprobe cannot find " + module + ": " + probe.summary());
+
             // A privileged guest gets its own cgroup namespace: it sits at the namespace root, and
             // Docker mounts that cgroupfs read-write so the guest's systemd can create slices.
             // Assumes cgroup v2: on v1/hybrid hosts there is no "0::" line.
