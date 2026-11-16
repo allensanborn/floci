@@ -77,6 +77,8 @@ existing application storage and region visibility.
 
 ### On-Premises Instances
 
+Every on-premises operation that takes an instance name refuses a blank one with `InstanceNameRequiredException`, and a name over 100 characters, outside `[A-Za-z0-9+=,.@_-]`, or starting with `i-` (the EC2 instance-id form, any case) with `InvalidInstanceNameException`.
+
 | Operation | Notes |
 |---|---|
 | `RegisterOnPremisesInstance` | Registers an instance name with an IAM session or user ARN |
