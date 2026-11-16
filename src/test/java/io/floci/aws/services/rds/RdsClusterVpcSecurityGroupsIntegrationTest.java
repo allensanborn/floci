@@ -225,4 +225,25 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .when().post("/").then().statusCode(400);
         assertEquals("1", described("BackupRetentionPeriod"));
     }
+
+    @Test
+    void createWithMalformedDeletionProtectionLeavesNoClusterBehind() {
+        create().formParam("DeletionProtection", "garbage").when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+        assertEquals(0, clusterCount());
+    }
+
+    @Test
+    void modifyWithMalformedDeletionProtectionChangesNothing() {
+        create().formParam("MasterUserPassword", "original-password1").when().post("/").then().statusCode(200);
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("DeletionProtection", "garbage").formParam("BackupRetentionPeriod", "9")
+                .formParam("EnableIAMDatabaseAuthentication", "true")
+                .formParam("MasterUserPassword", "changed-password2")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+        assertEquals("1", described("BackupRetentionPeriod"));
+        assertEquals("false", described("IAMDatabaseAuthenticationEnabled"));
+        assertEquals("false", described("DeletionProtection"));
+    }
 }

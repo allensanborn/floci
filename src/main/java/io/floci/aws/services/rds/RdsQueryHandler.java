@@ -1346,6 +1346,10 @@ public class RdsQueryHandler {
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
             String[] windows = RdsService.resolveClusterCreateWindows(
                     params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
+            // parsed before any mutating call so a malformed value leaves no cluster behind
+            List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
+                    ? vpcSecurityGroupIds(params) : null;
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
                 cluster = requestedPort == null
@@ -1398,10 +1402,8 @@ public class RdsQueryHandler {
             if (backupRetentionPeriodParam != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
             }
-            cluster = service.setDbClusterRequestSettings(id, region,
-                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
-                    windows[0], windows[1],
-                    parseOptionalBoolean(params, "DeletionProtection"));
+            cluster = service.setDbClusterRequestSettings(id, region, securityGroupIds,
+                    windows[0], windows[1], deletionProtection);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1521,6 +1523,10 @@ public class RdsQueryHandler {
             }
             RdsService.validateClusterWindows(service.getDbCluster(id, region),
                     params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
+            // parsed before any mutating call so a malformed value changes nothing
+            List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
+                    ? vpcSecurityGroupIds(params) : null;
+            Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,
@@ -1533,10 +1539,9 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
             }
-            cluster = service.setDbClusterRequestSettings(id, region,
-                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+            cluster = service.setDbClusterRequestSettings(id, region, securityGroupIds,
                     params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
-                    parseOptionalBoolean(params, "DeletionProtection"));
+                    deletionProtection);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
