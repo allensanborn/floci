@@ -103,6 +103,17 @@ floci:
     # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
     spoof-aws-endpoints: false
 
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> for the host's own resolver,
+    # answering the same names (Cloud Map <service>.<namespace>, Route 53 private zones) and
+    # refusing the rest.
+    # Via env var: FLOCI_DNS_HOST_PORT=5354
+    # host-port: 5354
+
+    # When Floci runs natively on a host with a docker0 bridge: listen on that bridge's
+    # address, port 53, for the containers Floci launches (needs root or CAP_NET_BIND_SERVICE).
+    # Via env var: FLOCI_DNS_BRIDGE_LISTENER_ENABLED=false
+    bridge-listener-enabled: true
+
   auth:
     validate-signatures: false               # Set to true to verify SigV4 signatures for every service (S3: header, presigned URL, presigned POST; others: header)
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
@@ -120,8 +131,8 @@ floci:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
-    max-connections: 1024                    # Docker client connection pool; each live Lambda container holds 1
-    streaming-max-connections: 512           # Separate pool for container log-follow streams
+    max-connections: 1024                    # Docker client connection pool for short calls
+    streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -211,6 +222,8 @@ floci:
       proxy-base-port: 6379
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
+      shell-less-backend: false               # true = image has no shell or CLI: flags as container arguments, snapshots via SAVE over RESP + Docker archive API
+      shell-less-backend-dbfilename: dump.rdb # snapshot file the server loads at startup (used with shell-less-backend)
 
     rds:
       enabled: true
@@ -417,10 +430,10 @@ Floci ships with `quarkus.log.min-level: TRACE`, so raising a single category to
 
 ```bash
 # SQS: log SendMessage/ReceiveMessage/DeleteMessage bodies and attributes
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL=TRACE
 
 # DynamoDB: log PutItem/GetItem/UpdateItem/DeleteItem items, Query/Scan counts
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_DYNAMODB__LEVEL=TRACE
 ```
 
 **Or in `application.yml`:**
@@ -429,9 +442,9 @@ QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
 quarkus:
   log:
     category:
-      "io.github.hectorvent.floci.services.sqs":
+      "io.floci.aws.services.sqs":
         level: TRACE
-      "io.github.hectorvent.floci.services.dynamodb":
+      "io.floci.aws.services.dynamodb":
         level: TRACE
 ```
 
@@ -440,7 +453,7 @@ quarkus:
 ```java
 new GenericContainer<>("floci/floci:latest")
     .withExposedPorts(4566)
-    .withEnv("QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL", "TRACE");
+    .withEnv("QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL", "TRACE");
 ```
 
 TRACE output includes the payload alongside the existing DEBUG line:

@@ -1,6 +1,7 @@
 # Installation
 
 Floci can be run three ways: as a Docker image, as a pre-built native binary, or built from source.
+To run it in a Kubernetes cluster, use the Helm chart: see [Kubernetes (Helm)](kubernetes.md).
 
 ## Docker (Recommended)
 
@@ -12,7 +13,7 @@ docker pull floci/floci:latest
 
 ### Requirements
 
-- Docker 20.10+
+- Docker 23.0+ (the image layers are compressed with zstd, which older engines cannot pull)
 - `docker compose` v2+ (plugin syntax, not standalone `docker-compose`)
 
 ## Image Tags

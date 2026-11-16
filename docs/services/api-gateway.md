@@ -2,6 +2,9 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+HTTP integrations preserve path encoding through custom domains and `execute-api` hosts as well
+as path-based endpoints. For example, `/files/a%25b` reaches an HTTP backend with `%25` intact.
+
 ## JWT issuer network policy
 
 HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
@@ -20,6 +23,33 @@ certificate of Floci's local CA. The discovery document and JWKS are fetched tru
 bundle Floci gives the containers it launches (see [TLS](../configuration/tls.md)), so a JWT
 authorizer on a Floci user pool verifies its tokens, as one on a Cognito user pool does on AWS. Its
 address is still a private one, so it also needs `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
+
+## Integration target addresses
+
+REST API `HTTP` and `HTTP_PROXY` integrations, HTTP API `HTTP_PROXY` integrations and WebSocket API
+HTTP integrations send the request from Floci itself, so Floci screens where it may go. When an
+integration is invoked, Floci resolves the integration URI's host and refuses link-local and cloud
+instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+
+How a refusal reaches the caller depends on the integration:
+
+- `HTTP_PROXY`, on a REST or an HTTP API, answers `502`.
+- A REST `HTTP` integration treats the refusal like a backend `502` and runs it through the
+  integration responses, so with only a default `200` response the client gets `200`. A
+  `5\d{2}` selection pattern surfaces it.
+- A WebSocket integration fails with `500`: `$connect` rejects the upgrade, and a message route
+  sends no reply.
+
+For an `http://` URI, Floci connects to the address it checked, so a name that resolves differently
+on a second lookup cannot reach a refused address. For an `https://` URI, it checks the address and
+then hands the URL to the JDK HTTP client, which resolves the name again when it connects, so a name
+that changes between the two lookups is not screened. Treat the check as the boundary for `http://`
+targets only.
+
+Loopback and private addresses stay reachable, since an integration in front of a service on the
+same host or in a neighbouring container is the normal case in local development. Unlike the JWT
+policy above, no setting refuses them, so keep Floci off networks where untrusted callers can
+create integrations.
 
 ## Custom API IDs
 
@@ -112,10 +142,14 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
+
+Documentation part listing covers created parts. The `UNDOCUMENTED` location status does not
+discover API locations without documentation content yet.
 
 `TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
 `arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
@@ -165,7 +199,8 @@ explicitly request values.
 
 `DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key
 stores its own copy of the key value, so without that sweep a deleted key would stay listed by
-`GetUsagePlanKeys` and keep being recognised on the data plane.
+`GetUsagePlanKeys` and keep being recognised on the data plane. `DeleteUsagePlan` drops the plan's keys
+the same way, so a plan recreated with the same pinned id starts with none.
 
 `requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
@@ -175,6 +210,24 @@ A method with `apiKeyRequired` rejects a request whose `x-api-key` is missing, u
 deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forbidden"}` and
 `x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
 `INVALID_API_KEY` gateway response.
+
+A request whose key is attached to the stage's usage plan is metered on every method of that stage,
+including methods without `apiKeyRequired`, and before request validation, as measured against AWS.
+An unknown key, or one outside the stage's plans, is not metered on a method that does not require a
+key. See [Usage plan enforcement](#usage-plan-enforcement).
+
+#### API key source
+
+A REST API's `apiKeySource` is set with `CreateRestApi`, a `replace /apiKeySource` patch on
+`UpdateRestApi`, or an imported `x-amazon-apigateway-api-key-source`, and defaults to `HEADER`. Any
+other value is refused with `BadRequestException`. A stage export leaves the extension out, as AWS's
+does.
+
+With `AUTHORIZER`, the `x-api-key` header is not read. The key is the `usageIdentifierKey` the
+method's Lambda authorizer returns, checked against usage plans as above, and reported as
+`requestContext.identity.apiKey` and `apiKeyId` to a Lambda proxy integration. The authorizer's own
+event carries no key, since none is known before it runs. A method that requires a key and is not
+behind a Lambda authorizer then always answers `403`.
 
 ### REST Lambda Authorizers
 
@@ -210,7 +263,11 @@ A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDo
 `<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
 itself is routed through the domain's base path mappings to the mapped REST API stage. An
 `EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+`regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
+publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
+region the table does not list. The id is set at creation, so a stored domain keeps the one it
+was created with. Moving a
 domain between the two types with `UpdateDomainName` creates or drops the distribution. A
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the
@@ -355,6 +412,8 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 | Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` | `AuthorizerConfigurationException` |
 | Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` | `UnauthorizedException` |
 | Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` | `ForbiddenException` |
+| Usage plan throttle refuses the key (`429 Too Many Requests`) | `THROTTLED` | `TooManyRequestsException` |
+| Usage plan quota for the period is used up (`429 Limit Exceeded`) | `QUOTA_EXCEEDED` | `LimitExceededException` |
 | Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` | `BadRequestException` |
 | `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` | `BadRequestException` |
 | Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` | `InternalServerErrorException` |
@@ -363,11 +422,10 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS.
 A gateway response that maps its own `gatewayresponse.header.x-amzn-ErrorType` (that exact key) replaces it for
 `BAD_REQUEST_PARAMETERS`, `BAD_REQUEST_BODY`, `UNSUPPORTED_MEDIA_TYPE`, `API_CONFIGURATION_ERROR` and
-`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Throttling, quota, request
-size and WAF answers are not produced on the execute plane, so
-`THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
-fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
-response.
+`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Request size and WAF
+answers are not produced on the execute plane, so `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be
+configured but never fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than
+treated as a gateway response.
 
 ### Not Implemented
 
@@ -375,7 +433,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Documentation parts and versions (the entire family, 10 operations)
+- Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
 
@@ -396,7 +454,7 @@ and mappings. It supports these integration types; others return an error:
 
 A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
 
-`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
+`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`, and so does an integration URI that cannot be parsed. A path parameter copied from the request path keeps the caller's percent-encoding, so `/index/NIFTY%2050` and `/files/a%2Fb` reach the backend as sent, and a path value mapped from anywhere else, such as a header, is percent-encoded. HTTP API `HTTP_PROXY` integrations treat path parameters the same way.
 
 A greedy resource captures only the path segments after its parent. For example,
 `/api/v1/auth/signup/{proxy+}` captures `checkpoint/status` from
@@ -609,8 +667,12 @@ an offset inside it, a per-method throttle needs a plan throttle, and adding a s
 lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
 `Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
-Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
-`keyId`, and does not enforce throttles or quotas.
+`GetUsagePlans` with a `keyId` returns only the plans that key is added to, and an empty list for a key
+in no plan or an unknown key. A blank `keyId` lists every plan, as on AWS. Every matching plan comes
+back in one page.
+
+Floci does not check that a stage's API, stage or method exists. The plan's throttle and quota are
+enforced on the execute plane, see [Usage plan enforcement](#usage-plan-enforcement).
 
 A `CreateUsagePlan` body member of the wrong JSON type is a `SerializationException` with API
 Gateway's deserializer message, before anything else is validated. The message names the Java class
@@ -653,9 +715,32 @@ The lower bound is a deliberate divergence: real API Gateway answers `limit=0` a
 an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
 as a `BadRequestException` instead of reproducing a 500.
 
-**Both numbers are always zero.** Nothing meters requests per API key, so there is no use to report
-or to subtract from a plan's quota. Throttle settings and quotas are stored and returned but never
-enforced.
+`used` is the number of calls the key made through the plan's stages on that UTC day, and `remaining`
+is the quota limit minus the key's use from the start of the quota period through that day. A plan
+without a quota reports `[0, 0]` for every day, as AWS does. Floci lists every key attached to the
+plan, while AWS lists only the keys with usage in the range.
+
+### Usage plan enforcement
+
+A call with a key attached to the stage's usage plan is counted against that key, per plan and UTC
+day, across all stages of the plan. Counts are kept in the `apigateway-usage.json` store, so they
+follow the configured storage mode. Deleting the plan or the key drops its counts, so a plan or key
+recreated with the same id starts unused.
+
+- **Quota.** Once the key's use in the current period reaches `quota.limit`, the call is refused with
+  `429` `{"message":"Limit Exceeded"}` and `x-amzn-ErrorType: LimitExceededException`. A `DAY` period
+  starts at UTC midnight, a `WEEK` period on Sunday and a `MONTH` period on the 1st, each shifted by
+  `quota.offset` days. AWS bounds the offset to the period's length but does not document the anchor,
+  so the anchor is inferred.
+- **Throttle.** The plan's `throttle` is a token bucket per key that starts full at `burstLimit` and
+  refills at `rateLimit` requests per second. Buckets are held in memory, so a restart or an emulator
+  reset refills them. An empty bucket refuses the call with `429`
+  `{"message":"Too Many Requests"}` and `x-amzn-ErrorType: TooManyRequestsException`. AWS throttles on
+  a best-effort basis, so the exact moment a burst is cut off can differ. Per-method stage throttles
+  and stage or account level throttles are stored but not enforced.
+
+A refused call is not counted, and a call without a key, or with a key outside the stage's plans, is
+not metered.
 
 ### Usage Plan Tags and Custom IDs
 
@@ -711,6 +796,15 @@ Gateway v1 (`AWS`/Lambda mapping templates) and the AppSync resolver templates d
 [appsync.md](appsync.md).
 
 ## API Gateway v2 (HTTP and WebSocket APIs) {#v2}
+
+### Integration descriptions
+
+`CreateIntegration` and `UpdateIntegration` retain the optional `description`, which
+is returned by create, update, get, and list operations. Omitting it or supplying null on update
+preserves the stored value; setting it to an empty string clears the description.
+The JSON 1.1 compatibility endpoint exposes the same field as `Description`.
+Non-null descriptions must be strings. Other JSON types return `400 BadRequestException`
+before the integration is created or changed.
 
 ### HTTP and WebSocket integration credentials
 
@@ -779,6 +873,82 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `context` containing `tenantId`, use `$context.authorizer.tenantId` in
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
+
+HTTP API `HTTP_PROXY` header, query string and path mappings also read `$request.body`,
+`$request.body.<JSONPath>`, `$stageVariables.<name>` and the `$context` variables `accountId`,
+`apiId`, `domainName`, `domainPrefix`, `extendedRequestId`, `httpMethod`, `path`, `protocol`,
+`requestTime`, `requestTimeEpoch`, `routeKey` and `stage`, alongside `requestId`,
+`identity.sourceIp` and the authorizer values above. A JSONPath that selects a scalar maps its text,
+and one that selects an object or array maps its JSON. A missing field, an empty body or a body
+that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
+expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
+an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+An expression embedded in a path is read whole before it is resolved: a body JSONPath takes dotted
+names, `[n]` indexes and `['key']` selectors, so `/orders/$request.body.items[0].id` selects the
+first item's `id`, a stage variable name ends at the first character that is not a letter, digit or
+underscore, and a `$request.path`, `$request.header` or `$request.querystring` name ends at the next
+`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any
+source, including the whole `$request.body`, is rejected when it contains CR, LF, NUL or any other
+control character besides tab, as is a mapped `Host`: the request never reaches the backend and the
+caller receives `502` with
+`{"message":"Bad Gateway: invalid request header value for <name>"}`.
+
+HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
+`EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
+`SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,
+`StepFunctions-StartExecution`, `StepFunctions-StartSyncExecution` and
+`StepFunctions-StopExecution`. `requestParameters` name the action's inputs, and create, update
+and OpenAPI import and reimport check them against that subtype's required and optional
+parameters from the AWS reference. They reject a required parameter that is missing, null or
+empty, any other parameter name, a JSON parameter such as `MessageAttributes` that is neither a
+JSON object nor a whole expression, a name that is not a subtype, a subtype on a non-`AWS_PROXY`
+integration or a WebSocket API, and a `payloadFormatVersion` other than `1.0`. `1.0` is the default
+when a subtype is set, including on an update that adds a subtype to an integration that had none.
+A number or boolean parameter value is stored as its text, and an object or array value is
+rejected. `UpdateIntegration` merges `requestParameters` into the stored ones for every HTTP API
+integration, as AWS does: a key it names is added or replaced, a key whose value is an empty string
+is removed, and a key it leaves out is kept. The subtype check runs on the merged parameters, so an
+update that sets only `DelaySeconds` keeps `QueueUrl` and `MessageBody`, and one that sets `QueueUrl`
+to an empty string is rejected. Import and reimport check every integration in the document before changing anything,
+so a rejected reimport leaves the API as it was. CloudFormation carries `IntegrationSubtype` and
+`RequestParameters` from an `AWS::ApiGatewayV2::Integration` and from the
+`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`. OpenAPI import
+and a CloudFormation `Body` read a `requestParameters` value the same way: a number or boolean as
+its text, and an object or array as its JSON text, so an object `MessageAttributes` is accepted and
+an array one is rejected as not a JSON object. A CloudFormation
+update that drops `IntegrationSubtype` removes it from the integration, and a failed update that
+added one rolls back to an integration without it.
+
+Only `SQS-SendMessage` is invoked: each request is sent to an SQS queue instead of a Lambda
+function. A request that reaches any other subtype answers `500` with
+`{"message":"Internal Server Error"}`. For `SQS-SendMessage`, `QueueUrl` and `MessageBody` are
+required, and `DelaySeconds`, `MessageAttributes`, `MessageDeduplicationId`, `MessageGroupId`,
+`MessageSystemAttributes` and `Region` are optional. A value is a static string, a whole
+expression, or text with expressions embedded as `${request.header.Authorization}`. The
+expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<name>`,
+`$request.querystring.<name>`, `$request.path.<name>`, `$stageVariables.<name>`, and these
+`$context` variables: `accountId`, `apiId`, `domainName`, `domainPrefix`, `extendedRequestId`,
+`httpMethod`, `path`, `protocol`, `requestTime`, `requestTimeEpoch`, `routeKey`, `stage`,
+`requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
+and `domainName` are the values the rest of the gateway reports for the request, and `path`
+starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
+with any other source is rejected with `400 BadRequestException` on create, update and import,
+including one embedded as `${...}` or inside a JSON parameter's string values. A `$` inside static
+text without braces, as in `price $5`, stays literal. A `$context` variable outside the list
+resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
+and `MessageSystemAttributes` are JSON object templates: expressions are resolved only inside
+their string values, so a header holding quotes or braces stays one string value and cannot add
+attributes. This differs from AWS, which substitutes the raw text into the template before
+parsing it: a value that is meant to add JSON structure becomes one string here. A JSON parameter
+that is a whole expression and resolves to anything but a JSON object answers `400` with
+`InvalidParameterValue`. `Region` selects the queue's region; when it is absent or resolves to an
+empty string, the API's region is used. `QueueUrl` is sent as resolved, so a mapped value can
+name any queue in the emulator. A sent message answers `200` with
+`{"SendMessageResponse":{"ResponseMetadata":{"RequestId":...},"SendMessageResult":{...}}}`; a
+required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
+`400` with `{"Error":{"Code":"MissingParameter",...}}` (a value of only whitespace is sent as it is,
+since SQS accepts it), and an SQS error is relayed in the same
+shape with its status. `credentialsArn` is stored but not enforced, as for every other integration.
 
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
@@ -857,6 +1027,20 @@ The `integrationUri` names the backend:
 The request path is forwarded as received. The stage name is not added to it, and `tlsConfig` is not
 applied: the call to a Cloud Map instance uses plain HTTP.
 
+`$context.identity.sourceIp` is the address of the TCP connection to Floci, whatever `X-Forwarded-For`
+the client sent. An HTTP API `HTTP_PROXY` backend receives a `Forwarded` header holding the client's
+`X-Forwarded-For` entries and the client address, for example
+`Forwarded: for=198.51.100.7,for=192.0.2.43;by=10.0.0.1;host=api.example.test;proto=https`, and an
+`X-Forwarded-For` naming only the address Floci accepted the request on. A client's own `Forwarded`
+header is replaced. `$request.header.X-Forwarded-For` mappings still see the client's value. The
+[API Gateway important notes](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html)
+say HTTP APIs translate `X-Forwarded-*` into `Forwarded` and append the egress IP, Host and protocol.
+They do not give the syntax or the `X-Forwarded-For` value, which follow third-party descriptions of
+observed behavior. Floci translates only `X-Forwarded-For`: `X-Forwarded-Host`, `X-Forwarded-Proto` and
+`X-Forwarded-Port` reach the backend as the client sent them.
+An ALB HTTP or HTTPS listener integration goes through the listener, which adds its own hop. An NLB TCP
+listener relays the request unchanged and does not add a hop.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -878,6 +1062,10 @@ applied: the call to a Cloud Map instance uses plain HTTP.
 `TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
 (`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
 name, as in the API model.
+
+`GetApis` pages with `MaxResults` and `NextToken`: a page holds at most `MaxResults` APIs and
+carries a `NextToken` unless it is the last. Without `MaxResults` every API comes back on one page.
+A `MaxResults` below 1 or an unreadable `NextToken` is refused with `BadRequestException`.
 
 ### Custom Domain Names and API Mappings
 

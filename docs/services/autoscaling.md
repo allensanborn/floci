@@ -4,6 +4,8 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 
 **Protocol:** Query — `POST /` with `Action=` form parameter, credential scope `autoscaling`
 
+**XML namespace:** `http://autoscaling.amazonaws.com/doc/2011-01-01/`, as declared by the AWS service model.
+
 **ARN formats:**
 
 - `arn:aws:autoscaling:<region>:<account>:autoScalingGroup:<uuid>:autoScalingGroupName/<name>`
@@ -27,7 +29,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `CreateAutoScalingGroup` | Creates a group with min/max/desired capacity, AZs, tags, launch configuration, launch template, or mixed instances policy; starts capacity reconciliation loop |
 | `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
-| `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
+| `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion, except in an [EKS nodegroup's group](eks.md#auto-scaling-group) |
 | `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
 | `CreateOrUpdateTags` | Creates or updates group tags and their propagate-at-launch setting |
 | `DeleteTags` | Removes named group tags |
@@ -41,6 +43,20 @@ comma-only form. This matches a live AWS comparison in `us-east-1` on October 12
 and zero capacity. Both groups had identical configuration except for name, ARN
 and creation time. The SDK regression is
 `compatibility-tests/sdk-test-python/tests/test_autoscaling_subnet_whitespace.py`.
+
+Capacity reservation targets remain limited to one reservation ID or one resource
+group ARN. Multiple entries, including duplicates, return `ValidationError`;
+mixing IDs and group ARNs returns a distinct validation message. These messages
+match live AWS comparisons on November 2, 2026 in `us-east-1` and `eu-west-1`
+for create, and `eu-west-1` for update, using zero desired capacity.
+Rejected updates preserve the group's existing configuration. This does not
+enable preview support for multiple reservation targets.
+
+When `AvailabilityZones` is omitted, group creation and subnet updates derive the
+distinct zones from `VPCZoneIdentifier`. Updates without placement fields retain
+the group's current subnet and zone selection. Zone derivation rejects missing
+subnet IDs with `ValidationError` before changing an existing group or storing a
+new one.
 
 Scale-out follows the [AWS placement rules](https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-benefits.html):
 choose the zone with the fewest active instances, then its subnet with the most
@@ -56,8 +72,22 @@ scale-in behavior, and do not complete an instance refresh. Unexpected runtime
 failures in ordinary scale-out, and save and cleanup failures, still propagate.
 Refresh launch failures retain the original replacement attempt and appear as
 failed scaling activities while other replacements can continue. Refresh and
-ordinary launches share the same launch settings, including template block-device
-mappings; accepted refresh launches keep their recorded source identity.
+ordinary launches share the same launch settings, including the block device mappings
+of the launch template or launch configuration; accepted refresh launches keep their
+recorded source identity. A launch template or launch configuration a CloudFormation
+stack creates carries no block device mappings yet, so its instances get the AMI's
+devices alone. `CreateLaunchConfiguration` refuses a block device mapping without a
+`DeviceName`, or with a Boolean or integer member it cannot parse, and stores the rest as
+given; the mappings are otherwise checked only when a group launches from the
+configuration, by the checks `RunInstances` applies. Neither step applies the ranges the
+Auto Scaling model sets for `VolumeSize`, `Iops` and `Throughput`, and the volume types a
+launch accepts are EC2's, `io2` included. A mapping EC2 refuses, such as an invalid device
+name or a snapshot that does not exist, fails that launch and is recorded as a failed
+scaling activity.
+
+An EBS mapping supplied by a launch configuration defaults `DeleteOnTermination` to
+`true`, even when the AMI's mapping sets it to `false`. An explicit `false` in the
+launch configuration keeps the volume after termination.
 
 For groups configured only with Availability Zones, Floci preserves its unpinned
 EC2 launch behavior and counts each member under the requested zone. This permits
@@ -73,12 +103,18 @@ EC2 instance can use a default subnet in a different zone.
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService`. Refuses the whole batch with `ValidationError` when an instance already belongs to a group |
-| `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
+| `DetachInstances` | Detaches instances from a group and deregisters them from its target groups; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `EnterStandby` | Moves `InService` instances to `EnteringStandby` and returns one `InProgress` activity (progress 50) per instance; the reconciler deregisters them from the group's target groups and Classic Load Balancers and sets `Standby` within 10 s. `ShouldDecrementDesiredCapacity=true` lowers desired capacity by the number of instances, refused with `ValidationError` below `MinSize`; `false` keeps it, so the group launches replacements |
 | `ExitStandby` | Moves `Standby` instances to `Pending`, raises desired capacity by the number of instances (refused with `ValidationError` above `MaxSize`) and returns one `PreInService` activity (progress 30) per instance; the reconciler registers them with the group's load balancers and sets `InService` within 10 s |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+`CreateAutoScalingGroup` defaults an omitted tag `PropagateAtLaunch` to `true`;
+an explicit `false` keeps that tag on the group. `CreateOrUpdateTags` requires the
+flag on every tag, including existing tags. If any flag is omitted, the request
+returns `ValidationError` before changing any tags in that batch. `DeleteTags`
+allows the flag to be omitted.
 
 Member instances carry the tags the
 [EC2 instance tagging lifecycle](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-tagging.html#tag-lifecycle)
@@ -144,19 +180,19 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 | Operation | Notes |
 |---|---|
-| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs; new instances auto-registered on InService |
-| `DetachLoadBalancerTargetGroups` | Detaches target groups; instances deregistered |
+| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs and registers the group's `InService` instances with the ones it adds, as AWS does; the reconciler registers each later instance as it comes into service |
+| `DetachLoadBalancerTargetGroups` | Detaches target groups and deregisters the group's instances from them, as AWS does; a target group already deleted is detached all the same. An EKS nodegroup's node stays registered with a target group another nodegroup's group still has attached |
 | `DescribeLoadBalancerTargetGroups` | Lists target groups attached to a group |
-| `AttachLoadBalancers` | Classic ELB attachment (stored; no ELB v1 routing) |
-| `DetachLoadBalancers` | Classic ELB detachment |
+| `AttachLoadBalancers` | Attaches Classic Load Balancers by name and registers the group's `InService` instances with the ones it adds, as AWS does; the reconciler registers each later instance as it comes into service. Floci runs no Classic data plane ([Classic ELB](elb-classic.md)) |
+| `DetachLoadBalancers` | Detaches Classic Load Balancers and deregisters the group's instances from them, as AWS does; a load balancer already deleted is detached all the same. An EKS nodegroup's node stays registered with a load balancer another nodegroup's group still has attached |
 | `DescribeLoadBalancers` | Lists classic ELBs attached to a group |
 
 ### Traffic Sources
 
 | Operation | Notes |
 |---|---|
-| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type |
-| `DetachTrafficSources` | Removes a traffic source by identifier |
+| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type. The group's `InService` instances are registered with an `elbv2` or `elb` source it adds, as with a target group or a Classic Load Balancer |
+| `DetachTrafficSources` | Removes a traffic source by identifier, deregistering the group's instances from an `elbv2` or `elb` source |
 | `DescribeTrafficSources` | Lists attached sources, optionally filtered by type; every source reports `InService` |
 
 ### Lifecycle Hooks
@@ -199,6 +235,10 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 |---|---|
 | `DescribeScalingActivities` | Returns the activity log for a group; activities recorded on scale-out and scale-in events |
 
+The optional `ActivityIds` filter selects matching activities within the requested group,
+account and region. Matches retain newest-first order, repeated IDs do not duplicate results,
+and unknown IDs are ignored. Omitting the filter returns the full matching activity history.
+
 ### Metadata
 
 | Operation | Notes |
@@ -230,6 +270,7 @@ Floci runs a background reconciler (10 s fixed rate) that keeps each group's InS
 - **Scale-out**: calls `RunInstances` with the group's launch configuration; new instances are tracked as `Pending` until the EC2 state transitions to `running`, at which point they move to `InService` and are registered with all attached ELB v2 target groups.
 - **Scale-in**: selects InService instances not protected from scale-in, deregisters them from target groups, then calls `TerminateInstances`.
 - Activity records are written on each scale-out and scale-in event.
+- **EKS nodegroups**: the group EKS keeps for a managed nodegroup is left alone. Its instance is the cluster's node, which the reconciler never launches, terminates or replaces, so attaching a target group to such a group registers the node at once and detaching it deregisters the node, and operations that would terminate, replace or move the node are refused. See the [EKS nodegroup Auto Scaling group](eks.md#auto-scaling-group).
 
 `SuspendProcesses` pauses desired-capacity scale-out for `Launch` and scale-in for
 `Terminate`. The desired count remains stored, and `ResumeProcesses` allows the

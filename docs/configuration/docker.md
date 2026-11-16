@@ -48,11 +48,13 @@ services:
 
 Use this only when the socket's permissions require root. Without the option, Floci retains its unprivileged default. The setting applies to the container entrypoint, not to `floci.docker` configuration.
 
+The entrypoint needs to start as root to read the socket's group and to honour this option. A container started as a non-root user, with `--user 1001` or a Kubernetes `runAsUser`, skips both, so give it the socket's group yourself: `--group-add "$(stat -c '%g' /var/run/docker.sock)"`.
+
 ## Connection Pool
 
-Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
+Floci's short Docker calls (create, start, stop, remove and the like) go through one client with a bounded connection pool. A few streams also hold a connection from it for as long as they run: CodeBuild phase commands, EKS audit log followers and ECS Exec sessions. When long-lived connections fill the pool, every other Docker call waits for one to free up, and Floci stops making progress.
 
-The default of 1024 connections covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows. Raise it if you widen that range or run many other containers at the same time:
+The default is 1024 connections. Raise it if you run many CodeBuild builds or ECS Exec sessions at the same time:
 
 ```yaml
 floci:
@@ -62,12 +64,12 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Container log-follow streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1). Exec-output and container-wait streams (CodeBuild phases, Lambda extensions and exit watchers, EKS audit followers) still use the main pool and count against `max-connections`:
+Streams that stay open for as long as a container runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension, and other containers' log streams use it too. The default of 2048 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each. Raise it if you widen that range or run many other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
   docker:
-    streaming-max-connections: 512
+    streaming-max-connections: 2048
 ```
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
@@ -287,7 +289,8 @@ podman network create floci-net
 podman run -d --name floci \
   --network floci-net \
   -p 4566:4566 \
-  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock:z \
+  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock \
+  --security-opt label=disable \
   -e FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=floci-net \
   -e FLOCI_HOSTNAME=floci \
   floci/floci
@@ -302,14 +305,14 @@ What each setting does and why it is needed:
   Lambda containers it spawns to that same named network.
 - **`FLOCI_HOSTNAME=floci`** — gives Floci a stable name that Lambda containers
   resolve when calling back to the Runtime API.
-- **`:z` on the socket mount** — relabels the Podman socket for SELinux. Without
-  it, Floci fails to talk to the Podman socket: Lambda/ECR container creation
-  errors with `java.io.IOException: Broken pipe`, and the **Floci UI** sidecar
-  fails to launch with `java.net.BindException: Permission denied`. Use the
-  lowercase `:z` (shared relabel) rather than `:Z` — the Podman API socket is
-  shared with the Podman service, and `:Z` applies a container-private SELinux
-  label that can break access. If `:z` is still not enough on your host, fall
-  back to `--security-opt label=disable`.
+- **`--security-opt label=disable`**: turns off SELinux labeling for the Floci
+  container. With SELinux enforcing, the container's label keeps Floci from
+  talking to the Podman socket: Lambda/ECR container creation fails with
+  `java.net.BindException: Permission denied` (or
+  `java.io.IOException: Broken pipe`), and so does the **Floci UI** sidecar.
+  Relabeling the mount with `:z` or `:Z` is not a substitute: it fixes access to
+  the socket file, but SELinux also denies `connectto` on the Podman service at
+  the other end of the socket.
 
 !!! tip "When the Runtime API address is still unreachable"
     On some Podman network topologies the auto-detected Runtime API address
@@ -346,7 +349,8 @@ caller keeps its existing failure handling after retries are exhausted.
 |---|---|---|
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
-| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds two connections, so about half this many can run at once |
+| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls, plus CodeBuild phase commands, EKS audit log followers and ECS Exec sessions |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `2048` | Connection pool size for streams that last a container's lifetime. Each live Lambda container holds two (log stream and exit watcher) plus one per extension |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |

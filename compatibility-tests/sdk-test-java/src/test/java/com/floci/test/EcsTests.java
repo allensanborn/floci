@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.*;
@@ -14,6 +15,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("ECS Elastic Container Service")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class EcsTests {
 
     private static EcsClient ecs;
@@ -485,12 +487,18 @@ class EcsTests {
         assertThat(started.get(0).taskArn()).isNotNull();
         assertThat(started.get(0).containerInstanceArn()).isEqualTo(instanceArn);
 
-        // Stop the task
+        // Stop the task. StartTask answers before the launch, so the stop lands asynchronously;
+        // wait for it so the task no longer counts as running in the tests below.
         if (!started.isEmpty()) {
             ecs.stopTask(StopTaskRequest.builder()
                     .cluster(clusterName)
                     .task(started.get(0).taskArn())
                     .build());
+            ecs.waiter().waitUntilTasksStopped(DescribeTasksRequest.builder()
+                            .cluster(clusterName)
+                            .tasks(started.get(0).taskArn())
+                            .build(),
+                    TestFixtures.waiterOverride(Duration.ofSeconds(60)));
         }
 
         // Deregister
@@ -617,7 +625,16 @@ class EcsTests {
         assertThat(task.taskArn()).isNotNull();
         assertThat(task.clusterArn()).isEqualTo(cluster.clusterArn());
         assertThat(task.taskDefinitionArn()).isEqualTo(taskDef.taskDefinitionArn());
-        assertThat(task.lastStatus()).isEqualTo("RUNNING");
+        // RunTask answers before the images are pulled, as AWS does; the task reaches RUNNING later.
+        assertThat(task.lastStatus()).isIn("PROVISIONING", "PENDING");
+
+        WaiterResponse<DescribeTasksResponse> running = ecs.waiter().waitUntilTasksRunning(
+                DescribeTasksRequest.builder()
+                        .cluster(clusterName)
+                        .tasks(task.taskArn())
+                        .build(),
+                TestFixtures.waiterOverride(Duration.ofSeconds(60)));
+        assertThat(running.matched().response()).isPresent();
     }
 
     @Test
@@ -1124,6 +1141,15 @@ class EcsTests {
                     .cluster(clusterName)
                     .task(taskArn)
                     .build());
+        }
+        // A task stopped while still launching lands STOPPED asynchronously, and a cluster with a
+        // task that has not stopped cannot be deleted.
+        if (!running.isEmpty()) {
+            ecs.waiter().waitUntilTasksStopped(DescribeTasksRequest.builder()
+                            .cluster(clusterName)
+                            .tasks(running)
+                            .build(),
+                    TestFixtures.waiterOverride(Duration.ofSeconds(60)));
         }
 
         Cluster deleted = ecs.deleteCluster(DeleteClusterRequest.builder()

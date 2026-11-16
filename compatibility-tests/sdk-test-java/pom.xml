@@ -74,6 +74,10 @@
     <dependencies>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>servicequotas</artifactId>
         </dependency>
         <dependency>
@@ -154,6 +158,14 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptography</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptographydata</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>cognitoidentityprovider</artifactId>
         </dependency>
         <dependency>
@@ -219,6 +231,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ec2instanceconnect</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>sts</artifactId>
         </dependency>
         <dependency>
@@ -256,6 +272,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+        </dependency>
+        <!-- EventBridge V2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
         </dependency>
         <!-- CloudHSM v2 client -->
         <dependency>
@@ -365,6 +386,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>emr</artifactId>
+        </dependency>
+        <!-- EMR on EKS client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emrcontainers</artifactId>
         </dependency>
         <!-- EMR Serverless client -->
         <dependency>
@@ -517,6 +543,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>scheduler</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>applicationautoscaling</artifactId>
+        </dependency>
         <!-- Auto Scaling client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -633,6 +663,16 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dlm</artifactId>
+        </dependency>
+        <!-- Signer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>signer</artifactId>
+        </dependency>
+        <!-- X-Ray client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>xray</artifactId>
         </dependency>
         <!-- DataSync client -->
         <dependency>

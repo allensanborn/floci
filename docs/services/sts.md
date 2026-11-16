@@ -18,6 +18,14 @@
 | `AssumeRoot` | Opens a privileged session on a member account of the organization |
 | `GetWebIdentityToken` | Returns a signed JWT representing the calling identity |
 
+## Account-root token lifetime
+
+`GetSessionToken` and `GetFederationToken` sessions issued to Floci's account-root
+credential default to one hour and are capped at one hour, including larger valid
+`DurationSeconds` requests. IAM users retain the requested duration and the
+12-hour default. Existing input validation and temporary-caller rejection run
+before credentials are registered.
+
 ## Request Constraints
 
 Every operation that models a constraint is held to the one its model declares rather than to a
@@ -38,11 +46,25 @@ names one, `audience.1.member` and `tags.1.member.key`, under the index the requ
 What that adds is on `GetSessionToken`, whose `SerialNumber`, `TokenCode` and
 `MinimumSessionTokenSize` were accepted and ignored: each is now held to its shape, so a serial
 number under 9 characters, a token code that is not six digits or a token size past 4096 answers
-400 where it used to answer credentials. The size is still only validated: the session token stays
-the length this emulator mints whatever the request asks for, which is a gap rather than a reading.
+400 where it used to answer credentials. The size asked for is the size issued, on every operation
+that models the member rather than on `AssumeRoot` alone: each mints its token through one writer,
+which holds it to the 200 characters this emulator mints when a request asks for less, since that
+is what a minimum asks for.
 `GetAccessKeyInfo` and `GetWebIdentityToken` answer the messages they already answered, from the
 same bounds and the same patterns, and what moves there is that an access key ID breaking both its
 length and its pattern is answered for both where the check it replaces stopped at the first.
+
+A pattern is read in the dialect the model writes it in rather than in Java's, which is one
+thing on one shape. `arnType`'s pattern ends in a five-digit escape, the U+10000 to U+10FFFF range,
+where Java reads a backslash-u escape as exactly four digits and takes the rest as literals:
+compiled as written, that range became the character U+1000, a literal zero, a hyphen, U+10FF and
+two literal Fs, so the class gained a range from `0` to U+10FF. It refused every supplementary
+character the model admits and admitted the C1 controls it excludes, U+0081 among them, on every
+member the shape resolves to: `RoleArn` on the three assume-role operations, `PrincipalArn` on the
+SAML one, each entry of `PolicyArns` on those three and on `GetFederationToken`, `TaskPolicyArn` on
+`AssumeRoot` and the provided-context ARN on `AssumeRole`. Each such escape is read as the code
+point it spells now, for every vendored pattern on both protocols, and `arnType` is the only shape
+in any vendored file that carries one.
 
 The model says nothing about what counts as a number, so a `DurationSeconds` or a
 `MinimumSessionTokenSize` that is no number at all stays `InvalidParameterValue`, answered before
@@ -73,6 +95,8 @@ length at all, so a request sending it empty is a request that carries it: it re
 and is answered `ExpiredTradeInTokenException`, the refusal any token that cannot be redeemed gets,
 where the check it replaces called it absent. Nothing published says what AWS answers an empty
 trade-in token, and the model is what is in hand, so the blank is read as the value it is.
+
+SAML role sessions reject `DurationSeconds` above the target role maximum. Accepted requests retain the shorter assertion expiration.
 
 ## Privileged Root Sessions
 
@@ -107,7 +131,9 @@ Four things are deviations rather than readings, since the operation models only
   region cannot tell the two apart, so there is nothing to refuse there.
 - `SessionTokenSize` is answered as the length of the token issued, and `MinimumSessionTokenSize`
   pads it to at least the size asked for, held to the 0 to 4096 the model declares, "The value must
-  not exceed 4,096 bytes", since the size asked for is the size materialized. Out of that range is
+  not exceed 4,096 bytes", since the size asked for is the size materialized. This was the first
+  operation to materialize it and is no longer the only one, the five others that model the member
+  reading it through the same writer. Out of that range is
   a `ValidationError` and a value that is no integer an `InvalidParameterValue`, the pair
   `DurationSeconds` already answers. `SessionTokenUtilization` is not answered: the model documents
   neither member, so only the one with an obvious meaning is filled.
@@ -126,12 +152,13 @@ A long-term `AKIA` key resolves through the account that holds it and a temporar
 the session that minted it. The ID is read against its own shape first, the 16 to 128 characters of
 `[\w]` the model declares, which answers `ValidationError` before any lookup.
 
-One answer is Floci's own. The operation models no errors at all, and the reference says only that
-"providing a deleted access key might return an error that the key doesn't exist", so a well-formed
-ID that this emulator never issued answers `InvalidParameterValue`, the published common error
-closest to that sentence. Nothing in the reference says what AWS answers for an ID it never issued,
-and real access key IDs are not random the way Floci's are, so treat that one as a deviation rather
-than a recorded behaviour.
+An ID the account never issued answers `ValidationError` with status 400 and "Access key ID is not
+valid.", a sentence carrying neither the ID nor a validation-error count. The operation models no
+errors at all and the reference says only that "providing a deleted access key might return an
+error that the key doesn't exist", so this answer comes from a capture from a real account on
+2026-10-31, which answered an `AKIA` and an `ASIA` ID alike that way. It settles a question this
+emulator had left open: AWS refuses an ID it never issued rather than reading the account out of
+it, so minting IDs that carry their account would buy nothing here.
 
 ## Delegated Access Token
 
@@ -208,10 +235,44 @@ says what the maximum payload is, so no size is invented here to refuse a reques
 The signing key is the account's, minted on first use per algorithm and stored, so a restart does
 not invalidate a token already handed out. `RS256` signs with a 2048-bit RSA key and `ES384` with
 P-384, whose signature is the raw `R || S` pair JWS defines rather than the DER sequence a default
-ECDSA signer returns. What is not here yet is the other half of the feature: nothing publishes the
-verification key, so the `/.well-known/openid-configuration` and `/.well-known/jwks.json` documents
-the issuer URL would host are not served, and a relying party cannot verify one of these tokens
-against this emulator.
+ECDSA signer returns.
+
+### Verifying a token
+
+AWS publishes the verification keys at the issuer itself, under
+`/.well-known/openid-configuration` and `/.well-known/jwks.json`. The issuer's host
+(`https://<uuid>.tokens.sts.global.api.aws`) does not reach Floci, so the two documents are served
+under a Floci route keyed by the issuer's UUID, its first host label:
+
+| Route | Serves |
+|---|---|
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/openid-configuration` | The OIDC discovery document |
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/jwks.json` | The account's verification keys |
+
+A relying party fetches them without AWS credentials, as it would from AWS, and the UUID tells Floci
+which account's keys to answer with. The token's `iss` keeps AWS's form, and the discovery document
+names it as `issuer`, which is what a verifier compares, while `jwks_uri` points at the key route
+above. Point the relying party's JWKS URL (or its discovery URL) at Floci:
+
+```bash
+ISSUER=$(aws iam get-outbound-web-identity-federation-info --endpoint-url $AWS_ENDPOINT_URL \
+  --query IssuerIdentifier --output text)
+ID=$(echo "$ISSUER" | sed -E 's#https://([^.]+)\..*#\1#')
+curl -s "$AWS_ENDPOINT_URL/_floci/sts/web-identity/$ID/.well-known/jwks.json"
+```
+
+The key set holds one key per algorithm, in the shape of the sample the IAM User Guide gives: the
+`ES384` key with `kty` `EC`, `alg` and `crv` `P-384`, and the `RS256` key with `kty` `RSA`, its
+modulus and exponent. Both are minted on the first read if no token has used them yet, so a key set
+cached before the first token already holds that token's key. AWS does not publish its discovery
+document, so Floci's carries the members OpenID Connect Discovery requires and no more: `issuer`,
+`jwks_uri`, `response_types_supported`, `subject_types_supported` and
+`id_token_signing_alg_values_supported` (`RS256` and `ES384`).
+
+The documents stay served while the feature is disabled. The issuer outlives a disable, and so do
+the tokens already minted under it, which a relying party still has to verify until they expire.
+AWS does not document this either way, so it is Floci's reading. An issuer no account was given
+answers 404.
 
 ## Configuration
 
@@ -243,10 +304,68 @@ key or one that belongs to another account, or by an IAM user since deleted and 
 a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
 as the account root, as the key itself does.
 
+## MFA
+
+`GetSessionToken` and `AssumeRole` read `SerialNumber` and `TokenCode`. AWS describes the pair on
+both: `SerialNumber` is "the identification number of the MFA device that is associated with the IAM
+user who is making the GetSessionToken call", and `TokenCode` is "the value provided by the MFA
+device", six digits. Floci holds the code to the seed of the virtual MFA device that serial names,
+with the one step of drift `EnableMFADevice` allows, and the device has to be enabled for the
+identity that signed the call: a serial naming a device enabled for somebody else authenticates
+nobody. The window is the wall clock's, as it is on the IAM actions that take codes, since the code
+comes from a device keeping time of its own rather than from the emulator's clock.
+
+A call that names neither parameter claims nothing and keeps whatever its own credentials carry, so
+a session minted behind a device assumes a role as an MFA-authenticated caller without naming the
+device again: "because temporary credentials returned by `GetSessionToken` include MFA information,
+you can check for MFA in individual API operations made by the credentials". A call that names
+either one is a claim of MFA and has to make it good, a code naming no device and a device with no
+code both proving nothing, and the code is spent once it authenticates: RFC 6238 has a verifier
+"MUST NOT accept the second attempt of the OTP generated for the same time step", so one code mints
+one session rather than every session its window allows. A key IAM holds nowhere is the one caller
+whose claim is taken as made, there being no identity behind it whose devices could be checked,
+which is the reading Floci already takes of such a key everywhere else. A claim that fails is
+refused with `AccessDenied` (403),
+which is the outcome AWS documents ("an incorrect MFA code causes the API to return an access denied
+error", and for `AssumeRole` "if the role being assumed requires MFA and if the TokenCode value is
+missing or expired, the AssumeRole call returns an access denied error"). The sentence Floci writes
+with it is its own, the one the IAM actions already write for a code that does not match, since AWS
+publishes no message for this refusal.
+
+What the authentication then buys differs by operation, and AWS draws the line itself. A
+`GetSessionToken` session carries it onward: a request signed with it has
+`aws:MultiFactorAuthPresent` as `true` and `aws:MultiFactorAuthAge` as the seconds since the device
+was used, which [IAM](iam.md#condition-keys-floci-populates) populates, "because temporary
+credentials returned by `GetSessionToken` include MFA information, you can check for MFA in
+individual API operations made by the credentials". An `AssumeRole` session does not: "the temporary
+credentials returned by `AssumeRole` do not include MFA information in the context, so you cannot
+check individual API operations for MFA", and "once the user has assumed the role, no further MFA
+checks are made". So a role session publishes the key as `false` whatever device got it issued, and
+Floci records none on it.
+
+The device a call presents is part of that request's own context, which is how a long-term key
+reaches an MFA-protected role at all. A trust policy may require it, AWS's own example being
+`"Condition": {"Bool": {"aws:MultiFactorAuthPresent": true}}`, and then "if the caller does not
+include valid MFA information, the request to assume the role is denied". The caller's own
+permission to make the call is read against that same context, since AWS denies such a request when
+"users have not been MFA authenticated, or if they provide an invalid MFA device identifier or
+invalid TOTP", so an identity policy conditioned on MFA for `sts:AssumeRole` is satisfied by the
+device the call carries.
+
+One difference from AWS is known and open: AWS says temporary credentials from a `GetSessionToken`
+request "can access IAM and AWS STS API operations *only* if you include MFA information in the
+request for credentials". Floci does not hold a session to that: one minted without a device reaches
+IAM and STS with whatever its user's policies allow.
+
 ## Trust Policy Enforcement
 
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
 if it does not.
+
+`AssumeRole` rejects a `DurationSeconds` above the role's `MaxSessionDuration` with
+`ValidationError` (400), after trust validation and before registering credentials. The exact
+role limit is accepted; an omitted duration defaults to 3600 seconds. This role setting is
+checked even when IAM policy enforcement is disabled.
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates the target role's trust policy
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
@@ -267,6 +386,15 @@ request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller pa
 `aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
+
+`aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role.
+The target role's tags do not supply the caller's principal tags. A chained request reads the
+current caller role's tags; tags on the user that originally assumed it are not inherited.
+
+A trust policy with a statement whose `Effect` is not exactly `Allow` or `Deny`, or whose
+`Condition` is not an object of non-empty operator objects, lets no one assume the role, the same
+on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`. IAM refuses such a document
+when it is written; Floci stores it as given, so the whole document is refused when it is read.
 
 ### Known limitations
 
@@ -323,3 +451,12 @@ When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`
 and `AssumeRole`. It checks the request signature, credential scope, expiry and session token before
 execution. Nonblank Authorization headers retain priority. See [signature checks](../configuration/multi-account.md#signature-validation).
+
+AssumeRoleWithWebIdentity rejects a requested duration above the target role's
+`MaxSessionDuration` before issuing credentials. The default remains 3,600 seconds;
+existing token and trust-policy errors take precedence over this role-specific check.
+
+Role chaining limits `AssumeRole` to one hour, including when the target role permits a longer
+session. A live role credential must carry its matching session token. `GetSessionToken` user
+credentials are not role chaining. The cap is checked after trust and role-maximum validation,
+before registering the new session.

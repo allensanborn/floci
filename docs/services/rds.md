@@ -36,7 +36,7 @@ mark those members `failed` until a successful retry.
 
 Floci manages real PostgreSQL, MySQL, MariaDB, and SQL Server Docker containers and proxies TCP connections to them, including IAM authentication support where the protocol supports it. SQL Server uses a transparent TCP relay for its native TDS protocol.
 
-MySQL and MariaDB master-grant script uploads, and PostgreSQL snapshot restore archive uploads,
+MySQL and MariaDB master-grant script uploads, and snapshot dump script and restore archive uploads,
 retry transient Docker connection failures up to six attempts with exponential backoff starting
 at 500 ms. Every attempt sends a fresh archive. Containers start, or snapshot restore commands
 run, only after the upload succeeds. A permanent Docker error or exhausted retries follows the
@@ -61,7 +61,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `StopDBCluster` | Stop a cluster and its member instances |
 | `StartDBCluster` | Start a stopped cluster and its members |
 | `RebootDBCluster` | Restart a cluster's database and its members' proxies |
-| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
+| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL, MySQL or MariaDB instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
@@ -154,7 +154,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `DeleteDBClusterAutomatedBackup` | Delete a retained cluster automated backup by `DbClusterResourceId` |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
-| `StartExportTask` | Start an export task for a DB snapshot or DB cluster snapshot; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
+| `StartExportTask` | Export a DB snapshot or DB cluster snapshot to S3 as Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
 | `DescribeExportTasks` | List export tasks, by `ExportTaskIdentifier`, `SourceArn`, `SourceType` and the `export-task-identifier`, `s3-bucket`, `source-arn` and `status` filters |
 | `CancelExportTask` | Cancel a running export task; what it already wrote stays in the bucket |
 | `DescribeGlobalClusters` | List the account's global clusters with their primary and secondary members; see [Global clusters](#global-clusters) |
@@ -165,6 +165,10 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
 | `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
 | `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
+| `CreateBlueGreenDeployment` | Stage a green copy of a DB instance with a new engine version, parameter group, class or storage; see [Blue/Green deployments](#bluegreen-deployments) |
+| `DescribeBlueGreenDeployments` | List blue/green deployments, by identifier and the `blue-green-deployment-identifier`, `blue-green-deployment-name`, `source` and `target` filters |
+| `SwitchoverBlueGreenDeployment` | Make the green instance production: it takes the blue name, ARN, endpoint and tags, and blue becomes `<name>-old1` |
+| `DeleteBlueGreenDeployment` | Delete a deployment, with `DeleteTarget` also deleting the green instance before switchover |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -204,13 +208,29 @@ checked against the instance's other window. Modifications apply immediately —
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
     state (no real cross-account sharing). Available manual snapshots can be deleted, copied by
     identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
-    request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
-    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    request tags. AWS doesn't document a `ModifyDBSnapshot` that names neither `EngineVersion` nor
+    `OptionGroupName`; Floci returns the snapshot unchanged, since the model requires only the
+    identifier and declares no fault for a request with nothing to change. Snapshots are
+    region-scoped like DB instances and clusters: `DBSnapshotArn` reflects the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
     for that same region. Cluster snapshots follow the same lifecycle: `CreateDBClusterSnapshot`
     dumps the cluster's database, `RestoreDBClusterFromSnapshot` loads it into a new cluster, and
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
+
+!!! note "DB snapshot engines"
+
+    `CreateDBSnapshot` takes a logical copy of a PostgreSQL, MySQL or MariaDB instance, and
+    `RestoreDBInstanceFromDBSnapshot` loads it into the new instance. PostgreSQL uses `pg_dumpall`.
+    MySQL and MariaDB use `mysqldump` (`mariadb-dump`) of every user schema, with routines,
+    triggers and events, run as the master user, followed by every account other than `root` and
+    the image's system accounts, recreated from `SHOW CREATE USER` and `SHOW GRANTS` so they keep
+    their passwords. Roles are copied too, and created before any grant names them. The `mysql`
+    system schema itself is not copied. The restore waits until the new server accepts the master
+    user over TCP before loading the copy. SQL Server instances are refused with
+    `InvalidDBInstanceState`. The dump runs in one transaction, so InnoDB tables are copied as of
+    one moment; as with `mysqldump --single-transaction` elsewhere, a MyISAM or other
+    non-transactional table written to during the snapshot may not be.
 
 ## Cluster parameter groups
 
@@ -239,6 +259,27 @@ flags leave the subscription and its topic, source type and event categories unc
 Malformed restore flags are rejected before starting an instance or cluster restore.
 
 
+## Native EventBridge lifecycle notifications
+
+Completed `StopDBInstance`, `StartDBInstance`, `StopDBCluster` and `StartDBCluster`
+operations publish `aws.rds` notifications on the resource account and Region's default
+EventBridge bus. Cluster operations also notify their member instances. Instance events
+use `RDS DB Instance Event` and IDs `RDS-EVENT-0087` (stopped) and `RDS-EVENT-0088`
+(started); cluster events use `RDS DB Cluster Event` and `RDS-EVENT-0150` / `0151`.
+The resource ARN appears in both `resources` and `detail.SourceArn`, alongside
+`SourceType` (`DB_INSTANCE` for instances, `CLUSTER` for clusters),
+`SourceIdentifier`, `Date`, `Message`, `EventID` and
+`EventCategories: ["notification"]`, following the
+[AWS event examples](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.overview.html).
+The [Aurora cluster example](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_Events.overview.html)
+documents the cluster-specific source type.
+
+Events are emitted after the backend and proxies finish the operation. Rejected or failed
+operations do not emit success notifications. Delivery is best effort, with no replay after
+a restart; other RDS lifecycle events are not yet emitted. Metadata-only mock mode emits
+the same notifications. EventBridge rules can route these events independently of the
+SNS subscription actions below.
+
 ## Event notification subscriptions
 
 The four subscription actions manage the resource itself. **Nothing is published to the topic.**
@@ -264,6 +305,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
+| `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` | `floci-rds-export-staging` | S3 bucket where snapshot exports stage rows and Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Docker image for SQL Server instances |
@@ -438,9 +480,35 @@ Not emulated: Data API requests to a paused cluster wait for the resume, as the 
 describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
 keep a cluster awake; and parameter group changes do not resume one.
 
+## VPC security groups
+
+`CreateDBInstance` and `ModifyDBInstance` check each id in `VpcSecurityGroupIds` against EC2 before
+anything is stored or a container starts, and refuse the request the way RDS does:
+
+- An id that names no security group of the account and Region fails with `InvalidParameterValue`
+  (`Invalid security group , groupId= sg-..., groupName=.`).
+- A group outside the VPC of the instance's DB subnet group fails with `InvalidParameterCombination`
+  (`The DB instance and EC2 security group are in different VPCs. ...`).
+
+A modify that also names a new `DBSubnetGroupName` checks the groups against that subnet group's VPC.
+Snapshot and point-in-time restores, read replicas, the green instance of a Blue/Green deployment and
+a CloudFormation update of `VPCSecurityGroups` are checked the same way. A request that names no groups
+is not checked.
+
+A standalone instance whose request names no groups gets the default security group of its VPC, as
+RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-Region read replica
+otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
+default group. A modify that moves an instance to another VPC without naming groups puts it on the
+new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
+its cluster's, which Floci does not keep, so it keeps none. `DescribeDBInstances` reports the VPC's
+default group for an instance that keeps none, such as a cluster member or an instance stored before
+these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
+before it changes anything, and a rollback leaves the groups of an instance the update moved to
+another VPC, which it does not move back.
+
 ## Modifying a DB instance
 
-`ModifyDBInstance` applies `DBInstanceClass`, `AllocatedStorage` and `EngineVersion`, and
+`ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and
 `DescribeDBInstances` reports the new values. Members the request leaves out keep their current
 value, so a partial modify does not reset anything.
 
@@ -452,7 +520,29 @@ value, so a partial modify does not reset anything.
   rather than refused, which is what AWS does. SQL Server takes the size it is given.
 - The same size is not a change and is left alone.
 
-`EngineVersion` accepts a minor upgrade on its own. A different major version needs
+Standalone container-backed instances support minor `EngineVersion` upgrades when the default
+image follows the requested version. Floci stops the proxy and database container, starts the new
+engine image on the same storage volume, and rebinds the existing endpoint. It reports `available`
+only after both the new backend and proxy have started. A failed restart reports `failed` and
+retains the storage volume.
+
+Major upgrades and downgrades fail with `InvalidParameterCombination` before any settings change.
+PostgreSQL 10 and later use the leading component as the major version; older PostgreSQL releases,
+MySQL, and MariaDB use the first two components. Existing databases need a migration for a major
+upgrade, which Floci does not perform. `AllowMajorVersionUpgrade` does not bypass this limitation.
+Custom image overrides and SQL Server do not map `EngineVersion` to a new image, so their version
+changes are also refused. Cluster members must use cluster-level engine management. Repeating the
+current version is allowed alongside other changes without restarting the database.
+
+A standalone instance created while Docker is unavailable may change its version before its first
+backend startup when its image follows the requested version. Its eventual container uses the
+updated version. Floci persists this never-started
+state, and protects the version before attempting to initialize the database, including when a later
+proxy startup fails. Existing databases remain protected against major changes after a reboot,
+storage reload, or lost container. Older records without this state are treated as existing databases.
+
+In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
+A minor upgrade is accepted on its own. A different major version needs
 `AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.
 Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
 as a minor one here while AWS treats it as major.
@@ -461,17 +551,11 @@ A refused member fails the whole request: a modify that carries a new `DBInstanc
 shrinking `AllocatedStorage` returns `InvalidParameterCombination` and leaves the class as it was,
 so a read-back never reports a value the request did not get.
 
-Two deviations are worth knowing:
-
-- **Changes apply immediately.** AWS defers a class, storage or engine-version change to the
-  preferred maintenance window unless `ApplyImmediately` is set, and reports it under
-  `PendingModifiedValues` until then. Floci runs no maintenance window and does not model
-  `PendingModifiedValues`, so it applies the change as soon as the request lands whatever
-  `ApplyImmediately` says. Without this a deferred change would never be applied at all, and every
-  read-back would report the same drift.
-- **The backing container is not re-imaged.** An engine-version change is recorded on the instance
-  and reported on read, but the container started at create time keeps running the image it was
-  started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
+Accepted changes apply immediately. AWS defers a class, storage or engine-version change to the
+preferred maintenance window unless `ApplyImmediately` is set, and reports it under
+`PendingModifiedValues` until then. Floci runs no maintenance window and does not model
+`PendingModifiedValues`, so it applies accepted changes as soon as the request lands whatever
+`ApplyImmediately` says.
 
 For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
 `ModifyDBInstance` retain the `StorageType` values `gp2`, `gp3`, `io1` and `io2`. A modify
@@ -584,8 +668,10 @@ one only Aurora has, is skipped with a warning in the database log. A formula va
 `require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
 to the server without TLS). When the server refuses a value and stops, the instance, or every
 member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
-the group and reboot to start it again. PostgreSQL and SQL Server databases do not take parameter
-group values yet.
+the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes one value
+from its groups, layered and applied the same way: `rds.logical_replication` of `1` starts the
+server with `wal_level=logical`, as on RDS. Its other parameter group values, and those of SQL
+Server, are not applied yet.
 
 ## Option Groups
 
@@ -634,7 +720,19 @@ Known gaps, all deliberate:
 | `DescribeOptionGroupOptions` | Not implemented: the per-engine option catalog is not modeled |
 | `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
 | `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
-| `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
+| `MaxRecords` / `Marker` pagination | Every matching option group is returned in one page, with no `Marker` |
+
+## Pagination
+
+`DescribeDBInstances`, `DescribeDBClusters`, `DescribeDBSubnetGroups`,
+`DescribeDBParameterGroups`, `DescribeDBParameters`,
+`DescribeDBClusterParameters`, `DescribeOrderableDBInstanceOptions` and `DescribeOptionGroups`
+return all matching results without a `Marker`. These handlers do not yet split results by
+`MaxRecords` or resume from `Marker`. An absent marker ends pagination, including for an empty
+result; an empty marker string must not be used as a continuation token.
+
+`DescribeDBClusterParameterGroups` supports `MaxRecords` pagination and returns a
+non-empty `Marker` only when another page is available.
 
 ## Read replicas
 
@@ -651,11 +749,11 @@ and a `StatusInfos` entry of type `read replication`, the source lists it under
 it is the ARN. A `DBSubnetGroupName` with a source given by plain identifier is refused with
 `DBSubnetGroupNotAllowedFault`, as on AWS.
 
-The replica's database is initialised from a `pg_dumpall` of the source taken when the replica is
-created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
-as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
-the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
-with `InvalidDBInstanceState`, as `CreateDBSnapshot` refuses them. A source with automated backups
+The replica's database is initialised from a dump of the source taken when the replica is
+created, the same mechanism `CreateDBSnapshot` and `RestoreDBInstanceFromDBSnapshot` use, so it
+holds the source's data as of that moment. Writes made to the source afterwards are not streamed to
+the replica. PostgreSQL, MySQL and MariaDB sources are accepted; other engines are refused with
+`InvalidDBInstanceState`. A source with automated backups
 off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
 
 `PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`
@@ -664,6 +762,42 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Blue/Green deployments
+
+`CreateBlueGreenDeployment` takes a PostgreSQL, MySQL or MariaDB DB instance by ARN as `Source`
+and creates its green copy, named `<source>-green-<suffix>`. The green instance inherits the
+blue one's settings and tags, with `TargetEngineVersion`, `TargetDBParameterGroupName`,
+`TargetDBInstanceClass`, `TargetAllocatedStorage` and `TargetStorageType` applied. Without
+`TargetDBParameterGroupName` it keeps the blue parameter group when the engine version stays in the
+same family, and gets the default group of the new family on a major upgrade. Both instances report
+the link in `DescribeDBInstances` as a read replica pair. The green database is initialised from a
+dump of the blue one taken at creation, the mechanism snapshots use, so it holds the blue data as
+of that moment; writes made to blue afterwards are not streamed to it.
+
+Creation finishes before the response, so the deployment is reported `AVAILABLE` straight away
+with its `SwitchoverDetails` and `Tasks`. As on AWS, a source needs automated backups on
+(`InvalidDBInstanceState` otherwise), a lower `TargetEngineVersion` is refused, and an instance can
+be in one deployment at a time. Floci refuses with `SourceDatabaseNotSupportedFault` an instance
+that belongs to a cluster, is a read replica or has read replicas, keeps its master password in
+Secrets Manager, or is a DB proxy target, and refuses a DB cluster source with
+`SourceClusterNotSupportedFault`. `TargetIops`, `TargetStorageThroughput` and
+`UpgradeTargetStorageConfig` are accepted and not applied, as `CreateDBInstance` treats IOPS.
+
+`SwitchoverBlueGreenDeployment` requires the deployment to be `AVAILABLE` and both instances
+available. Green takes the blue identifier, ARN, endpoint and tags, so clients that connect to the
+blue endpoint reach the new database without a change. Blue is renamed `<name>-old<n>`, moves to
+the endpoint green had, and keeps running. The deployment ends `SWITCHOVER_COMPLETED`, with
+`Source` naming the old instance and `Target` the new production one. The switchover completes
+before the response; `SwitchoverTimeout` is checked against the 30 to 3600 second range and has
+nothing else to bound. The old instance is not made read only.
+
+Before switchover, a deployment whose blue or green instance has been deleted, or whose green
+instance was promoted, reports `INVALID_CONFIGURATION` and can no longer be switched over.
+`DeleteBlueGreenDeployment` deletes the green instance too with `DeleteTarget`, which is refused
+after switchover; without it the green instance is kept as a standalone instance. The blue
+instance is never touched. A deployment is tagged through its
+`arn:aws:rds:<region>:<account>:deployment:<identifier>` ARN.
 
 ## Engine catalogue
 
@@ -779,6 +913,31 @@ Associations are recorded, not exercised: Floci does not check the role in IAM a
 role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
+## Aurora managed password rotation
+
+`ModifyDBCluster` supports `RotateMasterUserPassword=true` for an existing
+RDS-managed master-user secret. Set `ApplyImmediately=true`; requests without it,
+without an existing managed secret, with `MasterUserPassword`, or disabling
+`ManageMasterUserPassword` in the same call are rejected before credentials change.
+
+The local operation completes synchronously: it changes the running database's
+password, publishes a new `AWSCURRENT` secret version, and updates the cluster and
+member proxy credentials. The preceding version becomes `AWSPREVIOUS`. If secret
+publication fails, Floci attempts to restore the previous database credential and
+secret version labels. A backend failure leaves the previous secret current.
+Metadata-only RDS mock mode updates the secret and stored credentials without
+starting a database. Scheduled RDS-owned rotation through Secrets Manager remains
+outside this `ModifyDBCluster` operation.
+
+```bash
+aws --endpoint-url http://localhost:4566 rds modify-db-cluster \
+  --db-cluster-identifier example --rotate-master-user-password --apply-immediately
+```
+
+Use the managed secret's new current value for subsequent SQL connections. Existing
+database sessions may remain connected after rotation, as with a normal password
+change; verify with fresh connections.
+
 ## Aurora managed password opt-out
 
 When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
@@ -825,8 +984,8 @@ they are added with `CreateDBInstance`, as on AWS.
 Floci keeps no transaction log, so it cannot rebuild a database as it was at an earlier time. The
 target is seeded from a `pg_dumpall` of the source taken when the request arrives, the mechanism read
 replicas use, so the restored data is the source's latest state whatever time in the window is
-asked for; this is also why `LatestRestorableTime` is always the current time. As with
-`CreateDBSnapshot`, only PostgreSQL sources are accepted.
+asked for; this is also why `LatestRestorableTime` is always the current time. Only PostgreSQL
+sources are accepted.
 
 ## Automated backups
 
@@ -857,37 +1016,72 @@ source, keeps the replica as `retained`; a stop with nothing replicating to the 
 
 ## Exporting snapshots to Amazon S3
 
-`StartExportTask`, `DescribeExportTasks` and `CancelExportTask` manage RDS snapshot export tasks.
-`ExportTaskIdentifier`, `SourceArn`, `S3BucketName`, `IamRoleArn` and `KmsKeyId` are required,
-`S3Prefix` and `ExportOnly` are optional.
+`StartExportTask` exports a DB snapshot or a DB cluster snapshot to an S3 bucket in Floci as Apache
+Parquet, laid out as RDS lays it out, so a reader written against RDS exports (OpenSearch Data
+Prepper's `rds` source, Athena, Glue) reads Floci's. `ExportTaskIdentifier`, `SourceArn`,
+`S3BucketName`, `IamRoleArn` and `KmsKeyId` are required, `S3Prefix` and `ExportOnly` are optional.
 
-A task reports `STARTING`, then `IN_PROGRESS` with a `PercentProgress` while its tables are written,
-then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask` moves a running task to
-`CANCELING`; it stops before its next table and becomes `CANCELED`, and the data it already wrote
-stays in the bucket, as on RDS. A table the export skips is named in `WarningMessage`. A task still
-running when Floci stops is `FAILED` as soon as Floci starts again, or `CANCELED` if it was being
-canceled. A `StartExportTask` that arrives while Floci is resetting waits for the reset to finish,
-and is refused with `Throttling` if it lasts more than 30 seconds.
+A task reports `STARTING` while the snapshot is restored, `IN_PROGRESS` with a `PercentProgress`
+while its tables are written, then `COMPLETE` or `FAILED` with a `FailureCause`. `CancelExportTask`
+moves a running task to `CANCELING`; it stops before its next table and becomes `CANCELED`, and the
+data it already wrote stays in the bucket, as on RDS. A table the export skips is named in
+`WarningMessage`. A task still running when Floci stops is `FAILED` as soon as Floci starts again,
+or `CANCELED` if it was being canceled, and the container and volume it was using are removed then. A `StartExportTask` that arrives while
+Floci is resetting waits for the reset to finish, and is refused with `Throttling` if it lasts more
+than 30 seconds.
 
-Floci does not write snapshot data to S3 yet. In [mock mode](#mock-mode-ci-tests) a task completes
-without writing anything, unless its bucket is in another region (see below). Outside mock mode a task is accepted and then ends `FAILED` with the
-`FailureCause` `Floci does not write snapshot data to S3 yet: export tasks complete only in mock
-mode (FLOCI_SERVICES_RDS_MOCK=true)`.
+The snapshot is restored into a PostgreSQL container started from the snapshot's image, with a
+Docker volume of its own in every storage mode, and both are removed once the export ends, whether it
+completed, failed or was canceled. Each table's rows are streamed out of the restored database
+(for up to an hour per table) and staged, with the Parquet written from them, in the bucket named by
+`FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` (`floci-rds-export-staging`, created on first use); only
+the finished Parquet object is written to the export's bucket, so a failed table leaves nothing
+there. The Parquet is written by the floci-duck sidecar, the one Athena uses, so an export needs
+Docker for both. In [mock mode](#mock-mode-ci-tests) a task completes without writing anything,
+unless its bucket is in another region (see below).
+
+Each table goes under `<S3Prefix>/<ExportTaskIdentifier>/<database>/<schema>.<table>/1/` as
+`part-00000-<uuid>.gz.parquet`, compressed with GZIP. Floci reads a table in one batch and one
+partition, so each table has one file; an empty table has none. The task's own description is
+written next to the databases as `export_info_<ExportTaskIdentifier>.json`, with a
+`export_tables_info_<ExportTaskIdentifier>_from_1_to_<N>.json` that lists each table it wrote with the
+type every column was exported as. A backslash, backquote, double quote or space in an object path
+becomes an underscore.
+
+Column types follow the
+[RDS PostgreSQL mapping](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ExportSnapshot.data-types.html#USER_ExportSnapshot.data-types.PostgreSQL):
+`smallint` is `INT32` annotated `INT(16)`, `integer` `INT32`, `bigint` `INT64`, `real` `FLOAT`,
+`double precision` `DOUBLE`, `boolean` `BOOLEAN` and `bytea` binary. Every other type is a UTF-8
+string holding PostgreSQL's text output for the value: `numeric`, `money`, dates, times and
+intervals, `json` and `jsonb`, `uuid`, arrays, ranges, enums, domains and extension types such as
+pgvector's `vector`. Dates and times are written in ISO format, a `timestamptz` in UTC.
 
 `ExportOnly` takes `database`, `database.schema` or `database.schema.table` entries made of
 letters, digits, `$` and `_`, and refuses anything else with `InvalidExportOnly`, since RDS supports
-a partial export only for such names.
+a partial export only for such names. Every database that accepts connections is exported when it
+is absent. As on RDS, temporary and unlogged tables, views and materialized views are not exported,
+a partitioned table is exported once through its parent, and a table with a `/` in its name, or a
+column name holding a space or one of `, ; { } ( ) = \n \t`, is skipped. Floci also skips a table
+whose database or schema name has a `/`, which would split its path in the bucket, and a table
+with two column names that differ only in case, such as `"Foo"` and `"foo"`, which its Parquet
+writer, DuckDB, cannot keep apart; both are named in `WarningMessage`. A column of a type or domain
+of the user's own is exported as a string, whatever its name. A table that
+others inherit from (`INHERITS`) is exported with its own rows only, since each child is exported as
+a table of its own.
 
 What differs from RDS:
 
 - The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
   as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`. A bucket in
   another region than the snapshot's is accepted and the task then ends `FAILED`, as on RDS.
-- Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
+- Only PostgreSQL snapshots can be exported: the export reads a `pg_dumpall`, and a MySQL or
+  MariaDB snapshot holds a `mysqldump` instead.
   Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
   `available`.
 - `SourceArn` must name a snapshot: exporting a live DB cluster (`SourceType` `CLUSTER`) is not
   supported.
+- `TotalExtractedDataInGB` is the size of the rows Floci read, in whole gigabytes, and is 0 for
+  most local data sets.
 
 ## Global clusters
 
@@ -921,7 +1115,7 @@ promotes a remaining member, as Aurora does on its own.
 
 ## Persistence
 
-Each DB instance and cluster gets its own named Docker volume (`floci-rds-{volumeId}`) created
+Each DB instance and cluster gets its own named Docker volume (`floci-aws-rds-{resourceId}-{volumeId}`, with the instance's or cluster's resource id) created
 automatically. No configuration is required.
 
 | Scenario | Volume behavior |
@@ -1028,18 +1222,24 @@ The parameters a PostgreSQL client sends when it connects (`options` such as `-c
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
-with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+because the plugin is unavailable. The proxy rewrites that
 clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
 password hashes to. The account is therefore created, can be granted to and can be dropped, but
 holds no password of its own, which is what an IAM DB user is: an account whose credentials come
 from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
 pre-creates for PostgreSQL.
 
-Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
-`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
-connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
-password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
-`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
+including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
+backend rejects the unsupported `AWSAuthenticationPlugin` on that connection.
+
+For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
+than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
+MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
+auth switch to validate the token, then authenticates to the container as the master user.
+Unlike RDS, that MySQL session stays the master user: `CURRENT_USER()` reports the master,
+and the IAM user's own grants do not apply. The PostgreSQL proxy instead hands the session
+over to the role named in the token.
 
 ## Certificate authorities
 
@@ -1120,3 +1320,23 @@ PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=a
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
   --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```
+
+### IAM lifecycle resources and tags
+
+With IAM enforcement enabled, RDS request-resource mappings cover the complete
+namespace generated from AWS's Service Authorization Reference and pinned
+botocore models. Parameter groups, subnet groups, DB instances and DB clusters
+use their named ARNs. Stored proxy and endpoint identities are resolved from
+request names, and target group lookups include the owning proxy. ARN-valued
+members, including `RemoveFromGlobalCluster`'s `DbClusterIdentifier`, are checked
+as ARNs. Unfiltered describe requests continue to require a wildcard grant.
+
+For modeled taggable RDS resources (including endpoints and proxies) and
+DocumentDB clusters, instances and snapshots sharing the RDS ARN namespace,
+supported `aws:ResourceTag` and RDS resource-specific tag conditions read stored
+tags from the exact target ARN's account, Region and partition. IAM and tagging
+share resource lookup dispatch. IAM reads neither create defaults nor migrate
+legacy records; named lookups use direct account-scoped keys, and generated
+proxy identities only search their owning account. Create-time request tags
+remain separate from existing-resource tags. Resource types without modeled
+storage retain the generated wildcard fallback when no stored identity exists.

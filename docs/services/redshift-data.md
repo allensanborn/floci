@@ -37,12 +37,14 @@ For the upstream API shape, see the AWS documentation:
 
 A request identifies its target cluster or serverless workgroup one of three ways:
 
-- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` is the cluster master, or the prefixed name returned by `GetClusterCredentials` / `GetClusterCredentialsWithIAM` (for example `IAM:analyst`) while that credential is unexpired. Floci connects to the container as the cluster master in both cases. Any other `DbUser` returns `ValidationException`.
+- **`ClusterIdentifier` + `DbUser` + `Database`.** The `DbUser` is the cluster master, or the prefixed name returned by `GetClusterCredentials` / `GetClusterCredentialsWithIAM` (for example `IAM:analyst` or `IAMA:analyst`) while that credential is unexpired. For temporary credentials, Floci opens the session as the corresponding PostgreSQL role (honoring `AutoCreate` and session-scoped `DbGroups`), authenticated as that role so PostgreSQL refuses a switch to another user and applies the role's `ALTER USER ... SET` defaults, so `current_user`, `GRANT`, and object ownership match Redshift. Any other `DbUser` returns `ValidationException`.
 - **`SecretArn` + `ClusterIdentifier` + `Database`.** The secret must be a local Secrets Manager secret holding JSON credentials (`username` or `user`, plus `password`). A cross-region `SecretArn` is rejected.
 
-- **`WorkgroupName` + `Database`, with or without `SecretArn`.** `WorkgroupName` is a workgroup name or workgroup ARN created through [Redshift Serverless](redshift-serverless.md). `Database` must be the namespace `dbName`. Without a `SecretArn`, Floci connects as the namespace admin; AWS derives the database user from the signing identity (`IAM:<name>`), and `DbUser` is not used. With a `SecretArn`, the secret must hold credentials the workgroup backend accepts. Sending `ClusterIdentifier` as well returns `ValidationException`, and so does a workgroup whose runtime is not running.
+- **`WorkgroupName` + `Database`, with or without `SecretArn`.** `WorkgroupName` is a workgroup name or workgroup ARN created through [Redshift Serverless](redshift-serverless.md). `Database` must be the namespace `dbName`. Without a `SecretArn`, Floci derives the database user from the signing identity (`IAM:<user>` or `IAMR:<role>`, falling back to `IAMR:floci`), auto-creates that non-superuser PostgreSQL role if missing, and runs the session as that role; `DbUser` is not used. With a `SecretArn`, the secret must hold credentials the workgroup backend accepts. Sending `ClusterIdentifier` as well returns `ValidationException`, and so does a workgroup whose runtime is not running.
 
 A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
+
+Under IAM enforcement, `ExecuteStatement`, `BatchExecuteStatement`, `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` are checked on the cluster's ARN, or on the ARN of the workgroup `WorkgroupName` names, `workgroup/<id>`, whichever form it takes; a workgroup that does not exist is checked on `workgroup/*`. `ExecuteStatement` and `BatchExecuteStatement` naming a `SessionId` are checked on the cluster or workgroup the caller's session runs on, so a grant or a deny on that target covers every statement in the session, and on `*` when the caller has no such session. AWS does not document which resource such a request is authorized on, so the session's target is Floci's inference: a session runs on the cluster or workgroup named by the statement that opened it.
 
 ## Session reuse
 
@@ -212,7 +214,9 @@ use source `aws.redshift-data` and detail type `Redshift Data Statement Status C
 `redshiftQueryId`, `state`, `rows` and `expireAt` in epoch seconds. Query ids match
 `DescribeStatement`; Floci derives them from statement ids rather than backend query ids.
 `resources` contains the cluster ARN, or the workgroup ARN for Floci's Serverless support.
-EventBridge rules can route these events to SQS, Lambda or other supported targets.
+EventBridge rules can route these events to SQS, Lambda or other supported targets. Rules can also
+submit SQL to a Redshift cluster or Serverless workgroup through native Redshift Data API targets;
+see [EventBridge Redshift Data API targets](eventbridge.md#redshift-data-api-targets).
 
 ## Spectrum relational queries
 

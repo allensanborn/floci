@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
 import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
@@ -56,6 +57,7 @@ import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Subnet;
 import software.amazon.awssdk.services.ec2.model.Vpc;
+import software.amazon.awssdk.services.ec2instanceconnect.Ec2InstanceConnectClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.efs.EfsClient;
@@ -64,8 +66,10 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.emrcontainers.EmrContainersClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.globalaccelerator.GlobalAcceleratorClient;
@@ -105,7 +109,10 @@ import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
+import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.ram.RamClient;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
@@ -154,6 +161,9 @@ import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
+import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
+import software.amazon.awssdk.services.signer.SignerClient;
 import software.amazon.awssdk.services.signin.SigninClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -167,6 +177,7 @@ import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClie
 import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
+import software.amazon.awssdk.services.xray.XRayClient;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -191,6 +202,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -641,6 +653,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static QuickSightClient quickSightClient() {
+        return QuickSightClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static ServiceQuotasClient serviceQuotasClient() {
         return ServiceQuotasClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1040,6 +1060,28 @@ public final class TestFixtures {
         }
     }
 
+    /**
+     * The execution's description once it is no longer {@code RUNNING}, or its last description at the
+     * timeout. It checks every 50 ms against Floci and every 500 ms against real AWS, like
+     * {@link #awaitStackTerminal}.
+     */
+    public static DescribeExecutionResponse awaitExecutionTerminal(SfnClient sfn, String executionArn, Duration timeout)
+            throws InterruptedException {
+        long pollMillis = isRealAws() ? 500 : 50;
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            DescribeExecutionResponse execution = sfn.describeExecution(request -> request.executionArn(executionArn));
+            if (execution.status() != ExecutionStatus.RUNNING) {
+                return execution;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return execution;
+            }
+            Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+        }
+    }
+
     public static GlueClient glueClient() {
         return GlueClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1080,6 +1122,35 @@ public final class TestFixtures {
         return KmsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    /**
+     * The Payment Cryptography control plane. The real service is an awsJson 1.0 service
+     * that signs for {@code payment-cryptography}, and the SDK talks to it through the
+     * {@code PaymentCryptographyControlPlane} target prefix.
+     */
+    public static PaymentCryptographyClient paymentCryptographyClient() {
+        return paymentCryptographyClient(REGION);
+    }
+
+    public static PaymentCryptographyClient paymentCryptographyClient(Region region) {
+        return PaymentCryptographyClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    /**
+     * The Payment Cryptography data plane. The real service is a rest-json service of its
+     * own, at its own host, so the client talks to it over the paths of that protocol.
+     */
+    public static PaymentCryptographyDataClient paymentCryptographyDataClient() {
+        return PaymentCryptographyDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }
@@ -1166,6 +1237,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static EventBridgeV2Client eventBridgeV2Client() {
+        return EventBridgeV2Client.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static ServiceDiscoveryClient serviceDiscoveryClient() {
         return ServiceDiscoveryClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1188,6 +1267,14 @@ public final class TestFixtures {
 
     public static EmrClient emrClient() {
         return EmrClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EmrContainersClient emrContainersClient() {
+        return EmrContainersClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1514,6 +1601,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static ApplicationAutoScalingClient applicationAutoScalingClient() {
+        return ApplicationAutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AutoScalingClient autoScalingClient() {
         return AutoScalingClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1546,8 +1641,24 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static XRayClient xrayClient() {
+        return XRayClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static DlmClient dlmClient() {
         return DlmClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static SignerClient signerClient() {
+        return SignerClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1773,6 +1884,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static Ec2InstanceConnectClient ec2InstanceConnectClient() {
+        return Ec2InstanceConnectClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static EfsClient efsClient() {
         return EfsClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1787,6 +1906,37 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    public static RedshiftClient redshiftClient(String accountId) {
+        return RedshiftClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
+    /** Connects to the PostgreSQL database {@code dev} behind a Redshift cluster, retrying for up to a minute while it starts. */
+    public static Connection awaitRedshiftConnection(String host, int port, String username, String password)
+            throws Exception {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
+        SQLException lastFailure = null;
+        while (Instant.now().isBefore(deadline)) {
+            try {
+                Properties properties = new Properties();
+                properties.setProperty("user", username);
+                properties.setProperty("password", password);
+                properties.setProperty("sslmode", "disable");
+                properties.setProperty("connectTimeout", "5");
+                return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/dev", properties);
+            } catch (SQLException e) {
+                lastFailure = e;
+                Thread.sleep(1000);
+            }
+        }
+        throw lastFailure != null
+                ? lastFailure
+                : new SQLException("Timed out waiting for Redshift connection at " + host + ":" + port);
     }
 
     public static RedshiftDataClient redshiftDataClient() {

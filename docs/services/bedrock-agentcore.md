@@ -79,10 +79,22 @@ runtimes reach `READY` immediately and hold metadata only. See
 | `GetResourcePolicy` | Returns the policy attached to an AgentCore resource |
 | `PutResourcePolicy` | Creates or replaces a policy on an AgentCore resource |
 | `DeleteResourcePolicy` | Deletes the policy attached to an AgentCore resource |
+| `CreateHarness` | Creates a harness at version 1, filling in AWS's defaults; see [Harnesses](#harnesses) |
+| `ListHarnesses` | Lists harnesses (paginated) |
+| `GetHarness` | Returns a harness, optionally at a specific `harnessVersion` |
+| `UpdateHarness` | Updates a harness; appends a new immutable version |
+| `DeleteHarness` | Deletes a harness |
+| `ListHarnessVersions` | Lists a harness's versions, newest first (paginated) |
 <!-- floci:actions:end -->
 
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
 is associated with an auto-created, resolvable workload identity.
+
+Legacy `agent/<uuid>:<version>` runtime ARNs remain usable for invocation validation and tagging.
+Legacy `agentEndpoint/<uuid>` endpoint IDs resolve for tagging and CloudFormation updates and deletes.
+Responses use `runtime/<agentRuntimeId>` and `runtime/<agentRuntimeId>/runtime-endpoint/<name>`.
+With runtime existence validation enabled, a harness runtime ARN is valid while its harness remains
+registered; unknown and deleted runtime ARNs return `ResourceNotFoundException`.
 
 ## Memory events
 
@@ -103,6 +115,32 @@ than a fixed answer. Behaviour measured against real AgentCore:
 
 Memory *records* (extraction and retrieval) are not emulated: they depend on an extraction engine
 rather than on stored events.
+
+## Harnesses
+
+Harness tags use the `harness/<id>` ARN. Tagging a harness runtime-environment ARN is not emulated.
+
+A harness is stored with its configuration and settles in `READY` at once. No agent runtime is
+started for it, and `InvokeHarness` does not read it.
+
+- `harnessName` (a letter, then up to 39 letters, digits and underscores) and `executionRoleArn`
+  are required. The id is the name plus `-` and 10 alphanumerics, and a second harness with the
+  same name in the Region is a `ConflictException`. A repeated `clientToken` answers the harness
+  the first call created.
+- Members a request leaves out are filled in as AWS fills them: `apiFormat` `converse_stream` on a
+  `bedrockModelConfig`, empty `systemPrompt`, `tools`, `skills`, `allowedTools` and
+  `environmentVariables`, and a `sliding_window` truncation keeping 150 messages. `memory`,
+  `maxIterations`, `maxTokens` and `timeoutSeconds` are returned only when given.
+- `environment.agentCoreRuntimeEnvironment` names the harness's runtime `harness_<name>`, with an
+  id and ARN that stay the same across updates, a 900-second idle session timeout and an 8-hour
+  maximum lifetime unless given, and `PUBLIC` networking.
+- Each `UpdateHarness` appends a version. A member the request carries replaces the current one;
+  `environmentArtifact`, `authorizerConfiguration` and `memory` are set through `optionalValue`,
+  and an empty wrapper removes them. `GetHarness?harnessVersion=` reads an earlier version.
+- An unknown harness is `ResourceNotFoundException` with AWS's message, "Agent with name `<id>` not
+  found.", and an unknown version "Version `<n>` not found for harness `<id>`".
+- Tags are set with `tags` on create and through the shared `/tags/{resourceArn}` route.
+  `deleteManagedMemory` on `DeleteHarness` is accepted and has no effect.
 
 ## Data plane — `InvokeAgentRuntime`
 
@@ -135,8 +173,8 @@ message**, so a chat client visibly works end to end and a request that failed t
 rather than hidden behind a fixed string. A request whose `messages` array is present but empty, or
 carries no user turn, is legitimate and gets a canned reply rather than an error.
 
-The `harnessArn` is not resolved: the emulator models no harness resource, so there is nothing to
-look one up in. Tool execution, skills and multi-turn iteration are not emulated, so no tool-use
+The `harnessArn` is not resolved against the [harnesses](#harnesses) created through the control
+plane, so an application can invoke a harness it never created here. Tool execution, skills and multi-turn iteration are not emulated, so no tool-use
 block is ever produced even when a request supplies `tools`.
 
 ## Configuration
@@ -160,8 +198,9 @@ block is ever produced even when a request supplies `tools`.
 
 ## Behavior notes
 
-- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the ARN embeds a UUID and the
-  version: `arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>`.
+- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the runtime ARN is
+  `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>` and
+  stays the same across versions. Endpoint ARNs append `/runtime-endpoint/<name>`, including `DEFAULT`.
 - `agentRuntimeName` must match `[a-zA-Z][a-zA-Z0-9_]{0,47}` (no hyphens); invalid
   names return `ValidationException`.
 - Each `UpdateAgentRuntime` increments the version and preserves prior versions for

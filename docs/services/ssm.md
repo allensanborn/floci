@@ -19,17 +19,52 @@
 | `DescribeParameters` | List parameters with optional filters |
 | `LabelParameterVersion` | Attach a label to a specific version |
 | `UnlabelParameterVersion` | Remove labels from a specific version |
-| `AddTagsToResource` | Tag a parameter |
-| `ListTagsForResource` | List tags on a parameter |
-| `RemoveTagsFromResource` | Remove tags from a parameter |
+| `AddTagsToResource` | Tag a parameter, a document (by name) or an association (by ID), picked by `ResourceType` |
+| `ListTagsForResource` | List tags on a parameter, a document or an association |
+| `RemoveTagsFromResource` | Remove tags from a parameter, a document or an association |
 | `PutResourcePolicy` | Attach or update the resource policy of an Advanced-tier parameter |
 | `GetResourcePolicies` | List the resource policy attached to a parameter |
 | `DeleteResourcePolicy` | Remove a parameter's resource policy |
 | `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
 | `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
 
+`CreateDocument` and `CreateAssociation` keep their `Tags`. A document's tags are also returned in
+the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
+`ListDocuments` entry. With IAM enforcement on, the tag calls are checked against the resource their
+`ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
+without its leading `/`. `CreateDocument` is checked against `document/<name>`, and `CreateAssociation` against the
+association and the `document/<name>` its `Name` gives.
+
+`GetParameters` returns successful parameters alphabetically by `Name`, preserving
+the selected versions and labels.
+
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.
+
+Retained flat-name parameters from older Floci versions expose canonical
+`parameter/<name>` ARNs on reads without a `PutParameter` overwrite. Normalization
+preserves the ARN's partition, region and account, along with the parameter's value,
+version, tags and history. Refresh cached Terraform outputs or policies that consumed
+the old malformed ARN; malformed policy resources do not grant access to the canonical ARN.
+The tagging actions still accept that old `parameter<name>` form as `ResourceId` when it names
+the request's partition, region and account, and read it as `parameter/<name>`.
+
+`PutParameter` removes leading and trailing spaces from `Name` before it validates and stores it,
+as AWS does; a tab, newline or other whitespace is not removed. The name must then consist of
+letters, numbers, `.`, `-`, `_` and the `/` separator, so a colon or an interior space fails with
+a `ValidationException`. Parameters stored under invalid names by older Floci versions can
+still be read, restored during CloudFormation rollback and deleted.
+
+`GetParameter`, `GetParameters`, `GetParameterHistory`, `LabelParameterVersion` and
+`GetParametersByPath` remove leading and trailing ASCII spaces from the requested name
+or path before lookup, labeling or pagination. An interior space fails the complete
+request with `ValidationException` unless the name addresses a stored parameter, or the
+path contains stored descendants, in the caller's account and region. This exception
+preserves access to legacy Floci data; it does not allow new names with interior spaces.
+Secret-reference authorization uses the trimmed name;
+ARN, version and label selectors retain their normal scope and permission checks.
+Missing batch names are returned in `InvalidParameters` after this trimming. History
+and path pagination tokens work with either the padded or canonical name.
 
 `GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
 (the default) or `BeginsWith`. Values within one filter combine with OR; multiple
@@ -161,10 +196,15 @@ the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON wi
 matching image ID and name; its ECS agent and runtime versions are `unknown` because
 the catalog image is synthetic and does not represent an installed ECS runtime.
 
+Canonical's Ubuntu Server AMI parameters under `/aws/service/canonical/ubuntu/server/` resolve
+too, by version or codename: `24.04`/`noble` (amd64 and arm64, `ebs-gp3`) and `22.04`/`jammy`
+and `20.04`/`focal` (amd64, `ebs-gp2`), each at `stable/current`.
+
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
 aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 ```
 
 ## Secrets Manager References
@@ -190,12 +230,14 @@ aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with
 A parameter's ARN is `arn:<partition>:ssm:<region>:<account>:parameter/<name without leading slash>`
 for both a top-level name such as `db-host` and a path such as `/app/db/host`, as on AWS.
 The CloudFormation `Arn` attribute of an `AWS::SSM::Parameter` is the same ARN, and
-`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`.
-An ECS container secret's `valueFrom` accepts it too.
+`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`
+when it names the request's partition, region and account; an ARN naming another one fails with
+`InvalidResourceId`. An ECS container secret's `valueFrom` accepts it too.
 
 `GetParameter` and `GetParameters` accept the returned ARN, optionally followed by
 `:version` or `:label`, for parameters in the caller's account and request region.
 Batch reads keep unresolved inputs in `InvalidParameters` in their original form.
+An ARN whose resource is `parameter//<name>` names `//<name>`, never `/<name>`.
 ARNs naming another account, region or partition never resolve to a same-name local
 parameter. Cross-account shared parameters are not modeled. Secrets Manager
 references continue to use `/aws/reference/secretsmanager/<secret-id>`, not a
@@ -220,8 +262,25 @@ or create the AWS RAM resource share AWS makes for a shared parameter.
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
+`PutParameter` encrypts a `SecureString` with Floci's KMS under the parameter's key
+(`alias/aws/ssm` when none was given), with the encryption context `PARAMETER_ARN` set to the
+parameter's ARN, as AWS does. A read without `WithDecryption` (`GetParameter`, `GetParameters`,
+`GetParametersByPath`, `GetParameterHistory`) returns that ciphertext, the same one on every read
+of a version, and KMS `Decrypt` with that context returns the plaintext. With `WithDecryption`
+the plaintext is returned.
+
 !!! note
-    `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+    The encryption applies to what the API returns, not to storage: Floci saves each
+    `SecureString` version's plaintext alongside its ciphertext, so the plaintext stays readable in
+    the persisted state files.
+
+    A `KeyId` that Floci's KMS cannot use, which AWS would refuse on `PutParameter`, is accepted,
+    and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit, and a
+    parameter version stored before Floci encrypted `SecureString` values.
+
+    AWS encrypts every Advanced `SecureString` with the AWS Encryption SDK, so its value is the
+    SDK's encrypted message. Floci encrypts an Advanced value up to 4096 bytes with a plain KMS
+    `Encrypt` instead, the same as a Standard one.
 
 ## Parameter Store Change events
 
