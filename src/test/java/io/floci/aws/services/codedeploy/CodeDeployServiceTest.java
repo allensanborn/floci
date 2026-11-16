@@ -3,6 +3,7 @@ package io.floci.aws.services.codedeploy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.codedeploy.model.Deployment;
 import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -74,6 +77,50 @@ class CodeDeployServiceTest {
                 new RegionResolver(REGION, ACCOUNT_ID), null, hookCallbackTimeout, clock);
         svc.initializeStorage();
         return svc;
+    }
+
+    @Test
+    void applicationAndConfigurationUseTheDeploymentClock() {
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        CodeDeployService target = newService(Duration.ofHours(1), clock);
+        double created = EpochSeconds.fromInstant(clock.instant());
+
+        assertEquals(created, target.createApplication(REGION, "clock-app", "Server", null).getCreateTime());
+        assertEquals(created, target.createDeploymentConfig(REGION, "clock-config",
+                Map.of("type", "HOST_COUNT", "value", 1), "Server", null, null).getCreateTime());
+    }
+
+    @Test
+    void onPremisesRegistrationUsesTheDeploymentClock() {
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        CodeDeployService target = newService(Duration.ofHours(1), clock);
+        double registered = EpochSeconds.fromInstant(clock.instant());
+        assertEquals(registered, target.registerOnPremisesInstance(REGION, "clock-host", null, null)
+                .getRegisterTime());
+        // Deregister purges the record (no deregisterTime to stamp), so there is no timestamp left to check.
+    }
+
+    @Test
+    void serverDeploymentCreationAndCompletionUseTheDeploymentClock() {
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        CodeDeployService target = newService(Duration.ofHours(1), clock);
+        double created = EpochSeconds.fromInstant(clock.instant());
+
+        target.registerOnPremisesInstance(REGION, "clock-deployment-host", null, null);
+        when(ssmCommandService.isInstanceRegistered("clock-deployment-host", REGION)).thenReturn(true);
+        when(ssmCommandService.sendCommandToInstance(eq("clock-deployment-host"),
+                anyString(), anyMap(), eq(60), eq(REGION))).thenReturn("clock-command");
+        when(ssmCommandService.getCommandInvocationStatus("clock-command", "clock-deployment-host", REGION))
+                .thenReturn("Success");
+        String id = createServerDeployment(target, "clock-deployment", "clock-group", 60);
+        await().atMost(Duration.ofSeconds(5)).until(() ->
+                "Succeeded".equals(target.getDeployment(REGION, id).getStatus())
+                        && target.getDeployment(REGION, id).getCompleteTime() != null);
+        Deployment deployment = target.getDeployment(REGION, id);
+
+        assertEquals(created, deployment.getCreateTime());
+        assertEquals(created, deployment.getStartTime());
+        assertEquals(created, deployment.getCompleteTime());
     }
 
     @Test

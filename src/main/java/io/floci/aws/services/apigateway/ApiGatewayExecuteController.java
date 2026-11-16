@@ -48,6 +48,7 @@ import io.floci.aws.services.apigatewayv2.model.Route;
 import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
 import io.floci.aws.services.apigatewayv2.proxy.CloudMapInstanceResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import io.floci.aws.services.apigatewayv2.websocket.ConnectionInfo;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
@@ -146,6 +147,7 @@ public class ApiGatewayExecuteController {
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
     private final CloudMapInstanceResolver cloudMapInstanceResolver;
     private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
+    private final HttpProxyInvoker httpProxyInvoker;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -161,7 +163,8 @@ public class ApiGatewayExecuteController {
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
                                        AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
-                                       CloudMapInstanceResolver cloudMapInstanceResolver) {
+                                       CloudMapInstanceResolver cloudMapInstanceResolver,
+                                       HttpProxyInvoker httpProxyInvoker) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -185,6 +188,7 @@ public class ApiGatewayExecuteController {
         this.restLambdaAuthorizer = restLambdaAuthorizer;
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
         this.cloudMapInstanceResolver = cloudMapInstanceResolver;
+        this.httpProxyInvoker = httpProxyInvoker;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -2931,7 +2935,7 @@ public class ApiGatewayExecuteController {
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
             return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body,
-                    apiId, stageName, jwtClaims, lambdaAuthorizerContext, region);
+                    apiId, stageName, stageVariables, jwtClaims, lambdaAuthorizerContext, region);
         }
 
         if (integration.getIntegrationSubtype() != null && !integration.getIntegrationSubtype().isEmpty()) {
@@ -3012,29 +3016,16 @@ public class ApiGatewayExecuteController {
                         route.getRouteKey(), requestId, routeContext.sourceIp(),
                         requestHeaders, queryParams, pathParams, body, claims, authorizerContext);
 
-        Instant requestTime = routeContext.requestTime();
         String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
-        String domain = restDomainName(apiId, hostRegion, headers);
-        Map<String, String> contextVariables = new LinkedHashMap<>();
-        contextVariables.put("accountId", regionResolver.getAccountId());
-        contextVariables.put("apiId", apiId);
-        contextVariables.put("domainName", domain);
-        contextVariables.put("domainPrefix", domain.split("\\.")[0]);
-        contextVariables.put("extendedRequestId", routeContext.extendedRequestId());
-        contextVariables.put("httpMethod", httpMethod);
-        contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
-        contextVariables.put("protocol", "HTTP/1.1");
-        contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
-        contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
-        contextVariables.put("routeKey", route.getRouteKey());
-        contextVariables.put("stage", stageName);
+        Map<String, String> contextVariables =
+                httpApiContextVariables(apiId, stageName, httpMethod, path, route, hostRegion, headers);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
                 subtype.subtypeName());
 
         try {
             Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(subtype,
-                    integration.getRequestParameters(), ctx, stageVariables, contextVariables);
+                    integration.getRequestParameters(), ctx.withVariables(stageVariables, contextVariables));
             String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
             if (serviceRegion == null || serviceRegion.isEmpty()) {
                 serviceRegion = hostRegion;
@@ -3056,14 +3047,33 @@ public class ApiGatewayExecuteController {
         }
     }
 
+    /** The {@code $context.<name>} values an HTTP API parameter mapping can read for this request. */
+    private Map<String, String> httpApiContextVariables(String apiId, String stageName, String httpMethod,
+                                                        String path, Route route, String region,
+                                                        HttpHeaders headers) {
+        Instant requestTime = routeContext.requestTime();
+        String domain = restDomainName(apiId, region, headers);
+        Map<String, String> contextVariables = new LinkedHashMap<>();
+        contextVariables.put("accountId", regionResolver.getAccountId());
+        contextVariables.put("apiId", apiId);
+        contextVariables.put("domainName", domain);
+        contextVariables.put("domainPrefix", domain.split("\\.")[0]);
+        contextVariables.put("extendedRequestId", routeContext.extendedRequestId());
+        contextVariables.put("httpMethod", httpMethod);
+        contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
+        contextVariables.put("protocol", "HTTP/1.1");
+        contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
+        contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
+        contextVariables.put("routeKey", route.getRouteKey());
+        contextVariables.put("stage", stageName);
+        return contextVariables;
+    }
+
     private Response awsServiceErrorV2(String code, String message, int status, String requestId) {
         return Response.status(status)
                 .entity(awsServiceIntegrationMapper.actionError(code, message, status, requestId).toString())
                 .type(MediaType.APPLICATION_JSON).build();
     }
-
-    private final io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =
-            new io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker();
 
     /** REST integrations default to AWS's 29s and may opt out of backend TLS verification. */
     private static io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions
@@ -3079,8 +3089,8 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.floci.aws.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName, Map<String, String> jwtClaims,
-                                          ObjectNode lambdaAuthorizerContext,
+                                          String apiId, String stageName, Map<String, String> stageVariables,
+                                          Map<String, String> jwtClaims, ObjectNode lambdaAuthorizerContext,
                                           String region) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
@@ -3173,7 +3183,9 @@ public class ApiGatewayExecuteController {
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
                         UUID.randomUUID().toString(), sourceIp,
                         requestHeaders, queryParams, pathParams, body,
-                        claims, authorizerContext, backendHeaders, multiValueQueryParams, rawPathParams);
+                        claims, authorizerContext, backendHeaders, multiValueQueryParams, rawPathParams)
+                        .withVariables(stageVariables, httpApiContextVariables(apiId, stageName, httpMethod, path,
+                                route, region != null ? region : regionResolver.getDefaultRegion(), headers));
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());

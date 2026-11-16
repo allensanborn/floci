@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.OrganizationsRequests;
@@ -15,6 +16,10 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eks.EksClient;
+import software.amazon.awssdk.services.eks.model.EksException;
+import software.amazon.awssdk.services.eks.model.ResourceNotFoundException;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -31,6 +36,8 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * REST requests whose route no rule mapped to an IAM action were let through under enforcement
@@ -118,6 +125,8 @@ class IamRestRouteEnforcementIntegrationTest {
         created.then().statusCode(201);
         String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
         String etag = created.header("ETag");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
+                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
 
         policy(user, allow("cloudfront:*", "*") + "," +
                 "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
@@ -142,28 +151,59 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void schedulerTaggingIsCheckedOnTheBareTagsRouteToo() {
-        // The shared tagging routes also take the ARN in the body of POST /tags.
+    void schedulerTaggingIsCheckedOnTheGroupItsModeledRouteNamesAndServedOnNoOtherRoute() {
+        // Scheduler tags the group whose ARN its modeled /tags/{ResourceArn} carries, which the generated request
+        // resources read, so a Deny on that group holds against an Allow on every resource. The shared controller's
+        // bare POST /tags is no route of Scheduler's model, as AWS gives it none: let through, it is refused as an
+        // ARN that path does not serve, and tags nothing.
         String user = user("route-scheduler-tags");
         String group = scheduleGroup("route-group-" + suffix());
+        String tagsPath = "/tags/" + encoded(group);
+        String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
         policy(user, allow("scheduler:ListTagsForResource", "*"));
-        refused(as(user, "scheduler").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
         policy(user, allow("scheduler:TagResource", group));
         // Allowed on that group, the request reaches Scheduler, which has no such group.
-        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(not(403));
+        as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then().statusCode(not(403));
+        policy(user, allow("scheduler:TagResource", "*") + "," + deny("scheduler:TagResource", group));
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
+        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(400)
+                .body(containsString("Invalid resource ARN"));
+    }
+
+    /** A resource-tag condition reads the tags Scheduler holds on the schedule group a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheScheduleGroup() {
+        String tagged = "route-tagged-" + suffix();
+        String untagged = "route-untagged-" + suffix();
+        for (String[] group : new String[][] {{tagged, "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}"},
+                {untagged, "{}"}}) {
+            given().header("Authorization", auth(ADMIN, "scheduler")).contentType("application/json").body(group[1])
+                    .post("/schedule-groups/" + group[0]).then().statusCode(200);
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "scheduler"))
+                    .delete("/schedule-groups/" + group[0]).then().statusCode(200));
+        }
+        String user = user("route-scheduler-tag-condition");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"scheduler:GetScheduleGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        as(user, "scheduler").get("/schedule-groups/" + tagged).then().statusCode(200);
+        refused(as(user, "scheduler").get("/schedule-groups/" + untagged).then(), "scheduler:GetScheduleGroup");
     }
 
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
         String user = user("route-tags-body");
-        String allowed = scheduleGroup("route-allowed-" + suffix());
-        String other = scheduleGroup("route-other-" + suffix());
+        String allowed = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-allowed-" + suffix();
+        String other = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-other-" + suffix();
 
-        policy(user, allow("scheduler:TagResource", allowed));
-        refused(as(user, "scheduler").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
-                "scheduler:TagResource");
+        policy(user, allow("pipes:TagResource", allowed));
+        refused(as(user, "pipes").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
+                "pipes:TagResource");
     }
 
     @Test
@@ -206,6 +246,60 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").get(path).then(), "eks:DescribeNodegroup");
         policy(user, allow("eks:DescribeNodegroup", cluster.replace(":cluster/", ":nodegroup/") + "/ng/*"));
         as(user, "eks").get(path).then().statusCode(200).body("nodegroup.nodegroupArn", equalTo(nodegroup));
+    }
+
+    @Test
+    void deletedEksAddonRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "addon-waiter-" + suffix();
+        eksCluster(name);
+        String base = "/clusters/" + name + "/addons";
+        String arn = eks().body("{\"addonName\":\"vpc-cni\"}").post(base).then().statusCode(200)
+                .extract().path("addon.addonArn");
+        String user = "addon-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
+            client.deleteAddon(r -> r.clusterName(name).addonName("vpc-cni"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")));
+            policy(user, allow("eks:DescribeAddon", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+            policy(user, allow("eks:DescribeAddon", "*") + "," + deny("eks:DescribeAddon", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+        }
+    }
+
+    @Test
+    void deletedEksFargateProfileRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "fargate-waiter-" + suffix();
+        eksCluster(name);
+        String path = "/clusters/" + name + "/fargate-profiles";
+        String arn = eks().body("{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/route-fargate\"}").post(path).then().statusCode(200)
+                .extract().path("fargateProfile.fargateProfileArn");
+        String user = "fargate-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeFargateProfile", arn) + "," + allow("eks:DeleteFargateProfile", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))
+                    .fargateProfile().fargateProfileArn());
+            client.deleteFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp")));
+            policy(user, allow("eks:DescribeFargateProfile", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+            policy(user, allow("eks:DescribeFargateProfile", "*") + "," + deny("eks:DescribeFargateProfile", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+        }
     }
 
     @Test
@@ -402,9 +496,10 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void lambdaTaggingIsCheckedAgainstTheCallersOwnResourceWhateverAccountTheArnNames() {
-        // Lambda tags the caller's own function or MicroVM image of the ARN's name, so a grant on another
-        // account's ARN of that name does not cover it, and a grant on the caller's own does.
+    void lambdaTaggingByAnotherAccountsArnIsCheckedOnThatArnAndTheCallersOwnResourceOfItsName() {
+        // The ARN names another account's function or MicroVM image, which is checked, and Lambda tags the caller's
+        // own of that name, which is checked too, so a grant on either alone does not cover it; one on the caller's
+        // own covers a request naming its own ARN.
         String user = user("route-lambda-tags-account");
         String name = "route-tagged-" + suffix();
         String body = "{\"Tags\":{\"team\":\"a\"}}";
@@ -415,7 +510,8 @@ class IamRestRouteEnforcementIntegrationTest {
             policy(user, allow("lambda:TagResource", foreign));
             refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
             policy(user, allow("lambda:TagResource", own));
-            as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then().statusCode(not(403));
+            refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
+            as(user, "lambda").body(body).post("/2017-03-31/tags/" + own).then().statusCode(not(403));
         }
     }
 
@@ -900,11 +996,15 @@ class IamRestRouteEnforcementIntegrationTest {
     void accountIsCheckedOnTheMemberAccountOfTheCallersOrganization() {
         OrganizationsRequests.request(MANAGEMENT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
                 .when().post("/").then().statusCode(200);
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "DeleteOrganization", "{}")
+                .when().post("/").then().statusCode(200));
         String organization = OrganizationsRequests.request(MANAGEMENT, "DescribeOrganization", "{}")
                 .when().post("/").then().statusCode(200).extract().path("Organization.Id");
         String member = OrganizationsRequests.request(MANAGEMENT, "CreateAccount",
                         "{\"Email\":\"route-contact@example.com\",\"AccountName\":\"RouteContact\"}")
                 .when().post("/").then().statusCode(200).extract().path("CreateAccountStatus.AccountId");
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + member + "\"}").when().post("/").then().statusCode(200));
         OrganizationsRequests.request(MANAGEMENT, "EnableAWSServiceAccess",
                         "{\"ServicePrincipal\":\"account.amazonaws.com\"}")
                 .when().post("/").then().statusCode(200);
@@ -1019,8 +1119,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void ramIsCheckedOnTheResourceShareItNamesInItsBodyAndQuery() {
-        String share = adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}").post("/createresourceshare")
-                .then().statusCode(200).extract().path("resourceShare.resourceShareArn");
+        String share = madeShare(adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}")
+                .post("/createresourceshare").then());
         String other = "arn:aws:ram:us-east-1:" + ACCOUNT + ":resource-share/other";
         String user = user("route-ram");
 
@@ -1249,10 +1349,11 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, service, "POST", path, body.apply("red")), action);
     }
 
-    /** A create that got past the check and made a resource share, removed afterwards. */
-    private void madeShare(ValidatableResponse response) {
+    /** A create that got past the check and made a resource share, removed afterwards; returns the share's ARN. */
+    private String madeShare(ValidatableResponse response) {
         String share = response.statusCode(200).extract().path("resourceShare.resourceShareArn");
         cleanup.register(() -> adminOf("ram").queryParam("resourceShareArn", share).delete("/deleteresourceshare"));
+        return share;
     }
 
     /** Refuses a request until the caller holds the action, then lets it past the check. */

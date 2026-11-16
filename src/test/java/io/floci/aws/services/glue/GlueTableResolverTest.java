@@ -223,7 +223,8 @@ class GlueTableResolverTest {
         String from = GlueTableResolver.readPlan(table).fromClause();
 
         assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = '|', quote = '''', "
-                + "escape = '\\', nullstr = 'NA', columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
+                + "escape = '\\', nullstr = 'NA', auto_detect = false, null_padding = true, strict_mode = false, "
+                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
     }
 
     @Test
@@ -234,7 +235,9 @@ class GlueTableResolverTest {
 
         String from = GlueTableResolver.readPlan(table).fromClause();
 
-        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', "
+        // A table naming no SerDe is read as LazySimpleSerDe reads it: a quote is text and \\N is NULL.
+        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', quote = '', "
+                + "nullstr = '\\N', auto_detect = false, null_padding = true, strict_mode = false, "
                 + "columns = {'id': 'VARCHAR'})"));
     }
 
@@ -257,5 +260,18 @@ class GlueTableResolverTest {
                 List.of(column("id", "int")));
 
         assertThat(GlueTableResolver.readPlan(table).fromClause(), equalTo("read_csv_auto('s3://bucket/events/**')"));
+    }
+
+    @Test
+    void aJavaDatePatternTranslatesToAStrptimeFormat() {
+        assertThat(GlueTableResolver.strptimeFormat("yyyy/MM/dd/HH"), is("%Y/%m/%d/%H"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyyMMdd'T'HHmmss"), is("%Y%m%dT%H%M%S"));
+        assertThat(GlueTableResolver.strptimeFormat("yy-MM-dd 100%"), is("%y-%m-%d 100%%"));
+        // A doubled quote is one quote, inside a quoted section or outside one, as Java's formatter reads it.
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'foo''bar'MMdd"), is("%Yfoo'bar%m%d"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy''MM"), is("%Y'%m"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'unclosed"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat("EEE, dd MMM yyyy"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat(" "), nullValue());
     }
 }
