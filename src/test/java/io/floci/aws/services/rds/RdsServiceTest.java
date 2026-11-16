@@ -8822,10 +8822,17 @@ class RdsServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"POSTGRESQL", "SQLSERVER"})
-    void nonMysqlProxyAcceptsSessionPinningFilters(String proxyEngine) {
+    // SQLSERVER has no target engine: Floci cannot register a SQL Server target yet
+    // (validateTargetEngineFamily).
+    @CsvSource({"POSTGRESQL, aurora-postgresql", "SQLSERVER,"})
+    void nonMysqlProxyAcceptsSessionPinningFilters(String proxyEngine, String clusterEngine) {
         // AWS documents the filter as effective only on MySQL, not as rejected elsewhere.
         when(config.services().rds().mock()).thenReturn(true);
+        List<String> clusters = clusterEngine == null ? List.of() : List.of("cluster1");
+        if (clusterEngine != null) {
+            rdsService.createDbCluster("cluster1", clusterEngine, "16.3",
+                    "admin", "secret", "app", false, null);
+        }
         rdsService.createDbProxy("pg-proxy", proxyEngine, true, false,
                 PROXY_ROLE_ARN, PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
 
@@ -8836,7 +8843,7 @@ class RdsServiceTest {
                 .getSessionPinningFilters());
 
         DbProxyTargetGroup reconciled = rdsService.reconcileDbProxyTargetGroup(
-                "pg-proxy", "default", List.of(), List.of(),
+                "pg-proxy", "default", clusters, List.of(),
                 80, 40, 120, null, List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1");
         assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), reconciled.getSessionPinningFilters());
 
