@@ -76,6 +76,9 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .formParam("DeletionProtection", "false").when().post("/");
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
+        // after the cluster, which may reference it; absent in most tests
+        rds("DeleteDBClusterParameterGroup").formParam("DBClusterParameterGroupName", "pg-rejected")
+                .when().post("/");
     }
 
     @Test
@@ -254,8 +257,6 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         assertEquals("false", described("DeletionProtection"));
         assertEquals(List.of("sg-old"), describedGroupIds());
         assertEquals(groupBefore, described("DBClusterParameterGroup"));
-        rds("DeleteDBClusterParameterGroup").formParam("DBClusterParameterGroupName", "pg-rejected")
-                .when().post("/");
     }
 
     @Test
