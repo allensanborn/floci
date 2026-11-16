@@ -124,6 +124,32 @@ class CodeDeployServiceTest {
     }
 
     @Test
+    void onPremisesOperationsRejectInvalidInstanceNames() {
+        service.registerOnPremisesInstance(REGION, "real-host", null, null);
+        for (String[] c : new String[][]{
+                {"i-1234567890abcdef0", "Host name cannot start with \"i-\""},
+                {"I-ABC", "Host name cannot start with \"i-\""},
+                {"bad name/with invalid chars !!", "Instance name contains invalid characters."},
+                {"x".repeat(101), "Instance name contains invalid characters."}}) {
+            String name = c[0];
+            List<Executable> calls = List.of(
+                    () -> service.deregisterOnPremisesInstance(REGION, name),
+                    () -> service.registerOnPremisesInstance(REGION, name, null, null),
+                    () -> service.getOnPremisesInstance(REGION, name),
+                    () -> service.addTagsToOnPremisesInstances(REGION, List.of("real-host", name), List.of()));
+            for (Executable call : calls) {
+                AwsException e = assertThrows(AwsException.class, call);
+                assertEquals("InvalidInstanceNameException", e.getErrorCode());
+                assertEquals(c[1], e.getMessage());
+            }
+        }
+        assertEquals("InstanceNameRequiredException", assertThrows(AwsException.class,
+                () -> service.deregisterOnPremisesInstance(REGION, "")).getErrorCode());
+        // the rejected calls left the real instance alone
+        assertEquals("Registered", service.getOnPremisesInstance(REGION, "real-host").getRegistrationStatus());
+    }
+
+    @Test
     void onPremisesTagFilterTypesMatchOnlyRequestedTags() {
         for (String name : List.of("red-team", "blue-team", "red-env", "untagged")) {
             service.registerOnPremisesInstance(REGION, name, null, null);

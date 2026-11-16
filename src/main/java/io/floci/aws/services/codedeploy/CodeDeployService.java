@@ -750,6 +750,7 @@ public class CodeDeployService {
 
     public OnPremisesInstance registerOnPremisesInstance(String region, String instanceName,
                                                           String iamSessionArn, String iamUserArn) {
+        requireValidInstanceName(instanceName);
         Map<String, OnPremisesInstance> store = onPremisesFor(region);
         OnPremisesInstance inst = new OnPremisesInstance();
         inst.setInstanceName(instanceName);
@@ -765,9 +766,7 @@ public class CodeDeployService {
     }
 
     public void deregisterOnPremisesInstance(String region, String instanceName) {
-        if (instanceName == null || instanceName.isEmpty()) {
-            throw new AwsException("InstanceNameRequiredException", "Instance name is missing", 400);
-        }
+        requireValidInstanceName(instanceName);
         // AWS purges the record on deregister: Get raises InstanceNotRegisteredException, neither status
         // filter lists it, and re-registering mints a new instanceArn with no tags; repeating the call
         // on a gone instance succeeds. Evidence:
@@ -778,12 +777,32 @@ public class CodeDeployService {
         }
     }
 
+    /**
+     * The name form every on-premises operation checks before it asks the registry: non-blank, at most 100
+     * characters from [A-Za-z0-9+=,.@_-], and not the EC2 instance-id form ("i-" prefix, any case). Messages
+     * are AWS's, from check_deregister_invalid_instance_name_rejected.py and
+     * check_deregister_onprem_instance_invalid_name_rejected.py.
+     */
+    private static void requireValidInstanceName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InstanceNameRequiredException", "Instance name is missing", 400);
+        }
+        if (name.length() > 100 || !name.matches("[A-Za-z0-9+=,.@_-]+")) {
+            throw new AwsException("InvalidInstanceNameException", "Instance name contains invalid characters.", 400);
+        }
+        if (name.regionMatches(true, 0, "i-", 0, 2)) {
+            throw new AwsException("InvalidInstanceNameException", "Host name cannot start with \"i-\"", 400);
+        }
+    }
+
     public OnPremisesInstance getOnPremisesInstance(String region, String instanceName) {
+        requireValidInstanceName(instanceName);
         return requireOnPremisesInstance(region, instanceName);
     }
 
     public List<OnPremisesInstance> batchGetOnPremisesInstances(String region, List<String> names) {
         // AWS omits unknown names: BatchGetOnPremisesInstances models no not-found error.
+        names.forEach(CodeDeployService::requireValidInstanceName);
         Map<String, OnPremisesInstance> store = onPremisesFor(region);
         return names.stream().map(store::get).filter(i -> i != null).collect(Collectors.toList());
     }
@@ -823,6 +842,7 @@ public class CodeDeployService {
 
     /** AddTags/RemoveTags check every name before touching any, and word the refusal "Host X is not registered". */
     private void requireRegistered(String region, List<String> instanceNames) {
+        instanceNames.forEach(CodeDeployService::requireValidInstanceName);
         for (String name : instanceNames) {
             if (!onPremisesFor(region).containsKey(name)) {
                 throw new AwsException("InstanceNotRegisteredException", "Host " + name + " is not registered", 400);
