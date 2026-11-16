@@ -34,6 +34,7 @@ import java.util.regex.Pattern;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -163,6 +164,7 @@ class Ec2SystemdGuestDockerIntegrationTest {
             docker.startContainerCmd(id).exec();
             ContainerExec.Result dep = ContainerExec.run(docker, id,
                     new String[]{"sh", "-c", "sed -n '1s/:.*//p' /m/$(uname -r)/modules.dep"}, 30);
+            assertNotEquals(-1, dep.exitCode(), "host modules probe timed out: " + dep.summary());
             String module = dep.stdout().trim().replaceAll(".*/", "").replaceAll("\\..*", "");
             return dep.exitCode() == 0 && !module.isEmpty() ? module : null;
         } finally {
