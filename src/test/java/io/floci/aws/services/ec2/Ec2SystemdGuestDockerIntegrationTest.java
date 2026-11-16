@@ -2,6 +2,8 @@ package io.floci.aws.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.HostConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -90,6 +92,10 @@ class Ec2SystemdGuestDockerIntegrationTest {
         instance.setInstanceId("i-systemd" + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
         instance.setRegion(REGION);
         String modulesDir = "/lib/modules/" + docker.infoCmd().exec().getKernelVersion();
+        // Skip on the host's account, never the guest's: a Docker VM with no module tree has nothing to
+        // modprobe, but a guest that cannot see a tree the host has is the bug under test.
+        String module = hostModule();
+        assumeTrue(module != null, "Docker host has no " + modulesDir + "/modules.dep to modprobe from");
         try {
             manager.launch(instance,
                     new ResolvedAmiImage(TestImages.PYTHON_ALPINE, ResolvedAmiImage.SYSTEMD_RUNTIME, false, null),
@@ -118,11 +124,7 @@ class Ec2SystemdGuestDockerIntegrationTest {
                     "guest's /lib/modules outside " + modulesDir + " is not writable: " + writable.summary());
 
             // The bound tree is usable, not just present: modprobe resolves a module from the host's
-            // modules.dep. Docker Desktop/OrbStack VMs may ship no module tree, leaving the mount empty.
-            ContainerExec.Result dep = ContainerExec.runMerged(docker, containerId,
-                    new String[]{"sh", "-c", "sed -n '1s/:.*//p' " + modulesDir + "/modules.dep"}, 30);
-            String module = dep.stdout().trim().replaceAll(".*/", "").replaceAll("\\..*", "");
-            assumeTrue(dep.exitCode() == 0 && !module.isEmpty(), "docker host has no " + modulesDir + "/modules.dep to modprobe from");
+            // modules.dep (the module was read from the Docker host before launch).
             ContainerExec.Result probe = ContainerExec.runMerged(docker, containerId,
                     new String[]{"modprobe", "-D", module}, 30);
             assertEquals(0, probe.exitCode(), "guest's modprobe cannot find " + module + ": " + probe.summary());
@@ -149,6 +151,22 @@ class Ec2SystemdGuestDockerIntegrationTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    /** The first module named in the Docker host's modules.dep for its running kernel, or null if it has none. */
+    private String hostModule() {
+        String id = docker.createContainerCmd(TestImages.PYTHON_ALPINE).withCmd("sleep", "60")
+                .withHostConfig(HostConfig.newHostConfig().withBinds(Bind.parse("/lib/modules:/m:ro")))
+                .exec().getId();
+        try {
+            docker.startContainerCmd(id).exec();
+            ContainerExec.Result dep = ContainerExec.run(docker, id,
+                    new String[]{"sh", "-c", "sed -n '1s/:.*//p' /m/$(uname -r)/modules.dep"}, 30);
+            String module = dep.stdout().trim().replaceAll(".*/", "").replaceAll("\\..*", "");
+            return dep.exitCode() == 0 && !module.isEmpty() ? module : null;
+        } finally {
+            docker.removeContainerCmd(id).withForce(true).exec();
         }
     }
 }
