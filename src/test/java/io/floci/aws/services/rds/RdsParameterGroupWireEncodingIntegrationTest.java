@@ -224,7 +224,7 @@ class RdsParameterGroupWireEncodingIntegrationTest {
     /**
      * The RDS model's ApplyMethod enum is {@code immediate | pending-reboot}; anything else, including
      * a different case, is refused with InvalidParameterValue and leaves the stored parameter untouched.
-     * Both wire encodings are exercised, since each is parsed separately.
+     * Both wire encodings are exercised, since one shared parser loop accepts both prefixes.
      */
     private static void assertInvalidApplyMethodRejected(String kind, String group,
                                                          String param, String storedValue, String storedMethod) {
