@@ -4817,12 +4817,12 @@ public class Ec2QueryHandler {
                 .elem("dnsName", endpoint.getDnsName())
                 .elem("fipsDnsName", endpoint.getFipsDnsName())
                 .end("ipv4");
-        // The dualstack name pattern AWS uses is not published; this reuses the ipv4 name with a
-        // "dualstack" label. Only the member's presence is modelled (InstanceConnectEndpointPublicDnsNames).
+        // The dualstack name pattern AWS uses is not published; this uses the ipv4 name with
+        // "-dualstack" on the first label, so it stays under the single-label TLS wildcard. Only the member's presence is modelled (InstanceConnectEndpointPublicDnsNames).
         if (!"ipv4".equals(endpoint.getIpAddressType())) {
             xml.start("dualstack")
-                    .elem("dnsName", endpoint.getDnsName().replaceFirst("\\.", ".dualstack."))
-                    .elem("fipsDnsName", endpoint.getFipsDnsName().replaceFirst("\\.", ".dualstack."))
+                    .elem("dnsName", endpoint.getDualstackDnsName())
+                    .elem("fipsDnsName", endpoint.getDualstackFipsDnsName())
                     .end("dualstack");
         }
         xml.end("publicDnsNames");

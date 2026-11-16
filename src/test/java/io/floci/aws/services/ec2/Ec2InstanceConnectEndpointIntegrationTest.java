@@ -63,6 +63,7 @@ class Ec2InstanceConnectEndpointIntegrationTest {
                 .body(ITEM + ".preserveClientIp", equalTo("false"))
                 .body(ITEM + ".dnsName", equalTo(id + ".localhost.floci.io"))
                 .body(ITEM + ".publicDnsNames.ipv4.dnsName", equalTo(id + ".localhost.floci.io"))
+                .body(ITEM + ".publicDnsNames.dualstack.size()", equalTo(0))
                 .body(ITEM + ".securityGroupIdSet.item", containsInAnyOrder(groupA, groupB))
                 .body(ITEM + ".tagSet.item.find { it.key == 'Name' }.value", equalTo(name));
 
@@ -162,9 +163,9 @@ class Ec2InstanceConnectEndpointIntegrationTest {
                     .post("/").then().statusCode(200)
                     .body(ITEM + ".ipAddressType", equalTo(type))
                     .body(ITEM + ".publicDnsNames.ipv4.dnsName", equalTo(id + ".localhost.floci.io"))
-                    .body(ITEM + ".publicDnsNames.dualstack.dnsName", equalTo(id + ".dualstack.localhost.floci.io"))
+                    .body(ITEM + ".publicDnsNames.dualstack.dnsName", equalTo(id + "-dualstack.localhost.floci.io"))
                     .body(ITEM + ".publicDnsNames.dualstack.fipsDnsName",
-                            equalTo(id + "-fips.dualstack.localhost.floci.io"));
+                            equalTo(id + "-fips-dualstack.localhost.floci.io"));
         }
     }
 

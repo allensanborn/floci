@@ -13659,6 +13659,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setState("create-complete");
         endpoint.setDnsName(id + "." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
         endpoint.setFipsDnsName(id + "-fips." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        // Single-label names: the TLS SAN is *.localhost.floci.io and a wildcard matches one label.
+        endpoint.setDualstackDnsName(id + "-dualstack." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        endpoint.setDualstackFipsDnsName(id + "-fips-dualstack." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
         endpoint.setNetworkInterfaceIds(new ArrayList<>(List.of("eni-" + randomHex(17))));
         endpoint.setVpcId(subnet.getVpcId());
         endpoint.setSubnetId(subnetId);
