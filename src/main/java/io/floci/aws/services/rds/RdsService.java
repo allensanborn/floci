@@ -9680,12 +9680,13 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
-    /** The real-mode relay cannot check IAM tokens; SQL Server's arrive in TDS Login7 (not implemented). */
+    /** Whether the real-mode relay would have to check an IAM token it cannot check. */
     private static boolean relayIamUnsupported(DbProxy proxy) {
         return "IAM_AUTH".equals(proxy.getDefaultAuthScheme())
                 || "SQLSERVER".equals(proxy.getEngineFamily()) && proxy.isIamAuth();
     }
 
+    /** The real-mode relay cannot check IAM tokens; SQL Server's arrive in TDS Login7 (not implemented). */
     private static void rejectRelayIamUnsupported(DbProxy proxy) {
         if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
             throw new AwsException("InvalidDBProxyStateFault",
