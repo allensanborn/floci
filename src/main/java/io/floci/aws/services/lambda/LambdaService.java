@@ -965,8 +965,11 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         // identifies neither state (issue #3007). The monitor is reentrant and per function ARN, so
         // the nested acquisitions further down, and publishVersion's own when Publish is set, are
         // no-ops rather than a second lock.
+        // The registry lookup can take seconds, so it runs before the lock rather than holding other updaters.
+        String imageUri = (String) request.get("ImageUri");
+        String resolvedImageUri = imageUri == null ? null : resolveImageUri(imageUri);
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
-            return updateFunctionCodeLocked(region, fn, request);
+            return updateFunctionCodeLocked(region, fn, request, resolvedImageUri);
         }
     }
 
@@ -1008,7 +1011,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     }
 
     private LambdaFunction updateFunctionCodeLocked(String region, LambdaFunction fn,
-                                                    Map<String, Object> request) {
+                                                    Map<String, Object> request, String resolvedImageUri) {
         String functionName = fn.getFunctionName();
         List<String> architectures = validateArchitectures(request.get("Architectures"));
 
@@ -1027,7 +1030,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         }
         if (imageUri != null) {
             fn.setImageUri(imageUri);
-            fn.setResolvedImageUri(resolveImageUri(imageUri));
+            fn.setResolvedImageUri(resolvedImageUri);
         }
         if (s3Bucket != null && s3Key != null) {
             if ("hot-reload".equals(s3Bucket)) {

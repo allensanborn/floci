@@ -69,7 +69,11 @@ class LambdaResolvedImageUriTest {
     }
 
     private JsonNode getFunctionCode() throws Exception {
-        Response response = controller.getFunction(mock(HttpHeaders.class), mock(UriInfo.class), "img-fn", null);
+        return getFunctionCode(null);
+    }
+
+    private JsonNode getFunctionCode(String qualifier) throws Exception {
+        Response response = controller.getFunction(mock(HttpHeaders.class), mock(UriInfo.class), "img-fn", qualifier);
         return new ObjectMapper().valueToTree(response.getEntity()).get("Code");
     }
 
@@ -92,6 +96,22 @@ class LambdaResolvedImageUriTest {
         service.updateFunctionCode(REGION, "img-fn", new HashMap<>(Map.of("ImageUri", REPO_URI + ":v2")));
 
         assertEquals(REPO_URI + "@" + other, getFunctionCode().get("ResolvedImageUri").asText());
+    }
+
+    @Test
+    void publishedVersionKeepsItsPinnedDigestWhenTheFunctionIsLaterUpdated() throws Exception {
+        imageHasDigest(DIGEST);
+        Map<String, Object> request = imageRequest(REPO_URI + ":v1");
+        request.put("Publish", true);
+        service.createFunction(REGION, request);
+        assertEquals(REPO_URI + "@" + DIGEST, getFunctionCode("1").get("ResolvedImageUri").asText());
+
+        String other = "sha256:" + "cd".repeat(32);
+        imageHasDigest(other);
+        service.updateFunctionCode(REGION, "img-fn", new HashMap<>(Map.of("ImageUri", REPO_URI + ":v2")));
+
+        assertEquals(REPO_URI + "@" + other, getFunctionCode().get("ResolvedImageUri").asText());
+        assertEquals(REPO_URI + "@" + DIGEST, getFunctionCode("1").get("ResolvedImageUri").asText());
     }
 
     @Test
