@@ -918,11 +918,16 @@ public class RdsService implements Resettable, ResourceProvider {
 
         DbEndpoint endpoint;
         DbInstance instance;
+        // A cluster member reports its cluster's port, as AWS does, unless it asks for its own.
+        Integer advertisedPort = requestedPort != null || publicationCluster == null
+                ? requestedPort : publicationCluster.getRequestedPort();
         try {
-            endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
+            endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
+                    advertisedPort);
             instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                     dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
                     endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+            instance.setRequestedPort(advertisedPort);
             instance.setOptionGroupName(optionGroupName);
             instance.setDbSubnetGroupName(dbSubnetGroupName);
             instance.setContainerId(containerId);
@@ -3710,7 +3715,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setManagedSecretCleanupRequired(false);
     }
 
-    private static String managedMasterSecretString(DbInstance instance) {
+    private String managedMasterSecretString(DbInstance instance) {
         try {
             return JSON.writeValueAsString(Map.of(
                     "username", instance.getMasterUsername(),
@@ -3719,7 +3724,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             ? instance.getEngineIdentifier().toLowerCase()
                             : instance.getEngine().name().toLowerCase(),
                     "host", instance.getEndpoint().address(),
-                    "port", instance.getEndpoint().port(),
+                    "port", connectablePort(instance.getProxyPort()),
                     "dbname", instance.getDbName() == null ? "" : instance.getDbName(),
                     "dbInstanceIdentifier", instance.getDbInstanceIdentifier()));
         } catch (JsonProcessingException e) {
@@ -3856,11 +3861,11 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setMasterUserSecretKmsKeyId(kmsKeyId);
     }
 
-    private static String managedMasterSecretString(DbCluster cluster) {
+    private String managedMasterSecretString(DbCluster cluster) {
         return managedMasterSecretString(cluster, cluster.getMasterPassword());
     }
 
-    private static String managedMasterSecretString(DbCluster cluster, String password) {
+    private String managedMasterSecretString(DbCluster cluster, String password) {
         try {
             return JSON.writeValueAsString(Map.of(
                     "username", cluster.getMasterUsername(),
@@ -3869,7 +3874,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             ? cluster.getEngineIdentifier().toLowerCase()
                             : cluster.getEngine().name().toLowerCase(),
                     "host", cluster.getEndpoint().address(),
-                    "port", cluster.getEndpoint().port(),
+                    "port", connectablePort(cluster.getProxyPort()),
                     "dbname", cluster.getDatabaseName() == null ? "" : cluster.getDatabaseName(),
                     "dbClusterIdentifier", cluster.getDbClusterIdentifier()));
         } catch (JsonProcessingException e) {
@@ -5266,7 +5271,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (relayEndpoint == null) {
                 relayPort = allocateProxyPort();
                 allocatedRelayPort = true;
-                relayEndpoint = proxyEndpoint(relayPort);
+                relayEndpoint = advertised(proxyEndpoint(relayPort), instance.getRequestedPort());
             }
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                     backendIdentity.runtimeId(),
@@ -5392,7 +5397,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (relayEndpoint == null) {
                 relayPort = allocateProxyPort();
                 allocatedRelayPort = true;
-                relayEndpoint = proxyEndpoint(relayPort);
+                relayEndpoint = advertised(proxyEndpoint(relayPort), cluster.getRequestedPort());
             }
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                     cluster.getDbClusterArn(),
@@ -5825,10 +5830,12 @@ public class RdsService implements Resettable, ResourceProvider {
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
-        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
+        DbEndpoint endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
+                requestedPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setRequestedPort(requestedPort);
         cluster.setEngineIdentifier(effectiveEngineName(engineParam).toLowerCase(Locale.ROOT));
         cluster.setEngineMode(engineMode != null && !engineMode.isBlank() ? engineMode : "provisioned");
         cluster.setStorageEncrypted(storageEncrypted);
@@ -9268,6 +9275,20 @@ public class RdsService implements Resettable, ResourceProvider {
         usedPorts.remove(port);
     }
 
+    /**
+     * With {@code advertise-requested-port} on, reports the Port the client asked for instead of the
+     * proxy port. The proxy still listens on its own port; real clients connect there.
+     */
+    private DbEndpoint advertised(DbEndpoint endpoint, Integer requestedPort) {
+        return requestedPort != null && config.services().rds().advertiseRequestedPort()
+                ? new DbEndpoint(endpoint.address(), requestedPort) : endpoint;
+    }
+
+    /** The port a client can actually connect to, which the managed secret must carry. */
+    private int connectablePort(int proxyPort) {
+        return config.services().rds().mock() ? proxyPort : proxyEndpoint(proxyPort).port();
+    }
+
     private DbEndpoint proxyEndpoint(int proxyPort) {
         Optional<String> endpointHost = config.services().rds().endpointHost()
                 .filter(host -> !host.isBlank());
@@ -9960,7 +9981,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
                 if (port != cluster.getProxyPort()) {
                     cluster.setProxyPort(port);
-                    DbEndpoint endpoint = proxyEndpoint(port);
+                    DbEndpoint endpoint = advertised(proxyEndpoint(port), cluster.getRequestedPort());
                     cluster.setEndpoint(endpoint);
                     cluster.setReaderEndpoint(endpoint);
                     putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
@@ -9984,14 +10005,15 @@ public class RdsService implements Resettable, ResourceProvider {
                 portReserved = true;
                 cluster.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
-                    cluster.setEndpoint(new DbEndpoint("localhost", proxyPort));
-                    cluster.setReaderEndpoint(new DbEndpoint("localhost", proxyPort));
+                    DbEndpoint mockEndpoint = advertised(new DbEndpoint("localhost", proxyPort), cluster.getRequestedPort());
+                    cluster.setEndpoint(mockEndpoint);
+                    cluster.setReaderEndpoint(mockEndpoint);
                     cluster.setStatus(DbInstanceStatus.AVAILABLE);
                     putClusterForScope(accountId, clusterRegion,
                             cluster.getDbClusterIdentifier(), cluster);
                     continue;
                 }
-                DbEndpoint endpoint = proxyEndpoint(proxyPort);
+                DbEndpoint endpoint = advertised(proxyEndpoint(proxyPort), cluster.getRequestedPort());
                 cluster.setEndpoint(endpoint);
                 cluster.setReaderEndpoint(endpoint);
                 String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
@@ -10075,7 +10097,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
                 if (port != instance.getProxyPort()) {
                     instance.setProxyPort(port);
-                    instance.setEndpoint(proxyEndpoint(port));
+                    instance.setEndpoint(advertised(proxyEndpoint(port), instance.getRequestedPort()));
                     putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
                             regionFromArn(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(), instance);
                 }
@@ -10106,13 +10128,13 @@ public class RdsService implements Resettable, ResourceProvider {
                 portReserved = true;
                 instance.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
-                    instance.setEndpoint(new DbEndpoint("localhost", proxyPort));
+                    instance.setEndpoint(advertised(new DbEndpoint("localhost", proxyPort), instance.getRequestedPort()));
                     instance.setStatus(DbInstanceStatus.AVAILABLE);
                     putInstanceForScope(accountId, instanceRegion,
                             instance.getDbInstanceIdentifier(), instance);
                     continue;
                 }
-                instance.setEndpoint(proxyEndpoint(proxyPort));
+                instance.setEndpoint(advertised(proxyEndpoint(proxyPort), instance.getRequestedPort()));
                 String backendHost;
                 int backendPort;
                 if (clusterId != null && !clusterId.isBlank()) {
