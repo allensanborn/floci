@@ -407,7 +407,10 @@ services:
     data-plane behaviors. `SessionPinningFilters` is accepted and stored on every engine family; AWS
     documents it as effective only for the MySQL engine family. `DefaultAuthScheme=IAM_AUTH` is
     supported for control-plane workflows, but a real-mode proxy using that scheme cannot register a
-    target until backend IAM authentication is implemented.
+    target until backend IAM authentication is implemented. `SQLSERVER` proxies register RDS for
+    SQL Server instance targets, but a real-mode `SQLSERVER` proxy with `IAMAuth` `REQUIRED` or
+    `ENABLED` cannot register a target because the relay does not implement IAM authentication for
+    SQL Server.
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
