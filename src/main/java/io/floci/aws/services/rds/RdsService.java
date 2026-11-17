@@ -11512,6 +11512,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return new String[] {backupWindow, maintenanceWindow};
     }
 
+    /** CreateDBCluster's group check; AwsQueryController has already refused an existing id by then. */
+    public void requireSecurityGroupsExist(String region, List<String> groupIds) {
+        ec2Service.requireSecurityGroupsExist(effectiveRegion(region), groupIds);
+    }
+
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
     public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
             List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow,

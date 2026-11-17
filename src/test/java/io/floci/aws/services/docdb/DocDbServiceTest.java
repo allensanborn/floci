@@ -265,6 +265,7 @@ class DocDbServiceTest {
         when(rdsService.getDbSubnetGroup(eq("nope"), any())).thenThrow(new AwsException("DBSubnetGroupNotFoundFault", "x", 404));
         when(rdsService.getDbClusterParameterGroup(eq("pg"), any())).thenReturn(new DbClusterParameterGroup("pg", "docdb5.0", "d"));
         when(rdsService.getDbClusterParameterGroup(eq("nope"), any())).thenThrow(new AwsException("DBClusterParameterGroupNotFound", "x", 404));
+        Mockito.doCallRealMethod().when(ec2Service).requireSecurityGroupsExist(any(), any());
         SecurityGroup sg = new SecurityGroup();
         sg.setGroupId("sg-1");
         when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any())).thenReturn(List.of(sg));

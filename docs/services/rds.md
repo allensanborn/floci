@@ -190,6 +190,8 @@ returned with lowercase day names; `DeleteDBCluster` is refused while `DeletionP
 `RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds`,
 `PreferredBackupWindow` and `DeletionProtection` the same way, and a restored cluster given no
 group is put in its VPC's default security group.
+`CreateDBCluster` refuses a `VpcSecurityGroupIds` entry EC2 does not know with
+`InvalidParameterValue`; `ModifyDBCluster` does not check that the group exists.
 
 !!! note "Stopping and starting"
 
