@@ -198,12 +198,10 @@ public class EcrRegistryManager {
         if (!m.matches()) {
             return image;
         }
-        if (config.services().ecr().preferLocalImages()) {
-            String resolved = containerBuilder.resolveImage(image);
-            if (isPresentOnDaemon(resolved)) {
-                LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)", resolved);
-                return image;
-            }
+        if (isLocallyBuilt(image)) {
+            LOG.infov("Using locally present image {0} as-is (not rewriting to the emulated ECR registry)",
+                    containerBuilder.resolveImage(image));
+            return image;
         }
         String account = m.group(1);
         String region = m.group(2);
@@ -267,6 +265,11 @@ public class EcrRegistryManager {
             return Optional.empty();
         }
         return Optional.of(m.group(1) != null ? m.group(1) : m.group(2));
+    }
+
+    /** True when {@code floci.services.ecr.prefer-local-images} is on and the Docker daemon already holds the image. */
+    public boolean isLocallyBuilt(String image) {
+        return config.services().ecr().preferLocalImages() && isPresentOnDaemon(containerBuilder.resolveImage(image));
     }
 
     private boolean isPresentOnDaemon(String image) {

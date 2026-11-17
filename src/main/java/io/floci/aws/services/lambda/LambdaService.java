@@ -333,6 +333,10 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     @Inject
     EcrService ecrService;
 
+    // An image built on the Docker daemon under its ECR URI needs no push; none in a test without it.
+    @Inject
+    EcrRegistryManager ecrRegistryManager;
+
     @Inject
     public LambdaService(LambdaFunctionStore functionStore,
                          LambdaExecutorService executorService,
@@ -686,6 +690,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         if (code != null) {
             String imageUri = (String) code.get("ImageUri");
             if (imageUri != null) {
+                requireSourceImage(region, imageUri);
                 fn.setImageUri(imageUri);
                 fn.setResolvedImageUri(resolveImageUri(imageUri));
             }
@@ -968,8 +973,10 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         // The registry lookup can take seconds, so it runs before the lock rather than holding other updaters.
         String imageUri = (String) request.get("ImageUri");
         String resolvedImageUri = imageUri == null ? null : resolveImageUri(imageUri);
+        // Thrown inside the lock after the revision check, so a stale RevisionId still wins over a bad image.
+        AwsException imageRefusal = imageUri == null ? null : checkSourceImage(region, imageUri);
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
-            return updateFunctionCodeLocked(region, fn, request, resolvedImageUri);
+            return updateFunctionCodeLocked(region, fn, request, resolvedImageUri, imageRefusal);
         }
     }
 
@@ -1010,8 +1017,52 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         return uri + "@" + digest;
     }
 
+    /**
+     * Refuses an image function's source image the way AWS does: an image of another Region's registry is "not
+     * valid", and one Floci's ECR holds nothing for (no repository, or no such tag or digest) "does not exist".
+     * An image outside ECR, in another account's registry, built on the Docker daemon, or that Floci's ECR
+     * cannot be asked about (no Docker) shows nothing and is let through.
+     */
+    private void requireSourceImage(String region, String imageUri) {
+        AwsException refusal = checkSourceImage(region, imageUri);
+        if (refusal != null) {
+            throw refusal;
+        }
+    }
+
+    /** The refusal {@link #requireSourceImage} would throw, or null; lets UpdateFunctionCode ask before its lock. */
+    private AwsException checkSourceImage(String region, String imageUri) {
+        Optional<EcrRegistryManager.EcrImage> image = EcrRegistryManager.ecrImage(imageUri);
+        if (image.isEmpty() || ecrService == null) {
+            return null;
+        }
+        EcrRegistryManager.EcrImage ref = image.get();
+        if (!region.equals(ref.region())) {
+            return new AwsException("InvalidParameterValueException",
+                    "Source image " + imageUri + " is not valid. Provide a valid source image.", 400);
+        }
+        if (!regionResolver.getAccountId().equals(ref.registryId())) {
+            return null;
+        }
+        try {
+            ecrService.describeImages(ref.repository(), List.of(new ImageIdentifier(ref.tag(), ref.digest())),
+                    ref.registryId(), region);
+        } catch (AwsException e) {
+            if ("RepositoryNotFoundException".equals(e.getErrorCode()) || "ImageNotFoundException".equals(e.getErrorCode())) {
+                if (ecrRegistryManager != null && ecrRegistryManager.isLocallyBuilt(imageUri)) {
+                    return null;
+                }
+                return new AwsException("InvalidParameterValueException",
+                        "Source image " + imageUri + " does not exist. Provide a valid source image.", 400);
+            }
+            LOG.debugv("Image {0} cannot be checked against Floci's ECR ({1}); accepting it", imageUri, e.getMessage());
+        }
+        return null;
+    }
+
     private LambdaFunction updateFunctionCodeLocked(String region, LambdaFunction fn,
-                                                    Map<String, Object> request, String resolvedImageUri) {
+                                                    Map<String, Object> request, String resolvedImageUri,
+                                                    AwsException imageRefusal) {
         String functionName = fn.getFunctionName();
         List<String> architectures = validateArchitectures(request.get("Architectures"));
 
@@ -1022,6 +1073,9 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         validateS3CodeLocation(s3Bucket, s3Key);
 
         requireMatchingRevisionId(fn, request);
+        if (imageRefusal != null) {
+            throw imageRefusal;
+        }
 
         if (zipFileBase64 != null) {
             extractZipCode(fn, zipFileBase64, region);

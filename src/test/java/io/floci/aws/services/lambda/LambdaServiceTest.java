@@ -8,6 +8,10 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.EcrService.DescribeImagesResult;
+import io.floci.aws.services.ecr.model.ImageIdentifier;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.lambda.model.EventSourceMapping;
 import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
@@ -669,6 +673,105 @@ class LambdaServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.deleteFunction(REGION, "ghost"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    private static final String ECR_HOST = "000000000000.dkr.ecr.us-east-1.amazonaws.com/";
+
+    /** A Floci ECR holding repository "app" with only tag "v1"; every other image is not found. */
+    private void ecrHoldingAppV1() {
+        EcrService ecr = mock(EcrService.class);
+        when(ecr.describeImages(anyString(), anyList(), anyString(), anyString())).thenAnswer(inv -> {
+            ImageIdentifier id = ((List<ImageIdentifier>) inv.getArgument(1)).getFirst();
+            if (!"app".equals(inv.getArgument(0))) {
+                throw new AwsException("RepositoryNotFoundException", "no such repository", 400);
+            }
+            if (!"v1".equals(id.getImageTag())) {
+                throw new AwsException("ImageNotFoundException", "no such image", 400);
+            }
+            return new DescribeImagesResult(List.of(), List.of());
+        });
+        service.ecrService = ecr;
+    }
+
+    private Map<String, Object> imageRequest(String name, String imageUri) {
+        return new HashMap<>(Map.of("FunctionName", name, "Role", "arn:aws:iam::000000000000:role/test-role",
+                "PackageType", "Image", "Code", Map.of("ImageUri", imageUri)));
+    }
+
+    @Test
+    void createImageFunctionRefusesAnImageFloociEcrHoldsNothingFor() {
+        ecrHoldingAppV1();
+        for (String uri : List.of(ECR_HOST + "app:absent", ECR_HOST + "app@sha256:" + "0".repeat(64),
+                ECR_HOST + "norepo:v1")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> service.createFunction(REGION, imageRequest("img-missing", uri)));
+            assertEquals("InvalidParameterValueException", ex.getErrorCode());
+            assertEquals(400, ex.getHttpStatus());
+            assertEquals("Source image " + uri + " does not exist. Provide a valid source image.", ex.getMessage());
+        }
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createImageFunctionRefusesAnImageOfAnotherRegionsRegistry() {
+        ecrHoldingAppV1();
+        String uri = ECR_HOST.replace("us-east-1", "us-west-2") + "app:v1";
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, imageRequest("img-xregion", uri)));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals("Source image " + uri + " is not valid. Provide a valid source image.", ex.getMessage());
+        assertTrue(service.listFunctions(REGION).isEmpty());
+    }
+
+    @Test
+    void createImageFunctionAcceptsAPushedImageAndOneItCannotCheck() {
+        ecrHoldingAppV1();
+        service.createFunction(REGION, imageRequest("img-pushed", ECR_HOST + "app:v1"));
+        assertEquals(ECR_HOST + "app:v1", service.getFunction(REGION, "img-pushed").getImageUri());
+
+        // No Docker behind Floci's ECR: the registry cannot say, so nothing is refused.
+        doThrow(new AwsException("ServerException", "no Docker", 500))
+                .when(service.ecrService).describeImages(anyString(), anyList(), anyString(), anyString());
+        service.createFunction(REGION, imageRequest("img-unchecked", ECR_HOST + "app:v9"));
+        assertNotNull(service.getFunction(REGION, "img-unchecked"));
+    }
+
+    @Test
+    void createImageFunctionAcceptsAnImageBuiltOnTheDockerDaemonUnderItsEcrUri() {
+        ecrHoldingAppV1();
+        service.ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(service.ecrRegistryManager.isLocallyBuilt(ECR_HOST + "built:dev")).thenReturn(true);
+        service.createFunction(REGION, imageRequest("img-built", ECR_HOST + "built:dev"));
+        assertEquals(ECR_HOST + "built:dev", service.getFunction(REGION, "img-built").getImageUri());
+    }
+
+    @Test
+    void updateFunctionCodeAnswersAStaleRevisionBeforeAMissingImage() {
+        ecrHoldingAppV1();
+        service.createFunction(REGION, imageRequest("img-order", ECR_HOST + "app:v1"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "img-order",
+                Map.of("ImageUri", ECR_HOST + "app:absent", "RevisionId", "stale")));
+
+        assertEquals("PreconditionFailedException", ex.getErrorCode());
+        assertEquals(412, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateFunctionCodeRefusesAMissingTagAndKeepsTheDeployedImage() {
+        ecrHoldingAppV1();
+        service.createFunction(REGION, imageRequest("img-update", ECR_HOST + "app:v1"));
+        String revisionId = service.getFunction(REGION, "img-update").getRevisionId();
+        String missing = ECR_HOST + "app:absent";
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.updateFunctionCode(REGION, "img-update", Map.of("ImageUri", missing)));
+
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals("Source image " + missing + " does not exist. Provide a valid source image.", ex.getMessage());
+        LambdaFunction kept = service.getFunction(REGION, "img-update");
+        assertEquals(ECR_HOST + "app:v1", kept.getImageUri());
+        assertEquals(revisionId, kept.getRevisionId());
     }
 
     @Test
