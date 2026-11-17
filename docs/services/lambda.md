@@ -1263,6 +1263,15 @@ A container image function whose `ImageUri` names an image already present on th
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
 
+### Image source validation
+
+`CreateFunction` and `UpdateFunctionCode` check an ECR `ImageUri` against [Floci's emulated ECR](ecr.md) and refuse it with `InvalidParameterValueException` (HTTP 400), as AWS does:
+
+- a repository that does not exist, or a tag or digest that was never pushed to it: `Source image <ImageUri> does not exist. Provide a valid source image.`
+- a registry of another Region than the function's: `Source image <ImageUri> is not valid. Provide a valid source image.`
+
+A refused create leaves no function behind, and a refused update leaves the deployed image in place. Push the image to the emulated registry first (see [ECR](ecr.md)), or build it on the Docker daemon under its ECR URI (above), which needs no push. An `ImageUri` outside ECR, in another account's registry, or checked while Floci's ECR has no Docker daemon to query is not refused.
+
 ### Image user and working directory
 
 AWS runs a container image function as its own least-privileged user, not the image's `USER`. Floci keeps running the container as the image's user, but before it starts the container it checks that Lambda's user could enter the working directory (`ImageConfig.WorkingDirectory`, or the image's `WORKDIR`). Lambda's user owns nothing in the image, so a directory on that path must be executable by other users. Symlinks on the path are followed, and the check stops at a file system the function mounts from EFS, which Lambda enters as the access point's user. When a directory is not executable by other users, such as a `0700` home directory owned by the image's user, the invocation fails with `Runtime.InvalidEntrypoint`, as on AWS. Set `WORKDIR` to a directory everyone can enter, such as `/`.
