@@ -183,6 +183,11 @@ usual default, a 30-minute window starting where the given one ends); a window g
 checked against the instance's other window. Modifications apply immediately —
 `PendingModifiedValues` is not modeled.
 
+`CreateDBCluster` and `ModifyDBCluster` store `VpcSecurityGroupIds` (a cluster given none gets its
+VPC's default security group), `PreferredBackupWindow`, `PreferredMaintenanceWindow` and
+`DeletionProtection`. Windows are checked like an instance's and the maintenance window is
+returned with lowercase day names; `DeleteDBCluster` is refused while `DeletionProtection` is on.
+
 !!! note "Stopping and starting"
 
     `StopDBInstance` and `StopDBCluster` follow the user guide: the response reports `stopping`

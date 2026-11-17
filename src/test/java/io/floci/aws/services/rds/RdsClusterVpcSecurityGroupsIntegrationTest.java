@@ -20,6 +20,7 @@ import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * VpcSecurityGroupIds, PreferredBackupWindow, PreferredMaintenanceWindow and DeletionProtection given
@@ -105,9 +106,35 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     }
 
     @Test
-    void omittedGroupsFallBackToTheInstanceDefault() {
-        create().when().post("/").then().statusCode(200);
-        assertEquals(List.of("sg-00000000"), describedGroupIds());
+    void omittedGroupsDefaultToTheVpcsDefaultSecurityGroup() {
+        String created = create().when().post("/").then().statusCode(200).extract().asString();
+        List<String> groups = describedGroupIds();
+        assertEquals(1, groups.size());
+        assertNotEquals("sg-00000000", groups.get(0));
+        assertEquals(true, groups.get(0).startsWith("sg-"));
+        assertEquals(groups, groupIds(created));
+    }
+
+    @Test
+    void maintenanceWindowDayNamesReadBackLowerCase() {
+        String created = create()
+                .formParam("PreferredMaintenanceWindow", "Mon:00:00-Mon:03:00")
+                .when().post("/").then().statusCode(200).extract().asString();
+        assertEquals(true, created.contains("<PreferredMaintenanceWindow>mon:00:00-mon:03:00<"));
+        assertEquals("mon:00:00-mon:03:00", described("PreferredMaintenanceWindow"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("PreferredMaintenanceWindow", "TUE:07:00-Tue:08:00")
+                .when().post("/").then().statusCode(200);
+        assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
+    }
+
+    @Test
+    void modifyOfAMissingClusterIsDbClusterNotFound() {
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", "no-such-cluster")
+                .when().post("/").then().statusCode(404)
+                .body(containsString("<Code>DBClusterNotFoundFault</Code>"))
+                .body(containsString("<Message>DBCluster not found</Message>"));
     }
 
     private static String described(String tag) {

@@ -11521,12 +11521,16 @@ public class RdsService implements Resettable, ResourceProvider {
         validateClusterWindows(cluster, backupWindow, maintenanceWindow);
         if (vpcSecurityGroupIds != null) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        } else if (cluster.getVpcSecurityGroupIds().isEmpty() && !isBlank(cluster.getVpcId())) {
+            // none named: AWS puts the cluster in its VPC's default group; EC2 without one leaves none
+            ec2Service.defaultSecurityGroupOf(effectiveRegion, cluster.getVpcId())
+                    .ifPresent(group -> cluster.setVpcSecurityGroupIds(List.of(group.getGroupId())));
         }
         if (backupWindow != null) {
             cluster.setPreferredBackupWindow(backupWindow);
         }
         if (maintenanceWindow != null) {
-            cluster.setPreferredMaintenanceWindow(maintenanceWindow);
+            cluster.setPreferredMaintenanceWindow(BackupWindows.lowerCase(maintenanceWindow));
         }
         if (deletionProtection != null) {
             cluster.setDeletionProtection(deletionProtection);

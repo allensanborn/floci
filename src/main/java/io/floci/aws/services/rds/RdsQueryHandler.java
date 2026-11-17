@@ -1518,10 +1518,17 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
-            if (Boolean.TRUE.equals(enableHttpEndpoint)) {
-                RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
+            DbCluster current;
+            try {
+                current = service.getDbCluster(id, region);
+            } catch (AwsException notFound) {
+                // AWS words a modify of a missing cluster this way, unlike the describe and delete paths
+                throw new AwsException("DBClusterNotFoundFault", "DBCluster not found", 404);
             }
-            RdsService.validateClusterWindows(service.getDbCluster(id, region),
+            if (Boolean.TRUE.equals(enableHttpEndpoint)) {
+                RdsService.requireDataApiEngine(current.getEngineIdentifier());
+            }
+            RdsService.validateClusterWindows(current,
                     params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
             // parsed before any mutating call so a malformed value changes nothing
             List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
@@ -3313,7 +3320,8 @@ public class RdsQueryHandler {
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .elem("DeletionProtection", i.isDeletionProtection())
-           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds()))
+           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds().isEmpty()
+                   ? List.of("sg-00000000") : i.getVpcSecurityGroupIds()))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -3396,11 +3404,8 @@ public class RdsQueryHandler {
     }
 
     private String vpcSecurityGroupsXml(List<String> vpcSecurityGroupIds) {
-        List<String> groupIds = vpcSecurityGroupIds.isEmpty()
-                ? List.of("sg-00000000")
-                : vpcSecurityGroupIds;
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
-        for (String groupId : groupIds) {
+        for (String groupId : vpcSecurityGroupIds) {
             xml.start("VpcSecurityGroupMembership")
                     .elem("VpcSecurityGroupId", groupId)
                     .elem("Status", "active")
