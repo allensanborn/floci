@@ -1350,6 +1350,7 @@ public class RdsQueryHandler {
             List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
                     ? vpcSecurityGroupIds(params) : null;
             Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
+            service.requireSecurityGroupsExist(region, securityGroupIds);
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
                 cluster = requestedPort == null
@@ -2957,6 +2958,9 @@ public class RdsQueryHandler {
         }
         try {
             RestoreSettings settings = RestoreSettings.parse(params);
+            if (settings.securityGroupIds() != null) {
+                service.requireSecurityGroupsExist(region, settings.securityGroupIds());
+            }
             DbCluster cluster = service.restoreDbClusterToPointInTime(clusterId,
                     params.getFirst("SourceDBClusterIdentifier"), params.getFirst("SourceDbClusterResourceId"),
                     params.getFirst("RestoreType"),
@@ -2987,6 +2991,9 @@ public class RdsQueryHandler {
         }
         try {
             RestoreSettings settings = RestoreSettings.parse(params);
+            if (settings.securityGroupIds() != null) {
+                service.requireSecurityGroupsExist(region, settings.securityGroupIds());
+            }
             service.restoreDbClusterFromSnapshot(clusterId, snapshotId, engine,
                     params.getFirst("EngineVersion"), optionalInt(params.getFirst("Port")),
                     params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),

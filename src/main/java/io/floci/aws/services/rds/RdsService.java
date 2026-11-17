@@ -11512,6 +11512,22 @@ public class RdsService implements Resettable, ResourceProvider {
         return new String[] {backupWindow, maintenanceWindow};
     }
 
+    /** Rejects a security group EC2 does not know; null or empty names nothing to check. */
+    public void requireSecurityGroupsExist(String region, List<String> groupIds) {
+        if (groupIds == null) {
+            return;
+        }
+        String effectiveRegion = effectiveRegion(region);
+        for (String groupId : groupIds) {
+            boolean known = ec2Service.describeSecurityGroups(effectiveRegion, List.of(groupId), List.of(), Map.of())
+                    .stream().anyMatch(sg -> groupId.equals(sg.getGroupId()));
+            if (!known) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid security group , groupId= " + groupId + ", groupName=.", 400);
+            }
+        }
+    }
+
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
     public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
             List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow,
