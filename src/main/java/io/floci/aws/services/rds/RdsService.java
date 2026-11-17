@@ -9600,7 +9600,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 || targetGroup == null || targetGroup.getTargets().isEmpty()
                 || !targetGroupMatchesProxy(targetGroup, proxy)
                 || !"available".equals(proxy.getStatus())
-                || "IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
+                || relayIamUnsupported(proxy)) {
             return;
         }
         attemptRollback(failure,
@@ -9681,6 +9681,11 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /** The real-mode relay cannot check IAM tokens; SQL Server's arrive in TDS Login7 (not implemented). */
+    private static boolean relayIamUnsupported(DbProxy proxy) {
+        return "IAM_AUTH".equals(proxy.getDefaultAuthScheme())
+                || "SQLSERVER".equals(proxy.getEngineFamily()) && proxy.isIamAuth();
+    }
+
     private static void rejectRelayIamUnsupported(DbProxy proxy) {
         if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
             throw new AwsException("InvalidDBProxyStateFault",
@@ -10329,12 +10334,6 @@ public class RdsService implements Resettable, ResourceProvider {
                     proxy.setStatus("available");
                     persistRestoredProxy(proxy);
                     continue;   // no target registered yet; nothing to relay to
-                }
-                if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
-                    throw new AwsException("InvalidDBProxyStateFault",
-                            "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
-                                    + "the real-mode relay does not support end-to-end IAM authentication.",
-                            400);
                 }
                 startDbProxyRelay(proxy, targetGroup.getTargets().get(0));
                 proxy.setStatus("available");
