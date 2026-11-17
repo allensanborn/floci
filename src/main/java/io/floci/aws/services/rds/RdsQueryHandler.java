@@ -1522,6 +1522,9 @@ public class RdsQueryHandler {
             try {
                 current = service.getDbCluster(id, region);
             } catch (AwsException notFound) {
+                if (!"DBClusterNotFoundFault".equals(notFound.getErrorCode())) {
+                    throw notFound;
+                }
                 // AWS words a modify of a missing cluster this way, unlike the describe and delete paths
                 throw new AwsException("DBClusterNotFoundFault", "DBCluster not found", 404);
             }
@@ -2953,6 +2956,7 @@ public class RdsQueryHandler {
             return missing;
         }
         try {
+            RestoreSettings settings = RestoreSettings.parse(params);
             DbCluster cluster = service.restoreDbClusterToPointInTime(clusterId,
                     params.getFirst("SourceDBClusterIdentifier"), params.getFirst("SourceDbClusterResourceId"),
                     params.getFirst("RestoreType"),
@@ -2962,6 +2966,7 @@ public class RdsQueryHandler {
                     params.getFirst("DBClusterParameterGroupName"),
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     params.getFirst("EngineMode"), parseTags(params), region);
+            cluster = settings.applyTo(service, clusterId, region);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
                     dbClusterXml(cluster))).build();
         } catch (AwsException e) {
@@ -2980,15 +2985,37 @@ public class RdsQueryHandler {
         if (missing != null) {
             return missing;
         }
-        DbCluster cluster = service.restoreDbClusterFromSnapshot(clusterId, snapshotId, engine,
-                params.getFirst("EngineVersion"), optionalInt(params.getFirst("Port")),
-                params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
-                params.getFirst("DBClusterParameterGroupName"),
-                params.getFirst("AvailabilityZones.member.1"),
-                parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
-                params.getFirst("EngineMode"), parseTags(params), region);
-        return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
-                dbClusterXml(cluster))).build();
+        try {
+            RestoreSettings settings = RestoreSettings.parse(params);
+            service.restoreDbClusterFromSnapshot(clusterId, snapshotId, engine,
+                    params.getFirst("EngineVersion"), optionalInt(params.getFirst("Port")),
+                    params.getFirst("DatabaseName"), params.getFirst("DBSubnetGroupName"),
+                    params.getFirst("DBClusterParameterGroupName"),
+                    params.getFirst("AvailabilityZones.member.1"),
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
+                    params.getFirst("EngineMode"), parseTags(params), region);
+            DbCluster cluster = settings.applyTo(service, clusterId, region);
+            return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
+                    dbClusterXml(cluster))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    /** What a cluster restore request says about security groups, backup window and protection. */
+    private record RestoreSettings(List<String> securityGroupIds, String[] windows, Boolean deletionProtection) {
+        // parsed before the restore so a malformed value leaves no cluster behind
+        static RestoreSettings parse(MultivaluedMap<String, String> params) {
+            return new RestoreSettings(
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    RdsService.resolveClusterCreateWindows(params.getFirst("PreferredBackupWindow"), null),
+                    parseOptionalBoolean(params, "DeletionProtection"));
+        }
+
+        DbCluster applyTo(RdsService service, String id, String region) {
+            return service.setDbClusterRequestSettings(id, region, securityGroupIds,
+                    windows[0], windows[1], deletionProtection);
+        }
     }
 
     private Response handleDescribeDbClusterSnapshotAttributes(MultivaluedMap<String, String> params, String region) {

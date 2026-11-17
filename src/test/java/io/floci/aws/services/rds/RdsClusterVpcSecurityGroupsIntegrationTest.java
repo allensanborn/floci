@@ -8,6 +8,8 @@ import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -21,6 +23,7 @@ import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * VpcSecurityGroupIds, PreferredBackupWindow, PreferredMaintenanceWindow and DeletionProtection given
@@ -111,8 +114,49 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         List<String> groups = describedGroupIds();
         assertEquals(1, groups.size());
         assertNotEquals("sg-00000000", groups.get(0));
-        assertEquals(true, groups.get(0).startsWith("sg-"));
+        assertTrue(groups.get(0).startsWith("sg-"));
         assertEquals(groups, groupIds(created));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"snapshot", "pitr"})
+    void restoredClusterHoldsRequestedOrDefaultGroupsAndModifyLeavesThem(String path) {
+        String restored = ID + "-restored";
+        String snapshot = ID + "-snap";
+        try {
+            create().when().post("/").then().statusCode(200);
+            rds("CreateDBClusterSnapshot").formParam("DBClusterIdentifier", ID)
+                    .formParam("DBClusterSnapshotIdentifier", snapshot).post("/").then().statusCode(200);
+            for (String group : new String[] {null, "sg-abcdef01"}) {
+                RequestSpecification restore = "snapshot".equals(path)
+                        ? rds("RestoreDBClusterFromSnapshot").formParam("SnapshotIdentifier", snapshot)
+                                .formParam("Engine", "aurora-postgresql")
+                        : rds("RestoreDBClusterToPointInTime").formParam("SourceDBClusterIdentifier", ID)
+                                .formParam("UseLatestRestorableTime", "true");
+                restore.formParam("DBClusterIdentifier", restored);
+                if (group != null) {
+                    restore.formParam("VpcSecurityGroupIds.VpcSecurityGroupId.1", group);
+                }
+                List<String> reported = groupIds(restore.post("/").then().statusCode(200).extract().asString());
+                if (group != null) {
+                    assertEquals(List.of(group), reported);
+                } else {
+                    assertEquals(1, reported.size());
+                    assertNotEquals("sg-00000000", reported.get(0));
+                }
+                rds("ModifyDBCluster").formParam("DBClusterIdentifier", restored)
+                        .formParam("EnableIAMDatabaseAuthentication", "true").post("/").then().statusCode(200);
+                assertEquals(reported, groupIds(rds("DescribeDBClusters")
+                        .formParam("DBClusterIdentifier", restored).post("/").then().statusCode(200)
+                        .extract().asString()));
+                rds("DeleteDBCluster").formParam("DBClusterIdentifier", restored)
+                        .formParam("SkipFinalSnapshot", "true").post("/");
+            }
+        } finally {
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", restored)
+                    .formParam("SkipFinalSnapshot", "true").post("/");
+            rds("DeleteDBClusterSnapshot").formParam("DBClusterSnapshotIdentifier", snapshot).post("/");
+        }
     }
 
     @Test
