@@ -1350,7 +1350,7 @@ public class RdsQueryHandler {
             List<String> securityGroupIds = hasMemberKeys(params, "VpcSecurityGroupIds")
                     ? vpcSecurityGroupIds(params) : null;
             Boolean deletionProtection = parseOptionalBoolean(params, "DeletionProtection");
-            service.requireNewClusterSecurityGroups(id, region, securityGroupIds);
+            service.requireSecurityGroupsExist(region, securityGroupIds);
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
                 cluster = requestedPort == null
