@@ -746,6 +746,18 @@ class LambdaServiceTest {
     }
 
     @Test
+    void updateFunctionCodeAnswersAStaleRevisionBeforeAMissingImage() {
+        ecrHoldingAppV1();
+        service.createFunction(REGION, imageRequest("img-order", ECR_HOST + "app:v1"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateFunctionCode(REGION, "img-order",
+                Map.of("ImageUri", ECR_HOST + "app:absent", "RevisionId", "stale")));
+
+        assertEquals("PreconditionFailedException", ex.getErrorCode());
+        assertEquals(412, ex.getHttpStatus());
+    }
+
+    @Test
     void updateFunctionCodeRefusesAMissingTagAndKeepsTheDeployedImage() {
         ecrHoldingAppV1();
         service.createFunction(REGION, imageRequest("img-update", ECR_HOST + "app:v1"));
