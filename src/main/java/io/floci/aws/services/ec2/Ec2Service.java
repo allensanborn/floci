@@ -7835,6 +7835,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return sg;
     }
 
+    /** Rejects a security group id this region does not hold; null or empty names nothing to check. */
+    public void requireSecurityGroupsExist(String region, List<String> groupIds) {
+        if (groupIds == null) {
+            return;
+        }
+        for (String groupId : groupIds) {
+            if (describeSecurityGroups(region, List.of(groupId), List.of(), Map.of()).isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid security group , groupId= " + groupId + ", groupName=.", 400);
+            }
+        }
+    }
+
     public List<SecurityGroup> describeSecurityGroups(String region, List<String> groupIds,
                                                        List<String> groupNames, Map<String, List<String>> filters) {
         return describeSecurityGroups(region, groupIds, groupNames, filterList(filters));

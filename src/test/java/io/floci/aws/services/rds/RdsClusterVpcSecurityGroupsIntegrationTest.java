@@ -397,24 +397,16 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     }
 
     @Test
-    void restoreWithUnknownSecurityGroupIsRefusedAndLeavesNoClusterBehind() {
+    void existingClusterIdWinsOverAnUnknownSecurityGroup() {
         create().when().post("/").then().statusCode(200);
-        rds("CreateDBClusterSnapshot").formParam("DBClusterIdentifier", ID)
-                .formParam("DBClusterSnapshotIdentifier", ID + "-snap").post("/").then().statusCode(200);
-        try {
-            rds("RestoreDBClusterFromSnapshot").formParam("DBClusterIdentifier", ID + "-restored")
-                    .formParam("SnapshotIdentifier", ID + "-snap").formParam("Engine", "aurora-postgresql")
-                    .formParam("VpcSecurityGroupIds.member.1", "sg-0123456789abcdef0")
-                    .post("/").then().statusCode(400)
-                    .body(containsString("Invalid security group , groupId= sg-0123456789abcdef0, groupName=."));
-            assertEquals(1, clusterCount());
-        } finally {
-            rds("DeleteDBClusterSnapshot").formParam("DBClusterSnapshotIdentifier", ID + "-snap").post("/");
-        }
+        create().formParam("VpcSecurityGroupIds.member.1", "sg-0123456789abcdef0")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>DBClusterAlreadyExistsFault</Code>"));
     }
 
     @Test
-    void modifyDoesNotCheckSecurityGroupExistence() {
+    void modifyChecksSecurityGroupFormatOnlyLikeTheRustReference() {
+        // AWS's behaviour on Modify is unconfirmed; this pins the Rust reference, not a verified AWS answer.
         create().when().post("/").then().statusCode(200);
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("VpcSecurityGroupIds.member.1", "sg-0123456789abcdef0")

@@ -5352,6 +5352,11 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    private boolean clusterExists(String effectiveRegion, String id) {
+        return findClusterForScope(currentAccountId(), effectiveRegion, id) != null
+                || scopedKeyExists(clusters, currentAccountId(), dbResourceKey(effectiveRegion, id));
+    }
+
     private DbCluster doCreateDbCluster(String id, String engineParam, String engineVersion,
                                         String masterUsername, String masterPassword,
                                         String databaseName, boolean iamEnabled,
@@ -5365,8 +5370,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
         String clusterArn = regionResolver.buildArn("rds", effectiveRegion, "cluster:" + id);
-        if (findClusterForScope(currentAccountId(), effectiveRegion, id) != null
-                || scopedKeyExists(clusters, currentAccountId(), dbResourceKey(effectiveRegion, id))) {
+        if (clusterExists(effectiveRegion, id)) {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "DB cluster " + id + " already exists.", 400);
         }
@@ -11512,20 +11516,16 @@ public class RdsService implements Resettable, ResourceProvider {
         return new String[] {backupWindow, maintenanceWindow};
     }
 
-    /** Rejects a security group EC2 does not know; null or empty names nothing to check. */
-    public void requireSecurityGroupsExist(String region, List<String> groupIds) {
-        if (groupIds == null) {
+    /** CreateDBCluster's group check, run after the already-exists check as AWS does and before any store. */
+    public void requireNewClusterSecurityGroups(String id, String region, List<String> groupIds) {
+        if (groupIds == null || groupIds.isEmpty()) {
             return;
         }
         String effectiveRegion = effectiveRegion(region);
-        for (String groupId : groupIds) {
-            boolean known = ec2Service.describeSecurityGroups(effectiveRegion, List.of(groupId), List.of(), Map.of())
-                    .stream().anyMatch(sg -> groupId.equals(sg.getGroupId()));
-            if (!known) {
-                throw new AwsException("InvalidParameterValue",
-                        "Invalid security group , groupId= " + groupId + ", groupName=.", 400);
-            }
+        if (clusterExists(effectiveRegion, id)) {
+            throw new AwsException("DBClusterAlreadyExistsFault", "DB cluster " + id + " already exists.", 400);
         }
+        ec2Service.requireSecurityGroupsExist(effectiveRegion, groupIds);
     }
 
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
