@@ -187,6 +187,9 @@ checked against the instance's other window. Modifications apply immediately —
 VPC's default security group), `PreferredBackupWindow`, `PreferredMaintenanceWindow` and
 `DeletionProtection`. Windows are checked like an instance's and the maintenance window is
 returned with lowercase day names; `DeleteDBCluster` is refused while `DeletionProtection` is on.
+`RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds`,
+`PreferredBackupWindow` and `DeletionProtection` the same way, and a restored cluster given no
+group is put in its VPC's default security group.
 
 !!! note "Stopping and starting"
 
