@@ -26,6 +26,10 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.model.ImageDetail;
+import io.floci.aws.services.ecr.model.ImageIdentifier;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.lambda.durable.DurableExecutionService;
 import io.floci.aws.services.lambda.durable.DurableWire;
@@ -324,6 +328,10 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
                 kinesisPoller, dynamodbStreamsPoller, storageFactory, layerService, ec2Service,
                 customResourceLiveness, durableExecutionService, objectMapper, null);
     }
+
+    // Floci's ECR, which an image function's tag is resolved to a digest through; none in a test without it.
+    @Inject
+    EcrService ecrService;
 
     @Inject
     public LambdaService(LambdaFunctionStore functionStore,
@@ -679,6 +687,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             String imageUri = (String) code.get("ImageUri");
             if (imageUri != null) {
                 fn.setImageUri(imageUri);
+                fn.setResolvedImageUri(resolveImageUri(imageUri));
             }
             String zipFileBase64 = (String) code.get("ZipFile");
             if (zipFileBase64 != null) {
@@ -961,6 +970,43 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         }
     }
 
+    /**
+     * The image's repository pinned to the digest Floci's ECR holds for its tag, which is what AWS records as
+     * Code.ResolvedImageUri when the image is deployed. Null where the image is not in Floci's ECR or its digest
+     * cannot be read (no Docker, no such tag): GetFunction then reports the URI as given.
+     */
+    private String resolveImageUri(String imageUri) {
+        Optional<EcrRegistryManager.EcrImage> image = EcrRegistryManager.ecrImage(imageUri);
+        if (image.isEmpty() || ecrService == null) {
+            return null;
+        }
+        String tag = image.get().tag();
+        String digest = image.get().digest();
+        try {
+            if (digest == null) {
+                List<ImageDetail> details = ecrService.describeImages(image.get().repository(),
+                        List.of(new ImageIdentifier(tag, null)), image.get().registryId(),
+                        image.get().region()).imageDetails();
+                if (details.isEmpty()) {
+                    return null;
+                }
+                digest = details.getFirst().getImageDigest();
+            }
+        } catch (AwsException e) {
+            LOG.debugv("Image {0} has no digest in Floci's ECR ({1}); ResolvedImageUri keeps the URI as given",
+                    imageUri, e.getMessage());
+            return null;
+        }
+        String uri = imageUri;
+        int at = uri.indexOf('@');
+        if (at >= 0) {
+            uri = uri.substring(0, at);
+        } else if (uri.endsWith(":" + tag)) {
+            uri = uri.substring(0, uri.length() - tag.length() - 1);
+        }
+        return uri + "@" + digest;
+    }
+
     private LambdaFunction updateFunctionCodeLocked(String region, LambdaFunction fn,
                                                     Map<String, Object> request) {
         String functionName = fn.getFunctionName();
@@ -981,6 +1027,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         }
         if (imageUri != null) {
             fn.setImageUri(imageUri);
+            fn.setResolvedImageUri(resolveImageUri(imageUri));
         }
         if (s3Bucket != null && s3Key != null) {
             if ("hot-reload".equals(s3Bucket)) {
@@ -2732,6 +2779,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             snapshot.setS3Key(fn.getS3Key());
             snapshot.setHotReloadHostPath(fn.getHotReloadHostPath());
             snapshot.setImageUri(fn.getImageUri());
+            snapshot.setResolvedImageUri(fn.getResolvedImageUri());
             snapshot.setImageConfigCommand(fn.getImageConfigCommand());
             snapshot.setImageConfigEntryPoint(fn.getImageConfigEntryPoint());
             snapshot.setImageConfigWorkingDirectory(fn.getImageConfigWorkingDirectory());

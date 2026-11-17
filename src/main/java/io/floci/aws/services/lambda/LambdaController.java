@@ -109,7 +109,8 @@ public class LambdaController {
         if ("Image".equals(fn.getPackageType()) && fn.getImageUri() != null) {
             code.put("RepositoryType", "ECR");
             code.put("ImageUri", fn.getImageUri());
-            code.put("ResolvedImageUri", fn.getImageUri());
+            code.put("ResolvedImageUri",
+                    fn.getResolvedImageUri() != null ? fn.getResolvedImageUri() : fn.getImageUri());
         } else {
             String base = uriInfo.getBaseUri().toString();
             if (base.endsWith("/")) {
