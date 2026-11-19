@@ -5429,6 +5429,11 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
         cluster.setVpcId(placement.vpcId());
+        if (!isBlank(placement.vpcId())) {
+            // none named yet: AWS puts the cluster in its VPC's default group; EC2 without one leaves none
+            ec2Service.defaultSecurityGroupOf(effectiveRegion, placement.vpcId())
+                    .ifPresent(group -> cluster.setVpcSecurityGroupIds(List.of(group.getGroupId())));
+        }
         cluster.setAvailabilityZone(placement.availabilityZone());
         cluster.setMultiAz(placement.multiAz());
         cluster.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
@@ -11521,10 +11526,6 @@ public class RdsService implements Resettable, ResourceProvider {
         validateClusterWindows(cluster, backupWindow, maintenanceWindow);
         if (vpcSecurityGroupIds != null) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
-        } else if (cluster.getVpcSecurityGroupIds().isEmpty() && !isBlank(cluster.getVpcId())) {
-            // none named: AWS puts the cluster in its VPC's default group; EC2 without one leaves none
-            ec2Service.defaultSecurityGroupOf(effectiveRegion, cluster.getVpcId())
-                    .ifPresent(group -> cluster.setVpcSecurityGroupIds(List.of(group.getGroupId())));
         }
         if (backupWindow != null) {
             cluster.setPreferredBackupWindow(backupWindow);

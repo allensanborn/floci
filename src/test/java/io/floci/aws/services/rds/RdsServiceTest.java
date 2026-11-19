@@ -1589,6 +1589,25 @@ class RdsServiceTest {
     }
 
     @Test
+    void clusterCreatedWithNoGroupsGetsTheVpcDefaultAndModifyOnlyStoresWhatItNames() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+        DbCluster created = rdsService.createDbCluster("sg-cluster", "aurora-postgresql", null,
+                "admin", "password", "dbname", false, null);
+        assertEquals(List.of("sg-default"), created.getVpcSecurityGroupIds());
+
+        // an unrelated Modify leaves a null-groups request alone
+        assertEquals(List.of("sg-default"), rdsService.setDbClusterRequestSettings(
+                "sg-cluster", "us-east-1", null, null, null, true).getVpcSecurityGroupIds());
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", List.of(), null, null, null);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+        // ... and does not re-assign the default to a cluster stored with no groups
+        rdsService.setDbClusterRequestSettings("sg-cluster", "us-east-1", null, null, null, false);
+        assertEquals(List.of(), rdsService.getDbCluster("sg-cluster").getVpcSecurityGroupIds());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistPubliclyAccessible() {
         DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",

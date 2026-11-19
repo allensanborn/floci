@@ -34,7 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(RdsMockProfile.class)
 class RdsClusterVpcSecurityGroupsIntegrationTest {
 
-    private static final String ID = "vpc-sg-cluster";
+    private static final String ID = "vpc-sg-cluster-" + System.nanoTime();
 
     private static RequestSpecification rds(String action) {
         return given().header("Authorization",

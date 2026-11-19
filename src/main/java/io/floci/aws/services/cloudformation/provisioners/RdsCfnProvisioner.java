@@ -645,6 +645,17 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             RdsService.requireDataApiEngine(resolveOptional(props, "Engine", engine));
         }
         boolean created = cluster == null;
+        String backupWindow = resolveOptional(props, "PreferredBackupWindow", engine);
+        String maintenanceWindow = resolveOptional(props, "PreferredMaintenanceWindow", engine);
+        if (created) {
+            // validated before the cluster exists, so a bad window leaves none behind
+            String[] windows = RdsService.resolveClusterCreateWindows(backupWindow, maintenanceWindow);
+            backupWindow = windows[0];
+            maintenanceWindow = windows[1];
+        }
+        List<String> securityGroupIds = props.has("VpcSecurityGroupIds")
+                ? resolveStringList(props, "VpcSecurityGroupIds", engine) : null;
+        Boolean deletionProtection = parseOptionalStrictBoolProp(props, "DeletionProtection", engine);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -671,6 +682,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted);
         }
+        rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
+                securityGroupIds, backupWindow, maintenanceWindow, deletionProtection);
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         // EnableHttpEndpoint updates with no interruption; a template that leaves it out wants it off.

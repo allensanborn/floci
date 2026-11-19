@@ -190,6 +190,9 @@ returned with lowercase day names; `DeleteDBCluster` is refused while `DeletionP
 `RestoreDBClusterFromSnapshot` and `RestoreDBClusterToPointInTime` take `VpcSecurityGroupIds`,
 `PreferredBackupWindow` and `DeletionProtection` the same way, and a restored cluster given no
 group is put in its VPC's default security group.
+`AWS::RDS::DBCluster` applies `VpcSecurityGroupIds`, `DeletionProtection`, `PreferredBackupWindow` and
+`PreferredMaintenanceWindow` the same way, and a cluster whose template names no groups gets its VPC's
+default security group. `ModifyDBCluster` leaves the groups alone unless it names them.
 
 !!! note "Stopping and starting"
 
