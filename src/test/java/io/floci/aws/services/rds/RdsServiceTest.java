@@ -1608,6 +1608,24 @@ class RdsServiceTest {
     }
 
     @Test
+    void restoredAndGlobalMemberClustersGetTheVpcDefaultGroup() {
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf(eq("us-east-1"), any())).thenReturn(Optional.of(defaultGroup));
+
+        clusterSnapshotOfNewCluster("csnap");
+        assertEquals(List.of("sg-default"), rdsService.restoreDbClusterFromSnapshot("restored-sg", "csnap",
+                "aurora-postgresql", null, null, null, null, null, null, null, null, null, "us-east-1")
+                .getVpcSecurityGroupIds());
+
+        rdsService.createGlobalCluster("sg-global", null, "aurora-postgresql", "16.3",
+                "dbname", false, false, Map.of(), "us-east-1");
+        assertEquals(List.of("sg-default"), rdsService.createDbClusterInGlobalCluster("sg-global", "global-member",
+                "aurora-postgresql", null, "admin", "password", "dbname", false, null, null, null, false,
+                "us-east-1", null, null, null, false, null, null, false).getVpcSecurityGroupIds());
+    }
+
+    @Test
     void createAndModifyDbInstancePersistPubliclyAccessible() {
         DbInstance instance = rdsService.createDbInstance("pubdb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",

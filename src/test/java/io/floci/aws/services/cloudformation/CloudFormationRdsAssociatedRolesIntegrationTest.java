@@ -274,6 +274,43 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         }
     }
 
+    @Test
+    void aClusterWithNoTemplateGroupsGetsTheVpcDefaultAndAnUpdateKeepsStoredGroups() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-sg-" + suffix;
+        String clusterId = "cfn-sg-cluster-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "%s"%s}}}}
+                """;
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId, "password123", ""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            List<String> defaultGroup = clusterGroups(clusterId);
+            assertEquals(1, defaultGroup.size(), defaultGroup.toString());
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "password123",
+                    ", \"VpcSecurityGroupIds\": [\"sg-named\"]"));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-named"), clusterGroups(clusterId));
+
+            // An update that leaves the groups out keeps what is stored.
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "password456", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of("sg-named"), clusterGroups(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    private static List<String> clusterGroups(String clusterId) {
+        XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
+                .when().post("/").then().statusCode(200).extract().xmlPath();
+        return xml.getList("**.findAll { it.name() == 'VpcSecurityGroupId' }", String.class);
+    }
+
     private static String template(String clusterId, String instanceId, String clusterRoles) {
         return """
                 {"Resources": {

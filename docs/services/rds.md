@@ -193,6 +193,7 @@ group is put in its VPC's default security group.
 `AWS::RDS::DBCluster` applies `VpcSecurityGroupIds`, `DeletionProtection`, `PreferredBackupWindow` and
 `PreferredMaintenanceWindow` the same way, and a cluster whose template names no groups gets its VPC's
 default security group. `ModifyDBCluster` leaves the groups alone unless it names them.
+A CloudFormation update that omits these properties keeps the stored values.
 
 !!! note "Stopping and starting"
 
