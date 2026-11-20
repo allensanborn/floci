@@ -5286,6 +5286,23 @@ class RdsServiceTest {
     }
 
     @Test
+    void aSubnetGroupUnderAnUnprefixedLegacyKeyWithAMixedCaseNameIsListedDescribedAndDeleted() {
+        InMemoryStorage<String, DbSubnetGroup> raw = new InMemoryStorage<>();
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new AccountAwareStorageBackend<>(raw, null, "123456789012"));
+        DbSubnetGroup legacy = new DbSubnetGroup("CaseGroup", "d", "vpc-1", List.of("subnet-1"), Map.of());
+        legacy.setDbSubnetGroupArn(regionResolver.buildArn("rds", "us-east-1", "subgrp:CaseGroup"));
+        raw.put("us-east-1::CaseGroup", legacy);
+
+        assertEquals(List.of("casegroup"), service.listDbSubnetGroups(null).stream()
+                .map(DbSubnetGroup::getDbSubnetGroupName).filter(n -> !n.equals("default")).toList());
+        assertEquals("casegroup", service.getDbSubnetGroup("CaseGroup").getDbSubnetGroupName());
+        service.deleteDbSubnetGroup("CaseGroup");
+        assertEquals(List.of(), raw.scan(k -> true));
+    }
+
+    @Test
     void listingSubnetGroupsRenamesALegacyMixedCaseGroup() {
         InMemoryStorage<String, DbSubnetGroup> storedGroups = new InMemoryStorage<>();
         RdsService service = legacySubnetGroupService(storedGroups, null);

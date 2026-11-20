@@ -10810,8 +10810,16 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         // ponytail: O(groups) scan on a miss; a lower-case index if a lookup miss gets hot.
         String effectiveRegion = effectiveRegion(region);
-        List<DbSubnetGroup> stored = subnetGroups instanceof AccountAwareStorageBackend<DbSubnetGroup> aware
-                ? aware.scanForAccount(accountId, k -> true) : subnetGroups.scan(k -> true);
+        List<DbSubnetGroup> stored = new ArrayList<>();
+        List<DbSubnetGroup> unprefixed = new ArrayList<>();
+        if (subnetGroups instanceof AccountAwareStorageBackend<DbSubnetGroup> aware) {
+            stored.addAll(aware.scanForAccount(accountId, k -> true));
+            // Keys from before accounts were prefixed; the list reads these too.
+            unprefixed.addAll(aware.scanUnscopedLegacy(g -> g != null && g.getDbSubnetGroupName() != null));
+            stored.addAll(unprefixed);
+        } else {
+            stored.addAll(subnetGroups.scan(k -> true));
+        }
         for (DbSubnetGroup group : stored) {
             String oldName = group.getDbSubnetGroupName();
             String oldArn = group.getDbSubnetGroupArn();
@@ -10820,9 +10828,14 @@ public class RdsService implements Resettable, ResourceProvider {
                     "subgrp", oldName)) {
                 group.setDbSubnetGroupName(groupName);
                 group.setDbSubnetGroupArn(regionResolver.buildArn("rds", effectiveRegion, "subgrp:" + groupName));
+                // Tags first: a failure there leaves the legacy record in place for a later retry.
+                moveTags(effectiveRegion, oldArn, group.getDbSubnetGroupArn());
                 putSubnetGroupForScope(accountId, effectiveRegion, groupName, group);
                 deleteSubnetGroupForScope(accountId, effectiveRegion, oldName);
-                moveTags(effectiveRegion, oldArn, group.getDbSubnetGroupArn());
+                if (unprefixed.contains(group)) {
+                    ((AccountAwareStorageBackend<DbSubnetGroup>) subnetGroups)
+                            .deleteRaw(dbResourceKey(effectiveRegion, oldName));
+                }
                 return group;
             }
         }
