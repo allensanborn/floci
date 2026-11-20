@@ -77,6 +77,14 @@ class Route53ServiceTest {
     }
 
     @Test
+    void createHostedZoneStoresNameLowercased() {
+        Route53Service service = newService();
+        String id = service.createHostedZone("Svc-KqVD.Internal", "mixed-case", null, null).zone().getId();
+
+        assertEquals("svc-kqvd.internal.", service.getHostedZone(id).getName());
+    }
+
+    @Test
     void hostedZonesByNameUseReversedLabelsAndFilteredPageBoundary() {
         Route53Service service = newService();
         String firstId = service.createHostedZone("z.example.com.", "byname-first", null, null).zone().getId();
@@ -88,6 +96,17 @@ class Route53ServiceTest {
         Route53Pagination.Page<HostedZone> lastPage = service.pageHostedZonesByName("a.other.com.", null, 1);
         assertEquals(List.of(lastId), lastPage.items().stream().map(HostedZone::getId).toList());
         assertFalse(lastPage.isTruncated());
+    }
+
+    @Test
+    void hostedZonesByNameMatchesAMixedCaseQueryAgainstLowercaseStoredNames() {
+        Route53Service service = newService();
+        service.createHostedZone("apple.com", "before", null, null);
+        String id = service.createHostedZone("zone.example.com", "mixed-query", null, null).zone().getId();
+
+        // apple.com sorts before zone.example.com, so an unlowercased start key would wrongly include it
+        assertEquals(List.of(id), service.listHostedZonesByName("Zone.Example.COM", 0).stream()
+                .map(HostedZone::getId).toList());
     }
 
     @Test
@@ -159,11 +178,12 @@ class Route53ServiceTest {
     @Test
     void rejectedBatchDoesNotRenameSharedStoredRecord() {
         Route53Service service = newService();
-        String zone = service.createHostedZone("EXAMPLE.COM", "shared-record", null, null).zone().getId();
+        String zone = service.createHostedZone("example.com", "shared-record", null, null).zone().getId();
         ResourceRecordSet stored = service.listResourceRecordSets(zone, null, null, 100).stream()
                 .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow();
+        // zone names are stored lowercase, so give the shared record a mixed-case name a leaked rename would show
+        stored.setName("EXAMPLE.COM.");
         String originalName = stored.getName();
-        assertEquals("EXAMPLE.COM.", originalName);
         assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zone,
                 List.of(change("UPSERT", stored), change("DELETE", aRecord("missing.example.com.", 60, "192.0.2.1"))), null));
         assertEquals(originalName, stored.getName());
