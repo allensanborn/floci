@@ -5303,6 +5303,27 @@ class RdsServiceTest {
     }
 
     @Test
+    void anUnprefixedMixedCaseSubnetGroupOfAnotherAccountIsLeftAloneByTheDefaultAccount() {
+        InMemoryStorage<String, DbSubnetGroup> raw = new InMemoryStorage<>();
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new AccountAwareStorageBackend<>(raw, null, "123456789012"));
+        DbSubnetGroup other = new DbSubnetGroup("CaseGroup", "d", "vpc-1", List.of("subnet-1"), Map.of());
+        other.setDbSubnetGroupArn("arn:aws:rds:us-east-1:999999999999:subgrp:CaseGroup");
+        raw.put("us-east-1::CaseGroup", other);
+
+        assertEquals(List.of(), service.listDbSubnetGroups(null).stream()
+                .map(DbSubnetGroup::getDbSubnetGroupName).filter(n -> !n.equals("default")).toList());
+        assertThrows(AwsException.class, () -> service.getDbSubnetGroup("CaseGroup"));
+        assertThrows(AwsException.class, () -> service.deleteDbSubnetGroup("CaseGroup"));
+
+        assertEquals(1, raw.scan(k -> true).size());
+        assertEquals("CaseGroup", raw.get("us-east-1::CaseGroup").orElseThrow().getDbSubnetGroupName());
+        assertEquals("arn:aws:rds:us-east-1:999999999999:subgrp:CaseGroup",
+                raw.get("us-east-1::CaseGroup").orElseThrow().getDbSubnetGroupArn());
+    }
+
+    @Test
     void listingSubnetGroupsRenamesALegacyMixedCaseGroup() {
         InMemoryStorage<String, DbSubnetGroup> storedGroups = new InMemoryStorage<>();
         RdsService service = legacySubnetGroupService(storedGroups, null);
