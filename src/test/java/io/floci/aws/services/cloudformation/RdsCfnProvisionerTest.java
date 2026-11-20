@@ -308,7 +308,7 @@ class RdsCfnProvisionerTest {
 
         // An update that leaves the property out turns the endpoint off again.
         when(rdsService.getDbCluster("dataapi")).thenReturn(enabled);
-        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
+        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
         DbCluster disabled = mock(DbCluster.class);
         when(disabled.getDbClusterIdentifier()).thenReturn("dataapi");
         when(rdsService.setHttpEndpoint("us-east-1", "dataapi", false)).thenReturn(disabled);
@@ -324,7 +324,7 @@ class RdsCfnProvisionerTest {
         when(enabled.getDbClusterIdentifier()).thenReturn("dataapi");
         when(enabled.isHttpEndpointEnabled()).thenReturn(true);
         when(rdsService.getDbCluster("dataapi")).thenReturn(enabled);
-        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
+        when(rdsService.modifyDbCluster(eq("dataapi"), any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(enabled);
 
         StackResource r = provisionExisting("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"dataapi","Engine":"aurora-postgresql","EnableHttpEndpoint":"yes"}
@@ -333,7 +333,7 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("EnableHttpEndpoint must be true or false"), r.getStatusReason());
         verify(rdsService, never()).setHttpEndpoint(any(), any(), anyBoolean());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -1468,7 +1468,7 @@ class RdsCfnProvisionerTest {
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
-                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
 
         StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
@@ -1480,7 +1480,7 @@ class RdsCfnProvisionerTest {
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "secret", false,
-                null, null, null, "us-east-1");
+                null, null, null, false, null, "us-east-1");
     }
 
     private static final String PRIOR_CLUSTER = "my-stack-cluster-0123456789ab";
@@ -1532,7 +1532,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
                 "admin", "secret", null, false, null, null, null, false, "us-east-1",
                 null, null, null, false, null, "serverless", false, null, false);
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).deleteDbCluster(any(), any());
 
         // The engine announces and runs the cleanup after the stack update has committed.
@@ -1566,7 +1566,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null,
                 null, null, null, false, null, null, null, false, "us-east-1",
                 null, null, null, false, null, null, true, null, false);
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
         verify(rdsService, never()).deleteDbCluster(any(), any());
     }
@@ -1592,7 +1592,7 @@ class RdsCfnProvisionerTest {
         assertEquals(PRIOR_CLUSTER, r.getPhysicalId(), "the resource still names the prior cluster");
         assertEquals(PRIOR_CLUSTER, r.getAttributes().get("DBClusterIdentifier"));
         verify(rdsService, never()).deleteDbCluster(any(), any());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertFalse(provisioner.hasReplacementUpdate(r), "nothing is owed to the cleanup");
         assertFalse(provisioner.rollbackUpdate(r), "there is no replacement to undo");
     }
@@ -1756,7 +1756,7 @@ class RdsCfnProvisionerTest {
                 "custom-named resource requires replacing. Rename mycluster and update the stack again."));
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).deleteDbCluster(any(), any());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
@@ -1790,7 +1790,7 @@ class RdsCfnProvisionerTest {
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
-                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
 
         StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
@@ -1804,7 +1804,7 @@ class RdsCfnProvisionerTest {
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "rotated", false,
-                null, null, null, "us-east-1");
+                null, null, null, false, null, "us-east-1");
     }
 
     @Test
@@ -1817,7 +1817,7 @@ class RdsCfnProvisionerTest {
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
         when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
-                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
 
         StackResource r = provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
                 {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql",
@@ -1826,7 +1826,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus());
         verify(rdsService, never()).deleteDbCluster(any(), any());
-        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, "us-east-1");
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, false, null, "us-east-1");
     }
 
     // ── the remaining createOnlyProperties of AWS::RDS::DBCluster ──
@@ -1847,7 +1847,7 @@ class RdsCfnProvisionerTest {
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn(created.getPhysicalId());
         when(rdsService.modifyDbCluster(eq(created.getPhysicalId()), any(), anyBoolean(),
-                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
         return created;
     }
 
@@ -1880,7 +1880,7 @@ class RdsCfnProvisionerTest {
         verify(rdsService).createDbCluster(replacement, "aurora-postgresql", null, null, null,
                 "reports", false, null, null, null, false, "us-east-1",
                 null, null, null, false, null, null, false, null, false);
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).deleteDbCluster(any(), any());
         assertEquals(PRIOR_CLUSTER, provisioner.updateCleanupPhysicalId(r));
     }
@@ -1915,7 +1915,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         assertNotEquals(prior, r.getPhysicalId());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(rdsService, never()).deleteDbCluster(any(), any());
         assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains(after));
         assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
@@ -1945,7 +1945,7 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         assertEquals(created.getPhysicalId(), r.getPhysicalId());
         verify(rdsService).modifyDbCluster(created.getPhysicalId(), "rotated", false,
-                null, null, null, "us-east-1");
+                null, null, null, false, null, "us-east-1");
         verify(rdsService, times(1)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
@@ -1974,7 +1974,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         assertNotEquals(prior, r.getPhysicalId());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(prior, provisioner.updateCleanupPhysicalId(r));
         assertTrue(r.getAttributes().get(CREATE_ONLY_ATTR).contains("\"PubliclyAccessible\":\"" + value + "\""));
 
@@ -1996,7 +1996,7 @@ class RdsCfnProvisionerTest {
         DbCluster reconciled = mock(DbCluster.class);
         when(reconciled.getDbClusterIdentifier()).thenReturn(PRIOR_CLUSTER);
         when(rdsService.modifyDbCluster(eq(PRIOR_CLUSTER), any(), anyBoolean(),
-                any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
 
         StackResource first = updateUnnamedCluster("""
                 {"Engine":"aurora-postgresql","KmsKeyId":"alias/aws/rds"}
@@ -2004,7 +2004,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", first.getStatus(), first.getStatusReason());
         assertEquals(PRIOR_CLUSTER, first.getPhysicalId());
-        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, "us-east-1");
+        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, false, null, "us-east-1");
         assertTrue(first.getAttributes().get(CREATE_ONLY_ATTR).contains("alias/aws/rds"));
         assertEquals("", first.getAttributes().get(CREATE_ONLY_PRIOR_ATTR),
                 "a rollback of this update drops the record again");
@@ -2045,7 +2045,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", again.getStatus(), again.getStatusReason());
         assertEquals(prior, again.getPhysicalId(), "the rolled-back template describes the prior cluster");
-        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, "us-east-1");
+        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, false, null, "us-east-1");
         verify(rdsService, times(2)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
@@ -2068,7 +2068,7 @@ class RdsCfnProvisionerTest {
                 "custom-named resource requires replacing. Rename mycluster and update the stack again."));
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).deleteDbCluster(any(), any());
-        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     // ── VPCSecurityGroups and StorageEncrypted of AWS::RDS::DBInstance ──

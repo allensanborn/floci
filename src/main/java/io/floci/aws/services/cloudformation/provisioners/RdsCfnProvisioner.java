@@ -664,7 +664,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     parseServerlessV2Capacity(props, "MinCapacity", engine),
                     parseServerlessV2Capacity(props, "MaxCapacity", engine),
-                    parseServerlessV2SecondsUntilAutoPause(props, engine), region);
+                    parseServerlessV2SecondsUntilAutoPause(props, engine),
+                    parseBoolProp(props, "ManageMasterUserPassword", engine),
+                    masterUserSecretKmsKeyId(props, engine), region);
         } else {
             Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
             Double serverlessV2MaxCapacity = parseServerlessV2Capacity(props, "MaxCapacity", engine);
@@ -682,7 +684,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     parseBoolProp(props, "ManageMasterUserPassword", engine),
-                    resolveOptional(props, "MasterUserSecretKmsKeyId", engine),
+                    masterUserSecretKmsKeyId(props, engine),
                     engineMode, storageEncrypted, null, deletionProtection);
         }
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
@@ -708,6 +710,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cluster.getDbClusterResourceId() != null) {
             r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
+        }
+        if (cluster.getMasterUserSecretArn() != null) {
+            r.getAttributes().put("MasterUserSecret.SecretArn", cluster.getMasterUserSecretArn());
+        } else {
+            r.getAttributes().remove("MasterUserSecret.SecretArn");
         }
         recordDbClusterCreateOnly(r, ctx, attributesBefore, createOnly);
         // A provision that left the resource with a new physical id replaced the cluster: the
@@ -1307,6 +1314,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             return Boolean.parseBoolean(text);
         }
         throw new AwsException("ValidationError", name + " must be true or false, not " + text + ".", 400);
+    }
+
+    /** The {@code MasterUserSecret.KmsKeyId} property, which is where the template names the secret's key. */
+    private String masterUserSecretKmsKeyId(JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode secret = props == null ? null : props.get("MasterUserSecret");
+        return secret == null || !secret.has("KmsKeyId") ? null
+                : resolveOptional(secret, "KmsKeyId", engine);
     }
 
     private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
