@@ -10792,7 +10792,35 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * The group named {@code groupName}. A group an older build stored under a mixed-case name is
+     * renamed to lower case the first time it is looked up, so it keeps working.
+     */
     private synchronized DbSubnetGroup findSubnetGroupForScope(
+            String accountId, String region, String groupName) {
+        DbSubnetGroup found = findExactSubnetGroupForScope(accountId, region, groupName);
+        if (found != null || groupName == null) {
+            return found;
+        }
+        String effectiveRegion = effectiveRegion(region);
+        List<DbSubnetGroup> stored = subnetGroups instanceof AccountAwareStorageBackend<DbSubnetGroup> aware
+                ? aware.scanForAccount(accountId, k -> true) : subnetGroups.scan(k -> true);
+        for (DbSubnetGroup group : stored) {
+            String oldName = group.getDbSubnetGroupName();
+            if (oldName != null && !oldName.equals(groupName) && oldName.equalsIgnoreCase(groupName)
+                    && hasRdsResourceIdentity(group.getDbSubnetGroupArn(), accountId, effectiveRegion,
+                    "subgrp", oldName)) {
+                group.setDbSubnetGroupName(groupName);
+                group.setDbSubnetGroupArn(regionResolver.buildArn("rds", effectiveRegion, "subgrp:" + groupName));
+                putSubnetGroupForScope(accountId, effectiveRegion, groupName, group);
+                deleteSubnetGroupForScope(accountId, effectiveRegion, oldName);
+                return group;
+            }
+        }
+        return null;
+    }
+
+    private DbSubnetGroup findExactSubnetGroupForScope(
             String accountId, String region, String groupName) {
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, groupName);

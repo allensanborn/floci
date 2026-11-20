@@ -45,9 +45,23 @@ class RdsSubnetGroupNameCaseIntegrationTest {
                     .masterUsername("dbadmin").masterUserPassword("password123")
                     .dbSubnetGroupName("CaseGroup")).dbInstance().dbSubnetGroup().dbSubnetGroupName());
 
+            // ModifyDBSubnetGroup and ModifyDBInstance find the group by any case, and the instance keeps
+            // the stored name.
+            List<String> moreSubnets = List.of(subnet(ec2, vpcId, "10.51.3.0/24", "us-east-1a"),
+                    subnet(ec2, vpcId, "10.51.4.0/24", "us-east-1b"));
+            assertEquals("casegroup", rds.modifyDBSubnetGroup(request -> request.dbSubnetGroupName("CASEGROUP")
+                    .subnetIds(moreSubnets)).dbSubnetGroup().dbSubnetGroupName());
+            rds.createDBSubnetGroup(request -> request.dbSubnetGroupName("OtherGroup")
+                    .dbSubnetGroupDescription("d").subnetIds(moreSubnets));
+            assertEquals("othergroup", rds.modifyDBInstance(request -> request.dbInstanceIdentifier("case-db")
+                    .dbSubnetGroupName("OtherGroup")).dbInstance().dbSubnetGroup().dbSubnetGroupName());
+            assertEquals("othergroup", rds.describeDBInstances(request -> request.dbInstanceIdentifier("case-db"))
+                    .dbInstances().getFirst().dbSubnetGroup().dbSubnetGroupName());
+
             rds.deleteDBInstance(request -> request.dbInstanceIdentifier("case-db").skipFinalSnapshot(true));
             rds.deleteDBCluster(request -> request.dbClusterIdentifier("case-cluster").skipFinalSnapshot(true));
             rds.deleteDBSubnetGroup(request -> request.dbSubnetGroupName("CaseGroup"));
+            rds.deleteDBSubnetGroup(request -> request.dbSubnetGroupName("OtherGroup"));
             assertEquals(0, rds.describeDBSubnetGroups().dbSubnetGroups().stream()
                     .filter(g -> g.dbSubnetGroupName().equals("casegroup")).count());
         }

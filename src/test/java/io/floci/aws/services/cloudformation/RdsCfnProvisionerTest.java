@@ -1399,6 +1399,26 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void updateStackReconcilesAMixedCaseDbSubnetGroupNameAgainstItsLowerCasePhysicalId() {
+        // RDS stores the name in lower case, so the prior physical id is "my-subnet-group" while the
+        // template keeps naming the group "My-Subnet-Group".
+        when(rdsService.getDbSubnetGroup("my-subnet-group", "us-east-1")).thenReturn(mock(DbSubnetGroup.class));
+        DbSubnetGroup reconciled = mock(DbSubnetGroup.class);
+        when(reconciled.getDbSubnetGroupName()).thenReturn("my-subnet-group");
+        when(rdsService.modifyDbSubnetGroup(eq("my-subnet-group"), anyList(), eq("us-east-1")))
+                .thenReturn(reconciled);
+
+        StackResource r = provisionUpdate("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"My-Subnet-Group","DBSubnetGroupDescription":"db subnets",
+                 "SubnetIds":["subnet-a","subnet-b"]}
+                """, "my-subnet-group");
+
+        assertEquals("my-subnet-group", r.getPhysicalId());
+        verify(rdsService, never()).createDbSubnetGroup(any(), any(), anyList(), any());
+        verify(rdsService).modifyDbSubnetGroup("my-subnet-group", List.of("subnet-a", "subnet-b"), "us-east-1");
+    }
+
+    @Test
     void updateStackNoOpsExistingDbParameterGroupInsteadOfRecreating() {
         // DBParameterGroupName/Family/Description are all immutable on real AWS, so an unchanged
         // re-apply must no-op rather than hit createDbParameterGroup's DBParameterGroupAlreadyExists.

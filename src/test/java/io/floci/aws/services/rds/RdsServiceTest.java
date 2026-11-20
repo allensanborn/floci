@@ -5224,6 +5224,27 @@ class RdsServiceTest {
     }
 
     @Test
+    void aSubnetGroupStoredWithAMixedCaseNameByAnOlderBuildIsFoundAndDeleted() {
+        InMemoryStorage<String, DbSubnetGroup> storedGroups = new InMemoryStorage<>();
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), storedGroups);
+        DbSubnetGroup legacy = new DbSubnetGroup("CaseGroup", "d", "vpc-1", List.of("subnet-1"), Map.of());
+        legacy.setDbSubnetGroupArn(regionResolver.buildArn("rds", "us-east-1", "subgrp:CaseGroup"));
+        storedGroups.put("us-east-1::CaseGroup", legacy);
+
+        assertEquals("casegroup", service.getDbSubnetGroup("CaseGroup").getDbSubnetGroupName());
+        assertEquals(List.of("casegroup"), service.listDbSubnetGroups("CaseGroup").stream()
+                .map(DbSubnetGroup::getDbSubnetGroupName).filter(n -> !n.equals("default")).toList());
+        assertEquals(regionResolver.buildArn("rds", "us-east-1", "subgrp:casegroup"),
+                service.getDbSubnetGroup("casegroup").getDbSubnetGroupArn());
+
+        service.deleteDbSubnetGroup("CaseGroup");
+        assertThrows(AwsException.class, () -> service.getDbSubnetGroup("casegroup"));
+        assertEquals(0, storedGroups.scan(k -> true).size());
+    }
+
+    @Test
     void dbSubnetGroupRoundTrip() {
         DbSubnetGroup group = rdsService.createDbSubnetGroup(
                 "sample-db-subnets", "test", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));

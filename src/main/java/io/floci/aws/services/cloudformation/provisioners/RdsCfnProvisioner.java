@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -276,7 +277,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         String priorPhysicalId = r.getPhysicalId();
         String name;
         if (explicitName != null && !explicitName.isBlank()) {
-            name = explicitName;
+            name = explicitName.toLowerCase(Locale.ROOT); // RDS stores the name in lower case
         } else if (priorPhysicalId != null) {
             // No explicit name: keep the name RDS already has on file instead of generating a fresh
             // one on every update, which would otherwise orphan the previously provisioned group.
