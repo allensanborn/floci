@@ -1517,6 +1517,44 @@ class RdsCfnProvisionerTest {
         updateClusterVerifyingSecretArguments("", null, null);
     }
 
+    private void updateClusterWithPriorManage(String previous, String desired, Boolean expected) {
+        DbCluster existing = mock(DbCluster.class);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+        String base = "\"DBClusterIdentifier\":\"mycluster\",\"Engine\":\"aurora-postgresql\"";
+
+        provisioner.provision("Cluster", "AWS::RDS::DBCluster",
+                props("{" + base + (desired == null ? "" : ",\"ManageMasterUserPassword\":" + desired) + "}"),
+                engine(), "us-east-1", "000000000000", "my-stack", "mycluster", Map.of(), event -> { },
+                props("{" + base + (previous == null ? "" : ",\"ManageMasterUserPassword\":" + previous) + "}"));
+
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, expected, null,
+                "us-east-1");
+    }
+
+    @Test
+    void updateStackTurnsManagementOffWhenThePreviousTemplateSetItAndThisOneOmitsIt() {
+        updateClusterWithPriorManage("true", null, Boolean.FALSE);
+    }
+
+    @Test
+    void updateStackLeavesManagementAloneWhenThePreviousTemplateSetItFalseAndThisOneOmitsIt() {
+        updateClusterWithPriorManage("false", null, null);
+    }
+
+    @Test
+    void updateStackLeavesManagementAloneWhenBothTemplatesSetItFalse() {
+        updateClusterWithPriorManage("false", "false", null);
+    }
+
+    @Test
+    void updateStackTurnsManagementOffWhenItIsNewlySetFalse() {
+        updateClusterWithPriorManage(null, "false", Boolean.FALSE);
+    }
+
     private static final String PRIOR_CLUSTER = "my-stack-cluster-0123456789ab";
 
     /** RdsService hands back a cluster named after whatever id the provisioner asked to create. */

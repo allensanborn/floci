@@ -644,7 +644,7 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 
 ## RDS managed master password
 
-`AWS::RDS::DBCluster` applies `ManageMasterUserPassword` and `MasterUserSecret.KmsKeyId` on create and on `UpdateStack`, as `CreateDBCluster` / `ModifyDBCluster` do. A managed cluster has a Secrets Manager secret that `Fn::GetAtt` reads as `MasterUserSecret.SecretArn`; an update that drops the flag from a template that had declared it turns management off and removes the secret and its attribute, while a stack that never declared it leaves a secret set outside the stack alone. AWS requires a `MasterUserPassword` when an update stops managing the password.
+`AWS::RDS::DBCluster` applies `ManageMasterUserPassword` and `MasterUserSecret.KmsKeyId` on create and on `UpdateStack`, as `CreateDBCluster` / `ModifyDBCluster` do. A managed cluster has a Secrets Manager secret that `Fn::GetAtt` reads as `MasterUserSecret.SecretArn`; an update that sets the flag to false, or drops it after the previous template set it to true, turns management off and removes the secret and its attribute, while a stack that never declared it leaves a secret set outside the stack alone. AWS requires a `MasterUserPassword` when an update stops managing the password.
 
 ## RDS DB instance security groups and encryption
 
