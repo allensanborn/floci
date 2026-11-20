@@ -344,7 +344,7 @@ public class CognitoJsonHandler {
     }
 
     private Response handleDescribeUserPoolClient(JsonNode request) {
-        UserPoolClient client = service.describeUserPoolClient(
+        UserPoolClient client = service.addressedUserPoolClient(
                 request.path("UserPoolId").asText(),
                 request.path("ClientId").asText()
         );

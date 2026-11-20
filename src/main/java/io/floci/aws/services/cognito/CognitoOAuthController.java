@@ -48,6 +48,8 @@ import java.util.regex.Pattern;
 @Produces(MediaType.APPLICATION_JSON)
 public class CognitoOAuthController {
 
+    /** What the hosted sign-in form shows for a wrong password; not the IDP API's wording, which ends in a period. */
+    private static final String PAGE_INCORRECT_CREDENTIALS = "Incorrect username or password";
     private static final Logger LOG = Logger.getLogger(CognitoOAuthController.class);
 
     /** The {@code identity_provider} value, and the SupportedIdentityProviders entry, of the pool's own users. */
@@ -290,7 +292,7 @@ public class CognitoOAuthController {
         Optional<String> code = issueAuthorizationCode(sessionId, client, request);
         if (code.isEmpty()) {
             return firstPage(requestContext, request, choiceBased, Response.Status.BAD_REQUEST,
-                    CognitoAuthFlowHandler.INCORRECT_CREDENTIALS, username);
+                    PAGE_INCORRECT_CREDENTIALS, username);
         }
         return Response.fromResponse(redirectWithCode(request, code.get()))
                 .header(HttpHeaders.SET_COOKIE, cookie(SESSION_COOKIE, sessionId,
@@ -1050,8 +1052,9 @@ public class CognitoOAuthController {
 
     /** The reason a sign-in failed, as the form shows it. An unknown user reads the same as a wrong password. */
     private static String signInError(AwsException e) {
-        if ("UserNotFoundException".equals(e.getErrorCode())) {
-            return CognitoAuthFlowHandler.INCORRECT_CREDENTIALS;
+        if ("UserNotFoundException".equals(e.getErrorCode())
+                || CognitoErrors.INCORRECT_CREDENTIALS.equals(e.getMessage())) {
+            return PAGE_INCORRECT_CREDENTIALS;
         }
         return e.getMessage();
     }
