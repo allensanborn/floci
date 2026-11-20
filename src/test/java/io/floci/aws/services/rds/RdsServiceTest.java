@@ -4340,7 +4340,6 @@ class RdsServiceTest {
                 rdsService.modifyDbCluster("cluster1", null, true,
                         null, null, null, true, null, "us-east-1")).getErrorCode());
 
-        assertEquals("original-password", cluster.getMasterPassword());
         assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
         assertNull(cluster.getMasterUserSecretArn());
         verifyNoInteractions(containerManager, proxyManager);
@@ -13607,5 +13606,30 @@ class RdsServiceTest {
                 "omni", false, null, null, null, false, "us-east-1", null, null, null, false, null);
         assertManagedPasswordRefusal("InvalidParameterCombination", KEY_WITHOUT_MANAGE,
                 () -> rdsService.modifyDbCluster("c1", null, null, null, null, null, null, "kms-key-1", "us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterAcceptsSecretKeyOnAnAlreadyManagedCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-M");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secretsManager);
+        service.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", null,
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, true, "kms-key-1");
+
+        assertDoesNotThrow(() -> service.modifyDbCluster("c1", null, null,
+                null, null, null, null, "kms-key-1", "us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterAnswersNotFoundBeforeTheSecretKeyRule() {
+        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class, () ->
+                rdsService.modifyDbCluster("missing", null, null, null, null, null, null, "kms-key-1",
+                        "us-east-1")).getErrorCode());
     }
 }

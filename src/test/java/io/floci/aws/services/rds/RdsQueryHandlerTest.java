@@ -4044,6 +4044,7 @@ class RdsQueryHandlerTest {
     void modifyDbInstanceRefusesInvalidManagedPasswordCombinations(String members, String code, String message) {
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(makeInstance("mydb"));
         for (String member : members.split(",")) {
             p.add(member.substring(0, member.indexOf('=')), member.substring(member.indexOf('=') + 1));
         }
@@ -4053,5 +4054,19 @@ class RdsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("<Code>" + code + "</Code>"), body);
         assertTrue(body.contains("<Message>" + message.replace("'", "&apos;") + "</Message>"), body);
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsSecretKeyOnAnAlreadyManagedInstance() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(instance);
+        when(service.modifyDbInstance(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any())).thenReturn(instance);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
     }
 }

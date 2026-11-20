@@ -961,7 +961,8 @@ associations, and snapshots, restores and read replicas start without any.
 sets `ManageMasterUserPassword=true` together with `MasterUserPassword`
 (`InvalidParameterValue`, "mutually exclusive"), and a request that names
 `MasterUserSecretKmsKeyId` without `ManageMasterUserPassword=true`
-(`InvalidParameterCombination`). Both are refused before anything is created or changed.
+(`InvalidParameterCombination`). A modify of a cluster or instance that already manages its
+password may carry the key without `ManageMasterUserPassword`. Refusals happen before anything is created or changed.
 
 ## Aurora managed password rotation
 
