@@ -396,8 +396,8 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
 
             stack("UpdateStack", stackName, "{\"Resources\": {"
                     + cluster.formatted(clusterId, updatedGroups) + failingMember + "}}");
-            // The cluster's other settings have no rollback, so the stack may report the rollback failed.
-            assertTrue(CfnStackWaits.awaitTerminal(stackName).status().startsWith("UPDATE_ROLLBACK"));
+            // The cluster's other settings have no rollback, so the stack reports the rollback failed.
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(List.of("sg-first"), clusterGroups(clusterId));
         } finally {
             stack("DeleteStack", stackName, null);
@@ -415,7 +415,7 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             return clusterGroups(id);
         } finally {
             rds("DeleteDBCluster").formParam("DBClusterIdentifier", id).formParam("SkipFinalSnapshot", "true")
-                    .when().post("/");
+                    .when().post("/").then().statusCode(200);
         }
     }
 

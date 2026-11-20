@@ -248,6 +248,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
      * instance gone since the update fails the rollback, and a retried one tries again.
      */
+    // Also restores a DB cluster's groups, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
