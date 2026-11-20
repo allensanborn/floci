@@ -1,11 +1,13 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -27,6 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
 class CloudFormationRdsAssociatedRolesIntegrationTest {
+
+    @Inject
+    RdsService rdsService;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261014/us-east-1/cloudformation/aws4_request";
@@ -414,8 +419,10 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                   "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
                   "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
                   "DeletionProtection": %s, "PreferredBackupWindow": "%s",
-                  "PreferredMaintenanceWindow": "%s",
-                  "ServerlessV2ScalingConfiguration": {"MinCapacity": %s, "MaxCapacity": %s}}}""";
+                  "PreferredMaintenanceWindow": "%s", "EnableIAMDatabaseAuthentication": %s,
+                  "EnableHttpEndpoint": %s,
+                  "ServerlessV2ScalingConfiguration": {"MinCapacity": %s, "MaxCapacity": %s,
+                    "SecondsUntilAutoPause": %s}}}""";
         String failingMember = """
                 , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
                   "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
@@ -423,11 +430,11 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                   "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
         try {
             stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "false",
-                    "03:00-04:00", "mon:05:00-mon:06:00", "0.5", "2") + "}}");
+                    "03:00-04:00", "mon:05:00-mon:06:00", "false", "false", "0", "2", "900") + "}}");
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             stack("UpdateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "true",
-                    "07:00-08:00", "tue:09:00-tue:10:00", "1", "4") + failingMember + "}}");
+                    "07:00-08:00", "tue:09:00-tue:10:00", "true", "true", "0", "4", "1800") + failingMember + "}}");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
@@ -436,8 +443,39 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             assertEquals("03:00-04:00", xml.getString("**.find { it.name() == 'PreferredBackupWindow' }"));
             assertEquals("mon:05:00-mon:06:00",
                     xml.getString("**.find { it.name() == 'PreferredMaintenanceWindow' }"));
-            assertEquals(0.5, Double.parseDouble(xml.getString("**.find { it.name() == 'MinCapacity' }")));
+            assertEquals(0.0, Double.parseDouble(xml.getString("**.find { it.name() == 'MinCapacity' }")));
             assertEquals(2.0, Double.parseDouble(xml.getString("**.find { it.name() == 'MaxCapacity' }")));
+            assertEquals("false", xml.getString("**.find { it.name() == 'IAMDatabaseAuthenticationEnabled' }"));
+            assertEquals("false", xml.getString("**.find { it.name() == 'HttpEndpointEnabled' }"));
+            assertEquals("900", xml.getString("**.find { it.name() == 'SecondsUntilAutoPause' }"));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void aClusterPasswordChangeIsUndoneWhenALaterResourceFailsTheUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-pw-undo-" + suffix;
+        String clusterId = "cfn-pw-undo-" + suffix;
+        String cluster = """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "%s"}}""";
+        String failingMember = """
+                , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                  "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
+                  "DBInstanceClass": "db.r6g.large",
+                  "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
+        try {
+            stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "password123") + "}}");
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            stack("UpdateStack", stackName,
+                    "{\"Resources\": {" + cluster.formatted(clusterId, "changed-password-456") + failingMember + "}}");
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("password123", rdsService.getDbCluster(clusterId).getMasterPassword());
         } finally {
             stack("DeleteStack", stackName, null);
             CfnStackWaits.awaitStackDeleted(stackName);
