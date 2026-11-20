@@ -63,6 +63,7 @@ class Ec2InstanceConnectEndpointIntegrationTest {
                 .body(ITEM + ".preserveClientIp", equalTo("false"))
                 .body(ITEM + ".dnsName", equalTo(id + ".localhost.floci.io"))
                 .body(ITEM + ".publicDnsNames.ipv4.dnsName", equalTo(id + ".localhost.floci.io"))
+                .body(ITEM + ".publicDnsNames.dualstack.size()", equalTo(0))
                 .body(ITEM + ".securityGroupIdSet.item", containsInAnyOrder(groupA, groupB))
                 .body(ITEM + ".tagSet.item.find { it.key == 'Name' }.value", equalTo(name));
 
@@ -146,6 +147,26 @@ class Ec2InstanceConnectEndpointIntegrationTest {
         ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1").formParam("InstanceConnectEndpointId", id)
                 .post("/").then().statusCode(200);
         deleteAll(List.of(), subnetId, vpcId);
+    }
+
+    @Test
+    void dualstackAndIpv6EndpointsPublishDualstackDnsNames() {
+        String vpcId = createVpc("10.82.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.82.1.0/24");
+        for (String type : new String[] {"dualstack", "ipv6"}) {
+            String id = ec2("CreateInstanceConnectEndpoint", "test", "us-east-1")
+                    .formParam("SubnetId", subnetId).formParam("IpAddressType", type)
+                    .post("/").then().statusCode(200)
+                    .extract().path(CREATED + ".instanceConnectEndpointId");
+            ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                    .formParam("InstanceConnectEndpointId.1", id)
+                    .post("/").then().statusCode(200)
+                    .body(ITEM + ".ipAddressType", equalTo(type))
+                    .body(ITEM + ".publicDnsNames.ipv4.dnsName", equalTo(id + ".localhost.floci.io"))
+                    .body(ITEM + ".publicDnsNames.dualstack.dnsName", equalTo(id + "-dualstack.localhost.floci.io"))
+                    .body(ITEM + ".publicDnsNames.dualstack.fipsDnsName",
+                            equalTo(id + "-fips-dualstack.localhost.floci.io"));
+        }
     }
 
     @Test

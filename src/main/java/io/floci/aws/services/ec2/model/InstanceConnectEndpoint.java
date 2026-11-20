@@ -18,6 +18,8 @@ public class InstanceConnectEndpoint {
     private String state;
     private String dnsName;
     private String fipsDnsName;
+    private String dualstackDnsName;
+    private String dualstackFipsDnsName;
     private List<String> networkInterfaceIds = new ArrayList<>();
     private String vpcId;
     private String subnetId;
@@ -45,6 +47,8 @@ public class InstanceConnectEndpoint {
         state = other.state;
         dnsName = other.dnsName;
         fipsDnsName = other.fipsDnsName;
+        dualstackDnsName = other.dualstackDnsName;
+        dualstackFipsDnsName = other.dualstackFipsDnsName;
         networkInterfaceIds = new ArrayList<>(other.networkInterfaceIds);
         vpcId = other.vpcId;
         subnetId = other.subnetId;
@@ -87,6 +91,12 @@ public class InstanceConnectEndpoint {
 
     public String getFipsDnsName() { return fipsDnsName; }
     public void setFipsDnsName(String fipsDnsName) { this.fipsDnsName = fipsDnsName; }
+
+    public String getDualstackDnsName() { return dualstackDnsName; }
+    public void setDualstackDnsName(String dualstackDnsName) { this.dualstackDnsName = dualstackDnsName; }
+
+    public String getDualstackFipsDnsName() { return dualstackFipsDnsName; }
+    public void setDualstackFipsDnsName(String dualstackFipsDnsName) { this.dualstackFipsDnsName = dualstackFipsDnsName; }
 
     public List<String> getNetworkInterfaceIds() { return networkInterfaceIds; }
     public void setNetworkInterfaceIds(List<String> ids) { this.networkInterfaceIds = ids != null ? ids : new ArrayList<>(); }
