@@ -962,7 +962,10 @@ sets `ManageMasterUserPassword=true` together with `MasterUserPassword`
 (`InvalidParameterValue`, "mutually exclusive"), and a request that names
 `MasterUserSecretKmsKeyId` without `ManageMasterUserPassword=true`
 (`InvalidParameterCombination`). A modify of a cluster or instance that already manages its
-password may carry the key without `ManageMasterUserPassword`. Refusals happen before anything is created or changed.
+password may carry the key without `ManageMasterUserPassword`. `ModifyDBCluster` and `ModifyDBInstance` also
+refuse `ManageMasterUserPassword=false` without `MasterUserPassword` on a resource that currently
+manages its password (`InvalidParameterCombination`, "You must specify MasterUserPassword when you
+stop managing the master user password..."); on an unmanaged resource `false` is accepted. Refusals happen before anything is created or changed.
 
 ## Aurora managed password rotation
 

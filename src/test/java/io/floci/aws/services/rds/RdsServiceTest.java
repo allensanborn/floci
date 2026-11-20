@@ -13558,6 +13558,47 @@ class RdsServiceTest {
     private static final String KEY_WITHOUT_MANAGE = "You can't specify MasterUserSecretKmsKeyId without also "
             + "specifying ManageMasterUserPassword as true.";
 
+    private static final String UNMANAGE_NEEDS_PASSWORD = "You must specify MasterUserPassword when you stop "
+            + "managing the master user password with Amazon Web Services Secrets Manager.";
+
+    private RdsService managedClusterService() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-U");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), any(), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secretsManager);
+        service.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", null,
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, true, null);
+        return service;
+    }
+
+    @Test
+    void modifyDbClusterRefusesUnmanagingWithoutAPassword() {
+        RdsService service = managedClusterService();
+        assertManagedPasswordRefusal("InvalidParameterCombination", UNMANAGE_NEEDS_PASSWORD,
+                () -> service.modifyDbCluster("c1", null, null, null, null, null, false, null, "us-east-1"));
+        assertNotNull(service.getDbCluster("c1", "us-east-1").getMasterUserSecretArn());
+    }
+
+    @Test
+    void modifyDbClusterAcceptsUnmanagingWithAPassword() {
+        RdsService service = managedClusterService();
+        assertDoesNotThrow(() -> service.modifyDbCluster("c1", "Other123!", null, null, null, null, false, null,
+                "us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterAcceptsFalseWithoutAPasswordOnAnUnmanagedCluster() {
+        rdsService.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", "Secret123!",
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, false, null);
+        assertDoesNotThrow(() -> rdsService.modifyDbCluster("c1", null, null, null, null, null, false, null,
+                "us-east-1"));
+    }
+
     private void assertManagedPasswordRefusal(String code, String message, Executable call) {
         AwsException e = assertThrows(AwsException.class, call);
         assertEquals(code, e.getErrorCode());

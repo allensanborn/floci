@@ -931,9 +931,10 @@ public class RdsQueryHandler {
             Boolean manage = parseOptionalBoolean(params, "ManageMasterUserPassword");
             String secretKey = params.getFirst("MasterUserSecretKmsKeyId");
             RdsService.validatePasswordNotManaged(manage, newPassword);
-            if (secretKey != null) {
-                RdsService.validateSecretKeyNeedsManagement(manage, secretKey,
-                        service.getDbInstance(id, region).getMasterUserSecretArn() != null);
+            if (secretKey != null || Boolean.FALSE.equals(manage)) {
+                boolean currentlyManaged = service.getDbInstance(id, region).getMasterUserSecretArn() != null;
+                RdsService.validateSecretKeyNeedsManagement(manage, secretKey, currentlyManaged);
+                RdsService.validatePasswordNeededToUnmanage(manage, newPassword, currentlyManaged);
             }
             iamEnabled = parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication");
             autoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");

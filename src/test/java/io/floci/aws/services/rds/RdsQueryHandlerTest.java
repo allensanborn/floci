@@ -328,6 +328,7 @@ class RdsQueryHandlerTest {
         when(service.modifyDbInstance(eq("mydb"), isNull(), eq(enabled), isNull(), any(), isNull(), any(),
                 isNull(), settings.capture(), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull()))
                 .thenReturn(makeInstance("mydb"));
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(makeInstance("mydb"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBInstanceIdentifier", "mydb");
         // Encryption is not a ModifyDBInstance request member and remains ignored.
@@ -4082,5 +4083,43 @@ class RdsQueryHandlerTest {
 
         assertEquals(404, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<Code>DBInstanceNotFound</Code>"));
+    }
+
+    private Response modifyInstanceManage(boolean managed, String password) {
+        DbInstance instance = makeInstance("mydb");
+        if (managed) {
+            instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        }
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(instance);
+        when(service.modifyDbInstance(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any())).thenReturn(instance);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("ManageMasterUserPassword", "false");
+        if (password != null) {
+            p.add("MasterUserPassword", password);
+        }
+        return handler.handle("ModifyDBInstance", p);
+    }
+
+    @Test
+    void modifyDbInstanceRefusesUnmanagingWithoutAPassword() {
+        Response response = modifyInstanceManage(true, null);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InvalidParameterCombination</Code>"), body);
+        assertTrue(body.contains("<Message>You must specify MasterUserPassword when you stop managing the "
+                + "master user password with Amazon Web Services Secrets Manager.</Message>"), body);
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsUnmanagingWithAPassword() {
+        assertEquals(200, modifyInstanceManage(true, "Other123!").getStatus());
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsFalseWithoutAPasswordOnAnUnmanagedInstance() {
+        assertEquals(200, modifyInstanceManage(false, null).getStatus());
     }
 }
