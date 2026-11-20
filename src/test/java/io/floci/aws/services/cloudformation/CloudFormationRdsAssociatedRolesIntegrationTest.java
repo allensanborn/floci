@@ -396,9 +396,48 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
 
             stack("UpdateStack", stackName, "{\"Resources\": {"
                     + cluster.formatted(clusterId, updatedGroups) + failingMember + "}}");
-            // The cluster's other settings have no rollback, so the stack reports the rollback failed.
-            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(List.of("sg-first"), clusterGroups(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void aClusterUpdateIsUndoneWhenALaterResourceFailsTheUpdate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-settings-undo-" + suffix;
+        String clusterId = "cfn-settings-undo-" + suffix;
+        String cluster = """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "DeletionProtection": %s, "PreferredBackupWindow": "%s",
+                  "PreferredMaintenanceWindow": "%s",
+                  "ServerlessV2ScalingConfiguration": {"MinCapacity": %s, "MaxCapacity": %s}}}""";
+        String failingMember = """
+                , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                  "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
+                  "DBInstanceClass": "db.r6g.large",
+                  "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
+        try {
+            stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "false",
+                    "03:00-04:00", "mon:05:00-mon:06:00", "0.5", "2") + "}}");
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            stack("UpdateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "true",
+                    "07:00-08:00", "tue:09:00-tue:10:00", "1", "4") + failingMember + "}}");
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
+                    .when().post("/").then().statusCode(200).extract().xmlPath();
+            assertEquals("false", xml.getString("**.find { it.name() == 'DeletionProtection' }"));
+            assertEquals("03:00-04:00", xml.getString("**.find { it.name() == 'PreferredBackupWindow' }"));
+            assertEquals("mon:05:00-mon:06:00",
+                    xml.getString("**.find { it.name() == 'PreferredMaintenanceWindow' }"));
+            assertEquals(0.5, Double.parseDouble(xml.getString("**.find { it.name() == 'MinCapacity' }")));
+            assertEquals(2.0, Double.parseDouble(xml.getString("**.find { it.name() == 'MaxCapacity' }")));
         } finally {
             stack("DeleteStack", stackName, null);
             CfnStackWaits.awaitStackDeleted(stackName);

@@ -248,7 +248,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
      * instance gone since the update fails the rollback, and a retried one tries again.
      */
-    // Also restores a DB cluster's groups, from a record carrying the `cluster` flag.
+    // Also restores a DB cluster's settings, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
@@ -261,17 +261,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             throw new IllegalStateException("Could not read the saved in-place update of "
                     + resource.getLogicalId(), e);
         }
+        if (prior.path("cluster").asBoolean(false)) {
+            DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior);
+        }
         JsonNode groups = prior.path("vpcSecurityGroups");
-        if (groups.isArray()) {
+        if (!prior.path("cluster").asBoolean(false) && groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
-            if (prior.path("cluster").asBoolean(false)) {
-                rdsService.setDbClusterRequestSettings(resource.getPhysicalId(), prior.path("region").asText(),
-                        groupIds, null, null, null);
-            } else {
-                rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
-                        resource.getPhysicalId(), groupIds);
-            }
+            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
+                    resource.getPhysicalId(), groupIds);
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
@@ -597,6 +595,67 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * What an update that keeps a DB cluster can change on it, copied so the cluster's later changes
+     * do not reach it. Everything but the master password is put back by {@link #restore}; as for an
+     * instance, the password is not kept (a record would hold the secret), so a changed one, or
+     * scaling that cannot be set back (a cluster that had none), leaves the rollback incomplete.
+     */
+    private record DbClusterInPlaceState(String masterPassword, boolean iamAuthentication, Double minCapacity,
+                                         Double maxCapacity, Integer secondsUntilAutoPause,
+                                         List<String> vpcSecurityGroups, String backupWindow,
+                                         String maintenanceWindow, boolean deletionProtection,
+                                         boolean httpEndpoint) {
+
+        static DbClusterInPlaceState of(DbCluster c) {
+            return new DbClusterInPlaceState(c.getMasterPassword(), c.isIamDatabaseAuthenticationEnabled(),
+                    c.getServerlessV2MinCapacity(), c.getServerlessV2MaxCapacity(),
+                    c.getServerlessV2SecondsUntilAutoPause(), List.copyOf(c.getVpcSecurityGroupIds()),
+                    c.getPreferredBackupWindow(), c.getPreferredMaintenanceWindow(), c.isDeletionProtection(),
+                    c.isHttpEndpointEnabled());
+        }
+
+        /** The saved record: these values, and whether {@code after} differs in what cannot be put back. */
+        ObjectNode record(String region, DbClusterInPlaceState after) {
+            boolean scalingChanged = !Objects.equals(minCapacity, after.minCapacity)
+                    || !Objects.equals(maxCapacity, after.maxCapacity)
+                    || !Objects.equals(secondsUntilAutoPause, after.secondsUntilAutoPause);
+            boolean scalingLost = scalingChanged && (minCapacity == null || maxCapacity == null
+                    || (secondsUntilAutoPause == null && after.secondsUntilAutoPause != null));
+            ObjectNode n = MAPPER.createObjectNode().put("region", region).put("cluster", true)
+                    .put("otherChanges", scalingLost || !Objects.equals(masterPassword, after.masterPassword))
+                    .put("iam", iamAuthentication).put("deletionProtection", deletionProtection)
+                    .put("httpEndpoint", httpEndpoint);
+            n.put("min", minCapacity).put("max", maxCapacity).put("autoPause", secondsUntilAutoPause)
+                    .put("backupWindow", backupWindow).put("maintenanceWindow", maintenanceWindow);
+            ArrayNode groups = n.putArray("vpcSecurityGroups");
+            vpcSecurityGroups.forEach(groups::add);
+            return n;
+        }
+
+        static void restore(RdsService rds, String id, JsonNode p) {
+            String region = p.path("region").asText();
+            Double min = p.path("min").isNull() ? null : p.path("min").asDouble();
+            Double max = p.path("max").isNull() ? null : p.path("max").asDouble();
+            Integer autoPause = p.path("autoPause").isNull() ? null : p.path("autoPause").asInt();
+            // an unset scaling is skipped: modifyDbCluster rejects one on a cluster without Serverless v2
+            boolean scaling = min != null && max != null;
+            rds.modifyDbCluster(id, null, p.path("iam").asBoolean(),
+                    scaling ? min : null, scaling ? max : null, scaling ? autoPause : null, region);
+            List<String> groups = new ArrayList<>();
+            p.path("vpcSecurityGroups").forEach(g -> groups.add(g.asText()));
+            rds.setDbClusterRequestSettings(id, region, groups, textOrNull(p.path("backupWindow")),
+                    textOrNull(p.path("maintenanceWindow")), p.path("deletionProtection").asBoolean());
+            if (rds.getDbCluster(id, region).isHttpEndpointEnabled() != p.path("httpEndpoint").asBoolean()) {
+                rds.setHttpEndpoint(region, id, p.path("httpEndpoint").asBoolean());
+            }
+        }
+
+        private static String textOrNull(JsonNode n) {
+            return n.isNull() ? null : n.asText();
+        }
+    }
+
+    /**
      * A DB cluster follows CloudFormation's replacement lifecycle. A change to any of the
      * createOnlyProperties in the {@code AWS::RDS::DBCluster} schema ({@code DBClusterIdentifier},
      * {@code EngineMode}, {@code StorageEncrypted} and {@code DatabaseName} against the cluster on
@@ -661,6 +720,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         Boolean deletionProtection = parseOptionalStrictBoolProp(props, "DeletionProtection", engine);
+        // What an in-place update can change, copied before modifyDbCluster, for rollbackUpdate.
+        DbClusterInPlaceState stateBefore = cluster == null ? null : DbClusterInPlaceState.of(cluster);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -696,15 +757,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     : List.of();
             securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
         }
-        // The groups an in-place update changes are saved, for rollbackUpdate, as an instance's are.
         r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
-        if (!created && securityGroupIds != null
-                && !Set.copyOf(securityGroupIds).equals(Set.copyOf(cluster.getVpcSecurityGroupIds()))) {
-            ObjectNode saved = MAPPER.createObjectNode().put("region", region).put("cluster", true)
-                    .put("otherChanges", true);
-            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
-            cluster.getVpcSecurityGroupIds().forEach(priorGroups::add);
-            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
+        if (!created) {
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR,
+                    stateBefore.record(region, DbClusterInPlaceState.of(cluster)).toString());
         }
         rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
                 securityGroupIds, backupWindow, maintenanceWindow, deletionProtection);
