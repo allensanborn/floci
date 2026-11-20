@@ -3991,11 +3991,20 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public List<String> defaultVpcSecurityGroupIds(String region, String instanceId) {
         String effectiveRegion = effectiveRegion(region);
-        String vpcId = getDbInstance(instanceId, effectiveRegion).getVpcId();
+        return defaultGroupIdsOf(effectiveRegion, getDbInstance(instanceId, effectiveRegion).getVpcId());
+    }
+
+    /** As {@link #defaultVpcSecurityGroupIds} for a DB cluster. */
+    public List<String> defaultClusterVpcSecurityGroupIds(String region, String clusterId) {
+        String effectiveRegion = effectiveRegion(region);
+        return defaultGroupIdsOf(effectiveRegion, getDbCluster(clusterId, effectiveRegion).getVpcId());
+    }
+
+    private List<String> defaultGroupIdsOf(String region, String vpcId) {
         if (isBlank(vpcId)) {
             return List.of();
         }
-        return ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId)
+        return ec2Service.defaultSecurityGroupOf(region, vpcId)
                 .map(group -> List.of(group.getGroupId()))
                 .orElse(List.of());
     }

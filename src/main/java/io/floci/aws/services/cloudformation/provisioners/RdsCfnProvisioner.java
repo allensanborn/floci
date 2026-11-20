@@ -653,8 +653,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             backupWindow = windows[0];
             maintenanceWindow = windows[1];
         }
-        List<String> securityGroupIds = props.has("VpcSecurityGroupIds")
-                ? resolveStringList(props, "VpcSecurityGroupIds", engine) : null;
+        List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         Boolean deletionProtection = parseOptionalStrictBoolProp(props, "DeletionProtection", engine);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
@@ -681,6 +680,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted);
+        }
+        if (securityGroupIds.isEmpty()) {
+            // A list the previous template declared and this one drops puts the cluster on its VPC's
+            // default group, as AWS's handler does, and leaves them when there is none. Groups the
+            // stack never declared, and the other settings, keep what is stored.
+            List<String> defaultGroup = !created && ctx.previouslyDeclared("VpcSecurityGroupIds")
+                    ? rdsService.defaultClusterVpcSecurityGroupIds(region, cluster.getDbClusterIdentifier())
+                    : List.of();
+            securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
         }
         rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
                 securityGroupIds, backupWindow, maintenanceWindow, deletionProtection);
