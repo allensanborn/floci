@@ -3005,7 +3005,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         return Optional.ofNullable(findClusterSnapshotForScope(accountId, region, snapshotId))
                 .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DBClusterSnapshot " + snapshotId + " not found.", 404));
+                        "DBClusterSnapshot not found: " + snapshotId, 404));
     }
 
     private static void requireClusterSnapshotAvailable(DbClusterSnapshot snapshot, String operation) {
@@ -3099,7 +3099,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (clusterSnapshot) {
             if (!ours) {
                 throw new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DBClusterSnapshot " + snapshotId + " not found.", 404);
+                        "DBClusterSnapshot not found: " + snapshotId, 404);
             }
             DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
             requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);

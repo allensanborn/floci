@@ -11,6 +11,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
+import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceSettings;
 import io.floci.aws.services.rds.model.DbParameterGroup;
@@ -36,7 +37,7 @@ import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
- * {@code DBInstance}, {@code DBCluster}, {@code DBProxy} and {@code DBProxyTargetGroup}.
+ * {@code DBInstance}, {@code DBCluster}, {@code ClusterSnapshot}, {@code DBProxy} and {@code DBProxyTargetGroup}.
  * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
@@ -137,6 +138,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 "AWS::RDS::DBClusterParameterGroup",
                 "AWS::RDS::DBInstance",
                 "AWS::RDS::DBCluster",
+                "AWS::RDS::ClusterSnapshot",
                 "AWS::RDS::DBProxy",
                 "AWS::RDS::DBProxyTargetGroup");
     }
@@ -152,6 +154,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     provisionDbClusterParameterGroup(r, props, engine, ctx, region);
             case "AWS::RDS::DBInstance" -> provisionDbInstance(r, props, engine, ctx, region);
             case "AWS::RDS::DBCluster" -> provisionDbCluster(r, props, engine, ctx, region);
+            case "AWS::RDS::ClusterSnapshot" -> provisionClusterSnapshot(r, props, engine, region);
             case "AWS::RDS::DBProxy" -> provisionDbProxy(r, props, engine, region);
             case "AWS::RDS::DBProxyTargetGroup" -> provisionDbProxyTargetGroup(r, props, engine, region);
             default -> throw new IllegalStateException(
@@ -166,6 +169,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     () -> rdsService.deleteDbInstance(physicalId, region), "DBInstanceNotFound");
             case "AWS::RDS::DBCluster" -> CfnDeletes.safeDelete("DB cluster", physicalId,
                     () -> rdsService.deleteDbCluster(physicalId, region), "DBClusterNotFoundFault");
+            // Ref is the snapshot ARN; the identifier is its last segment.
+            case "AWS::RDS::ClusterSnapshot" -> CfnDeletes.safeDelete("DB cluster snapshot", physicalId,
+                    () -> rdsService.deleteDbClusterSnapshot(
+                            physicalId.substring(physicalId.lastIndexOf(':') + 1), region),
+                    "DBClusterSnapshotNotFoundFault");
             case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
             case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
             case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId, region);
@@ -308,6 +316,19 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
         if (group.getDbSubnetGroupArn() != null) {
             r.getAttributes().put("DBSubnetGroupArn", group.getDbSubnetGroupArn());
+        }
+    }
+
+    private void provisionClusterSnapshot(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region) {
+        // Both properties are createOnly, so a re-run of an unchanged resource keeps its snapshot.
+        if (r.getPhysicalId() == null) {
+            DbClusterSnapshot snapshot = rdsService.createDbClusterSnapshot(
+                    resolveOptional(props, "DBClusterSnapshotIdentifier", engine),
+                    resolveOptional(props, "DBClusterIdentifier", engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine), region);
+            r.setPhysicalId(snapshot.getDbClusterSnapshotArn());          // Ref -> the snapshot ARN
+            r.getAttributes().put("DBClusterSnapshotArn", snapshot.getDbClusterSnapshotArn());
         }
     }
 

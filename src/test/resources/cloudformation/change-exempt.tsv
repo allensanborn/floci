@@ -152,6 +152,7 @@ AWS::Organizations::OrganizationalUnit	update not yet on the engine's changes (#
 AWS::Organizations::Policy	update not yet on the engine's changes (#6606)
 AWS::Organizations::ResourcePolicy	update not yet on the engine's changes (#6606)
 AWS::Pipes::Pipe	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
+AWS::RDS::ClusterSnapshot	update not yet on the engine's changes (#6606)
 AWS::RDS::DBCluster	update not yet on the engine's changes (#6606)
 AWS::RDS::DBClusterParameterGroup	update not yet on the engine's changes (#6606)
 AWS::RDS::DBInstance	update not yet on the engine's changes (#6606)
