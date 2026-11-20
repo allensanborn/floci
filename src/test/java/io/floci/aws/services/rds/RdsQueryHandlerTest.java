@@ -4032,4 +4032,26 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
         assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
     }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ManageMasterUserPassword=true,MasterUserPassword=Secret123!|InvalidParameterValue|"
+                    + "MasterUserPassword and ManageMasterUserPassword are mutually exclusive. "
+                    + "Specify only one of these parameters.",
+            "MasterUserSecretKmsKeyId=kms-key-1|InvalidParameterCombination|"
+                    + "You can't specify MasterUserSecretKmsKeyId without also specifying "
+                    + "ManageMasterUserPassword as true."})
+    void modifyDbInstanceRefusesInvalidManagedPasswordCombinations(String members, String code, String message) {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        for (String member : members.split(",")) {
+            p.add(member.substring(0, member.indexOf('=')), member.substring(member.indexOf('=') + 1));
+        }
+        Response response = handler.handle("ModifyDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+        assertTrue(body.contains("<Message>" + message.replace("'", "&apos;") + "</Message>"), body);
+    }
 }

@@ -955,6 +955,14 @@ Associations are recorded, not exercised: Floci does not check the role in IAM a
 role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
+## Managed master user password validation
+
+`CreateDBCluster`, `CreateDBInstance`, `ModifyDBCluster` and `ModifyDBInstance` reject a request that
+sets `ManageMasterUserPassword=true` together with `MasterUserPassword`
+(`InvalidParameterValue`, "mutually exclusive"), and a request that names
+`MasterUserSecretKmsKeyId` without `ManageMasterUserPassword=true`
+(`InvalidParameterCombination`). Both are refused before anything is created or changed.
+
 ## Aurora managed password rotation
 
 `ModifyDBCluster` supports `RotateMasterUserPassword=true` for an existing

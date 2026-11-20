@@ -779,6 +779,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           DbInstanceSettings settings,
                                           Boolean publiclyAccessible, Integer requestedPort,
                                           Boolean deletionProtection) {
+        validateManagedMasterPassword(manageMasterUserPassword, masterPassword, masterUserSecretKmsKeyId);
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -5838,6 +5839,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                         String engineMode, boolean storageEncrypted, Integer requestedPort,
                                         boolean deletionProtection) {
+        validateManagedMasterPassword(manageMasterUserPassword, masterPassword, masterUserSecretKmsKeyId);
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -6369,12 +6371,33 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Refuses a request that both supplies the master password and asks RDS to manage it, or
+     * names a managed-secret key without asking RDS to manage the password. Shared by every
+     * create and modify of a cluster or instance.
+     */
+    static void validateManagedMasterPassword(Boolean manageMasterUserPassword, String masterPassword,
+                                              String masterUserSecretKmsKeyId) {
+        boolean manage = Boolean.TRUE.equals(manageMasterUserPassword);
+        if (manage && masterPassword != null) {
+            throw new AwsException("InvalidParameterValue",
+                    "MasterUserPassword and ManageMasterUserPassword are mutually exclusive. "
+                            + "Specify only one of these parameters.", 400);
+        }
+        if (!manage && masterUserSecretKmsKeyId != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You can't specify MasterUserSecretKmsKeyId without also specifying "
+                            + "ManageMasterUserPassword as true.", 400);
+        }
+    }
+
     private DbCluster doModifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String dbClusterParameterGroupName, boolean rotateMasterUserPassword,
                                      boolean applyImmediately, String region) {
+        validateManagedMasterPassword(manageMasterUserPassword, newPassword, masterUserSecretKmsKeyId);
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
         if (rotateMasterUserPassword) {
