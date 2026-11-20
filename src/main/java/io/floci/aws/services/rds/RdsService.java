@@ -8366,7 +8366,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 currentAccountId(), effectiveRegion(region), effectiveName);
         if (group == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + effectiveName + " not found.", 404);
+                    "DB Subnet group '" + effectiveName + "' not found.", 404);
         }
         return group;
     }
@@ -8558,7 +8558,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 currentAccountId(), effectiveRegion(region), name);
         if (group == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + name + " not found.", 404);
+                    "DB subnet group '" + name + "' does not exist.", 404);
         }
         return group;
     }
@@ -8589,7 +8589,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = currentAccountId();
         if (findSubnetGroupForScope(accountId, effectiveRegion, name) == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + name + " not found.", 404);
+                    "DB subnet group '" + name + "' does not exist.", 404);
         }
         deleteSubnetGroupForScope(accountId, effectiveRegion, name);
     }

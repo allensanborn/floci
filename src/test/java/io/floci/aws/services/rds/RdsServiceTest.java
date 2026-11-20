@@ -5240,6 +5240,17 @@ class RdsServiceTest {
     }
 
     @Test
+    void missingDbSubnetGroupMessageFollowsTheCall() {
+        // Describe reports the group; Delete and Modify act on it, and AWS words the fault differently.
+        assertEquals("DB Subnet group 'ghost' not found.", assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("ghost")).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.deleteDbSubnetGroup("ghost")).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbSubnetGroup("ghost", List.of("subnet-1"))).getMessage());
+    }
+
+    @Test
     void listDbSubnetGroupsFaultsForMissingName() {
         AwsException missing = assertThrows(AwsException.class,
                 () -> rdsService.listDbSubnetGroups("does-not-exist"));
