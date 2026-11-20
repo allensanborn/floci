@@ -58,6 +58,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyBinding;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
+import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.testutil.LogCapture;
@@ -5242,6 +5243,58 @@ class RdsServiceTest {
         service.deleteDbSubnetGroup("CaseGroup");
         assertThrows(AwsException.class, () -> service.getDbSubnetGroup("casegroup"));
         assertEquals(0, storedGroups.scan(k -> true).size());
+    }
+
+    private RdsService legacySubnetGroupService(InMemoryStorage<String, DbSubnetGroup> storedGroups,
+                                                ResourceGroupsTaggingService tagging) {
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), storedGroups, null, null, null, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), tagging, null);
+        DbSubnetGroup legacy = new DbSubnetGroup("CaseGroup", "d", "vpc-1", List.of("subnet-1"), Map.of());
+        legacy.setDbSubnetGroupArn(regionResolver.buildArn("rds", "us-east-1", "subgrp:CaseGroup"));
+        storedGroups.put("us-east-1::CaseGroup", legacy);
+        return service;
+    }
+
+    @Test
+    void taggingALegacySubnetGroupThroughItsMixedCaseArnLeavesNoRecordAfterDelete() {
+        InMemoryStorage<String, DbSubnetGroup> storedGroups = new InMemoryStorage<>();
+        RdsService service = legacySubnetGroupService(storedGroups, null);
+        service.getDbSubnetGroup("casegroup"); // renames the group; a client may still hold the old ARN
+
+        service.addTagsToResource(regionResolver.buildArn("rds", "us-east-1", "subgrp:CaseGroup"),
+                Map.of("k", "v"));
+        assertEquals(Map.of("k", "v"), service.getDbSubnetGroup("casegroup").getTags());
+
+        service.deleteDbSubnetGroup("casegroup");
+        assertEquals(List.of(), storedGroups.scan(k -> true));
+    }
+
+    @Test
+    void aLegacySubnetGroupKeepsTheTagsAppliedUnderItsOldArnWhenItIsRenamed() {
+        ResourceGroupsTaggingService tagging = mock(ResourceGroupsTaggingService.class);
+        String oldArn = regionResolver.buildArn("rds", "us-east-1", "subgrp:CaseGroup");
+        String newArn = regionResolver.buildArn("rds", "us-east-1", "subgrp:casegroup");
+        when(tagging.getTagsForResource("us-east-1", oldArn)).thenReturn(Map.of("k", "v"));
+        RdsService service = legacySubnetGroupService(new InMemoryStorage<>(), tagging);
+
+        service.getDbSubnetGroup("CaseGroup");
+
+        verify(tagging).tagResources(List.of(newArn), Map.of("k", "v"), "us-east-1");
+        verify(tagging).deleteResources(List.of(oldArn), "us-east-1");
+    }
+
+    @Test
+    void listingSubnetGroupsRenamesALegacyMixedCaseGroup() {
+        InMemoryStorage<String, DbSubnetGroup> storedGroups = new InMemoryStorage<>();
+        RdsService service = legacySubnetGroupService(storedGroups, null);
+
+        assertEquals(List.of("casegroup"), service.listDbSubnetGroups(null).stream()
+                .map(DbSubnetGroup::getDbSubnetGroupName).filter(n -> !n.equals("default")).toList());
+        assertEquals(List.of("casegroup"), storedGroups.scan(k -> true).stream()
+                .map(DbSubnetGroup::getDbSubnetGroupName).toList());
+        assertEquals(1, storedGroups.scan(k -> true).size());
     }
 
     @Test

@@ -3389,10 +3389,15 @@ public class RdsService implements Resettable, ResourceProvider {
                 if (group == null) {
                     yield null;
                 }
-                yield new TagHandle(group.getTags(), updated -> {
-                    group.setTags(updated);
+                // A group an older build stored under a mixed-case name is renamed here, and written
+                // back under its stored name so no second record outlives its deletion.
+                DbSubnetGroup stored = findSubnetGroupForScope(
+                        currentAccountId(), effectiveRegion, group.getDbSubnetGroupName());
+                DbSubnetGroup tagged = stored != null ? stored : group;
+                yield new TagHandle(tagged.getTags(), updated -> {
+                    tagged.setTags(updated);
                     putSubnetGroupForScope(
-                            currentAccountId(), effectiveRegion, resourceId, group);
+                            currentAccountId(), effectiveRegion, tagged.getDbSubnetGroupName(), tagged);
                 });
             }
             case "cluster-snapshot" -> {
@@ -10797,16 +10802,19 @@ public class RdsService implements Resettable, ResourceProvider {
      * renamed to lower case the first time it is looked up, so it keeps working.
      */
     private synchronized DbSubnetGroup findSubnetGroupForScope(
-            String accountId, String region, String groupName) {
+            String accountId, String region, String requestedName) {
+        String groupName = subnetGroupName(requestedName);
         DbSubnetGroup found = findExactSubnetGroupForScope(accountId, region, groupName);
         if (found != null || groupName == null) {
             return found;
         }
+        // ponytail: O(groups) scan on a miss; a lower-case index if a lookup miss gets hot.
         String effectiveRegion = effectiveRegion(region);
         List<DbSubnetGroup> stored = subnetGroups instanceof AccountAwareStorageBackend<DbSubnetGroup> aware
                 ? aware.scanForAccount(accountId, k -> true) : subnetGroups.scan(k -> true);
         for (DbSubnetGroup group : stored) {
             String oldName = group.getDbSubnetGroupName();
+            String oldArn = group.getDbSubnetGroupArn();
             if (oldName != null && !oldName.equals(groupName) && oldName.equalsIgnoreCase(groupName)
                     && hasRdsResourceIdentity(group.getDbSubnetGroupArn(), accountId, effectiveRegion,
                     "subgrp", oldName)) {
@@ -10814,10 +10822,24 @@ public class RdsService implements Resettable, ResourceProvider {
                 group.setDbSubnetGroupArn(regionResolver.buildArn("rds", effectiveRegion, "subgrp:" + groupName));
                 putSubnetGroupForScope(accountId, effectiveRegion, groupName, group);
                 deleteSubnetGroupForScope(accountId, effectiveRegion, oldName);
+                moveTags(effectiveRegion, oldArn, group.getDbSubnetGroupArn());
                 return group;
             }
         }
         return null;
+    }
+
+    /** Tags applied through the tagging API live under the ARN, so a renamed group's follow its new one. */
+    private void moveTags(String region, String oldArn, String newArn) {
+        if (taggingService == null) {
+            return;
+        }
+        Map<String, String> tags = taggingService.getTagsForResource(region, oldArn);
+        if (!tags.isEmpty()) {
+            Map<String, String> copy = new LinkedHashMap<>(tags);
+            taggingService.tagResources(List.of(newArn), copy, region);
+            taggingService.deleteResources(List.of(oldArn), region);
+        }
     }
 
     private DbSubnetGroup findExactSubnetGroupForScope(
