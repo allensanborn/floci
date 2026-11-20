@@ -120,9 +120,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * VPC security groups it had when the update changed them; a cluster's holds all it can change
      * (see {@link DbClusterInPlaceState}).
      * A cluster's record holds its previous master password, a secret, so the update's commit clears
-     * it: only a rollback needs it.
+     * it: only a rollback needs it, and {@link #completeUpdate} drops it on every committed update.
      */
-    public static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
+    static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
 
     private final RdsService rdsService;
     private final CfnDynamicReferences dynamicReferences;
@@ -599,8 +599,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * What an update that keeps a DB cluster can change on it, copied so the cluster's later changes
-     * do not reach it, and put back by {@link #restore}, as CloudFormation sends the previous values
-     * on rollback. The master password is saved too: rollback has the resource and not the previous
+     * do not reach it, and put back by {@link #restore}, as CloudFormation sends the previous template's
+     * declared values on rollback. The master password is saved too: rollback has the resource and not the previous
      * template to resolve it from, so the record holds it as the cluster does. Scaling a cluster did
      * not have is left in place, as CloudFormation sends nothing for it.
      */
@@ -610,6 +610,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                                          String maintenanceWindow, boolean deletionProtection,
                                          boolean httpEndpoint) {
 
+        private static final List<String> DECLARED_RESTORED = List.of("EnableIAMDatabaseAuthentication",
+                "DeletionProtection", "PreferredBackupWindow", "PreferredMaintenanceWindow");
+
         static DbClusterInPlaceState of(DbCluster c) {
             return new DbClusterInPlaceState(c.getMasterPassword(), c.isIamDatabaseAuthenticationEnabled(),
                     c.getServerlessV2MinCapacity(), c.getServerlessV2MaxCapacity(),
@@ -618,11 +621,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     c.isHttpEndpointEnabled());
         }
 
-        ObjectNode record(String region) {
+        ObjectNode record(String region, ProvisionContext ctx) {
             ObjectNode n = MAPPER.createObjectNode().put("region", region).put("cluster", true)
                     .put("otherChanges", false).put("password", masterPassword)
                     .put("iam", iamAuthentication).put("deletionProtection", deletionProtection)
                     .put("httpEndpoint", httpEndpoint);
+            // A property the previous template did not declare is not sent back on rollback.
+            for (String property : DECLARED_RESTORED) {
+                n.put("declared" + property, ctx.previouslyDeclared(property));
+            }
             n.put("min", minCapacity).put("max", maxCapacity).put("autoPause", secondsUntilAutoPause)
                     .put("backupWindow", backupWindow).put("maintenanceWindow", maintenanceWindow);
             ArrayNode groups = n.putArray("vpcSecurityGroups");
@@ -637,15 +644,22 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             Integer autoPause = p.path("autoPause").isNull() ? null : p.path("autoPause").asInt();
             // an unset scaling is skipped: modifyDbCluster rejects one on a cluster without Serverless v2
             boolean scaling = min != null && max != null;
-            rds.modifyDbCluster(id, textOrNull(p.path("password")), p.path("iam").asBoolean(),
+            rds.modifyDbCluster(id, textOrNull(p.path("password")),
+                    declared(p, "EnableIAMDatabaseAuthentication") ? p.path("iam").asBoolean() : null,
                     scaling ? min : null, scaling ? max : null, scaling ? autoPause : null, region);
             List<String> groups = new ArrayList<>();
             p.path("vpcSecurityGroups").forEach(g -> groups.add(g.asText()));
-            rds.setDbClusterRequestSettings(id, region, groups, textOrNull(p.path("backupWindow")),
-                    textOrNull(p.path("maintenanceWindow")), p.path("deletionProtection").asBoolean());
+            rds.setDbClusterRequestSettings(id, region, groups, declared(p, "PreferredBackupWindow") ? textOrNull(p.path("backupWindow")) : null,
+                    declared(p, "PreferredMaintenanceWindow") ? textOrNull(p.path("maintenanceWindow")) : null,
+                    declared(p, "DeletionProtection") ? p.path("deletionProtection").asBoolean() : null);
             if (rds.getDbCluster(id, region).isHttpEndpointEnabled() != p.path("httpEndpoint").asBoolean()) {
                 rds.setHttpEndpoint(region, id, p.path("httpEndpoint").asBoolean());
             }
+        }
+
+        // a record from before the flags were kept restores, as it did
+        private static boolean declared(JsonNode p, String property) {
+            return p.path("declared" + property).asBoolean(true);
         }
 
         private static String textOrNull(JsonNode n) {
@@ -748,7 +762,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (!created) {
-            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, stateBefore.record(region).toString());
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, stateBefore.record(region, ctx).toString());
         }
         if (securityGroupIds.isEmpty()) {
             // A list the previous template declared and this one drops puts the cluster on its VPC's

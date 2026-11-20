@@ -32,7 +32,6 @@ import io.floci.aws.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
 import io.floci.aws.services.cloudformation.provisioners.ProvisionContext;
-import io.floci.aws.services.cloudformation.provisioners.RdsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
@@ -2653,11 +2652,8 @@ public class CloudFormationService implements ResourceProvider {
                     stack.setStackPolicyBody(stackPolicy);
                 }
                 stack.replaceTags(operationTags);
-                stack.getResources().values().forEach(resource -> {
-                    resource.getAttributes().remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR);
-                    // holds a DB cluster's prior master password; only a rollback needs it
-                    resource.getAttributes().remove(RdsCfnProvisioner.DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
-                });
+                stack.getResources().values().forEach(resource -> resource.getAttributes()
+                        .remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR));
                 refreshTemplateUses(stack, resources, conditions, physicalIds);
                 if (hasReplacementUpdates(stack) || hasRemovedOrConditionFalseResources(stack, resources, conditions)) {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");

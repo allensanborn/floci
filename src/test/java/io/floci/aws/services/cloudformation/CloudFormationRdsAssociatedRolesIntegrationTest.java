@@ -510,6 +510,35 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         }
     }
 
+    @Test
+    void aSettingThePreviousTemplateDidNotDeclareStaysAfterTheRollback() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-undeclared-" + suffix;
+        String clusterId = "cfn-undeclared-" + suffix;
+        String cluster = """
+                "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"%s}}""";
+        String failingMember = """
+                , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                  "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
+                  "DBInstanceClass": "db.r6g.large",
+                  "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
+        try {
+            stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "") + "}}");
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            stack("UpdateStack", stackName, "{\"Resources\": {"
+                    + cluster.formatted(clusterId, ", \"DeletionProtection\": true") + failingMember + "}}");
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertTrue(rdsService.getDbCluster(clusterId).isDeletionProtection());
+        } finally {
+            rdsService.setDbClusterRequestSettings(clusterId, null, null, null, null, false);
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
     /** The group a cluster created with none lands on, read from a throwaway cluster. */
     private static List<String> vpcDefaultGroup(String suffix) {
         String id = "cfn-sg-ref-" + suffix;
