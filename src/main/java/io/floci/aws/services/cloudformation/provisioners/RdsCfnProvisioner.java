@@ -115,8 +115,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
     /**
-     * What an update that kept a DB instance needs for {@link #rollbackUpdate}: the region, the VPC
-     * security groups the instance had when the update changed them, and whether it changed anything
+     * What an update that kept a DB instance or cluster needs for {@link #rollbackUpdate}: the region,
+     * the VPC security groups it had when the update changed them, and whether it changed anything
      * else, which has no rollback here.
      */
     static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
@@ -264,8 +264,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
-            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(), resource.getPhysicalId(),
-                    groupIds);
+            if (prior.path("cluster").asBoolean(false)) {
+                rdsService.setDbClusterRequestSettings(resource.getPhysicalId(), prior.path("region").asText(),
+                        groupIds, null, null, null);
+            } else {
+                rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
+                        resource.getPhysicalId(), groupIds);
+            }
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
@@ -689,6 +694,16 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     ? rdsService.defaultClusterVpcSecurityGroupIds(region, cluster.getDbClusterIdentifier())
                     : List.of();
             securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
+        }
+        // The groups an in-place update changes are saved, for rollbackUpdate, as an instance's are.
+        r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        if (!created && securityGroupIds != null
+                && !Set.copyOf(securityGroupIds).equals(Set.copyOf(cluster.getVpcSecurityGroupIds()))) {
+            ObjectNode saved = MAPPER.createObjectNode().put("region", region).put("cluster", true)
+                    .put("otherChanges", true);
+            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
+            cluster.getVpcSecurityGroupIds().forEach(priorGroups::add);
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
         }
         rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
                 securityGroupIds, backupWindow, maintenanceWindow, deletionProtection);
