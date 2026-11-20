@@ -1558,6 +1558,20 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void updateStackRefusesANonBooleanPreviousManagedPasswordFlag() {
+        when(rdsService.getDbCluster("mycluster")).thenReturn(mock(DbCluster.class));
+        String base = "\"DBClusterIdentifier\":\"mycluster\",\"Engine\":\"aurora-postgresql\"";
+
+        StackResource r = provisioner.provision("Cluster", "AWS::RDS::DBCluster", props("{" + base + "}"),
+                engine(), "us-east-1", "000000000000", "my-stack", "mycluster", Map.of(), event -> { },
+                props("{" + base + ",\"ManageMasterUserPassword\":\"yes\"}"));
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("ManageMasterUserPassword must be a boolean"), r.getStatusReason());
+        verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void updateStackTurnsManagementOffWhenItIsNewlySetFalse() {
         updateClusterWithPriorManage(null, "false", Boolean.FALSE);
     }
