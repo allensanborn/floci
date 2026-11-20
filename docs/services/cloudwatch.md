@@ -581,6 +581,10 @@ Alarms stored before Floci recorded it report their last state update.
 `StateReason` and 4000 characters for `StateReasonData` before changing alarm state.
 Length checks count Unicode code points and preserve empty and whitespace values.
 
+A state set by `SetAlarmState` is held against the alarm evaluator for the alarm's period,
+capped at 60 seconds. The first evaluation after the hold returns the alarm to its evaluated
+state. `PutMetricAlarm` ends the hold.
+
 ### Composite alarm evaluation
 
 A composite alarm is evaluated when it is created, when `PutCompositeAlarm` updates it, and when
@@ -637,7 +641,7 @@ Updating an alarm replaces its metric definition, so changing between `Metrics` 
 metric does not retain the previous definition.
 
 This is management-plane support: the alarm evaluator currently evaluates only single-metric
-alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
+alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions and holds its state for up to 60 seconds, as described above.
 
 ### DescribeAlarms filters {#describealarms-filters}
 

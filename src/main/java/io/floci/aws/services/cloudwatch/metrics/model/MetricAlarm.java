@@ -9,6 +9,9 @@ import java.util.List;
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class MetricAlarm extends Alarm {
+    /** Longest the evaluator leaves a SetAlarmState state alone; AWS measured about 30s to 70s. */
+    private static final long MAX_HOLD_SECONDS = 60;
+
     @Override
     public String getAlarmType() { return "MetricAlarm"; }
 
@@ -75,4 +78,9 @@ public class MetricAlarm extends Alarm {
     public String getEvaluateLowSampleCountPercentile() { return evaluateLowSampleCountPercentile; }
     public void setEvaluateLowSampleCountPercentile(String percentile) { this.evaluateLowSampleCountPercentile = percentile; }
 
+    /** Whether a client's SetAlarmState still holds at {@code nowSeconds}: for a period, capped at {@link #MAX_HOLD_SECONDS}. */
+    public boolean stateHeld(long nowSeconds) {
+        long forced = getStateForcedTimestamp();
+        return forced > 0 && forced + Math.min(period == null ? MAX_HOLD_SECONDS : period, MAX_HOLD_SECONDS) > nowSeconds;
+    }
 }

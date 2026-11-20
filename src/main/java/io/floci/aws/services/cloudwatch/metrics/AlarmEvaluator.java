@@ -113,6 +113,9 @@ public class AlarmEvaluator {
         }
         String region = alarm.getRegion();
         int period = alarm.getPeriod();
+        if (alarm.stateHeld(Instant.now().getEpochSecond())) {
+            return; // SetAlarmState holds until the next evaluation
+        }
         int evaluationPeriods = alarm.getEvaluationPeriods();
         int range = evaluationRange(evaluationPeriods);
         long nowBucket = (Instant.now().getEpochSecond() / period) * period;
