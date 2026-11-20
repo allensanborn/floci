@@ -33,6 +33,9 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
     @Inject
     RdsService rdsService;
 
+    @Inject
+    CloudFormationService cloudFormation;
+
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261014/us-east-1/cloudformation/aws4_request";
     private static final String RDS_AUTH =
@@ -476,6 +479,31 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
                     "{\"Resources\": {" + cluster.formatted(clusterId, "changed-password-456") + failingMember + "}}");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals("password123", rdsService.getDbCluster(clusterId).getMasterPassword());
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void theRollbackRecordHoldingThePasswordIsDroppedOnceAnUpdateCommits() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-record-" + suffix;
+        String clusterId = "cfn-record-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "%s"}}}}""";
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId, "password123"));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "changed-password-456"));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            assertEquals("changed-password-456", rdsService.getDbCluster(clusterId).getMasterPassword());
+            assertTrue(cloudFormation.describeStacks(stackName, "us-east-1").get(0).getResources()
+                    .get("Cluster").getAttributes().keySet().stream().noneMatch(k -> k.startsWith("__Floci")
+                            && k.contains("InPlace")));
         } finally {
             stack("DeleteStack", stackName, null);
             CfnStackWaits.awaitStackDeleted(stackName);

@@ -586,7 +586,8 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   sends the previous values on rollback: the master password, IAM authentication, VPC security groups,
   backup and maintenance windows, `DeletionProtection`, `EnableHttpEndpoint` and Serverless v2 scaling,
   and the stack reaches `UPDATE_ROLLBACK_COMPLETE`. Scaling the cluster did not have before is left in
-  place, as AWS sends nothing for it. Floci keeps the previous password with the rollback record.
+  place, as AWS sends nothing for it. Floci keeps the previous password with the rollback record, as the cluster itself does, and
+  drops the record when the update commits.
 - `StorageEncrypted` is createOnly, so changing it, including dropping `StorageEncrypted: true`,
   replaces the instance under a new generated name. The old instance is deleted once the update
   commits, or kept, with the replacement deleted, when the update rolls back. An instance with a

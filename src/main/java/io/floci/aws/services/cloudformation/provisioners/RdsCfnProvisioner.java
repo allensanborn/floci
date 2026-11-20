@@ -119,8 +119,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * and whether it changed anything else, which has no rollback here. An instance's record holds the
      * VPC security groups it had when the update changed them; a cluster's holds all it can change
      * (see {@link DbClusterInPlaceState}).
+     * A cluster's record holds its previous master password, a secret, so the update's commit clears
+     * it: only a rollback needs it.
      */
-    static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
+    public static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
 
     private final RdsService rdsService;
     private final CfnDynamicReferences dynamicReferences;
