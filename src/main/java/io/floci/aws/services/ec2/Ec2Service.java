@@ -13965,7 +13965,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
         }
         Subnet subnet = requireSubnet(region, subnetId);
-        String type = ipAddressType == null || ipAddressType.isBlank() ? "ipv4" : ipAddressType;
+        // AWS: unspecified follows the subnet's families (both -> dualstack, IPv6 only -> ipv6).
+        boolean subnetHasIpv6 = !associatedIpv6Blocks(subnet).isEmpty();
+        String subnetType = subnet.getCidrBlock() == null ? "ipv6" : subnetHasIpv6 ? "dualstack" : "ipv4";
+        String type = ipAddressType == null || ipAddressType.isBlank() ? subnetType : ipAddressType;
         if (!INSTANCE_CONNECT_ENDPOINT_IP_TYPES.contains(type)) {
             throw new AwsException("InvalidParameterValue",
                     "Value (" + type + ") for parameter IpAddressType is invalid.", 400);

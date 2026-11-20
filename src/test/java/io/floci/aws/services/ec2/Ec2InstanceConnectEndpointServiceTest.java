@@ -14,6 +14,7 @@ import io.floci.aws.services.ec2.model.PrefixListEntry;
 import io.floci.aws.services.ec2.model.PrefixListId;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.UserIdGroupPair;
+import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -38,6 +39,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class Ec2InstanceConnectEndpointServiceTest {
 
     private static final String REGION = "us-east-1";
+
+    /** AWS: with no IpAddressType the default follows the subnet's address families. */
+    @Test
+    void defaultIpAddressTypeFollowsSubnetFamilies() {
+        Ec2Service service = mockModeService();
+        Vpc vpc = service.createVpc(REGION, "10.81.0.0/16", false, true);
+        String vpcId = vpc.getVpcId();
+        String v6 = vpc.getIpv6CidrBlockAssociationSet().get(0).getIpv6CidrBlock();
+        String v6Block = v6.substring(0, v6.indexOf("/")) + "/64";
+        String ipv4Only = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        String dual = service.createSubnet(REGION, vpcId, "10.81.2.0/24", "us-east-1a", null, v6Block).getSubnetId();
+        String v6Only = service.createSubnet(REGION, vpcId, null, "us-east-1a", null, v6Block).getSubnetId();
+
+        assertEquals("ipv4", service.createInstanceConnectEndpoint(REGION, ipv4Only, List.of(), null, null,
+                List.of(), null).getIpAddressType());
+        assertEquals("dualstack", service.createInstanceConnectEndpoint(REGION, dual, List.of(), null, null,
+                List.of(), null).getIpAddressType());
+        assertEquals("ipv6", service.createInstanceConnectEndpoint(REGION, v6Only, List.of(), null, null,
+                List.of(), null).getIpAddressType());
+        assertEquals("ipv4", service.createInstanceConnectEndpoint(REGION, dual, List.of(), null, "ipv4",
+                List.of(), null).getIpAddressType(), "an explicit value wins");
+    }
 
     @Test
     void lifecycleFiltersAndDefaults() {
