@@ -84,18 +84,7 @@ public class CloudWatchDashboardsService {
         if (dashboardName == null || dashboardName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DashboardName is required.", 400);
         }
-        // PutDashboardInput$DashboardName: "The maximum length is 255, and valid characters are A-Z, a-z, 0-9, "-", and "_"". AWS
-        // closes the sentence with a newline, and checks the name before it reads the body.
-        if (dashboardName.length() > MAX_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "The value for field DashboardName is too long. It must have length less than or equal to "
-                            + MAX_NAME_LENGTH + ".\n", 400);
-        }
-        if (!VALID_NAME.matcher(dashboardName).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "The value for field DashboardName contains invalid characters. "
-                            + "It can only contain alphanumerics, dash (-) and underscore (_).\n", 400);
-        }
+        validateName(dashboardName);
         if (dashboardBody == null) {
             throw new AwsException("InvalidParameterValue", "DashboardBody is required.", 400);
         }
@@ -142,7 +131,30 @@ public class CloudWatchDashboardsService {
         return new AwsException("InvalidParameterInput", "The field DashboardBody must be a valid JSON object", 400);
     }
 
+    /**
+     * PutDashboardInput$DashboardName: "The maximum length is 255, and valid characters are A-Z, a-z, 0-9, "-", and "_"".
+     * GetDashboard answers the same way. AWS reports each violated rule on its own line, each closed with a newline,
+     * and checks the name before it reads the body.
+     */
+    private static void validateName(String dashboardName) {
+        StringBuilder message = new StringBuilder();
+        if (!VALID_NAME.matcher(dashboardName).matches()) {
+            message.append("The value for field DashboardName contains invalid characters. "
+                    + "It can only contain alphanumerics, dash (-) and underscore (_).\n");
+        }
+        if (dashboardName.length() > MAX_NAME_LENGTH) {
+            message.append("The value for field DashboardName is too long. It must have length less than or equal to "
+                    + MAX_NAME_LENGTH + ".\n");
+        }
+        if (message.length() > 0) {
+            throw new AwsException("InvalidParameterValue", message.toString(), 400);
+        }
+    }
+
     public Dashboard getDashboard(String dashboardName, String region) {
+        if (dashboardName != null) {
+            validateName(dashboardName);
+        }
         return dashboardStore.get(key(region, dashboardName))
                 .map(CloudWatchDashboardsService::withRegionlessArn)
                 .orElseThrow(() -> new AwsException("ResourceNotFound",
