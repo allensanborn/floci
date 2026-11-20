@@ -658,13 +658,16 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         boolean deletionProtection = parseStrictBoolProp(props, "DeletionProtection", engine);
         boolean created = cluster == null;
         if (cluster != null) {
+            Boolean manageChange = manageMasterUserPasswordChange(props, ctx);
             cluster = rdsService.modifyDbCluster(
                     id,
                     resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     parseServerlessV2Capacity(props, "MinCapacity", engine),
                     parseServerlessV2Capacity(props, "MaxCapacity", engine),
-                    parseServerlessV2SecondsUntilAutoPause(props, engine), region);
+                    parseServerlessV2SecondsUntilAutoPause(props, engine),
+                    manageChange,
+                    masterUserSecretKmsKeyId(props, engine), region);
         } else {
             Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
             Double serverlessV2MaxCapacity = parseServerlessV2Capacity(props, "MaxCapacity", engine);
@@ -681,7 +684,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                    false, null, engineMode, storageEncrypted, null, deletionProtection);
+                    parseBoolProp(props, "ManageMasterUserPassword", engine),
+                    masterUserSecretKmsKeyId(props, engine),
+                    engineMode, storageEncrypted, null, deletionProtection);
         }
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
@@ -706,6 +711,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cluster.getDbClusterResourceId() != null) {
             r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
+        }
+        if (cluster.getMasterUserSecretArn() != null) {
+            r.getAttributes().put("MasterUserSecret.SecretArn", cluster.getMasterUserSecretArn());
+        } else {
+            r.getAttributes().remove("MasterUserSecret.SecretArn");
         }
         recordDbClusterCreateOnly(r, ctx, attributesBefore, createOnly);
         // A provision that left the resource with a new physical id replaced the cluster: the
@@ -1305,6 +1315,29 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             return Boolean.parseBoolean(text);
         }
         throw new AwsException("ValidationError", name + " must be true or false, not " + text + ".", 400);
+    }
+
+    /**
+     * What an update sends for {@code ManageMasterUserPassword}, as the AWS handler does: true when the
+     * template sets it, false when it turns it off (set to false over a previous value that was not
+     * false, or dropped after a true), and null, meaning leave it as it is, otherwise.
+     */
+    private Boolean manageMasterUserPasswordChange(JsonNode props, ProvisionContext ctx) {
+        Boolean desired = ctx.resolveOptionalBoolean(props, "ManageMasterUserPassword");
+        Boolean previous = ProvisionContext.resolveOptionalBoolean(
+                ctx.priorProperties(), "ManageMasterUserPassword", ctx.priorEngine());
+        if (Boolean.TRUE.equals(desired)) {
+            return Boolean.TRUE;
+        }
+        boolean turnsOff = desired == null ? Boolean.TRUE.equals(previous) : !Boolean.FALSE.equals(previous);
+        return turnsOff ? Boolean.FALSE : null;
+    }
+
+    /** The {@code MasterUserSecret.KmsKeyId} property, which is where the template names the secret's key. */
+    private String masterUserSecretKmsKeyId(JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode secret = props == null ? null : props.get("MasterUserSecret");
+        return secret == null || !secret.has("KmsKeyId") ? null
+                : resolveOptional(secret, "KmsKeyId", engine);
     }
 
     private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {

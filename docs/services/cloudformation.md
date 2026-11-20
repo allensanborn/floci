@@ -642,6 +642,10 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 - On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
 - An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
 
+## RDS managed master password
+
+`AWS::RDS::DBCluster` applies `ManageMasterUserPassword` and `MasterUserSecret.KmsKeyId` on create and on `UpdateStack`, as `CreateDBCluster` / `ModifyDBCluster` do. A managed cluster has a Secrets Manager secret that `Fn::GetAtt` reads as `MasterUserSecret.SecretArn`; an update that sets the flag to false, or drops it after the previous template set it to true, turns management off and removes the secret and its attribute, while a stack that never declared it leaves a secret set outside the stack alone. AWS requires a `MasterUserPassword` when an update stops managing the password.
+
 ## RDS DB instance security groups and encryption
 
 `AWS::RDS::DBInstance` creates the instance with its `VPCSecurityGroups` and `StorageEncrypted`, as

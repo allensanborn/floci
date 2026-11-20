@@ -273,7 +273,15 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * whitespace-only intrinsic result included, is refused rather than read as false.
      */
     public Boolean resolveOptionalBoolean(JsonNode props, String name) {
-        String value = resolveOptional(props, name);
+        return resolveOptionalBoolean(props, name, engine);
+    }
+
+    /** As {@link #resolveOptionalBoolean(JsonNode, String)}, resolving through {@code resolver}, such as {@link #priorEngine}. */
+    public static Boolean resolveOptionalBoolean(JsonNode props, String name, CloudFormationTemplateEngine resolver) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        String value = resolver.resolve(props.get(name));
         if (value == null || (value.isEmpty() && !props.get(name).isTextual())) {
             return null;
         }
