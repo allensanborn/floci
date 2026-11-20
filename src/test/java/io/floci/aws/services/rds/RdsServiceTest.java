@@ -5248,6 +5248,13 @@ class RdsServiceTest {
                 () -> rdsService.deleteDbSubnetGroup("ghost")).getMessage());
         assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
                 () -> rdsService.modifyDbSubnetGroup("ghost", List.of("subnet-1"))).getMessage());
+        assertEquals("DBSubnetGroup 'ghost' not found.", assertThrows(AwsException.class,
+                () -> rdsService.createDbInstance("placed", "postgres", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, "ghost", null)).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.createDbCluster("placed-cluster", "aurora-postgresql", null,
+                        "admin", "password", "dbname", false, null, "ghost", null, false)).getMessage());
     }
 
     @Test

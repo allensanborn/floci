@@ -808,7 +808,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DBName must be null for SQL Server.", 400);
         }
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank() && !"default".equalsIgnoreCase(dbSubnetGroupName)) {
-            getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+            getInstanceSubnetGroup(dbSubnetGroupName, effectiveRegion);
         }
         validateInstanceParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
@@ -2286,7 +2286,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // The source's groups belong to its VPC, so a replica placed in another one gets that VPC's
         // default group instead.
         boolean inSourceVpc = sameRegion && (isBlank(request.dbSubnetGroupName()) || Objects.equals(
-                getDbSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
+                getInstanceSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
         List<String> vpcSecurityGroupIds = request.vpcSecurityGroupIds() != null
                 ? request.vpcSecurityGroupIds()
                 : inSourceVpc ? source.getVpcSecurityGroupIds() : List.of();
@@ -8548,6 +8548,19 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public DbSubnetGroup getDbSubnetGroup(String name) {
         return getDbSubnetGroup(name, regionResolver.getDefaultRegion());
+    }
+
+    /** The group a DB instance is placed in; AWS words its absence differently from the calls that act on a group. */
+    private DbSubnetGroup getInstanceSubnetGroup(String name, String region) {
+        try {
+            return getDbSubnetGroup(name, region);
+        } catch (AwsException e) {
+            if ("DBSubnetGroupNotFoundFault".equals(e.getErrorCode())) {
+                throw new AwsException("DBSubnetGroupNotFoundFault",
+                        "DBSubnetGroup '" + name + "' not found.", 404);
+            }
+            throw e;
+        }
     }
 
     public DbSubnetGroup getDbSubnetGroup(String name, String region) {
