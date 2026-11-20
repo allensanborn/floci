@@ -7960,6 +7960,61 @@ class RdsServiceTest {
         assertEquals(payload, rdsService.snapshotExportSource(copy.getDbClusterSnapshotArn(), "us-east-1").sqlDump());
     }
 
+    /** A cluster registered with no container, as when there is no Docker daemon; real-container mode is back on. */
+    private void createClusterWithoutContainer(String id, String engine) {
+        when(config.services().rds().mock()).thenReturn(true);
+        assertNull(rdsService.createDbCluster(id, engine, null, "admin", "password", "dbname", false, null)
+                .getContainerId());
+        when(config.services().rds().mock()).thenReturn(false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-mysql", "aurora-postgresql"})
+    void clusterSnapshotOfAClusterWithoutAContainerHoldsNoDataForAnyEngine(String engine) {
+        createClusterWithoutContainer("bare-cluster", engine);
+
+        DbClusterSnapshot snapshot = rdsService.createDbClusterSnapshot("bare-snap", "bare-cluster", Map.of());
+
+        assertEquals("available", snapshot.getStatus());
+        verify(containerManager, never()).createPostgresSnapshot(any(), any());
+    }
+
+    @Test
+    void clusterSnapshotOfALiveMysqlClusterIsRefused() {
+        DbCluster cluster = rdsService.createDbCluster("live-mysql", "aurora-mysql", "8.0",
+                "admin", "password", "dbname", false, null);
+        assertNotNull(cluster.getContainerId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> rdsService.createDbClusterSnapshot("live-snap", "live-mysql", Map.of()));
+
+        assertEquals("InvalidDBClusterStateFault", refused.getErrorCode());
+        assertTrue(rdsService.describeDbClusterSnapshots(null, null, null).isEmpty());
+    }
+
+    @Test
+    void clusterSnapshotOfALivePostgresClusterDumpsIt() {
+        DbCluster cluster = rdsService.createDbCluster("live-pg", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        assertNotNull(cluster.getContainerId());
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
+
+        rdsService.createDbClusterSnapshot("pg-snap", "live-pg", Map.of());
+
+        verify(containerManager).createPostgresSnapshot(cluster.getContainerId(), "admin");
+    }
+
+    @Test
+    void restoreFromAnEmptyClusterSnapshotSkipsTheContainerRestore() {
+        createClusterWithoutContainer("bare-cluster", "aurora-mysql");
+        rdsService.createDbClusterSnapshot("bare-snap", "bare-cluster", Map.of());
+
+        rdsService.restoreDbClusterFromSnapshot("restored", "bare-snap", "aurora-mysql", null, null, null, null,
+                null, null, null, null, false, null, null);
+
+        verify(containerManager, never()).restorePostgresSnapshot(any(), any(), any());
+    }
+
     @Test
     void createDbClusterSnapshotRecordsTheClusterAndItsData() {
         DbClusterSnapshot snapshot = clusterSnapshotOfNewCluster("csnap");

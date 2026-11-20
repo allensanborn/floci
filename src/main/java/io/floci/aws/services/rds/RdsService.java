@@ -2634,8 +2634,11 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + clusterId + " is not available.", 400);
         }
-        // Only the real-container dump is Postgres-only; mock mode stores an empty dump for any engine.
-        if (!config.services().rds().mock() && cluster.getEngine() != DatabaseEngine.POSTGRES) {
+        // A cluster with no container (mock mode, or no Docker daemon) has no data to dump, so any engine
+        // gets a metadata snapshot with an empty dump. With a live container only the Postgres dump exists;
+        // an empty snapshot of a real MySQL database would silently lose its data on restore.
+        boolean live = !config.services().rds().mock() && cluster.getContainerId() != null;
+        if (live && cluster.getEngine() != DatabaseEngine.POSTGRES) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "Operation CreateDBClusterSnapshot is not supported for engine " + cluster.getEngine() + ".", 400);
         }
@@ -2644,7 +2647,7 @@ public class RdsService implements Resettable, ResourceProvider {
         snapshot.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
 
         String sqlDump = "";
-        if (!config.services().rds().mock()) {
+        if (live) {
             try {
                 sqlDump = containerManager.createPostgresSnapshot(cluster.getContainerId(), cluster.getMasterUsername());
             } catch (Exception e) {
@@ -2805,7 +2808,8 @@ public class RdsService implements Resettable, ResourceProvider {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
         }
-        if (!config.services().rds().mock()) {
+        // An empty dump is a snapshot of a cluster that had no container: there is nothing to restore.
+        if (!config.services().rds().mock() && !sqlDump.isEmpty()) {
             try {
                 containerManager.restorePostgresSnapshot(cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
