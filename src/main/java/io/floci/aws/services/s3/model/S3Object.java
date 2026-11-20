@@ -36,6 +36,7 @@ public class S3Object {
     private String storageClass;
     private Instant restoreCompletionAt;
     private Instant restoreExpiryAt;
+    private String restoreTier;
     private S3Checksum checksum;
     private List<Part> parts;
     private String versionId;
@@ -114,6 +115,7 @@ public class S3Object {
         this.storageClass = source.storageClass;
         this.restoreCompletionAt = source.restoreCompletionAt;
         this.restoreExpiryAt = source.restoreExpiryAt;
+        this.restoreTier = source.restoreTier;
         this.checksum = source.checksum == null ? null : source.checksum.copy();
         this.parts = Part.copyAll(source.parts);
         this.versionId = source.versionId;
@@ -179,6 +181,9 @@ public class S3Object {
 
     public Instant getRestoreCompletionAt() { return restoreCompletionAt; }
     public void setRestoreCompletionAt(Instant restoreCompletionAt) { this.restoreCompletionAt = restoreCompletionAt; }
+
+    public String getRestoreTier() { return restoreTier; }
+    public void setRestoreTier(String restoreTier) { this.restoreTier = restoreTier; }
 
     public Instant getRestoreExpiryAt() { return restoreExpiryAt; }
     public void setRestoreExpiryAt(Instant restoreExpiryAt) { this.restoreExpiryAt = restoreExpiryAt; }
