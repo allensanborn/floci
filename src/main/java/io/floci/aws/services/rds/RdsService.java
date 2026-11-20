@@ -940,7 +940,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
             instance.setRequestedPort(advertisedPort);
             instance.setOptionGroupName(optionGroupName);
-            instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setDbSubnetGroupName(subnetGroupName(dbSubnetGroupName));
             instance.setContainerId(containerId);
             instance.setContainerHost(containerHost);
             instance.setContainerPort(containerPort);
@@ -4214,7 +4214,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
         if (newSubnetGroup != null) {
-            instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setDbSubnetGroupName(newSubnetGroup.getDbSubnetGroupName());
             instance.setVpcId(newSubnetGroup.getVpcId());
         }
         if (securityGroupIdsAfter != null) {
@@ -8288,6 +8288,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
+        name = subnetGroupName(name);
         String effectiveRegion = effectiveRegion(region);
         if (findSubnetGroupForScope(currentAccountId(), effectiveRegion, name) != null
                 || scopedKeyExists(subnetGroups, currentAccountId(),
@@ -8358,7 +8359,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup resolveDbSubnetGroupView(String name, String region) {
-        String effectiveName = (name == null || name.isBlank()) ? "default" : name;
+        String effectiveName = (name == null || name.isBlank()) ? "default" : subnetGroupName(name);
         if ("default".equalsIgnoreCase(effectiveName)) {
             return buildDefaultSubnetGroup(effectiveRegion(region));
         }
@@ -8551,6 +8552,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup getDbSubnetGroup(String name, String region) {
+        name = subnetGroupName(name);
         if ("default".equalsIgnoreCase(name)) {
             return buildDefaultSubnetGroup(effectiveRegion(region));
         }
@@ -8568,6 +8570,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup modifyDbSubnetGroup(String name, List<String> subnetIds, String region) {
+        name = subnetGroupName(name);
         DbSubnetGroup existing = getDbSubnetGroup(name, region);
         if (subnetIds == null || subnetIds.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
@@ -8585,6 +8588,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void deleteDbSubnetGroup(String name, String region) {
+        name = subnetGroupName(name);
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         if (findSubnetGroupForScope(accountId, effectiveRegion, name) == null) {
@@ -11419,7 +11423,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                                  String region) {
         String effectiveSubnetGroupName = (dbSubnetGroupName == null || dbSubnetGroupName.isBlank())
                 ? "default"
-                : dbSubnetGroupName;
+                : subnetGroupName(dbSubnetGroupName);
         DbSubnetGroup group = "default".equals(effectiveSubnetGroupName)
                 ? buildDefaultSubnetGroup(region)
                 : getDbSubnetGroup(effectiveSubnetGroupName, region);
@@ -11538,6 +11542,11 @@ public class RdsService implements Resettable, ResourceProvider {
                             + "VpcSubnetIds entry to have an associated IPv6 CIDR block; missing on "
                             + missing + ".", 400);
         }
+    }
+
+    /** AWS stores DBSubnetGroupName as a lowercase string. */
+    private static String subnetGroupName(String name) {
+        return name == null ? null : name.toLowerCase(Locale.ROOT);
     }
 
     private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds, String region) {

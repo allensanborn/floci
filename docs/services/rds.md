@@ -91,7 +91,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `RemoveRoleFromDBInstance` | Remove a role from an instance |
 | `AddSourceIdentifierToSubscription` | Add a source id to a subscription |
 | `RemoveSourceIdentifierFromSubscription` | Remove a source id from a subscription |
-| `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource` |
+| `CreateDBSubnetGroup` | Create a DB subnet group; tags given here are readable through `ListTagsForResource`; the name is stored in lower case, as AWS does, and any case finds it |
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
