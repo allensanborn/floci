@@ -218,10 +218,10 @@ class CloudWatchTagUnknownResourceIntegrationTest {
      * Both handlers route every ARN that is not a dashboard and not a metric stream to the
      * alarm path, so a Contributor Insights ARN, which AWS documents as taggable and Floci
      * does not serve, lands there. Reporting it as not found is right; calling it an alarm
-     * that was not found is not, so the message names the ARN instead.
+     * that was not found is not, so the refusal carries no message at all.
      */
     @Test
-    void anArnOfAKindFlociDoesNotServeIsReportedAgainstTheArn() {
+    void anArnOfAKindFlociDoesNotServeIsReportedWithoutAMessage() {
         query("TagResource")
                 .formParam("ResourceARN", PREFIX + "insight-rule/no-such-rule")
                 .formParam("Tags.member.1.Key", "env")
@@ -231,10 +231,7 @@ class CloudWatchTagUnknownResourceIntegrationTest {
             .then()
                 .statusCode(404)
                 .body("ErrorResponse.Error.Code", equalTo("ResourceNotFoundException"))
-                .body("ErrorResponse.Error.Message",
-                        containsString("insight-rule/no-such-rule"))
-                .body("ErrorResponse.Error.Message",
-                        not(containsString("Alarm")));
+                .body(not(containsString("<Message")));
     }
 
     /**
