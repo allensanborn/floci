@@ -1551,6 +1551,13 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void updateStackReadsAPreviousNoValueAsAbsent() {
+        conditions = Map.of("Off", false);
+        updateClusterWithPriorManage("{\"Fn::If\":[\"Off\",true,{\"Ref\":\"AWS::NoValue\"}]}", "false",
+                Boolean.FALSE);
+    }
+
+    @Test
     void updateStackTurnsManagementOffWhenItIsNewlySetFalse() {
         updateClusterWithPriorManage(null, "false", Boolean.FALSE);
     }

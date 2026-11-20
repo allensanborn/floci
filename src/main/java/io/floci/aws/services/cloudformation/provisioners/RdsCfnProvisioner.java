@@ -1324,12 +1324,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      */
     private Boolean manageMasterUserPasswordChange(JsonNode props, ProvisionContext ctx) {
         Boolean desired = ctx.resolveOptionalBoolean(props, "ManageMasterUserPassword");
-        JsonNode prior = ctx.priorProperties();
-        Boolean previous = null;
-        if (prior != null && prior.hasNonNull("ManageMasterUserPassword")) {
-            CloudFormationTemplateEngine priorEngine = ctx.priorEngine() != null ? ctx.priorEngine() : ctx.engine();
-            previous = Boolean.parseBoolean(priorEngine.resolve(prior.get("ManageMasterUserPassword")).trim());
-        }
+        Boolean previous = ProvisionContext.resolveOptionalBoolean(
+                ctx.priorProperties(), "ManageMasterUserPassword", ctx.priorEngine());
         if (Boolean.TRUE.equals(desired)) {
             return Boolean.TRUE;
         }
