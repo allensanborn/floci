@@ -1431,7 +1431,7 @@ class RdsQueryHandlerTest {
                 eq(20), eq(false), eq(null), eq("missing-subnet-group"), eq(null), eq(null), eq(false),
                 eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenThrow(new AwsException("DBSubnetGroupNotFoundFault",
-                        "DB subnet group missing-subnet-group not found.", 404));
+                        "DBSubnetGroup 'missing-subnet-group' not found.", 404));
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");

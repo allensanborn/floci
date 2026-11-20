@@ -5240,6 +5240,24 @@ class RdsServiceTest {
     }
 
     @Test
+    void missingDbSubnetGroupMessageFollowsTheCall() {
+        // Describe reports the group; Delete and Modify act on it, and AWS words the fault differently.
+        assertEquals("DB Subnet group 'ghost' not found.", assertThrows(AwsException.class,
+                () -> rdsService.listDbSubnetGroups("ghost")).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.deleteDbSubnetGroup("ghost")).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbSubnetGroup("ghost", List.of("subnet-1"))).getMessage());
+        assertEquals("DBSubnetGroup 'ghost' not found.", assertThrows(AwsException.class,
+                () -> rdsService.createDbInstance("placed", "postgres", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, "ghost", null)).getMessage());
+        assertEquals("DB subnet group 'ghost' does not exist.", assertThrows(AwsException.class,
+                () -> rdsService.createDbCluster("placed-cluster", "aurora-postgresql", null,
+                        "admin", "password", "dbname", false, null, "ghost", null, false)).getMessage());
+    }
+
+    @Test
     void listDbSubnetGroupsFaultsForMissingName() {
         AwsException missing = assertThrows(AwsException.class,
                 () -> rdsService.listDbSubnetGroups("does-not-exist"));
@@ -7500,6 +7518,35 @@ class RdsServiceTest {
         assertEquals("InvalidDBSnapshotState", exception.getErrorCode());
         assertEquals("DBInstanceNotFound", assertThrows(AwsException.class, () ->
                 rdsService.getDbInstance("restored")).getErrorCode());
+    }
+
+    @Test
+    void readReplicaInMissingDbSubnetGroupIsWordedAsInstancePlacement() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 5432));
+        createPostgresSource("primary");
+
+        AwsException e = assertThrows(AwsException.class, () -> rdsService.createDbInstanceReadReplica(
+                replicaRequest("primary-replica", "arn:aws:rds:us-east-1:123456789012:db:primary", "ghost"), null));
+
+        assertEquals("DBSubnetGroupNotFoundFault", e.getErrorCode());
+        assertEquals("DBSubnetGroup 'ghost' not found.", e.getMessage());
+    }
+
+    @Test
+    void snapshotRestoreIntoMissingDbSubnetGroupIsWordedAsInstancePlacement() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        AwsException e = assertThrows(AwsException.class, () -> rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "mysnap", null, null, false, "ghost", List.of(), Map.of(), "us-east-1"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", e.getErrorCode());
+        assertEquals("DBSubnetGroup 'ghost' not found.", e.getMessage());
     }
 
     @Test
