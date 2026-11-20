@@ -80,9 +80,9 @@ existing application storage and region visibility.
 | Operation | Notes |
 |---|---|
 | `RegisterOnPremisesInstance` | Registers an instance name with an IAM session or user ARN |
-| `DeregisterOnPremisesInstance` | Marks an instance as `Deregistered` while retaining its registration record |
+| `DeregisterOnPremisesInstance` | Purges the instance record: Get then raises `InstanceNotRegisteredException`, neither status filter lists it, and re-registering mints a new `instanceArn` with no tags; repeating the call on a gone instance succeeds |
 | `GetOnPremisesInstance` | Returns registration information for one instance |
-| `BatchGetOnPremisesInstances` | Returns registration information for named instances |
+| `BatchGetOnPremisesInstances` | Returns registration information for named instances; unknown names are omitted |
 | `ListOnPremisesInstances` | Lists registered names, optionally filtered by status or tags |
 | `AddTagsToOnPremisesInstances` | Adds or replaces tags by key on named instances |
 | `RemoveTagsFromOnPremisesInstances` | Removes matching tag keys from named instances |

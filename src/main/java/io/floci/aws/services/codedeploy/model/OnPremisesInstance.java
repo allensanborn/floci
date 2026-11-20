@@ -16,6 +16,7 @@ public class OnPremisesInstance {
     private String iamSessionArn;
     private String iamUserArn;
     private Double registerTime;
+    /** Never set: deregistration purges the record. Kept so state persisted by earlier builds still loads. */
     private Double deregisterTime;
     private List<Map<String, String>> tags = new ArrayList<>();
     private String registrationStatus;

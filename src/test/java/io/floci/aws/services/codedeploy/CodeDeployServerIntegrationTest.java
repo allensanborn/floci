@@ -346,8 +346,9 @@ class CodeDeployServerIntegrationTest {
                 .header("X-Amz-Target", "CodeDeploy_20141006.GetOnPremisesInstance")
                 .body("{\"instanceName\":\"on-prem-test-1\"}")
                 .when().post("/")
-                .then().statusCode(200)
-                .body("instanceInfo.registrationStatus", equalTo("Deregistered"));
+                .then().statusCode(400)
+                .body("__type", containsString("InstanceNotRegisteredException"))
+                .body("message", equalTo("The requested host does not exist. Host: on-prem-test-1"));
     }
 
     @Test
@@ -359,7 +360,7 @@ class CodeDeployServerIntegrationTest {
                 .body("{\"registrationStatus\":\"Deregistered\"}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("instanceNames", hasItem("on-prem-test-1"));
+                .body("instanceNames", not(hasItem("on-prem-test-1")));
     }
 
     @Test

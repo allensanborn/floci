@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.codedeploy.model.Deployment;
+import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.Reservation;
@@ -19,6 +20,7 @@ import io.floci.aws.services.ssm.SsmCommandService;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -89,17 +91,13 @@ class CodeDeployServiceTest {
     }
 
     @Test
-    void onPremisesRegistrationAndDeregistrationUseTheDeploymentClock() {
+    void onPremisesRegistrationUsesTheDeploymentClock() {
         Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
         CodeDeployService target = newService(Duration.ofHours(1), clock);
         double registered = EpochSeconds.fromInstant(clock.instant());
         assertEquals(registered, target.registerOnPremisesInstance(REGION, "clock-host", null, null)
                 .getRegisterTime());
-
-        target.deregisterOnPremisesInstance(REGION, "clock-host");
-
-        assertEquals(registered,
-                target.getOnPremisesInstance(REGION, "clock-host").getDeregisterTime());
+        // Deregister purges the record (no deregisterTime to stamp), so there is no timestamp left to check.
     }
 
     @Test
@@ -647,6 +645,139 @@ class CodeDeployServiceTest {
         AwsException unknown = assertThrows(AwsException.class,
                 () -> service.listDeploymentGroups("us-east-1", "nope"));
         assertEquals("ApplicationDoesNotExistException", unknown.getErrorCode());
+    }
+
+    private void assertAws(String code, String message, Executable call) {
+        AwsException e = assertThrows(AwsException.class, call);
+        assertEquals(code, e.getErrorCode());
+        assertEquals(message, e.getMessage());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void applicationErrorsUseAwsMessages() {
+        service.createApplication(REGION, "app-a", "Server", null);
+        service.createApplication(REGION, "app-b", "Lambda", null);
+        assertAws("ApplicationAlreadyExistsException", "app-a already exists.",
+                () -> service.createApplication(REGION, "app-a", "Server", null));
+        assertAws("ApplicationAlreadyExistsException",
+                "The application name: app-b you want to update to already exist",
+                () -> service.updateApplication(REGION, "app-a", "app-b"));
+        assertAws("ApplicationDoesNotExistException", "No application found for name: ghost",
+                () -> service.getApplication(REGION, "ghost"));
+        assertAws("ApplicationDoesNotExistException", "No application found for name: ghost",
+                () -> service.updateApplication(REGION, "ghost", "x"));
+    }
+
+    @Test
+    void renameMovesApplicationAndDeleteIsIdempotent() {
+        service.createApplication(REGION, "old-app", "Server", null);
+        service.updateApplication(REGION, "old-app", "new-app");
+        assertEquals("Server", service.getApplication(REGION, "new-app").getComputePlatform());
+        assertAws("ApplicationDoesNotExistException", "No application found for name: old-app",
+                () -> service.getApplication(REGION, "old-app"));
+        service.deleteApplication(REGION, "new-app");
+        service.deleteApplication(REGION, "new-app");
+        assertFalse(service.listApplications(REGION).contains("new-app"));
+    }
+
+    @Test
+    void deploymentGroupErrorsUseAwsMessages() {
+        service.createApplication(REGION, "dg-app", "Server", null);
+        service.createDeploymentGroup(REGION, "dg-app", "g1", null, ROLE_ARN, Map.of(), null);
+        assertAws("DeploymentGroupAlreadyExistsException",
+                "An Deployment Group with the name g1 already exists for this application.",
+                () -> service.createDeploymentGroup(REGION, "dg-app", "g1", null, ROLE_ARN, Map.of(), null));
+        assertAws("DeploymentGroupDoesNotExistException", "No Deployment Group found for name: nogroup",
+                () -> service.getDeploymentGroup(REGION, "dg-app", "nogroup"));
+        assertAws("DeploymentGroupDoesNotExistException", "No Deployment Group found for name: nogroup",
+                () -> service.createDeployment(REGION, "dg-app", "nogroup", null, Map.of(), null));
+        service.deleteDeploymentGroup(REGION, "dg-app", "nogroup");
+    }
+
+    @Test
+    void createDeploymentGroupRejectsUnknownDeploymentConfigAndCreatesNothing() {
+        service.createApplication(REGION, "cfg-app", "Server", null);
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: nocfg",
+                () -> service.createDeploymentGroup(REGION, "cfg-app", "g", "nocfg", ROLE_ARN, Map.of(), null));
+        assertTrue(service.listDeploymentGroups(REGION, "cfg-app").isEmpty());
+        service.createDeploymentGroup(REGION, "cfg-app", "g", "CodeDeployDefault.AllAtOnce", ROLE_ARN, Map.of(), null);
+        assertEquals("CodeDeployDefault.AllAtOnce",
+                service.getDeploymentGroup(REGION, "cfg-app", "g").getDeploymentConfigName());
+    }
+
+    @Test
+    void deploymentConfigErrorsUseAwsMessages() {
+        service.createDeploymentConfig(REGION, "cfg", Map.of("type", "HOST_COUNT", "value", 1), "Server", null, null);
+        assertAws("DeploymentConfigAlreadyExistsException", "cfg already exists.",
+                () -> service.createDeploymentConfig(REGION, "cfg", Map.of("type", "HOST_COUNT", "value", 42),
+                        "Server", null, null));
+        assertEquals(1, service.getDeploymentConfig(REGION, "cfg").getMinimumHealthyHosts().get("value"));
+        assertAws("InvalidOperationException", "Can not delete a predefined deployment configuration",
+                () -> service.deleteDeploymentConfig(REGION, "CodeDeployDefault.OneAtATime"));
+        assertEquals("CodeDeployDefault.OneAtATime",
+                service.getDeploymentConfig(REGION, "CodeDeployDefault.OneAtATime").getDeploymentConfigName());
+        assertTrue(service.listDeploymentConfigs(REGION).contains("CodeDeployDefault.OneAtATime"));
+        service.deleteDeploymentConfig(REGION, "cfg");
+        service.deleteDeploymentConfig(REGION, "cfg");
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: cfg",
+                () -> service.getDeploymentConfig(REGION, "cfg"));
+    }
+
+    @Test
+    void updateDeploymentGroupRejectsUnknownConfigAndDeleteSurvivesMissingApplication() {
+        service.createApplication(REGION, "upd-app", "Server", null);
+        service.createDeploymentGroup(REGION, "upd-app", "g", null, ROLE_ARN, Map.of(), null);
+        assertAws("DeploymentConfigDoesNotExistException", "No deployment configuration found for name: nocfg",
+                () -> service.updateDeploymentGroup(REGION, "upd-app", "g", null, "nocfg", null, Map.of()));
+        assertEquals("CodeDeployDefault.OneAtATime",
+                service.getDeploymentGroup(REGION, "upd-app", "g").getDeploymentConfigName());
+        service.deleteApplication(REGION, "upd-app");
+        service.deleteDeploymentGroup(REGION, "upd-app", "g");
+    }
+
+    @Test
+    void getDeploymentUnknownIdUsesAwsMessage() {
+        assertAws("DeploymentDoesNotExistException", "The deployment d-NOPE could not be found",
+                () -> service.getDeployment(REGION, "d-NOPE"));
+    }
+
+    @Test
+    void deregisterOnPremisesInstanceRemovesRecordAndIsRepeatable() {
+        service.registerOnPremisesInstance(REGION, "host-1", null, "arn:aws:iam::000000000000:user/u");
+        service.deregisterOnPremisesInstance(REGION, "host-1");
+        assertAws("InstanceNotRegisteredException", "The requested host does not exist. Host: host-1",
+                () -> service.getOnPremisesInstance(REGION, "host-1"));
+        assertTrue(service.listOnPremisesInstances(REGION, null, null).isEmpty());
+        service.deregisterOnPremisesInstance(REGION, "host-1");
+        assertAws("InstanceNameRequiredException", "Instance name is missing",
+                () -> service.deregisterOnPremisesInstance(REGION, ""));
+    }
+
+    @Test
+    void onPremisesBatchGetOmitsUnknownAndTagOpsUseHostNotRegisteredMessage() {
+        service.registerOnPremisesInstance(REGION, "h1", null, "arn:aws:iam::000000000000:user/u");
+        assertEquals(List.of("h1"), service.batchGetOnPremisesInstances(REGION, List.of("h1", "gone")).stream()
+                .map(i -> i.getInstanceName()).toList());
+        assertAws("InstanceNotRegisteredException", "Host gone is not registered",
+                () -> service.addTagsToOnPremisesInstances(REGION, List.of("h1", "gone"),
+                        List.of(Map.of("Key", "k", "Value", "v"))));
+        assertTrue(service.getOnPremisesInstance(REGION, "h1").getTags().isEmpty());
+        assertAws("InstanceNotRegisteredException", "Host gone is not registered",
+                () -> service.removeTagsFromOnPremisesInstances(REGION, List.of("gone"),
+                        List.of(Map.of("Key", "k"))));
+    }
+
+    @Test
+    void reRegisteringAfterDeregisterMintsNewArnAndNoTags() {
+        String first = service.registerOnPremisesInstance(REGION, "h2", null, "arn:aws:iam::000000000000:user/u")
+                .getInstanceArn();
+        service.addTagsToOnPremisesInstances(REGION, List.of("h2"), List.of(Map.of("Key", "k", "Value", "v")));
+        service.deregisterOnPremisesInstance(REGION, "h2");
+        OnPremisesInstance reborn = service.registerOnPremisesInstance(REGION, "h2", null, "arn:aws:iam::000000000000:user/u");
+        assertTrue(reborn.getInstanceArn().contains(":instance/h2_"));
+        assertFalse(first.equals(reborn.getInstanceArn()));
+        assertTrue(reborn.getTags().isEmpty());
     }
 
     @SuppressWarnings("unchecked")
