@@ -6397,6 +6397,19 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * Refuses turning management of the master password off without a password to use instead. Only a
+     * resource that currently manages its password is refused. Runs after the secret-key rule.
+     */
+    static void validatePasswordNeededToUnmanage(Boolean manageMasterUserPassword, String masterPassword,
+                                                 boolean currentlyManaged) {
+        if (Boolean.FALSE.equals(manageMasterUserPassword) && currentlyManaged && masterPassword == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You must specify MasterUserPassword when you stop managing the master user password "
+                            + "with Amazon Web Services Secrets Manager.", 400);
+        }
+    }
+
     private DbCluster doModifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
@@ -6407,6 +6420,8 @@ public class RdsService implements Resettable, ResourceProvider {
         validatePasswordNotManaged(manageMasterUserPassword, newPassword);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
         validateSecretKeyNeedsManagement(manageMasterUserPassword, masterUserSecretKmsKeyId,
+                cluster.getMasterUserSecretArn() != null);
+        validatePasswordNeededToUnmanage(manageMasterUserPassword, newPassword,
                 cluster.getMasterUserSecretArn() != null);
         if (rotateMasterUserPassword) {
             if (!applyImmediately || newPassword != null || Boolean.FALSE.equals(manageMasterUserPassword)) {
