@@ -679,7 +679,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                    masterPassword, databaseName, iamEnabled, parameterGroup,
+                    resolveOptional(props, "DBSubnetGroupName", engine), null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted, null, deletionProtection);
         }
