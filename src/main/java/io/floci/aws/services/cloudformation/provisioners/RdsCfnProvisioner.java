@@ -37,11 +37,12 @@ import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
- * {@code DBInstance}, {@code DBCluster}, {@code ClusterSnapshot}, {@code DBProxy} and {@code DBProxyTargetGroup}.
+ * {@code DBInstance}, {@code DBCluster}, {@code ClusterSnapshot}, {@code DBProxy} and {@code DBProxyTargetGroup}
+ * (eight types).
  * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
- * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} and {@code DBInstance}
+ * {@link #delete(String, String, String)} serves all eight. {@code DBCluster} and {@code DBInstance}
  * are the types that replace through {@link ReplacementCleanup}; see {@code provisionDbCluster} and
  * {@code provisionDbInstance}.
  *

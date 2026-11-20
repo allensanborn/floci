@@ -4,7 +4,8 @@ import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 
@@ -26,8 +27,9 @@ class CloudFormationRdsClusterSnapshotIntegrationTest {
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261120/us-east-1/cloudformation/aws4_request";
 
-    @Test
-    void stackSnapshotIsARealSnapshotAndDeleteStackRemovesIt() {
+    @ParameterizedTest
+    @ValueSource(strings = {"aurora-postgresql", "aurora-mysql"})
+    void stackSnapshotIsARealSnapshotAndDeleteStackRemovesIt(String engine) {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-rds-snap-" + suffix;
         String clusterId = "cfn-snap-cluster-" + suffix;
@@ -35,14 +37,14 @@ class CloudFormationRdsClusterSnapshotIntegrationTest {
         String template = """
                 {"Resources": {
                   "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
-                    "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                    "DBClusterIdentifier": "%s", "Engine": "%s",
                     "MasterUsername": "dbadmin", "MasterUserPassword": "password123"}},
                   "Snap": {"Type": "AWS::RDS::ClusterSnapshot", "Properties": {
                     "DBClusterIdentifier": {"Ref": "Cluster"}, "DBClusterSnapshotIdentifier": "%s"}}},
                  "Outputs": {
                   "SnapRef": {"Value": {"Ref": "Snap"}},
                   "SnapArn": {"Value": {"Fn::GetAtt": ["Snap", "DBClusterSnapshotArn"]}}}}
-                """.formatted(clusterId, snapshotId);
+                """.formatted(clusterId, engine, snapshotId);
         try {
             deploy("CreateStack", stackName, template, CFN_AUTH, "CREATE_COMPLETE");
 

@@ -2634,7 +2634,8 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + clusterId + " is not available.", 400);
         }
-        if (cluster.getEngine() != DatabaseEngine.POSTGRES) {
+        // Only the real-container dump is Postgres-only; mock mode stores an empty dump for any engine.
+        if (!config.services().rds().mock() && cluster.getEngine() != DatabaseEngine.POSTGRES) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "Operation CreateDBClusterSnapshot is not supported for engine " + cluster.getEngine() + ".", 400);
         }
