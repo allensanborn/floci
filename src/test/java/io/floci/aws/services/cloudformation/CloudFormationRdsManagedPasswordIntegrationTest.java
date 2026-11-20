@@ -120,4 +120,43 @@ class CloudFormationRdsManagedPasswordIntegrationTest {
             }
         }
     }
+
+    @Test
+    void unrelatedUpdateKeepsASecretManagementTurnedOnOutsideTheStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-out-" + suffix;
+        String clusterId = "cfn-out-cluster-" + suffix;
+        try (RdsClient rds = rdsClient("us-east-1", ACCOUNT)) {
+            try {
+                deploy("CreateStack", stackName, template(clusterId, UNMANAGED), CFN_AUTH, "CREATE_COMPLETE");
+                rds.modifyDBCluster(r -> r.dbClusterIdentifier(clusterId).manageMasterUserPassword(true)
+                        .applyImmediately(true));
+                String arn = cluster(rds, clusterId).masterUserSecret().secretArn();
+                deploy("UpdateStack", stackName, template(clusterId, "\"MasterUserPassword\": \"password456\""),
+                        CFN_AUTH, "UPDATE_COMPLETE");
+                assertEquals(arn, cluster(rds, clusterId).masterUserSecret().secretArn());
+            } finally {
+                CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+            }
+        }
+    }
+
+    @Test
+    void updateAppliesMasterUserSecretKmsKeyId() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-ukey-" + suffix;
+        String clusterId = "cfn-ukey-cluster-" + suffix;
+        try (RdsClient rds = rdsClient("us-east-1", ACCOUNT)) {
+            try {
+                deploy("CreateStack", stackName, template(clusterId, UNMANAGED), CFN_AUTH, "CREATE_COMPLETE");
+                deploy("UpdateStack", stackName, template(clusterId,
+                        MANAGED + ", \"MasterUserSecret\": {\"KmsKeyId\": {\"Fn::GetAtt\": [\"Key\", \"Arn\"]}}"),
+                        CFN_AUTH, "UPDATE_COMPLETE");
+                assertEquals(output(describe(stackName, CFN_AUTH), "KeyArn"),
+                        cluster(rds, clusterId).masterUserSecret().kmsKeyId());
+            } finally {
+                CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+            }
+        }
+    }
 }

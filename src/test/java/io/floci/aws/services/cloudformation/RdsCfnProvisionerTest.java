@@ -1480,7 +1480,41 @@ class RdsCfnProvisionerTest {
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "secret", false,
-                null, null, null, false, null, "us-east-1");
+                null, null, null, null, null, "us-east-1");
+    }
+
+    private void updateClusterVerifyingSecretArguments(String extraProps, Boolean managed, String kmsKeyId) {
+        DbCluster existing = mock(DbCluster.class);
+        when(rdsService.getDbCluster("mycluster")).thenReturn(existing);
+        DbCluster reconciled = mock(DbCluster.class);
+        when(reconciled.getDbClusterIdentifier()).thenReturn("mycluster");
+        when(rdsService.modifyDbCluster(eq("mycluster"), any(), anyBoolean(),
+                any(), any(), any(), any(), any(), eq("us-east-1"))).thenReturn(reconciled);
+
+        provisionUpdate("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql"%s}
+                """.formatted(extraProps), "mycluster");
+
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, managed, kmsKeyId,
+                "us-east-1");
+    }
+
+    @Test
+    void updateStackPassesTheMasterUserSecretKeyAndTheManagedFlagThePropertiesSet() {
+        updateClusterVerifyingSecretArguments(
+                ",\"ManageMasterUserPassword\":true,\"MasterUserSecret\":{\"KmsKeyId\":\"key-1\"}",
+                true, "key-1");
+    }
+
+    @Test
+    void updateStackSendsNoSecretKeyWhenMasterUserSecretOmitsIt() {
+        updateClusterVerifyingSecretArguments(",\"ManageMasterUserPassword\":true,\"MasterUserSecret\":{}",
+                true, null);
+    }
+
+    @Test
+    void updateStackSendsNoSecretArgumentsWhenTheStackNeverDeclaredThem() {
+        updateClusterVerifyingSecretArguments("", null, null);
     }
 
     private static final String PRIOR_CLUSTER = "my-stack-cluster-0123456789ab";
@@ -1804,7 +1838,7 @@ class RdsCfnProvisionerTest {
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
         verify(rdsService).modifyDbCluster("mycluster", "rotated", false,
-                null, null, null, false, null, "us-east-1");
+                null, null, null, null, null, "us-east-1");
     }
 
     @Test
@@ -1826,7 +1860,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus());
         verify(rdsService, never()).deleteDbCluster(any(), any());
-        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, false, null, "us-east-1");
+        verify(rdsService).modifyDbCluster("mycluster", null, false, null, null, null, null, null, "us-east-1");
     }
 
     // ── the remaining createOnlyProperties of AWS::RDS::DBCluster ──
@@ -1945,7 +1979,7 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         assertEquals(created.getPhysicalId(), r.getPhysicalId());
         verify(rdsService).modifyDbCluster(created.getPhysicalId(), "rotated", false,
-                null, null, null, false, null, "us-east-1");
+                null, null, null, null, null, "us-east-1");
         verify(rdsService, times(1)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());
@@ -2004,7 +2038,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", first.getStatus(), first.getStatusReason());
         assertEquals(PRIOR_CLUSTER, first.getPhysicalId());
-        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, false, null, "us-east-1");
+        verify(rdsService).modifyDbCluster(PRIOR_CLUSTER, null, false, null, null, null, null, null, "us-east-1");
         assertTrue(first.getAttributes().get(CREATE_ONLY_ATTR).contains("alias/aws/rds"));
         assertEquals("", first.getAttributes().get(CREATE_ONLY_PRIOR_ATTR),
                 "a rollback of this update drops the record again");
@@ -2045,7 +2079,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", again.getStatus(), again.getStatusReason());
         assertEquals(prior, again.getPhysicalId(), "the rolled-back template describes the prior cluster");
-        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, false, null, "us-east-1");
+        verify(rdsService).modifyDbCluster(prior, null, false, null, null, null, null, null, "us-east-1");
         verify(rdsService, times(2)).createDbCluster(any(), any(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), any(), anyBoolean(), any(), any(), any(), any(),
                 anyBoolean(), any(), any(), anyBoolean(), any(), anyBoolean());

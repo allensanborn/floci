@@ -665,7 +665,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     parseServerlessV2Capacity(props, "MinCapacity", engine),
                     parseServerlessV2Capacity(props, "MaxCapacity", engine),
                     parseServerlessV2SecondsUntilAutoPause(props, engine),
-                    parseBoolProp(props, "ManageMasterUserPassword", engine),
+                    props != null && props.hasNonNull("ManageMasterUserPassword")
+                            ? (Boolean) parseBoolProp(props, "ManageMasterUserPassword", engine)
+                            : ctx.previouslyDeclared("ManageMasterUserPassword") ? Boolean.FALSE : null,
                     masterUserSecretKmsKeyId(props, engine), region);
         } else {
             Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
