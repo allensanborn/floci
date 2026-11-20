@@ -7521,6 +7521,35 @@ class RdsServiceTest {
     }
 
     @Test
+    void readReplicaInMissingDbSubnetGroupIsWordedAsInstancePlacement() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(invocation -> new RdsContainerHandle(
+                        "cont-" + invocation.getArgument(1), invocation.getArgument(1), "localhost", 5432));
+        createPostgresSource("primary");
+
+        AwsException e = assertThrows(AwsException.class, () -> rdsService.createDbInstanceReadReplica(
+                replicaRequest("primary-replica", "arn:aws:rds:us-east-1:123456789012:db:primary", "ghost"), null));
+
+        assertEquals("DBSubnetGroupNotFoundFault", e.getErrorCode());
+        assertEquals("DBSubnetGroup 'ghost' not found.", e.getMessage());
+    }
+
+    @Test
+    void snapshotRestoreIntoMissingDbSubnetGroupIsWordedAsInstancePlacement() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+
+        AwsException e = assertThrows(AwsException.class, () -> rdsService.restoreDbInstanceFromDbSnapshot(
+                "restored", "mysnap", null, null, false, "ghost", List.of(), Map.of(), "us-east-1"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", e.getErrorCode());
+        assertEquals("DBSubnetGroup 'ghost' not found.", e.getMessage());
+    }
+
+    @Test
     void createDbSnapshotSucceedsForPostgres() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
