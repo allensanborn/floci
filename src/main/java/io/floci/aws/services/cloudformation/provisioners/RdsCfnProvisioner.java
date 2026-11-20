@@ -599,10 +599,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * What an update that keeps a DB cluster can change on it, copied so the cluster's later changes
-     * do not reach it, and put back by {@link #restore}, as CloudFormation sends the previous template's
-     * declared values on rollback. The master password is saved too: rollback has the resource and not the previous
-     * template to resolve it from, so the record holds it as the cluster does. Scaling a cluster did
-     * not have is left in place, as CloudFormation sends nothing for it.
+     * do not reach it, and put back by {@link #restore}, as CloudFormation sends the previous
+     * template's declared values on rollback. The master password is saved too: rollback has the
+     * resource and not the previous template to resolve it from, so the record holds it as the
+     * cluster does. Scaling a cluster did not have is left in place, as CloudFormation sends nothing
+     * for it.
      */
     private record DbClusterInPlaceState(String masterPassword, boolean iamAuthentication, Double minCapacity,
                                          Double maxCapacity, Integer secondsUntilAutoPause,
@@ -610,8 +611,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                                          String maintenanceWindow, boolean deletionProtection,
                                          boolean httpEndpoint) {
 
-        private static final List<String> DECLARED_RESTORED = List.of("EnableIAMDatabaseAuthentication",
-                "DeletionProtection", "PreferredBackupWindow", "PreferredMaintenanceWindow");
+        private static final List<String> DECLARED_RESTORED = List.of("MasterUserPassword",
+                "EnableIAMDatabaseAuthentication", "DeletionProtection", "PreferredBackupWindow", "PreferredMaintenanceWindow");
 
         static DbClusterInPlaceState of(DbCluster c) {
             return new DbClusterInPlaceState(c.getMasterPassword(), c.isIamDatabaseAuthenticationEnabled(),
@@ -644,12 +645,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             Integer autoPause = p.path("autoPause").isNull() ? null : p.path("autoPause").asInt();
             // an unset scaling is skipped: modifyDbCluster rejects one on a cluster without Serverless v2
             boolean scaling = min != null && max != null;
-            rds.modifyDbCluster(id, textOrNull(p.path("password")),
+            rds.modifyDbCluster(id, declared(p, "MasterUserPassword") ? textOrNull(p.path("password")) : null,
                     declared(p, "EnableIAMDatabaseAuthentication") ? p.path("iam").asBoolean() : null,
                     scaling ? min : null, scaling ? max : null, scaling ? autoPause : null, region);
             List<String> groups = new ArrayList<>();
             p.path("vpcSecurityGroups").forEach(g -> groups.add(g.asText()));
-            rds.setDbClusterRequestSettings(id, region, groups, declared(p, "PreferredBackupWindow") ? textOrNull(p.path("backupWindow")) : null,
+            rds.setDbClusterRequestSettings(id, region, groups,
+                    declared(p, "PreferredBackupWindow") ? textOrNull(p.path("backupWindow")) : null,
                     declared(p, "PreferredMaintenanceWindow") ? textOrNull(p.path("maintenanceWindow")) : null,
                     declared(p, "DeletionProtection") ? p.path("deletionProtection").asBoolean() : null);
             if (rds.getDbCluster(id, region).isHttpEndpointEnabled() != p.path("httpEndpoint").asBoolean()) {

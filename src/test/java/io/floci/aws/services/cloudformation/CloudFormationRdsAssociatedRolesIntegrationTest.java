@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.services.rds.RdsService;
+import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -518,20 +519,25 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         String cluster = """
                 "Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
                   "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
-                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123"%s}}""";
+                  "MasterUsername": "dbadmin"%s}}""";
         String failingMember = """
                 , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
                   "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
                   "DBInstanceClass": "db.r6g.large",
                   "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
         try {
-            stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, "") + "}}");
+            stack("CreateStack", stackName, "{\"Resources\": {" + cluster.formatted(clusterId, ", \"MasterUserPassword\": \"password123\"") + "}}");
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             stack("UpdateStack", stackName, "{\"Resources\": {"
-                    + cluster.formatted(clusterId, ", \"DeletionProtection\": true") + failingMember + "}}");
+                    + cluster.formatted(clusterId, ", \"MasterUserPassword\": \"password123\", \"DeletionProtection\": true,"
+                    + " \"EnableIAMDatabaseAuthentication\": true,"
+                    + " \"PreferredBackupWindow\": \"07:00-08:00\"") + failingMember + "}}");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
-            assertTrue(rdsService.getDbCluster(clusterId).isDeletionProtection());
+            DbCluster kept = rdsService.getDbCluster(clusterId);
+            assertTrue(kept.isDeletionProtection());
+            assertTrue(kept.isIamDatabaseAuthenticationEnabled());
+            assertEquals("07:00-08:00", kept.getPreferredBackupWindow());
         } finally {
             rdsService.setDbClusterRequestSettings(clusterId, null, null, null, null, false);
             stack("DeleteStack", stackName, null);
