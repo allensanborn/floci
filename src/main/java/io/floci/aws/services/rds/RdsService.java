@@ -7395,12 +7395,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 dbProxyName, "default", effectiveRegion);
         DbProxyTarget registeredTarget = targetGroup.getTargets().isEmpty()
                 ? null : targetGroup.getTargets().get(0);
-        if (registeredTarget != null && !config.services().rds().mock()
-                && "IAM_AUTH".equals(updated.getDefaultAuthScheme())) {
-            throw new AwsException("InvalidDBProxyStateFault",
-                    "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
-                            + "the real-mode relay does not support end-to-end IAM authentication.",
-                    400);
+        if (registeredTarget != null && !config.services().rds().mock()) {
+            rejectRelayIamUnsupported(updated);
         }
 
         updated.setUpdatedAt(Instant.now());
@@ -7463,12 +7459,8 @@ public class RdsService implements Resettable, ResourceProvider {
         DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
         DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(
                 dbProxyName, targetGroupName, effectiveRegion);
-        if (!config.services().rds().mock()
-                && "IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
-            throw new AwsException("InvalidDBProxyStateFault",
-                    "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
-                            + "the real-mode relay does not support end-to-end IAM authentication.",
-                    400);
+        if (!config.services().rds().mock()) {
+            rejectRelayIamUnsupported(proxy);
         }
 
         int clusterCount = dbClusterIdentifiers == null ? 0 : dbClusterIdentifiers.size();
@@ -9665,7 +9657,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 || targetGroup == null || targetGroup.getTargets().isEmpty()
                 || !targetGroupMatchesProxy(targetGroup, proxy)
                 || !"available".equals(proxy.getStatus())
-                || "IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
+                || relayIamUnsupported(proxy)) {
             return;
         }
         attemptRollback(failure,
@@ -9741,10 +9733,33 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** Whether the real-mode relay would have to check an IAM token it cannot check. */
+    private static boolean relayIamUnsupported(DbProxy proxy) {
+        return "IAM_AUTH".equals(proxy.getDefaultAuthScheme())
+                || "SQLSERVER".equals(proxy.getEngineFamily()) && proxy.isIamAuth();
+    }
+
+    /** The real-mode relay cannot check IAM tokens; SQL Server's arrive in TDS Login7 (not implemented). */
+    private static void rejectRelayIamUnsupported(DbProxy proxy) {
+        if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
+                            + "the real-mode relay does not support end-to-end IAM authentication.",
+                    400);
+        }
+        if ("SQLSERVER".equals(proxy.getEngineFamily()) && proxy.isIamAuth()) {
+            throw new AwsException("InvalidDBProxyStateFault",
+                    "IAMAuth is available for control-plane emulation only on SQLSERVER DB proxies; "
+                            + "the real-mode relay does not support IAM authentication for SQL Server.",
+                    400);
+        }
+    }
+
     private void validateTargetEngineFamily(DbProxy proxy, DatabaseEngine targetEngine) {
         boolean compatible = switch (proxy.getEngineFamily()) {
             case "POSTGRESQL" -> targetEngine == DatabaseEngine.POSTGRES;
             case "MYSQL" -> targetEngine == DatabaseEngine.MYSQL || targetEngine == DatabaseEngine.MARIADB;
+            case "SQLSERVER" -> targetEngine == DatabaseEngine.SQLSERVER;
             default -> false;
         };
         if (!compatible) {
@@ -9927,12 +9942,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private void startDbProxyRelay(DbProxy proxy, DbProxyTarget target) {
-        if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
-            throw new AwsException("InvalidDBProxyStateFault",
-                    "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
-                            + "the real-mode relay does not support end-to-end IAM authentication.",
-                    400);
-        }
+        rejectRelayIamUnsupported(proxy);
         String accountId = accountIdFromArn(proxy.getDbProxyArn());
         String proxyRegion = regionResolver.regionOf(proxy.getDbProxyArn());
         if (!"TRACKED_CLUSTER".equals(target.getType())
@@ -10382,12 +10392,6 @@ public class RdsService implements Resettable, ResourceProvider {
                     proxy.setStatus("available");
                     persistRestoredProxy(proxy);
                     continue;   // no target registered yet; nothing to relay to
-                }
-                if ("IAM_AUTH".equals(proxy.getDefaultAuthScheme())) {
-                    throw new AwsException("InvalidDBProxyStateFault",
-                            "DefaultAuthScheme IAM_AUTH is available for control-plane emulation only; "
-                                    + "the real-mode relay does not support end-to-end IAM authentication.",
-                            400);
                 }
                 startDbProxyRelay(proxy, targetGroup.getTargets().get(0));
                 proxy.setStatus("available");
