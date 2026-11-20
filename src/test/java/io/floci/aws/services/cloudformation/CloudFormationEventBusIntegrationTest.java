@@ -401,7 +401,7 @@ class CloudFormationEventBusIntegrationTest {
             throw new AssertionError("collision failure was not preserved: " + resources);
         }
         String events = describeStackEvents(stackB);
-        if (!events.contains("EventBus already exists: " + busName)) {
+        if (!events.contains("Event bus " + busName + " already exists.")) {
             throw new AssertionError("collision reason was not preserved: " + events);
         }
 
