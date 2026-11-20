@@ -4069,4 +4069,18 @@ class RdsQueryHandlerTest {
 
         assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
     }
+
+    @Test
+    void modifyDbInstanceAnswersNotFoundBeforeTheSecretKeyRule() {
+        when(service.getDbInstance(eq("missing"), any()))
+                .thenThrow(new AwsException("DBInstanceNotFound", "DB instance missing not found.", 404));
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "missing");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+
+        Response response = handler.handle("ModifyDBInstance", p);
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>DBInstanceNotFound</Code>"));
+    }
 }

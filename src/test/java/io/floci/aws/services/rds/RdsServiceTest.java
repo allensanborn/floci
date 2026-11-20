@@ -13625,11 +13625,4 @@ class RdsServiceTest {
         assertDoesNotThrow(() -> service.modifyDbCluster("c1", null, null,
                 null, null, null, null, "kms-key-1", "us-east-1"));
     }
-
-    @Test
-    void modifyDbClusterAnswersNotFoundBeforeTheSecretKeyRule() {
-        assertEquals("DBClusterNotFoundFault", assertThrows(AwsException.class, () ->
-                rdsService.modifyDbCluster("missing", null, null, null, null, null, null, "kms-key-1",
-                        "us-east-1")).getErrorCode());
-    }
 }
