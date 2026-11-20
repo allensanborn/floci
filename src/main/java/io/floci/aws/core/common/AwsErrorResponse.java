@@ -24,7 +24,7 @@ public record AwsErrorResponse(String type, String message, boolean omitNullMess
     }
 
     @JsonValue
-    Map<String, String> wire() {
+    public Map<String, String> wire() {
         Map<String, String> body = new LinkedHashMap<>();
         body.put("__type", type);
         if (message != null || !omitNullMessage) {
