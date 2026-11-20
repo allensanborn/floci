@@ -289,7 +289,10 @@ class DocDbServiceTest {
     private static final String KEY_ARN = "arn:aws:kms:us-east-1:000000000000:key/k1";
 
     private void knownReferences() {
-        when(rdsService.getDbSubnetGroup(eq("sng"), any())).thenReturn(new DbSubnetGroup());
+        // RDS stores the name in lower case, so a mixed-case request comes back as the lower-case group.
+        DbSubnetGroup sng = new DbSubnetGroup();
+        sng.setDbSubnetGroupName("sng");
+        when(rdsService.getDbSubnetGroup(eq("SNG"), any())).thenReturn(sng);
         when(rdsService.getDbSubnetGroup(eq("nope"), any())).thenThrow(new AwsException("DBSubnetGroupNotFoundFault", "x", 404));
         when(rdsService.getDbClusterParameterGroup(eq("pg"), any())).thenReturn(new DbClusterParameterGroup("pg", "docdb5.0", "d"));
         when(rdsService.getDbClusterParameterGroup(eq("nope"), any())).thenThrow(new AwsException("DBClusterParameterGroupNotFound", "x", 404));
@@ -309,7 +312,7 @@ class DocDbServiceTest {
     void createDbClusterStoresPlacementEncryptionBackupSettingsAndTags() {
         knownReferences();
         DocDbCluster created = docDbService.createDbCluster("c1", "5.0.0", "u", "pw", false,
-                new DocDbClusterSettings("sng", "pg", List.of("sg-1"), true, "alias/docs", 5,
+                new DocDbClusterSettings("SNG", "pg", List.of("sg-1"), true, "alias/docs", 5,
                         "23:30-00:00", "Sun:03:00-Sun:04:00", true),
                 Map.of("Name", "c1"));
 

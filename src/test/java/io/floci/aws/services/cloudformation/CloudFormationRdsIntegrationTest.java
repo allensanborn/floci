@@ -6,6 +6,7 @@ import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Locale;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -166,6 +167,36 @@ class CloudFormationRdsIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(groupName));
+    }
+
+    @Test
+    void updateStackOfAMixedCaseDbSubnetGroupNameReconcilesInPlace() {
+        // RDS stores the name in lower case, so the physical id is lower case while the template
+        // keeps naming the group as written; the update must still find the group it made.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String groupName = "CfnMixed-" + suffix;
+        String stackName = "cfn-rds-mixed-stack-" + suffix;
+        String template = dbSubnetGroupTemplate(groupName);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", CfnUpdates.forceUpdate(template))
+        .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+        String xml = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+        assertEquals(groupName.toLowerCase(Locale.ROOT),
+                XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get("GroupName"));
     }
 
     @Test

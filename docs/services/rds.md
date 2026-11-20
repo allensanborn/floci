@@ -174,6 +174,8 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
 <!-- floci:actions:end -->
 
+DB subnet group names are stored in lower case, as on AWS: Create and Describe report the lower-case name and any case finds the group. A group persisted before this by an older build under a mixed-case name keeps working and is renamed to lower case, with its tags, the first time it is looked up, listed or tagged.
+
 `CreateDBInstance` stores `StorageEncrypted`, `KmsKeyId`, `BackupRetentionPeriod`,
 `PreferredBackupWindow`, `PreferredMaintenanceWindow` and `CopyTagsToSnapshot`, and
 `DescribeDBInstances` returns them; `ModifyDBInstance` changes the backup settings and
