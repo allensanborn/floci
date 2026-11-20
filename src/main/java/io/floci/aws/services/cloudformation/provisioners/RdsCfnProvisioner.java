@@ -681,7 +681,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
                     masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                    false, null, engineMode, storageEncrypted, null, deletionProtection);
+                    parseBoolProp(props, "ManageMasterUserPassword", engine),
+                    resolveOptional(props, "MasterUserSecretKmsKeyId", engine),
+                    engineMode, storageEncrypted, null, deletionProtection);
         }
         cluster = reconcileClusterRoles(r, cluster, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
