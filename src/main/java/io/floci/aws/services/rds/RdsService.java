@@ -779,6 +779,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                           DbInstanceSettings settings,
                                           Boolean publiclyAccessible, Integer requestedPort,
                                           Boolean deletionProtection) {
+        validatePasswordNotManaged(manageMasterUserPassword, masterPassword);
+        validateSecretKeyNeedsManagement(manageMasterUserPassword, masterUserSecretKmsKeyId, false);
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -5838,6 +5840,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                         String engineMode, boolean storageEncrypted, Integer requestedPort,
                                         boolean deletionProtection) {
+        validatePasswordNotManaged(manageMasterUserPassword, masterPassword);
+        validateSecretKeyNeedsManagement(manageMasterUserPassword, masterUserSecretKmsKeyId, false);
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -6369,6 +6373,30 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** Refuses a request that both supplies the master password and asks RDS to manage it. */
+    static void validatePasswordNotManaged(Boolean manageMasterUserPassword, String masterPassword) {
+        if (Boolean.TRUE.equals(manageMasterUserPassword) && masterPassword != null) {
+            throw new AwsException("InvalidParameterValue",
+                    "MasterUserPassword and ManageMasterUserPassword are mutually exclusive. "
+                            + "Specify only one of these parameters.", 400);
+        }
+    }
+
+    /**
+     * Refuses a managed-secret key without {@code ManageMasterUserPassword=true}. A modify of a
+     * resource that already manages its password ({@code currentlyManaged}) may carry a key
+     * without repeating it; a create passes false. Callers run it after the record lookup.
+     */
+    static void validateSecretKeyNeedsManagement(Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                                 boolean currentlyManaged) {
+        if (!Boolean.TRUE.equals(manageMasterUserPassword) && !currentlyManaged
+                && masterUserSecretKmsKeyId != null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You can't specify MasterUserSecretKmsKeyId without also specifying "
+                            + "ManageMasterUserPassword as true.", 400);
+        }
+    }
+
     private DbCluster doModifyDbCluster(String id, String newPassword, Boolean iamEnabled,
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
@@ -6376,7 +6404,10 @@ public class RdsService implements Resettable, ResourceProvider {
                                      String dbClusterParameterGroupName, boolean rotateMasterUserPassword,
                                      boolean applyImmediately, String region) {
         String effectiveRegion = effectiveRegion(region);
+        validatePasswordNotManaged(manageMasterUserPassword, newPassword);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        validateSecretKeyNeedsManagement(manageMasterUserPassword, masterUserSecretKmsKeyId,
+                cluster.getMasterUserSecretArn() != null);
         if (rotateMasterUserPassword) {
             if (!applyImmediately || newPassword != null || Boolean.FALSE.equals(manageMasterUserPassword)) {
                 throw new AwsException("InvalidParameterCombination",

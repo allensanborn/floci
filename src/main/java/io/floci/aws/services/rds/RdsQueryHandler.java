@@ -928,7 +928,13 @@ public class RdsQueryHandler {
         try {
             // These request members are accepted, but their modify behavior is not yet emulated.
             parseOptionalBoolean(params, "MultiAZ");
-            parseOptionalBoolean(params, "ManageMasterUserPassword");
+            Boolean manage = parseOptionalBoolean(params, "ManageMasterUserPassword");
+            String secretKey = params.getFirst("MasterUserSecretKmsKeyId");
+            RdsService.validatePasswordNotManaged(manage, newPassword);
+            if (secretKey != null) {
+                RdsService.validateSecretKeyNeedsManagement(manage, secretKey,
+                        service.getDbInstance(id, region).getMasterUserSecretArn() != null);
+            }
             iamEnabled = parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication");
             autoMinorVersionUpgrade = parseOptionalBoolean(params, "AutoMinorVersionUpgrade");
             publiclyAccessible = parseOptionalBoolean(params, "PubliclyAccessible");

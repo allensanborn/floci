@@ -4337,10 +4337,9 @@ class RdsServiceTest {
                 .when(kmsService).describeKey("alias/aws/secretsmanager", "us-east-1");
 
         assertEquals("NotFoundException", assertThrows(AwsException.class, () ->
-                rdsService.modifyDbCluster("cluster1", "changed-password", true,
+                rdsService.modifyDbCluster("cluster1", null, true,
                         null, null, null, true, null, "us-east-1")).getErrorCode());
 
-        assertEquals("original-password", cluster.getMasterPassword());
         assertFalse(cluster.isIamDatabaseAuthenticationEnabled());
         assertNull(cluster.getMasterUserSecretArn());
         verifyNoInteractions(containerManager, proxyManager);
@@ -13552,5 +13551,78 @@ class RdsServiceTest {
         rdsService.addTagsToResource(arn, Map.of("team", "data"));
         rdsService.removeTagsFromResource(arn, List.of("env"));
         assertEquals(Map.of("team", "data"), rdsService.listTagsForResource(arn));
+    }
+
+    private static final String MANAGE_CONFLICT = "MasterUserPassword and ManageMasterUserPassword are mutually "
+            + "exclusive. Specify only one of these parameters.";
+    private static final String KEY_WITHOUT_MANAGE = "You can't specify MasterUserSecretKmsKeyId without also "
+            + "specifying ManageMasterUserPassword as true.";
+
+    private void assertManagedPasswordRefusal(String code, String message, Executable call) {
+        AwsException e = assertThrows(AwsException.class, call);
+        assertEquals(code, e.getErrorCode());
+        assertEquals(message, e.getMessage());
+    }
+
+    @Test
+    void createDbInstanceRefusesManagedAndSuppliedPassword() {
+        assertManagedPasswordRefusal("InvalidParameterValue", MANAGE_CONFLICT,
+                () -> rdsService.createDbInstance("mydb", "postgres", "13", "admin", "Secret123!",
+                        "dbname", "db.t3.micro", 20, true, null, null, null, true, null));
+    }
+
+    @Test
+    void createDbInstanceRefusesSecretKeyWithoutManagement() {
+        assertManagedPasswordRefusal("InvalidParameterCombination", KEY_WITHOUT_MANAGE,
+                () -> rdsService.createDbInstance("mydb", "postgres", "13", "admin", "Secret123!",
+                        "dbname", "db.t3.micro", 20, true, null, null, null, false, "kms-key-1"));
+    }
+
+    @Test
+    void createDbClusterRefusesManagedAndSuppliedPassword() {
+        assertManagedPasswordRefusal("InvalidParameterValue", MANAGE_CONFLICT,
+                () -> rdsService.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", "Secret123!",
+                        "omni", false, null, null, null, false, "us-east-1", null, null, null, true, null));
+    }
+
+    @Test
+    void createDbClusterRefusesSecretKeyWithoutManagement() {
+        assertManagedPasswordRefusal("InvalidParameterCombination", KEY_WITHOUT_MANAGE,
+                () -> rdsService.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", "Secret123!",
+                        "omni", false, null, null, null, false, "us-east-1", null, null, null, false, "kms-key-1"));
+    }
+
+    @Test
+    void modifyDbClusterRefusesManagedAndSuppliedPassword() {
+        rdsService.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", "Secret123!",
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, false, null);
+        assertManagedPasswordRefusal("InvalidParameterValue", MANAGE_CONFLICT,
+                () -> rdsService.modifyDbCluster("c1", "Other123!", null, null, null, null, true, null, "us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterRefusesSecretKeyWithoutManagement() {
+        rdsService.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", "Secret123!",
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, false, null);
+        assertManagedPasswordRefusal("InvalidParameterCombination", KEY_WITHOUT_MANAGE,
+                () -> rdsService.modifyDbCluster("c1", null, null, null, null, null, null, "kms-key-1", "us-east-1"));
+    }
+
+    @Test
+    void modifyDbClusterAcceptsSecretKeyOnAnAlreadyManagedCluster() {
+        when(config.services().rds().mock()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!cluster-M");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), any(), eq("rds"), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secretsManager);
+        service.createDbCluster("c1", "aurora-postgresql", "16.3", "admin", null,
+                "omni", false, null, null, null, false, "us-east-1", null, null, null, true, "kms-key-1");
+
+        assertDoesNotThrow(() -> service.modifyDbCluster("c1", null, null,
+                null, null, null, null, "kms-key-1", "us-east-1"));
     }
 }
