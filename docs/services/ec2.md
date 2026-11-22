@@ -913,7 +913,7 @@ back, and a new address that is already held fails the update and leaves the gat
 
 | Action | Description |
 |--------|-------------|
-| CreateInstanceConnectEndpoint | Creates an endpoint in a subnet, `create-complete` at once, with a private address from the subnet. |
+| CreateInstanceConnectEndpoint | Creates an endpoint in a subnet, `create-complete` at once, with a private address from the subnet. An unspecified `IpAddressType` follows the subnet's address families (both IPv4 and IPv6 is `dualstack`, IPv6 only is `ipv6`, otherwise `ipv4`), as on AWS. |
 | DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `tag:<key>`, `tag-key`, `tag-value`. |
 | DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
 
