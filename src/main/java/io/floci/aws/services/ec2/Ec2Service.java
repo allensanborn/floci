@@ -228,6 +228,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             Pattern.compile("^tgw-rtb-[0-9a-f]{8}([0-9a-f]{9})?$");
     private static final Pattern TRANSIT_GATEWAY_ATTACHMENT_ID_PATTERN =
             Pattern.compile("^tgw-attach-[0-9a-f]{8}([0-9a-f]{9})?$");
+    private static final Set<String> TRANSIT_GATEWAY_ATTACHMENT_FILTER_NAMES = Set.of(
+            "association.state", "association.transit-gateway-route-table-id", "resource-id",
+            "resource-owner-id", "resource-type", "state", "tag-key", "tag-value",
+            "transit-gateway-attachment-id", "transit-gateway-id", "transit-gateway-owner-id",
+            "vpc-id", "vpc-owner-id");
+    private static final Set<String> TRANSIT_GATEWAY_CONNECT_FILTER_NAMES = Set.of(
+            "options.protocol", "state", "tag-key", "tag-value", "transit-gateway-attachment-id",
+            "transit-gateway-id", "transport-transit-gateway-attachment-id");
     private static final Set<String> ROUTE_TABLE_MEMBERSHIP_FILTER_NAMES =
             Set.of("resource-id", "resource-type", "transit-gateway-attachment-id");
     /**
@@ -356,6 +364,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // released between the launch's availability check and the store of its instance.
     private final Object hostLock = new Object();
     private final Set<String> seededAccountRegions = ConcurrentHashMap.newKeySet();
+    // AWS keeps a deleted gateway or peering visible for a while, and deleting it again succeeds.
+    // Only that repeat delete reads these; ponytail: in memory, so a restart forgets them.
+    private final Map<String, TransitGateway> deletedTransitGateways = new ConcurrentHashMap<>();
+    private final Map<String, TransitGatewayPeeringAttachment> deletedPeeringAttachments =
+            new ConcurrentHashMap<>();
     // References held while a group assignment applies firewall state before publishing its instance.
     private final Map<String, Integer> pendingSecurityGroupAssignments = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RefCountedLock> instanceGroupLocks = new ConcurrentHashMap<>();
@@ -1678,6 +1691,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             capacityGroupInstanceIds.clear();
         }
         seededAccountRegions.clear();
+        deletedTransitGateways.clear();
+        deletedPeeringAttachments.clear();
         seedDefaultRegionIfEnabled();
     }
 
@@ -2935,6 +2950,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // agree on who goes first.
         synchronized (attachmentTopologyLock(region)) {
         synchronized (lockFor(key(region, transitGatewayId))) {
+            TransitGateway alreadyDeleted =
+                    deletedTransitGateways.get(callerAccountId() + "::" + key(region, transitGatewayId));
+            if (alreadyDeleted != null) {
+                return alreadyDeleted;
+            }
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
             // AWS refuses while anything is still attached, naming the attachments in the message.
             List<String> attached = transitGatewayVpcAttachments.scan(k -> true).stream()
@@ -2984,6 +3004,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             transitGateways.delete(key(region, transitGatewayId));
             removeTags(region, transitGatewayId);
             gateway.setState("deleted");
+            deletedTransitGateways.put(callerAccountId() + "::" + key(region, transitGatewayId), gateway);
             return gateway;
         }
         }
@@ -2998,6 +3019,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .findFirst()
                 .orElseThrow(() -> new AwsException("InvalidTransitGatewayID.NotFound",
                         "Transit Gateway " + transitGatewayId + " was deleted or does not exist.", 400));
+    }
+
+    /**
+     * TransitGatewayMaxResults is 5 to 1000 in the EC2 model. AWS answers InvalidParameterValue for
+     * a value outside it, and the message ends in a space with no range after it. Null means the
+     * request left it out.
+     */
+    public static void requireTransitGatewayMaxResults(Integer maxResults) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. ", 400);
+        }
+    }
+
+    /** A filter name the operation does not model is refused; {@code tag:<key>} is always modeled. */
+    private static void requireModeledFilters(List<Map.Entry<String, List<String>>> filters, Set<String> modeled) {
+        for (Map.Entry<String, List<String>> filter : filters) {
+            String name = filter.getKey();
+            if (!modeled.contains(name) && !name.startsWith("tag:")) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value (" + name + ") for parameter Filter is invalid. ", 400);
+            }
+        }
     }
 
     private static void requireWellFormedTransitGatewayId(String transitGatewayId) {
@@ -3176,6 +3220,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     List<TransitGatewayVpcAttachment> describeTransitGatewayVpcAttachments(
             String region, List<String> attachmentIds, List<Map.Entry<String, List<String>>> filters) {
+        requireModeledFilters(filters, TRANSIT_GATEWAY_ATTACHMENT_FILTER_NAMES);
         attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
         List<TransitGatewayVpcAttachment> all = transitGatewayVpcAttachments.scan(k -> true).stream()
                 .filter(attachment -> region.equals(attachment.getRegion()))
@@ -3206,6 +3251,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     void describeTransitGatewayConnects(
             String region, List<String> attachmentIds, List<Map.Entry<String, List<String>>> filters) {
+        requireModeledFilters(filters, TRANSIT_GATEWAY_CONNECT_FILTER_NAMES);
         attachmentIds.forEach(Ec2Service::requireWellFormedAttachmentId);
         if (!attachmentIds.isEmpty()) {
             throw new AwsException("InvalidTransitGatewayConnectID.NotFound",
@@ -3217,7 +3263,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             String region, String attachmentId, List<String> addSubnetIds, List<String> removeSubnetIds,
             TransitGatewayVpcAttachmentOptions changes) {
         synchronized (attachmentTopologyLock(region)) {
-            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayVpcAttachment attachment =
+                    getRequiredVpcAttachment(region, attachmentId, "Transit Gateway VPC Attachment");
             List<String> subnetIds = new ArrayList<>(attachment.getSubnetIds());
             if (removeSubnetIds != null) {
                 for (String subnetId : removeSubnetIds) {
@@ -3270,7 +3317,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public TransitGatewayVpcAttachment deleteTransitGatewayVpcAttachment(String region, String attachmentId) {
         synchronized (attachmentTopologyLock(region)) {
-            TransitGatewayVpcAttachment attachment = getRequiredVpcAttachment(region, attachmentId);
+            TransitGatewayVpcAttachment attachment =
+                    getRequiredVpcAttachment(region, attachmentId, "Transit Gateway VPC Attachment");
             transitGatewayPropagations.scan(k -> true).stream()
                     .filter(propagation -> region.equals(propagation.getRegion()))
                     .filter(propagation -> attachmentId.equals(propagation.getTransitGatewayAttachmentId()))
@@ -3310,10 +3358,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Transit Gateway Peering Attachments ───────────────────────────────────
 
     /**
-     * Requests a peering between a local transit gateway and a peer one. The peer gateway is not
-     * resolved: it may live in another account this store cannot see, and AWS settles that
-     * asynchronously. AWS passes through {@code initiatingRequest}; nothing is slow locally, so
-     * the attachment is created already waiting for the peer.
+     * Requests a peering between a local transit gateway and a peer one. A peer gateway in the
+     * caller's own account must exist; one in another account is not resolved, since this store
+     * cannot see it, and AWS settles that asynchronously. AWS passes through
+     * {@code initiatingRequest}; nothing is slow locally, so the attachment is created already
+     * waiting for the peer.
      */
     public TransitGatewayPeeringAttachment createTransitGatewayPeeringAttachment(
             String region, String transitGatewayId, String peerTransitGatewayId, String peerAccountId,
@@ -3328,6 +3377,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // Under the lock DeleteTransitGateway checks peerings under, so neither lands in between.
         synchronized (attachmentTopologyLock(region)) {
             TransitGateway gateway = getRequiredTransitGateway(region, transitGatewayId);
+            // Only the caller's own peer can be looked up; another account's is settled at accept.
+            if (callerAccountId().equals(peerAccountId)) {
+                getRequiredTransitGateway(peerRegion, peerTransitGatewayId);
+            }
             TransitGatewayPeeringAttachment attachment = new TransitGatewayPeeringAttachment();
             String attachmentId = "tgw-attach-" + randomHex(17);
             attachment.setTransitGatewayAttachmentId(attachmentId);
@@ -3383,6 +3436,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (!isGatewayOf(attachment.getAccepterTgwInfo(), callerAccountId(), region)) {
                 throw peeringAttachmentNotFound(attachmentId);
             }
+            if (isGatewayOf(attachment.getRequesterTgwInfo(), callerAccountId(), region)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Cannot accept " + attachmentId + " as the source of the peering request.", 400);
+            }
             if (!"pendingAcceptance".equals(attachment.getState())) {
                 throw new AwsException("IncorrectState", "tgw-attach " + attachmentId
                         + " is in invalid state " + attachment.getState() + ".", 400);
@@ -3422,6 +3479,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** Either side may delete. AWS reports {@code deleting} first; the settled state is returned. */
     public TransitGatewayPeeringAttachment deleteTransitGatewayPeeringAttachment(String region, String attachmentId) {
         synchronized (lockFor(attachmentId)) {
+            TransitGatewayPeeringAttachment alreadyDeleted =
+                    deletedPeeringAttachments.get(callerAccountId() + "::" + key(region, attachmentId));
+            if (alreadyDeleted != null) {
+                return alreadyDeleted;
+            }
             OwnedPeeringAttachment owned = getRequiredPeeringAttachment(region, attachmentId);
             TransitGatewayPeeringAttachment attachment = withStoredTags(owned.attachment(), region);
             if (owned.storageAccountId() != null) {
@@ -3435,6 +3497,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             removeTags(requester.getOwnerId(), requester.getRegion(), attachmentId);
             removeTags(accepter.getOwnerId(), accepter.getRegion(), attachmentId);
             attachment.setState("deleted");
+            deletedPeeringAttachments.put(callerAccountId() + "::" + key(region, attachmentId), attachment);
             return attachment;
         }
     }
@@ -3802,8 +3865,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             getRequiredTransitGatewayRouteTable(region, routeTableId);
             TransitGatewayRoute route = transitGatewayRoutes
                     .get(routeKey(region, routeTableId, destinationCidrBlock))
-                    .orElseThrow(() -> new AwsException("InvalidRoute.NotFound", "The route "
-                            + destinationCidrBlock + " does not exist in Transit Gateway Route Table "
+                    .orElseThrow(() -> new AwsException("InvalidRoute.NotFound", "Route "
+                            + destinationCidrBlock + " does not exists in Transit Gateway Route Table "
                             + routeTableId + ".", 400));
             transitGatewayRoutes.delete(routeKey(region, routeTableId, destinationCidrBlock));
             route.setState("deleted");
@@ -4022,7 +4085,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return key(region, routeTableId + "::" + destinationCidrBlock);
     }
 
-    private TransitGatewayRouteTable getRequiredTransitGatewayRouteTable(String region, String routeTableId) {
+    public TransitGatewayRouteTable getRequiredTransitGatewayRouteTable(String region, String routeTableId) {
         if (routeTableId == null || routeTableId.isBlank()) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter TransitGatewayRouteTableId.", 400);
@@ -4046,6 +4109,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private TransitGatewayVpcAttachment getRequiredVpcAttachment(String region, String attachmentId) {
+        return getRequiredVpcAttachment(region, attachmentId, "Transit Gateway Attachment");
+    }
+
+    /** Modify and delete name the attachment as a VPC attachment in their not-found message. */
+    private TransitGatewayVpcAttachment getRequiredVpcAttachment(
+            String region, String attachmentId, String noun) {
         if (attachmentId == null || attachmentId.isBlank()) {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter TransitGatewayAttachmentId.", 400);
@@ -4053,7 +4122,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         requireWellFormedAttachmentId(attachmentId);
         return transitGatewayVpcAttachments.get(key(region, attachmentId))
                 .orElseThrow(() -> new AwsException("InvalidTransitGatewayAttachmentID.NotFound",
-                        "Transit Gateway Attachment " + attachmentId + " was deleted or does not exist.", 400));
+                        noun + " " + attachmentId + " was deleted or does not exist.", 400));
     }
 
     // ─── Instances ─────────────────────────────────────────────────────────────

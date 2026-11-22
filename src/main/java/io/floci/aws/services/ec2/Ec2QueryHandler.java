@@ -2838,7 +2838,14 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    /** Validates MaxResults only; the transit gateway describes return everything in one page. */
+    private void requireTransitGatewayMaxResults(MultivaluedMap<String, String> p) {
+        Ec2Service.requireTransitGatewayMaxResults(
+                p.getFirst("MaxResults") == null ? null : parseIntParam(p, "MaxResults", 0));
+    }
+
     private Response handleDescribeTransitGateways(MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         List<TransitGateway> gateways = service.describeTransitGateways(
                 region, getList(p, "TransitGatewayIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -2914,6 +2921,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -2933,6 +2941,7 @@ public class Ec2QueryHandler {
      * route table association shows up here and nowhere else.
      */
     private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -2964,6 +2973,7 @@ public class Ec2QueryHandler {
 
     /** floci does not yet support creating Connect attachments, so this is always an empty list. */
     private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
@@ -3017,6 +3027,7 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
                                                                    String region) {
+        requireTransitGatewayMaxResults(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3084,6 +3095,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
                 region, getList(p, "TransitGatewayRouteTableIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -3136,7 +3148,9 @@ public class Ec2QueryHandler {
 
     private Response handleGetTransitGatewayRouteTableAssociations(
             MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
         String routeTableId = p.getFirst("TransitGatewayRouteTableId");
+        service.getRequiredTransitGatewayRouteTable(region, routeTableId);
         List<TransitGatewayVpcAttachment> associated =
                 service.associationsOf(region, routeTableId, getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -3176,6 +3190,8 @@ public class Ec2QueryHandler {
 
     private Response handleGetTransitGatewayRouteTablePropagations(
             MultivaluedMap<String, String> p, String region) {
+        requireTransitGatewayMaxResults(p);
+        service.getRequiredTransitGatewayRouteTable(region, p.getFirst("TransitGatewayRouteTableId"));
         List<TransitGatewayRouteTablePropagation> propagations =
                 service.propagationsOf(region, p.getFirst("TransitGatewayRouteTableId"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
