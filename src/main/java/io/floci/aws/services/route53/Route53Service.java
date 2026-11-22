@@ -251,7 +251,8 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
 
     public synchronized CreateZoneResult createHostedZone(String name, String callerReference, String comment,
                                                            VpcAssociation vpcAssociation, String delegationSetId) {
-        String normalizedName = normalizeName(name);
+        // Route 53 stores alphabetic characters of a domain name lowercased
+        String normalizedName = normalizeRecordName(name);
 
         for (HostedZone existing : zoneStore.scan(k -> true)) {
             if (existing.getCallerReference().equals(callerReference)) {
@@ -379,7 +380,7 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
         }
         if (dnsName != null && !dnsName.isEmpty()) {
-            String startName = reversedDnsName(normalizeName(dnsName));
+            String startName = reversedDnsName(dnsName);
             all.removeIf(zone -> {
                 int comparison = reversedDnsName(zone.getName()).compareTo(startName);
                 return comparison < 0 || (comparison == 0 && hostedZoneId != null && !hostedZoneId.isEmpty()
@@ -391,7 +392,7 @@ public class Route53Service implements Resettable, RequestConditionSpelling {
     }
 
     static String reversedDnsName(String name) {
-        String normalized = normalizeName(name);
+        String normalized = normalizeRecordName(name);
         List<String> labels = new ArrayList<>();
         int labelStart = 0;
         boolean escaped = false;
