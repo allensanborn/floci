@@ -68,7 +68,9 @@ public class CognitoUserInfoController {
             verified = cognitoService.verifyAccessToken(token);
         } catch (AwsException e) {
             LOG.debug("Access token verification failed", e);
-            return bearerError(401, "invalid_token", e.getMessage());
+            // The userinfo endpoint keeps its own wording; only the IDP JSON API says 'Invalid Access Token'.
+            return bearerError(401, "invalid_token",
+                    CognitoErrors.INVALID_ACCESS_TOKEN.equals(e.getMessage()) ? "Invalid access token" : e.getMessage());
         }
 
         String sub = verified.subject();

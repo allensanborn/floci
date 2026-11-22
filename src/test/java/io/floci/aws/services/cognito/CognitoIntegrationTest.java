@@ -3782,7 +3782,7 @@ class CognitoIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("NotAuthorizedException"))
-                .body("message", equalTo("Incorrect username or password"));
+                .body("message", equalTo("Incorrect username or password."));
     }
 
     /**
