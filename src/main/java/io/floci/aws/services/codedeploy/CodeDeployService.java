@@ -335,7 +335,7 @@ public class CodeDeployService {
         Map<String, Application> store = applicationsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("ApplicationAlreadyExistsException",
-                    "Application already exists: " + name, 400);
+                    name + " already exists.", 400);
         }
         Application app = new Application();
         app.setApplicationId(UUID.randomUUID().toString());
@@ -365,7 +365,7 @@ public class CodeDeployService {
         Application app = applicationsFor(region).get(name);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + name, 400);
+                    "No application found for name: " + name, 400);
         }
         return app;
     }
@@ -375,12 +375,12 @@ public class CodeDeployService {
         Application app = store.get(currentName);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + currentName, 400);
+                    "No application found for name: " + currentName, 400);
         }
         if (newName != null && !newName.equals(currentName)) {
             if (store.containsKey(newName)) {
                 throw new AwsException("ApplicationAlreadyExistsException",
-                        "Application already exists: " + newName, 400);
+                        "The application name: " + newName + " you want to update to already exist", 400);
             }
             store.remove(currentName);
             app.setApplicationName(newName);
@@ -390,11 +390,10 @@ public class CodeDeployService {
     }
 
     public void deleteApplication(String region, String name) {
-        if (applicationsFor(region).remove(name) == null) {
-            throw new AwsException("ApplicationDoesNotExistException",
-                    "Application does not exist: " + name, 400);
+        // AWS: DeleteApplication on an unknown name succeeds (no not-found error in its model).
+        if (applicationsFor(region).remove(name) != null) {
+            persistRegion(applications, region);
         }
-        persistRegion(applications, region);
     }
 
     public List<String> listApplications(String region) {
@@ -414,7 +413,7 @@ public class CodeDeployService {
                     Application a = store.get(n);
                     if (a == null) {
                         throw new AwsException("ApplicationDoesNotExistException",
-                                "Application does not exist: " + n, 400);
+                                "No application found for name: " + n, 400);
                     }
                     return a;
                 })
@@ -431,7 +430,11 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
         if (groupStore.containsKey(groupName)) {
             throw new AwsException("DeploymentGroupAlreadyExistsException",
-                    "Deployment group already exists: " + groupName, 400);
+                    "An Deployment Group with the name " + groupName + " already exists for this application.", 400);
+        }
+
+        if (deploymentConfigName != null) {
+            getDeploymentConfig(region, deploymentConfigName);
         }
 
         DeploymentGroup group = new DeploymentGroup();
@@ -456,7 +459,7 @@ public class CodeDeployService {
         DeploymentGroup group = groupStore != null ? groupStore.get(groupName) : null;
         if (group == null) {
             throw new AwsException("DeploymentGroupDoesNotExistException",
-                    "Deployment group does not exist: " + groupName, 400);
+                    "No Deployment Group found for name: " + groupName, 400);
         }
         return group;
     }
@@ -472,10 +475,13 @@ public class CodeDeployService {
         if (newGroupName != null && !newGroupName.equals(currentGroupName)
                 && groupStore.containsKey(newGroupName)) {
             throw new AwsException("DeploymentGroupAlreadyExistsException",
-                    "Deployment group already exists: " + newGroupName, 400);
+                    "An Deployment Group with the name " + newGroupName + " already exists for this application.", 400);
         }
 
-        if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
+        if (deploymentConfigName != null) {
+            getDeploymentConfig(region, deploymentConfigName);
+            group.setDeploymentConfigName(deploymentConfigName);
+        }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
 
@@ -494,12 +500,16 @@ public class CodeDeployService {
     }
 
     public void deleteDeploymentGroup(String region, String appName, String groupName) {
+        // AWS: succeeds when the application is already gone too (delete is idempotent end to end).
+        if (appName != null && !appName.isBlank() && !applicationsFor(region).containsKey(appName)) {
+            return;
+        }
         getApplication(region, appName);
         Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
         Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        // AWS: DeleteDeploymentGroup on an unknown group succeeds (no not-found error in its model).
         if (groupStore == null || groupStore.remove(groupName) == null) {
-            throw new AwsException("DeploymentGroupDoesNotExistException",
-                    "Deployment group does not exist: " + groupName, 400);
+            return;
         }
         tags.remove(deploymentGroupArn(region, appName, groupName));
         persistRegion(deploymentGroups, region);
@@ -535,7 +545,7 @@ public class CodeDeployService {
         Map<String, DeploymentConfig> store = deploymentConfigsFor(region);
         if (store.containsKey(name)) {
             throw new AwsException("DeploymentConfigAlreadyExistsException",
-                    "Deployment configuration already exists: " + name, 400);
+                    name + " already exists.", 400);
         }
         if (name.startsWith("CodeDeployDefault.")) {
             throw new AwsException("InvalidDeploymentConfigNameException",
@@ -558,21 +568,20 @@ public class CodeDeployService {
         DeploymentConfig cfg = deploymentConfigsFor(region).get(name);
         if (cfg == null) {
             throw new AwsException("DeploymentConfigDoesNotExistException",
-                    "Deployment configuration does not exist: " + name, 400);
+                    "No deployment configuration found for name: " + name, 400);
         }
         return cfg;
     }
 
     public void deleteDeploymentConfig(String region, String name) {
         if (name.startsWith("CodeDeployDefault.")) {
-            throw new AwsException("InvalidDeploymentConfigNameException",
-                    "Cannot delete a built-in deployment configuration.", 400);
+            throw new AwsException("InvalidOperationException",
+                    "Can not delete a predefined deployment configuration", 400);
         }
-        if (deploymentConfigsFor(region).remove(name) == null) {
-            throw new AwsException("DeploymentConfigDoesNotExistException",
-                    "Deployment configuration does not exist: " + name, 400);
+        // AWS: DeleteDeploymentConfig on an unknown name succeeds (no not-found error in its model).
+        if (deploymentConfigsFor(region).remove(name) != null) {
+            persistRegion(deploymentConfigs, region);
         }
-        persistRegion(deploymentConfigs, region);
     }
 
     public List<String> listDeploymentConfigs(String region) {
@@ -662,7 +671,7 @@ public class CodeDeployService {
         Deployment d = deploymentsFor(region).get(deploymentId);
         if (d == null) {
             throw new AwsException("DeploymentDoesNotExistException",
-                    "Deployment does not exist: " + deploymentId, 400);
+                    "The deployment " + deploymentId + " could not be found", 400);
         }
         return d;
     }
@@ -696,7 +705,7 @@ public class CodeDeployService {
                     Deployment d = store.get(id);
                     if (d == null) {
                         throw new AwsException("DeploymentDoesNotExistException",
-                                "Deployment does not exist: " + id, 400);
+                                "The deployment " + id + " could not be found", 400);
                     }
                     return d;
                 })
@@ -745,7 +754,7 @@ public class CodeDeployService {
         OnPremisesInstance inst = new OnPremisesInstance();
         inst.setInstanceName(instanceName);
         inst.setInstanceArn(AwsArnUtils.Arn.of("codedeploy", region, regionResolver.getAccountId(),
-                "instance/" + instanceName).toString());
+                "instance/" + instanceName + "_" + UUID.randomUUID()).toString());
         inst.setIamSessionArn(iamSessionArn);
         inst.setIamUserArn(iamUserArn);
         inst.setRegisterTime(EpochSeconds.fromInstant(clock.instant()));
@@ -756,10 +765,17 @@ public class CodeDeployService {
     }
 
     public void deregisterOnPremisesInstance(String region, String instanceName) {
-        OnPremisesInstance inst = requireOnPremisesInstance(region, instanceName);
-        inst.setDeregisterTime(EpochSeconds.fromInstant(clock.instant()));
-        inst.setRegistrationStatus("Deregistered");
-        persistRegion(onPremisesInstances, region);
+        if (instanceName == null || instanceName.isEmpty()) {
+            throw new AwsException("InstanceNameRequiredException", "Instance name is missing", 400);
+        }
+        // AWS purges the record on deregister: Get raises InstanceNotRegisteredException, neither status
+        // filter lists it, and re-registering mints a new instanceArn with no tags; repeating the call
+        // on a gone instance succeeds. Evidence:
+        // https://github.com/aws/aws-emulator-evaluation-suite/blob/main/behavioral/codedeploy/check_on_premises_instance_deregister_reflects_in_status_filters.py and
+        // https://github.com/aws/aws-emulator-evaluation-suite/blob/main/behavioral/codedeploy/check_deregister_onprem_instance_missing_name_rejected.py.
+        if (onPremisesFor(region).remove(instanceName) != null) {
+            persistRegion(onPremisesInstances, region);
+        }
     }
 
     public OnPremisesInstance getOnPremisesInstance(String region, String instanceName) {
@@ -767,7 +783,9 @@ public class CodeDeployService {
     }
 
     public List<OnPremisesInstance> batchGetOnPremisesInstances(String region, List<String> names) {
-        return names.stream().map(n -> requireOnPremisesInstance(region, n)).collect(Collectors.toList());
+        // AWS omits unknown names: BatchGetOnPremisesInstances models no not-found error.
+        Map<String, OnPremisesInstance> store = onPremisesFor(region);
+        return names.stream().map(store::get).filter(i -> i != null).collect(Collectors.toList());
     }
 
     public List<String> listOnPremisesInstances(String region, String registrationStatus,
@@ -781,8 +799,9 @@ public class CodeDeployService {
     }
 
     public void addTagsToOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> newTags) {
+        requireRegistered(region, instanceNames);
         for (String name : instanceNames) {
-            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            OnPremisesInstance inst = onPremisesFor(region).get(name);
             for (Map<String, String> t : newTags) {
                 inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
                 inst.getTags().add(t);
@@ -792,8 +811,9 @@ public class CodeDeployService {
     }
 
     public void removeTagsFromOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> tagsToRemove) {
+        requireRegistered(region, instanceNames);
         for (String name : instanceNames) {
-            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            OnPremisesInstance inst = onPremisesFor(region).get(name);
             for (Map<String, String> t : tagsToRemove) {
                 inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
             }
@@ -801,11 +821,20 @@ public class CodeDeployService {
         persistRegion(onPremisesInstances, region);
     }
 
+    /** AddTags/RemoveTags check every name before touching any, and word the refusal "Host X is not registered". */
+    private void requireRegistered(String region, List<String> instanceNames) {
+        for (String name : instanceNames) {
+            if (!onPremisesFor(region).containsKey(name)) {
+                throw new AwsException("InstanceNotRegisteredException", "Host " + name + " is not registered", 400);
+            }
+        }
+    }
+
     private OnPremisesInstance requireOnPremisesInstance(String region, String instanceName) {
         OnPremisesInstance inst = onPremisesFor(region).get(instanceName);
         if (inst == null) {
-            throw new AwsException("InstanceNameRequiredException",
-                    "On-premises instance not found: " + instanceName, 400);
+            throw new AwsException("InstanceNotRegisteredException",
+                    "The requested host does not exist. Host: " + instanceName, 400);
         }
         return inst;
     }
