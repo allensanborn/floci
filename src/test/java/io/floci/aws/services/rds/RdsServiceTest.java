@@ -9213,6 +9213,92 @@ class RdsServiceTest {
         assertTrue(rdsService.listDbProxies(null).isEmpty());
     }
 
+    private DbProxy createSqlServerProxy(String iamAuth) {
+        return rdsService.createDbProxy(
+                "mssql-proxy", "SQLSERVER", true, false, "NONE", PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), List.of(new DbProxyAuth(
+                        "SECRETS", PROXY_AUTH.getFirst().getSecretArn(), iamAuth, null, null)),
+                1800, false, Map.of(), "us-east-1");
+    }
+
+    private void createSqlServerInstanceInMockMode() {
+        when(config.services().rds().mock()).thenReturn(true);
+        DbInstance instance = rdsService.createDbInstance(
+                "mssql-db", "sqlserver-se", "15.00", "sa", "Password123!", null,
+                "db.t3.micro", 20, false, null, null, null, null, false);
+        instance.setContainerHost("localhost");   // a real-mode relay needs a backend address
+        instance.setContainerPort(1433);
+    }
+
+    @Test
+    void sqlServerProxyRegistersSqlServerInstanceTargetInMockMode() {
+        createSqlServerInstanceInMockMode();
+        createSqlServerProxy("REQUIRED");
+
+        DbProxyTargetGroup tg = rdsService.registerDbProxyTargets("mssql-proxy", null,
+                List.of(), List.of("mssql-db"), 0, 0);
+
+        assertEquals("mssql-db", tg.getTargets().getFirst().getRdsResourceId());
+    }
+
+    @Test
+    void sqlServerProxyRejectsNonSqlServerInstanceTarget() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("pg-db", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false);
+        createSqlServerProxy("DISABLED");
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                rdsService.registerDbProxyTargets("mssql-proxy", null,
+                        List.of(), List.of("pg-db"), 0, 0));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"REQUIRED", "ENABLED"})
+    void realModeSqlServerProxyWithIamAuthRefusesTargetRegistration(String iamAuth) {
+        createSqlServerInstanceInMockMode();
+        createSqlServerProxy(iamAuth);
+        when(config.services().rds().mock()).thenReturn(false);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                rdsService.registerDbProxyTargets("mssql-proxy", null,
+                        List.of(), List.of("mssql-db"), 0, 0));
+
+        assertEquals("InvalidDBProxyStateFault", e.getErrorCode());
+        assertTrue(rdsService.describeDbProxyTargets("mssql-proxy", "default", "us-east-1").isEmpty());
+    }
+
+    @Test
+    void realModeSqlServerProxyWithoutIamAuthRegistersTarget() {
+        createSqlServerInstanceInMockMode();
+        createSqlServerProxy("DISABLED");
+        when(config.services().rds().mock()).thenReturn(false);
+
+        DbProxyTargetGroup tg = rdsService.registerDbProxyTargets("mssql-proxy", null,
+                List.of(), List.of("mssql-db"), 0, 0);
+
+        assertEquals(1, tg.getTargets().size());
+    }
+
+    @Test
+    void realModeModifyTurningIamOnWithSqlServerTargetIsRefused() {
+        createSqlServerInstanceInMockMode();
+        createSqlServerProxy("DISABLED");
+        when(config.services().rds().mock()).thenReturn(false);
+        rdsService.registerDbProxyTargets("mssql-proxy", null, List.of(), List.of("mssql-db"), 0, 0);
+        DbProxyAuth required = new DbProxyAuth(
+                "SECRETS", PROXY_AUTH.getFirst().getSecretArn(), "REQUIRED", null, null);
+
+        AwsException e = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbProxy("mssql-proxy", null, List.of(required),
+                        null, null, null, null, null, null, "us-east-1"));
+
+        assertEquals("InvalidDBProxyStateFault", e.getErrorCode());
+        assertFalse(rdsService.getDbProxy("mssql-proxy", "us-east-1").isIamAuth());
+    }
+
     @Test
     void createDbProxyValidatesAndPersistsDefaultAuthScheme() {
         DbProxy iamProxy = rdsService.createDbProxy(
