@@ -28,6 +28,7 @@ public class LambdaFunction {
     private long codeSizeBytes;
     private String packageType = "Zip";
     private String imageUri;
+    private String resolvedImageUri;
     private List<String> imageConfigCommand;
     private List<String> imageConfigEntryPoint;
     private String imageConfigWorkingDirectory;
@@ -129,6 +130,8 @@ public class LambdaFunction {
 
     public String getImageUri() { return imageUri; }
     public void setImageUri(String imageUri) { this.imageUri = imageUri; }
+    public String getResolvedImageUri() { return resolvedImageUri; }
+    public void setResolvedImageUri(String resolvedImageUri) { this.resolvedImageUri = resolvedImageUri; }
 
     public List<String> getImageConfigCommand() { return imageConfigCommand; }
     public void setImageConfigCommand(List<String> imageConfigCommand) { this.imageConfigCommand = imageConfigCommand; }
