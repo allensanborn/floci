@@ -15,12 +15,16 @@ import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoSca
 import software.amazon.awssdk.services.applicationautoscaling.model.DescribeScheduledActionsResponse;
 import software.amazon.awssdk.services.applicationautoscaling.model.InvalidNextTokenException;
 import software.amazon.awssdk.services.applicationautoscaling.model.ObjectNotFoundException;
+import software.amazon.awssdk.services.applicationautoscaling.model.PutScheduledActionRequest;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
 import software.amazon.awssdk.services.applicationautoscaling.model.ValidationException;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -643,14 +647,6 @@ class ApplicationAutoScalingIntegrationTest {
                         .scalableDimension(DIMENSION).scheduledActionName("once"));
                 assertThrows(ObjectNotFoundException.class, () -> client.deleteScheduledAction(b -> b.serviceNamespace("ecs")
                         .resourceId(resource).scalableDimension(DIMENSION).scheduledActionName("once")));
-                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
-                        .schedule("rate(1 minute)").build()));
-                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
-                        .timezone("Europe/London").build()));
-                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
-                        .startTime(deadline).build()));
-                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
-                        .endTime(deadline).build()));
                 assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs")
                         .resourceId(resource).maxResults(51)));
                 assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs")
@@ -679,7 +675,7 @@ class ApplicationAutoScalingIntegrationTest {
                         "at(2099-01-01T00:00:00+00:00)", "at(2099-01-01T00:00:00.123)",
                         "at(2099-01-01T00:00:00)trailing", "AT(2099-01-01T00:00:00)",
                         " at(2099-01-01T00:00:00)", "at( 2099-01-01T00:00:00)",
-                        "rate(1 minute)", "cron(0 0 * * ? *)")) {
+                        "rate(0 minutes)", "rate(5 fortnights)", "cron(not a cron)", "cron(0 0 * * *)")) {
                     assertThrows(ValidationException.class, () -> client.putScheduledAction(
                             ScheduledActionFixtures.put(resource, "once").schedule(schedule).build()), schedule);
                 }
@@ -762,7 +758,7 @@ class ApplicationAutoScalingIntegrationTest {
         String base = "\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"service/malformed-timezone/service\","
                 + "\"ScalableDimension\":\"ecs:service:DesiredCount\",\"ScheduledActionName\":\"bad\","
                 + "\"Schedule\":\"at(2099-01-01T00:00:00)\",\"ScalableTargetAction\":{\"MinCapacity\":0},\"Timezone\":";
-        for (String timezone : List.of("\"Europe/London\"", "\"Etc/UTC\"", "\"utc\"", "\"\"", "1", "true", "{}", "[]", "null")) {
+        for (String timezone : List.of("\"europe/london\"", "\"utc\"", "\"\"", "1", "true", "{}", "[]", "null")) {
             call("PutScheduledAction").body("{" + base + timezone + "}").post("/").then()
                     .statusCode(400).body("__type", equalTo("ValidationException"));
         }
@@ -777,6 +773,157 @@ class ApplicationAutoScalingIntegrationTest {
                 "{\"MaxCapacity\":2147483648}", "{\"MinCapacity\":null}")) {
             call("PutScheduledAction").body("{" + base + bounds + "}").post("/").then()
                     .statusCode(400).body("__type", equalTo("ValidationException"));
+        }
+    }
+
+    @Test
+    void scheduledActionsOnDynamoDbAreStoredValidatedAndScopedToTheirDimension() {
+        String resource = "table/scheduled-dynamodb";
+        String read = "dynamodb:table:ReadCapacityUnits";
+        String write = "dynamodb:table:WriteCapacityUnits";
+        Instant start = Instant.parse("2099-01-01T00:00:00Z");
+        Instant end = Instant.parse("2099-02-01T00:00:00Z");
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            client.registerScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                    .scalableDimension(read).minCapacity(1).maxCapacity(10));
+            try {
+                BiFunction<String, Consumer<PutScheduledActionRequest.Builder>, String> refused =
+                        (name, customise) -> assertThrows(ValidationException.class, () -> client.putScheduledAction(b -> {
+                            b.serviceNamespace("dynamodb").resourceId(resource).scalableDimension(read)
+                                    .scheduledActionName(name).scalableTargetAction(ScheduledActionFixtures.bounds(2, 6));
+                            customise.accept(b);
+                        })).awsErrorDetails().errorMessage();
+                assertEquals("Invalid schedule expression. Details: Invalid CRON expression: error at position 0, "
+                                + "details: Illegal characters for this position: 'NOT'",
+                        refused.apply("a", b -> b.schedule("cron(not a cron)")));
+                assertTrue(refused.apply("a", b -> b.schedule("rate(5 fortnights)"))
+                        .startsWith("Invalid schedule expression. Details: Schedule expressions must have the following syntax"));
+                assertEquals("Invalid schedule timezone: europe/london",
+                        refused.apply("a", b -> b.schedule("cron(0 6 * * ? *)").timezone("europe/london")));
+                assertEquals("Maximum capacity cannot be less than minimum capacity",
+                        refused.apply("a", b -> b.schedule("cron(0 6 * * ? *)")
+                                .scalableTargetAction(ScheduledActionFixtures.bounds(8, 3))));
+                assertEquals("StartTime must be before EndTime",
+                        refused.apply("a", b -> b.schedule("rate(1 day)").startTime(end).endTime(start)));
+                assertEquals("Schedule must be set", refused.apply("a", b -> { }));
+                assertTrue(refused.apply("scale-up/weekday", b -> b.schedule("cron(0 6 * * ? *)"))
+                        .startsWith("1 validation error detected: Value 'scale-up/weekday' at 'scheduledActionName' "
+                                + "failed to satisfy constraint: Member must satisfy regular expression pattern: "));
+                assertTrue(ScheduledActionFixtures.describe(client, resource).scheduledActions().isEmpty());
+                assertEquals("No scalable target registered for service namespace: dynamodb, resource ID: " + resource
+                                + ", scalable dimension: " + write,
+                        assertThrows(ObjectNotFoundException.class, () -> client.putScheduledAction(b -> b
+                                .serviceNamespace("dynamodb").resourceId(resource).scalableDimension(write)
+                                .scheduledActionName("a").schedule("cron(0 8 * * ? *)")
+                                .scalableTargetAction(ScheduledActionFixtures.bounds(2, null)))).awsErrorDetails().errorMessage());
+
+                client.putScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource).scalableDimension(read)
+                        .scheduledActionName("a").schedule("rate(1 day)").startTime(start).endTime(end)
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(2, 6)));
+                // Schedule-less put of an existing name keeps the stored schedule and replaces the action.
+                // StartTime/EndTime are the exception: AWS deletes the old values when they are not resent.
+                client.putScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource).scalableDimension(read)
+                        .scheduledActionName("a").startTime(start).endTime(end).scalableTargetAction(ScheduledActionFixtures.bounds(3, null)));
+                ScheduledAction stored = client.describeScheduledActions(b -> b.serviceNamespace("dynamodb")
+                        .resourceId(resource).scheduledActionNames("a")).scheduledActions().getFirst();
+                assertEquals("rate(1 day)", stored.schedule());
+                assertEquals(start, stored.startTime());
+                assertEquals(end, stored.endTime());
+                assertEquals(3, stored.scalableTargetAction().minCapacity());
+                assertNull(stored.scalableTargetAction().maxCapacity());
+
+                // The same name on another dimension is another action.
+                client.registerScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                        .scalableDimension(write).minCapacity(1).maxCapacity(10));
+                client.putScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource).scalableDimension(write)
+                        .scheduledActionName("a").schedule("at(2099-06-15T10:00:00)")
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(4, 9)));
+                assertEquals(2, client.describeScheduledActions(b -> b.serviceNamespace("dynamodb")
+                        .resourceId(resource).scheduledActionNames("a")).scheduledActions().size());
+                client.deleteScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                        .scalableDimension(read).scheduledActionName("a"));
+                ObjectNotFoundException missing = assertThrows(ObjectNotFoundException.class,
+                        () -> client.deleteScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                                .scalableDimension(read).scheduledActionName("a")));
+                assertTrue(missing.awsErrorDetails().errorMessage().matches(
+                        "No scheduled action found for service namespace: dynamodb, scalable target ID: "
+                                + "[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}, scheduled action name: a"));
+                assertEquals(1, client.describeScheduledActions(b -> b.serviceNamespace("dynamodb")
+                        .resourceId(resource).scheduledActionNames("a")).scheduledActions().size());
+
+                // Deregistering a target takes its actions with it.
+                client.deregisterScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                        .scalableDimension(write));
+                assertTrue(client.describeScheduledActions(b -> b.serviceNamespace("dynamodb").resourceId(resource))
+                        .scheduledActions().isEmpty());
+            } finally {
+                client.deregisterScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                        .scalableDimension(read));
+            }
+        }
+    }
+
+    @Test
+    void describeFiltersRefuseBareDimensionsAndOversizedLists() {
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            String dimension = "dynamodb:table:ReadCapacityUnits";
+            assertEquals("Scalable dimension cannot be provided without resource IDs.",
+                    assertThrows(ValidationException.class, () -> client.describeScalableTargets(b -> b
+                            .serviceNamespace("dynamodb").scalableDimension(dimension))).awsErrorDetails().errorMessage());
+            assertEquals("Scalable dimension cannot be provided without a resource ID.",
+                    assertThrows(ValidationException.class, () -> client.describeScalingPolicies(b -> b
+                            .serviceNamespace("dynamodb").scalableDimension(dimension))).awsErrorDetails().errorMessage());
+            assertEquals("Scalable dimension cannot be provided without a resource ID.",
+                    assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b
+                            .serviceNamespace("dynamodb").scalableDimension(dimension))).awsErrorDetails().errorMessage());
+            assertEquals("Scalable dimension cannot be provided without a resource ID.",
+                    assertThrows(ValidationException.class, () -> client.describeScalingActivities(b -> b
+                            .serviceNamespace("dynamodb").scalableDimension(dimension))).awsErrorDetails().errorMessage());
+            List<String> names = IntStream.range(0, 51).mapToObj(i -> "n" + i).toList();
+            String expected = "1 validation error detected: Value '[" + String.join(", ", names)
+                    + "]' at '%s' failed to satisfy constraint: Member must have length less than or equal to 50";
+            assertEquals(expected.formatted("scheduledActionNames"),
+                    assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b
+                            .serviceNamespace("dynamodb").scheduledActionNames(names))).awsErrorDetails().errorMessage());
+            assertEquals(expected.formatted("policyNames"),
+                    assertThrows(ValidationException.class, () -> client.describeScalingPolicies(b -> b
+                            .serviceNamespace("dynamodb").policyNames(names))).awsErrorDetails().errorMessage());
+            assertEquals(expected.formatted("resourceIds"),
+                    assertThrows(ValidationException.class, () -> client.describeScalableTargets(b -> b
+                            .serviceNamespace("dynamodb").resourceIds(names))).awsErrorDetails().errorMessage());
+        }
+    }
+
+    @Test
+    void scheduledActionsPageFiftyAtATime() {
+        String resource = "table/scheduled-paging";
+        String dimension = "dynamodb:table:ReadCapacityUnits";
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            client.registerScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                    .scalableDimension(dimension).minCapacity(1).maxCapacity(10));
+            try {
+                for (int i = 0; i < 55; i++) {
+                    String name = "nightly-%02d".formatted(i);
+                    String schedule = "cron(%d 3 * * ? *)".formatted(i);
+                    client.putScheduledAction(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                            .scalableDimension(dimension).scheduledActionName(name).schedule(schedule)
+                            .scalableTargetAction(ScheduledActionFixtures.bounds(1, 5)));
+                }
+                DescribeScheduledActionsResponse first = client.describeScheduledActions(b -> b
+                        .serviceNamespace("dynamodb").resourceId(resource));
+                assertEquals(50, first.scheduledActions().size());
+                assertNotNull(first.nextToken());
+                DescribeScheduledActionsResponse second = client.describeScheduledActions(b -> b
+                        .serviceNamespace("dynamodb").resourceId(resource).nextToken(first.nextToken()));
+                assertEquals(5, second.scheduledActions().size());
+                assertNull(second.nextToken());
+            } finally {
+                client.deregisterScalableTarget(b -> b.serviceNamespace("dynamodb").resourceId(resource)
+                        .scalableDimension(dimension));
+            }
         }
     }
 

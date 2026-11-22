@@ -22,6 +22,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -119,11 +120,6 @@ public class ApplicationAutoScalingJsonHandler {
     }
 
     private Response handlePutScheduledAction(JsonNode request, String region) {
-        for (String unsupported : List.of("StartTime", "EndTime")) {
-            if (request.has(unsupported)) {
-                throw new AwsException("ValidationException", unsupported + " is not supported for one-off UTC schedules.", 400);
-            }
-        }
         JsonNode action = request.get("ScalableTargetAction");
         if (action != null && !action.isObject()) {
             throw new AwsException("ValidationException", "ScalableTargetAction must be an object.", 400);
@@ -132,7 +128,8 @@ public class ApplicationAutoScalingJsonHandler {
                 text(request, "ScalableDimension"), text(request, "ScheduledActionName"),
                 strictText(request, "Schedule"), action != null,
                 strictInteger(action, "MinCapacity"), strictInteger(action, "MaxCapacity"),
-                strictText(request, "Timezone"), region);
+                strictText(request, "Timezone"), epochSeconds(request, "StartTime"), epochSeconds(request, "EndTime"),
+                region, Instant.now());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -159,6 +156,12 @@ public class ApplicationAutoScalingJsonHandler {
             node.put("CreationTime", action.getCreationTime());
             if (action.getTimezone() != null) {
                 node.put("Timezone", action.getTimezone());
+            }
+            if (action.getStartTime() != null) {
+                node.put("StartTime", action.getStartTime());
+            }
+            if (action.getEndTime() != null) {
+                node.put("EndTime", action.getEndTime());
             }
             ObjectNode bounds = node.putObject("ScalableTargetAction");
             if (action.getMinCapacity() != null) {
@@ -200,6 +203,17 @@ public class ApplicationAutoScalingJsonHandler {
             throw new AwsException("ValidationException", field + " must be a string.", 400);
         }
         return value.textValue();
+    }
+
+    private static Double epochSeconds(JsonNode request, String field) {
+        JsonNode value = request.get(field);
+        if (value == null) {
+            return null;
+        }
+        if (!value.isNumber()) {
+            throw new AwsException("ValidationException", field + " must be a timestamp.", 400);
+        }
+        return value.doubleValue();
     }
 
     private static Integer strictInteger(JsonNode request, String field) {
