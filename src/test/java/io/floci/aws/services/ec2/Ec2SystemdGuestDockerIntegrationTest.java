@@ -2,6 +2,8 @@ package io.floci.aws.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.HostConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -32,6 +34,7 @@ import java.util.regex.Pattern;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -90,6 +93,10 @@ class Ec2SystemdGuestDockerIntegrationTest {
         instance.setInstanceId("i-systemd" + UUID.randomUUID().toString().replace("-", "").substring(0, 8));
         instance.setRegion(REGION);
         String modulesDir = "/lib/modules/" + docker.infoCmd().exec().getKernelVersion();
+        // Skip on the host's account, never the guest's: a Docker VM with no module tree has nothing to
+        // modprobe, but a guest that cannot see a tree the host has is the bug under test.
+        String module = hostModule();
+        assumeTrue(module != null, "Docker host has no " + modulesDir + "/modules.dep to modprobe from");
         try {
             manager.launch(instance,
                     new ResolvedAmiImage(TestImages.PYTHON_ALPINE, ResolvedAmiImage.SYSTEMD_RUNTIME, false, null),
@@ -117,6 +124,12 @@ class Ec2SystemdGuestDockerIntegrationTest {
             assertEquals(0, writable.exitCode(),
                     "guest's /lib/modules outside " + modulesDir + " is not writable: " + writable.summary());
 
+            // The bound tree is usable, not just present: modprobe resolves a module from the host's
+            // modules.dep (the module was read from the Docker host before launch).
+            ContainerExec.Result probe = ContainerExec.runMerged(docker, containerId,
+                    new String[]{"modprobe", "-D", module}, 30);
+            assertEquals(0, probe.exitCode(), "guest's modprobe cannot find " + module + ": " + probe.summary());
+
             // A privileged guest gets its own cgroup namespace: it sits at the namespace root, and
             // Docker mounts that cgroupfs read-write so the guest's systemd can create slices.
             // Assumes cgroup v2: on v1/hybrid hosts there is no "0::" line.
@@ -139,6 +152,23 @@ class Ec2SystemdGuestDockerIntegrationTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+    }
+
+    /** The first module named in the Docker host's modules.dep for its running kernel, or null if it has none. */
+    private String hostModule() {
+        String id = docker.createContainerCmd(TestImages.PYTHON_ALPINE).withCmd("sleep", "60")
+                .withHostConfig(HostConfig.newHostConfig().withBinds(Bind.parse("/lib/modules:/m:ro")))
+                .exec().getId();
+        try {
+            docker.startContainerCmd(id).exec();
+            ContainerExec.Result dep = ContainerExec.run(docker, id,
+                    new String[]{"sh", "-c", "sed -n '1s/:.*//p' /m/$(uname -r)/modules.dep"}, 30);
+            assertNotEquals(-1, dep.exitCode(), "host modules probe timed out: " + dep.summary());
+            String module = dep.stdout().trim().replaceAll(".*/", "").replaceAll("\\..*", "");
+            return dep.exitCode() == 0 && !module.isEmpty() ? module : null;
+        } finally {
+            docker.removeContainerCmd(id).withForce(true).exec();
         }
     }
 }
