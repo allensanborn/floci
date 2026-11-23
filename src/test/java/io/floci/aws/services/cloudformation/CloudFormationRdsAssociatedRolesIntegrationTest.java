@@ -411,6 +411,48 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
     }
 
     @Test
+    void aClusterUpdatesRolesAreUndoneWhenALaterResourceFailsTheUpdate() {
+        // The update adds LAMBDA_ROLE and drops EXPORT_ROLE, then a later resource fails: the cluster
+        // has EXPORT_ROLE again and no LAMBDA_ROLE, and the stack reports the rollback complete.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-rds-roles-rollback-" + suffix;
+        String clusterId = "cfn-roles-rollback-" + suffix;
+        String cluster = """
+                {"Resources": {"Cluster": {"Type": "AWS::RDS::DBCluster", "Properties": {
+                  "DBClusterIdentifier": "%s", "Engine": "aurora-postgresql",
+                  "MasterUsername": "dbadmin", "MasterUserPassword": "password123",
+                  "AssociatedRoles": %s}}%s}}
+                """;
+        String failingMember = """
+                , "Member": {"Type": "AWS::RDS::DBInstance", "Properties": {
+                  "DBClusterIdentifier": {"Ref": "Cluster"}, "Engine": "aurora-postgresql",
+                  "DBInstanceClass": "db.r6g.large",
+                  "AssociatedRoles": [{"RoleArn": "%s", "FeatureName": "s3Import"}]}}""".formatted(EXPORT_ROLE);
+        try {
+            stack("CreateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}]".formatted(EXPORT_ROLE), ""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}]".formatted(LAMBDA_ROLE), failingMember));
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(EXPORT_ROLE), clusterRoles(clusterId));
+
+            // and a role the update added to a cluster that had none comes off again
+            stack("UpdateStack", stackName, cluster.formatted(clusterId, "[]", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(), clusterRoles(clusterId));
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\"}]".formatted(LAMBDA_ROLE), failingMember));
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(), clusterRoles(clusterId));
+        } finally {
+            stack("DeleteStack", stackName, null);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
     void aClusterUpdateIsUndoneWhenALaterResourceFailsTheUpdate() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "cfn-rds-settings-undo-" + suffix;

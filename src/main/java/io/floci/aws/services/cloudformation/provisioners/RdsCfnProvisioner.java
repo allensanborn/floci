@@ -216,7 +216,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * replacement's delete fails, as the resource names the displaced one from then on. Without a
      * record the update was in place: a cluster's settings are put back from its snapshot, and an
      * instance's VPC security groups, and the rollback counts as done when the update changed nothing
-     * else. Any other in-place change to an instance needs a snapshot this provisioner does not keep,
+     * else. A record carrying the {@code cluster} flag puts back a DB cluster's settings and its roles;
+     * a role that cannot be put back fails the rollback. Any other in-place change to an instance needs a snapshot this provisioner does not keep,
      * so the engine keeps reporting it as not rolled back.
      */
     @Override
@@ -251,9 +252,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * Puts back the VPC security groups an update that kept the instance changed, and answers whether
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
      * instance gone since the update fails the rollback, and a retried one tries again. A record
-     * carrying the {@code cluster} flag puts back a DB cluster's groups the same way.
+     * carrying the {@code cluster} flag puts back a DB cluster's settings the same way.
      */
-    // Also restores a DB cluster's settings, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
@@ -267,8 +267,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     + resource.getLogicalId(), e);
         }
         JsonNode groups = prior.path("vpcSecurityGroups");
+        boolean otherChanges = prior.path("otherChanges").asBoolean(true);
         if (prior.path("cluster").asBoolean(false)) {
-            DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior);
+            otherChanges |= !DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior);
         } else if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
@@ -276,7 +277,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resource.getPhysicalId(), groupIds);
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
-        return !prior.path("otherChanges").asBoolean(true);
+        return !otherChanges;
     }
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -622,7 +623,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                                          Double maxCapacity, Integer secondsUntilAutoPause,
                                          List<String> vpcSecurityGroups, String backupWindow,
                                          String maintenanceWindow, boolean deletionProtection,
-                                         boolean httpEndpoint) {
+                                         boolean httpEndpoint, List<DbRoleAssociation> roles) {
 
         private static final List<String> DECLARED_RESTORED = List.of("MasterUserPassword",
                 "EnableIAMDatabaseAuthentication", "DeletionProtection", "PreferredBackupWindow", "PreferredMaintenanceWindow");
@@ -632,7 +633,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     c.getServerlessV2MinCapacity(), c.getServerlessV2MaxCapacity(),
                     c.getServerlessV2SecondsUntilAutoPause(), List.copyOf(c.getVpcSecurityGroupIds()),
                     c.getPreferredBackupWindow(), c.getPreferredMaintenanceWindow(), c.isDeletionProtection(),
-                    c.isHttpEndpointEnabled());
+                    c.isHttpEndpointEnabled(), c.getAssociatedRoles().stream()
+                            .map(r -> new DbRoleAssociation(r.getRoleArn(), r.getFeatureName())).toList());
         }
 
         ObjectNode record(String region, ProvisionContext ctx) {
@@ -648,10 +650,14 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     .put("backupWindow", backupWindow).put("maintenanceWindow", maintenanceWindow);
             ArrayNode groups = n.putArray("vpcSecurityGroups");
             vpcSecurityGroups.forEach(groups::add);
+            ArrayNode saved = n.putArray("roles");
+            roles.forEach(role -> saved.addObject().put("RoleArn", role.getRoleArn())
+                    .put("FeatureName", role.getFeatureName()));
             return n;
         }
 
-        static void restore(RdsService rds, String id, JsonNode p) {
+        /** Puts the settings and roles back; false when a role could not be, so the rollback has not completed. */
+        static boolean restore(RdsService rds, String id, JsonNode p) {
             String region = p.path("region").asText();
             Double min = p.path("min").isNull() ? null : p.path("min").asDouble();
             Double max = p.path("max").isNull() ? null : p.path("max").asDouble();
@@ -673,6 +679,24 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             if (rds.getDbCluster(id, region).isHttpEndpointEnabled() != p.path("httpEndpoint").asBoolean()) {
                 rds.setHttpEndpoint(region, id, p.path("httpEndpoint").asBoolean());
             }
+            // the roles the update added come off and the ones it removed go back, as AWS's handler does
+            boolean restored = true;
+            if (p.has("roles")) {
+                List<DbRoleAssociation> prior = readAssociatedRoles(p.path("roles").toString());
+                for (DbRoleAssociation role : new ArrayList<>(rds.getDbCluster(id, region).getAssociatedRoles())) {
+                    if (!containsRole(prior, role)) {
+                        restored &= undoStep(() -> rds.removeRoleFromDbCluster(region, id, role.getRoleArn(),
+                                role.getFeatureName()), "remove", role, "DB cluster", id);
+                    }
+                }
+                for (DbRoleAssociation role : prior) {
+                    if (!containsRole(rds.getDbCluster(id, region).getAssociatedRoles(), role)) {
+                        restored &= undoStep(() -> rds.addRoleToDbCluster(region, id, role.getRoleArn(),
+                                role.getFeatureName()), "restore", role, "DB cluster", id);
+                    }
+                }
+            }
+            return restored;
         }
 
         // a record from before the flags were kept restores, as it did
@@ -984,12 +1008,14 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static void undoStep(Runnable step, String verb, DbRoleAssociation role, String kind, String id) {
+    private static boolean undoStep(Runnable step, String verb, DbRoleAssociation role, String kind, String id) {
         try {
             step.run();
+            return true;
         } catch (AwsException e) {
             LOG.warnv("Could not {0} role {1} on {2} {3} while undoing a failed update: {4}",
                     verb, role.getRoleArn(), kind, id, e.getMessage());
+            return false;
         }
     }
 
