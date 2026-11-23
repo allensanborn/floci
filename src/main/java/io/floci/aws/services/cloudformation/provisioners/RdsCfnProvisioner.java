@@ -115,9 +115,12 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
     /**
-     * What an update that kept a DB instance or cluster needs for {@link #rollbackUpdate}: the region,
-     * the VPC security groups it had when the update changed them, and whether it changed anything
-     * else, which has no rollback here.
+     * What an update that kept a DB instance or cluster needs for {@link #rollbackUpdate}: the region
+     * and whether it changed anything else, which has no rollback here. An instance's record holds the
+     * VPC security groups it had when the update changed them; a cluster's holds all it can change
+     * (see {@link DbClusterInPlaceState}).
+     * A cluster's record holds its previous master password, a secret, so the update's commit clears
+     * it: only a rollback needs it, and {@link #completeUpdate} drops it on every committed update.
      */
     static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
 
@@ -211,9 +214,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * or instance again and the replacement is deleted. The createOnly and roles records follow it
      * back, since {@link ReplacementCleanup} leaves {@code __Floci} attributes alone, even when the
      * replacement's delete fails, as the resource names the displaced one from then on. Without a
-     * record the update was in place: an instance's VPC security groups are put back, and the
-     * rollback counts as done when the update changed nothing else. Any other in-place change needs
-     * a snapshot this provisioner does not keep, so the engine keeps reporting it as not rolled back.
+     * record the update was in place: a cluster's settings are put back from its snapshot, and an
+     * instance's VPC security groups, and the rollback counts as done when the update changed nothing
+     * else. Any other in-place change to an instance needs a snapshot this provisioner does not keep,
+     * so the engine keeps reporting it as not rolled back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -249,6 +253,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * instance gone since the update fails the rollback, and a retried one tries again. A record
      * carrying the {@code cluster} flag puts back a DB cluster's groups the same way.
      */
+    // Also restores a DB cluster's settings, from a record carrying the `cluster` flag.
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         if (saved == null) {
@@ -262,16 +267,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     + resource.getLogicalId(), e);
         }
         JsonNode groups = prior.path("vpcSecurityGroups");
-        if (groups.isArray()) {
+        if (prior.path("cluster").asBoolean(false)) {
+            DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior);
+        } else if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
-            if (prior.path("cluster").asBoolean(false)) {
-                rdsService.setDbClusterRequestSettings(resource.getPhysicalId(), prior.path("region").asText(),
-                        groupIds, null, null);
-            } else {
-                rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
-                        resource.getPhysicalId(), groupIds);
-            }
+            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(),
+                    resource.getPhysicalId(), groupIds);
         }
         resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return !prior.path("otherChanges").asBoolean(true);
@@ -609,6 +611,81 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * What an update that keeps a DB cluster can change on it, copied so the cluster's later changes
+     * do not reach it, and put back by {@link #restore}, as CloudFormation sends the previous
+     * template's declared values on rollback. The master password is saved too: rollback has the
+     * resource and not the previous template to resolve it from, so the record holds it as the
+     * cluster does. Scaling a cluster did not have is left in place, as CloudFormation sends nothing
+     * for it.
+     */
+    private record DbClusterInPlaceState(String masterPassword, boolean iamAuthentication, Double minCapacity,
+                                         Double maxCapacity, Integer secondsUntilAutoPause,
+                                         List<String> vpcSecurityGroups, String backupWindow,
+                                         String maintenanceWindow, boolean deletionProtection,
+                                         boolean httpEndpoint) {
+
+        private static final List<String> DECLARED_RESTORED = List.of("MasterUserPassword",
+                "EnableIAMDatabaseAuthentication", "DeletionProtection", "PreferredBackupWindow", "PreferredMaintenanceWindow");
+
+        static DbClusterInPlaceState of(DbCluster c) {
+            return new DbClusterInPlaceState(c.getMasterPassword(), c.isIamDatabaseAuthenticationEnabled(),
+                    c.getServerlessV2MinCapacity(), c.getServerlessV2MaxCapacity(),
+                    c.getServerlessV2SecondsUntilAutoPause(), List.copyOf(c.getVpcSecurityGroupIds()),
+                    c.getPreferredBackupWindow(), c.getPreferredMaintenanceWindow(), c.isDeletionProtection(),
+                    c.isHttpEndpointEnabled());
+        }
+
+        ObjectNode record(String region, ProvisionContext ctx) {
+            ObjectNode n = MAPPER.createObjectNode().put("region", region).put("cluster", true)
+                    .put("otherChanges", false).put("password", masterPassword)
+                    .put("iam", iamAuthentication).put("deletionProtection", deletionProtection)
+                    .put("httpEndpoint", httpEndpoint);
+            // A property the previous template did not declare is not sent back on rollback.
+            for (String property : DECLARED_RESTORED) {
+                n.put("declared" + property, ctx.previouslyDeclared(property));
+            }
+            n.put("min", minCapacity).put("max", maxCapacity).put("autoPause", secondsUntilAutoPause)
+                    .put("backupWindow", backupWindow).put("maintenanceWindow", maintenanceWindow);
+            ArrayNode groups = n.putArray("vpcSecurityGroups");
+            vpcSecurityGroups.forEach(groups::add);
+            return n;
+        }
+
+        static void restore(RdsService rds, String id, JsonNode p) {
+            String region = p.path("region").asText();
+            Double min = p.path("min").isNull() ? null : p.path("min").asDouble();
+            Double max = p.path("max").isNull() ? null : p.path("max").asDouble();
+            Integer autoPause = p.path("autoPause").isNull() ? null : p.path("autoPause").asInt();
+            // an unset scaling is skipped: modifyDbCluster rejects one on a cluster without Serverless v2
+            boolean scaling = min != null && max != null;
+            rds.modifyDbCluster(id, declared(p, "MasterUserPassword") ? textOrNull(p.path("password")) : null,
+                    declared(p, "EnableIAMDatabaseAuthentication") ? p.path("iam").asBoolean() : null,
+                    scaling ? min : null, scaling ? max : null, scaling ? autoPause : null, region);
+            List<String> groups = new ArrayList<>();
+            p.path("vpcSecurityGroups").forEach(g -> groups.add(g.asText()));
+            rds.setDbClusterRequestSettings(id, region, groups,
+                    declared(p, "PreferredBackupWindow") ? textOrNull(p.path("backupWindow")) : null,
+                    declared(p, "PreferredMaintenanceWindow") ? textOrNull(p.path("maintenanceWindow")) : null);
+            // a template that dropped DeletionProtection kept the stored value, so only a declared one is put back
+            if (declared(p, "DeletionProtection")) {
+                rds.setDeletionProtection(region, id, p.path("deletionProtection").asBoolean());
+            }
+            if (rds.getDbCluster(id, region).isHttpEndpointEnabled() != p.path("httpEndpoint").asBoolean()) {
+                rds.setHttpEndpoint(region, id, p.path("httpEndpoint").asBoolean());
+            }
+        }
+
+        // a record from before the flags were kept restores, as it did
+        private static boolean declared(JsonNode p, String property) {
+            return p.path("declared" + property).asBoolean(true);
+        }
+
+        private static String textOrNull(JsonNode n) {
+            return n.isNull() ? null : n.asText();
+        }
+    }
+
+    /**
      * A DB cluster follows CloudFormation's replacement lifecycle. A change to any of the
      * createOnlyProperties in the {@code AWS::RDS::DBCluster} schema ({@code DBClusterIdentifier},
      * {@code EngineMode}, {@code StorageEncrypted} and {@code DatabaseName} against the cluster on
@@ -679,6 +756,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     cluster.getPreferredBackupWindow(), cluster.getPreferredMaintenanceWindow());
         }
         List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
+        // What an in-place update can change, copied before modifyDbCluster, for rollbackUpdate.
+        DbClusterInPlaceState stateBefore = cluster == null ? null : DbClusterInPlaceState.of(cluster);
         if (cluster != null) {
             cluster = rdsService.modifyDbCluster(
                     id,
@@ -705,6 +784,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted, null, deletionProtection);
         }
+        r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        if (!created) {
+            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, stateBefore.record(region, ctx).toString());
+        }
         if (securityGroupIds.isEmpty()) {
             // A list the previous template declared and this one drops puts the cluster on its VPC's
             // default group, as AWS's handler does, and leaves them when there is none. Groups the
@@ -713,16 +796,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     ? rdsService.defaultClusterVpcSecurityGroupIds(region, cluster.getDbClusterIdentifier())
                     : List.of();
             securityGroupIds = defaultGroup.isEmpty() ? null : defaultGroup;
-        }
-        // The groups an in-place update changes are saved, for rollbackUpdate, as an instance's are.
-        r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
-        if (!created && securityGroupIds != null
-                && !Set.copyOf(securityGroupIds).equals(Set.copyOf(cluster.getVpcSecurityGroupIds()))) {
-            ObjectNode saved = MAPPER.createObjectNode().put("region", region).put("cluster", true)
-                    .put("otherChanges", true);
-            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
-            cluster.getVpcSecurityGroupIds().forEach(priorGroups::add);
-            r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
         }
         rdsService.setDbClusterRequestSettings(cluster.getDbClusterIdentifier(), region,
                 securityGroupIds, backupWindow, maintenanceWindow);
