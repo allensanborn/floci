@@ -417,6 +417,10 @@ Set `FLOCI_SERVICES_RDS_MOCK=true` when you only need the management API shape: 
 instances are registered as `available` immediately, with no Docker container or auth proxy behind
 them. Each resource still gets a unique endpoint port, but nothing listens on it.
 
+A snapshot of a cluster that has no running container (mock mode, or no Docker daemon) is metadata
+only and holds no data, for any engine. A snapshot of a cluster with a running container is taken for
+Postgres only; MySQL-family cluster snapshots of a running container are not supported yet.
+
 ```yaml
 # docker-compose.yml — CI / test environment
 services:

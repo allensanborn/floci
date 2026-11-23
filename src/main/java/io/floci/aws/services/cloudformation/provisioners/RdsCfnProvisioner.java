@@ -12,6 +12,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
+import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceSettings;
 import io.floci.aws.services.rds.model.DbParameterGroup;
@@ -37,11 +38,12 @@ import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
- * {@code DBInstance}, {@code DBCluster}, {@code DBProxy} and {@code DBProxyTargetGroup}.
+ * {@code DBInstance}, {@code DBCluster}, {@code ClusterSnapshot}, {@code DBProxy} and {@code DBProxyTargetGroup}
+ * (eight types).
  * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
- * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} and {@code DBInstance}
+ * {@link #delete(String, String, String)} serves all eight. {@code DBCluster} and {@code DBInstance}
  * are the types that replace through {@link ReplacementCleanup}; see {@code provisionDbCluster} and
  * {@code provisionDbInstance}.
  *
@@ -60,10 +62,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * The createOnlyProperties of {@code AWS::RDS::DBCluster} that nothing on the cluster on file
      * records. {@code DBClusterIdentifier} is the physical id, {@code EngineMode},
      * {@code StorageEncrypted} and {@code DatabaseName} are fields of the cluster, but Floci does not
-     * emulate a KMS key, public access, a subnet group placement chosen by the template or a
-     * restore source on a cluster, so a change to one of these can only be seen against what the
-     * template said last time. The values the last successful provision resolved are kept on the
-     * resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
+     * emulate a KMS key, public access or a restore source on a cluster, so a change to one of
+     * these can only be seen against what the template said last time. {@code DBSubnetGroupName}
+     * is placed on the cluster, but is recorded as well so a change to it replaces the cluster
+     * as the template's change rather than the live entity's. The values the last successful
+     * provision resolved are kept on the resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
      * on the template's change, not on the live entity.
      */
     static final List<String> DB_CLUSTER_RECORDED_CREATE_ONLY = List.of(
@@ -138,6 +141,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 "AWS::RDS::DBClusterParameterGroup",
                 "AWS::RDS::DBInstance",
                 "AWS::RDS::DBCluster",
+                "AWS::RDS::ClusterSnapshot",
                 "AWS::RDS::DBProxy",
                 "AWS::RDS::DBProxyTargetGroup");
     }
@@ -153,6 +157,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     provisionDbClusterParameterGroup(r, props, engine, ctx, region);
             case "AWS::RDS::DBInstance" -> provisionDbInstance(r, props, engine, ctx, region);
             case "AWS::RDS::DBCluster" -> provisionDbCluster(r, props, engine, ctx, region);
+            case "AWS::RDS::ClusterSnapshot" -> provisionClusterSnapshot(r, props, engine, region);
             case "AWS::RDS::DBProxy" -> provisionDbProxy(r, props, engine, region);
             case "AWS::RDS::DBProxyTargetGroup" -> provisionDbProxyTargetGroup(r, props, engine, region);
             default -> throw new IllegalStateException(
@@ -167,6 +172,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     () -> rdsService.deleteDbInstance(physicalId, region), "DBInstanceNotFound");
             case "AWS::RDS::DBCluster" -> CfnDeletes.safeDelete("DB cluster", physicalId,
                     () -> rdsService.deleteDbCluster(physicalId, region), "DBClusterNotFoundFault");
+            // Ref is the snapshot ARN; the identifier is its last segment.
+            case "AWS::RDS::ClusterSnapshot" -> CfnDeletes.safeDelete("DB cluster snapshot", physicalId,
+                    () -> rdsService.deleteDbClusterSnapshot(
+                            physicalId.substring(physicalId.lastIndexOf(':') + 1), region),
+                    "DBClusterSnapshotNotFoundFault");
             case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
             case "AWS::RDS::DBProxyTargetGroup" -> clearDbProxyTargetGroupSafe(physicalId, region);
             case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId, region);
@@ -315,6 +325,19 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
         if (group.getDbSubnetGroupArn() != null) {
             r.getAttributes().put("DBSubnetGroupArn", group.getDbSubnetGroupArn());
+        }
+    }
+
+    private void provisionClusterSnapshot(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region) {
+        // Both properties are createOnly, so a re-run of an unchanged resource keeps its snapshot.
+        if (r.getPhysicalId() == null) {
+            DbClusterSnapshot snapshot = rdsService.createDbClusterSnapshot(
+                    resolveOptional(props, "DBClusterSnapshotIdentifier", engine),
+                    resolveOptional(props, "DBClusterIdentifier", engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine), region);
+            r.setPhysicalId(snapshot.getDbClusterSnapshotArn());          // Ref -> the snapshot ARN
+            r.getAttributes().put("DBClusterSnapshotArn", snapshot.getDbClusterSnapshotArn());
         }
     }
 
@@ -680,13 +703,16 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         List<String> securityGroupIds = resolveStringList(props, "VpcSecurityGroupIds", engine);
         if (cluster != null) {
+            Boolean manageChange = manageMasterUserPasswordChange(props, ctx);
             cluster = rdsService.modifyDbCluster(
                     id,
                     resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     parseServerlessV2Capacity(props, "MinCapacity", engine),
                     parseServerlessV2Capacity(props, "MaxCapacity", engine),
-                    parseServerlessV2SecondsUntilAutoPause(props, engine), region);
+                    parseServerlessV2SecondsUntilAutoPause(props, engine),
+                    manageChange,
+                    masterUserSecretKmsKeyId(props, engine), region);
         } else {
             Double serverlessV2MinCapacity = parseServerlessV2Capacity(props, "MinCapacity", engine);
             Double serverlessV2MaxCapacity = parseServerlessV2Capacity(props, "MaxCapacity", engine);
@@ -701,9 +727,12 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                    masterPassword, databaseName, iamEnabled, parameterGroup,
+                    resolveOptional(props, "DBSubnetGroupName", engine), null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                    false, null, engineMode, storageEncrypted, null, deletionProtection);
+                    Boolean.TRUE.equals(ctx.resolveOptionalBoolean(props, "ManageMasterUserPassword")),
+                    masterUserSecretKmsKeyId(props, engine),
+                    engineMode, storageEncrypted, null, deletionProtection);
         }
         if (securityGroupIds.isEmpty()) {
             // A list the previous template declared and this one drops puts the cluster on its VPC's
@@ -749,6 +778,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cluster.getDbClusterResourceId() != null) {
             r.getAttributes().put("DBClusterResourceId", cluster.getDbClusterResourceId());
+        }
+        if (cluster.getMasterUserSecretArn() != null) {
+            r.getAttributes().put("MasterUserSecret.SecretArn", cluster.getMasterUserSecretArn());
+        } else {
+            r.getAttributes().remove("MasterUserSecret.SecretArn");
         }
         recordDbClusterCreateOnly(r, ctx, attributesBefore, createOnly);
         // A provision that left the resource with a new physical id replaced the cluster: the
@@ -1348,6 +1382,29 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             return Boolean.parseBoolean(text);
         }
         throw new AwsException("ValidationError", name + " must be true or false, not " + text + ".", 400);
+    }
+
+    /**
+     * What an update sends for {@code ManageMasterUserPassword}, as the AWS handler does: true when the
+     * template sets it, false when it turns it off (set to false over a previous value that was not
+     * false, or dropped after a true), and null, meaning leave it as it is, otherwise.
+     */
+    private Boolean manageMasterUserPasswordChange(JsonNode props, ProvisionContext ctx) {
+        Boolean desired = ctx.resolveOptionalBoolean(props, "ManageMasterUserPassword");
+        Boolean previous = ProvisionContext.resolveOptionalBoolean(
+                ctx.priorProperties(), "ManageMasterUserPassword", ctx.priorEngine());
+        if (Boolean.TRUE.equals(desired)) {
+            return Boolean.TRUE;
+        }
+        boolean turnsOff = desired == null ? Boolean.TRUE.equals(previous) : !Boolean.FALSE.equals(previous);
+        return turnsOff ? Boolean.FALSE : null;
+    }
+
+    /** The {@code MasterUserSecret.KmsKeyId} property, which is where the template names the secret's key. */
+    private String masterUserSecretKmsKeyId(JsonNode props, CloudFormationTemplateEngine engine) {
+        JsonNode secret = props == null ? null : props.get("MasterUserSecret");
+        return secret == null || !secret.has("KmsKeyId") ? null
+                : resolveOptional(secret, "KmsKeyId", engine);
     }
 
     private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {

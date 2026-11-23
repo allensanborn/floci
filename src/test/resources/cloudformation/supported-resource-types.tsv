@@ -176,6 +176,7 @@ AWS::Organizations::OrganizationalUnit	OrganizationsCfnProvisioner
 AWS::Organizations::Policy	OrganizationsCfnProvisioner
 AWS::Organizations::ResourcePolicy	OrganizationsCfnProvisioner
 AWS::Pipes::Pipe	PipesCfnProvisioner
+AWS::RDS::ClusterSnapshot	RdsCfnProvisioner
 AWS::RDS::DBCluster	RdsCfnProvisioner
 AWS::RDS::DBClusterParameterGroup	RdsCfnProvisioner
 AWS::RDS::DBInstance	RdsCfnProvisioner
