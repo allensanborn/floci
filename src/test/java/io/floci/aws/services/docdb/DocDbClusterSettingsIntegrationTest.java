@@ -68,6 +68,31 @@ class DocDbClusterSettingsIntegrationTest {
                 .body(containsString("<VpcSecurityGroupId>" + second.getGroupId() + "</VpcSecurityGroupId>"));
     }
 
+    /** The group's name is stored lower case by RDS, and the cluster reports that name, not the spelling sent. */
+    @Test
+    void aMixedCaseSubnetGroupNameIsStoredAsTheGroupsLowerCaseName() {
+        String vpcId = ec2Service.createVpc("us-east-1", "10.8.0.0/16", false).getVpcId();
+        String a = ec2Service.createSubnet("us-east-1", vpcId, "10.8.1.0/24", "us-east-1a").getSubnetId();
+        String b = ec2Service.createSubnet("us-east-1", vpcId, "10.8.2.0/24", "us-east-1b").getSubnetId();
+        rds("CreateDBSubnetGroup").formParam("DBSubnetGroupName", "DocMixedGroup")
+                .formParam("DBSubnetGroupDescription", "d")
+                .formParam("SubnetIds.SubnetIdentifier.1", a).formParam("SubnetIds.SubnetIdentifier.2", b)
+                .when().post("/").then().statusCode(200);
+        try {
+            rds("CreateDBCluster").formParam("DBClusterIdentifier", ID).formParam("Engine", "docdb")
+                    .formParam("MasterUsername", "u").formParam("MasterUserPassword", "secret99password")
+                    .formParam("DBSubnetGroupName", "DocMixedGroup")
+                    .when().post("/").then().statusCode(200);
+            rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+                    .when().post("/").then().statusCode(200)
+                    .body(containsString("<DBSubnetGroup>docmixedgroup</DBSubnetGroup>"));
+        } finally {
+            rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
+                    .when().post("/");
+            rds("DeleteDBSubnetGroup").formParam("DBSubnetGroupName", "DocMixedGroup").when().post("/");
+        }
+    }
+
     @Test
     void settingsGivenOnCreateComeBackFromDescribeAndModifyChangesThem() {
         String keyArn = kmsService.createKey("docdb settings", "us-east-1").getArn();
