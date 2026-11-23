@@ -10,9 +10,11 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
@@ -24,9 +26,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code GetWebIdentityToken} over the wire: the signed JWT it answers with, the switch it reads,
  * and the constraints it is held to.
  *
- * <p>The token is checked here by decoding it rather than by verifying its signature, no endpoint
- * publishing the verification key yet, that being the other half of the feature. What is checked
- * instead is the shape a verifier depends on, including the one detail an ECDSA JWS is easy to get
+ * <p>The token is checked here by decoding it rather than by verifying its signature, which
+ * {@link StsWebIdentityWellKnownIntegrationTest} does against the published key set. What is
+ * checked here is the shape a verifier depends on, including the one detail an ECDSA JWS is easy to get
  * wrong: the signature is the raw {@code R || S} pair, 96 bytes for P-384, rather than the
  * variable-length DER sequence the JDK's default ECDSA signer returns. That the signature verifies
  * at all, against the key the issuer stored and over the claims it was made for, is
@@ -210,11 +212,51 @@ class WebIdentityTokenIntegrationTest {
 
         token("RS256").when().post("/").then().statusCode(403)
             .body(CODE, equalTo("OutboundWebIdentityFederationDisabledException"))
-            .body(MESSAGE, containsString("The outbound web identity federation feature is not"
-                    + " enabled for this account."))
+            .body(MESSAGE, equalTo("OutboundWebIdentityFederation is disabled."))
             .body(not(containsString("FeatureDisabled")));
 
         enabledIssuer();
+    }
+
+    /**
+     * "You can specify Scope only when SubjectMode is OriginIdentity and you request exactly one
+     * audience", so a scope beside the default subject mode, or beside two audiences, is refused.
+     */
+    @Test
+    void aScopeNeedsTheOriginIdentityModeAndOneAudience() {
+        enabledIssuer();
+
+        token("RS256").formParam("Scope", "read write").when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("You can specify Scope only when SubjectMode is OriginIdentity and you"
+                    + " request exactly one audience."));
+        token("RS256").formParam("Scope", "read").formParam("SubjectMode", "OriginIdentity")
+            .formParam("Audience.member.2", "other")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, containsString("You can specify Scope only when SubjectMode is OriginIdentity"));
+    }
+
+    /**
+     * OriginIdentity puts the aws:OriginIdentity/Subject key of the calling session's trusted
+     * identity propagation context in the sub claim, and AWS refuses the request with a validation
+     * error when the context lacks it, as every session here does. AWSIdentity, the default, is the
+     * caller's ARN as before.
+     */
+    @Test
+    void theOriginIdentityModeNeedsAnIdentityContextTheSessionDoesNotCarry() {
+        enabledIssuer();
+
+        for (RequestSpecification request : List.of(token("RS256").formParam("SubjectMode", "OriginIdentity"),
+                token("RS256").formParam("SubjectMode", "OriginIdentity").formParam("Scope", "read"))) {
+            request.when().post("/").then().statusCode(400)
+                .body(CODE, equalTo("ValidationError"))
+                .body(MESSAGE, equalTo("To use OriginIdentity, the trusted identity propagation context of the"
+                        + " calling session must contain the aws:OriginIdentity/Subject key and either the"
+                        + " aws:OriginIdentity/Issuer key or the aws:OriginIdentity/FederatedProviderArn key."));
+        }
+        token("RS256").formParam("SubjectMode", "AWSIdentity").when().post("/").then().statusCode(200)
+            .body(TOKEN, not(emptyOrNullString()));
     }
 
     /**

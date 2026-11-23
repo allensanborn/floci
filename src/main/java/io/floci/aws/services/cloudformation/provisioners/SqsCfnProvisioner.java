@@ -13,7 +13,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,6 +30,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(SqsCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String POLICY_QUEUES_ATTR = "__FlociQueuePolicyQueues";
     /** The schema's mutable properties that map one to one onto a queue attribute of the same name. */
     private static final List<String> SCALAR_ATTRIBUTES = List.of(
             "ContentBasedDeduplication", "DeduplicationScope", "DelaySeconds", "FifoThroughputLimit",
@@ -68,7 +71,7 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {
             case "AWS::SQS::Queue" -> provisionQueue(r, props, ctx);
-            case "AWS::SQS::QueuePolicy" -> provisionQueuePolicy(r, ctx);
+            case "AWS::SQS::QueuePolicy" -> provisionQueuePolicy(r, props, ctx);
             default -> throw new IllegalStateException("SqsCfnProvisioner cannot handle " + r.getResourceType());
         }
     }
@@ -78,7 +81,18 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         if ("AWS::SQS::Queue".equals(resourceType)) {
             sqsService.deleteQueue(physicalId, region);
         }
-        // AWS::SQS::QueuePolicy has no backing resource to delete (matches prior behavior).
+        // AWS::SQS::QueuePolicy's physical id does not name its queues; see delete(StackResource, String).
+    }
+
+    @Override
+    public void delete(StackResource resource, String region) {
+        if ("AWS::SQS::QueuePolicy".equals(resource.getResourceType())) {
+            for (String queueUrl : readQueueUrls(resource)) {
+                clearQueuePolicy(queueUrl, region);
+            }
+            return;
+        }
+        delete(resource.getResourceType(), resource.getPhysicalId(), region);
     }
 
     @Override
@@ -140,12 +154,21 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // The physical id is the queue URL, so ctx.stablePhysicalName does not fit: the prior name
         // comes from the QueueName attribute recorded at create time, as SnsCfnProvisioner reads
         // the topic name beside its ARN. Keeping it means an unnamed queue survives an update
-        // instead of being orphaned with its messages. FifoQueue is createOnly like QueueName, so a
-        // prior name whose .fifo suffix no longer matches the flag is a replacing update and gets a
-        // fresh name.
+        // instead of being orphaned with its messages. The engine's change decides whether the
+        // update replaces the queue, as it does for the change set's Replacement: QueueName and
+        // FifoQueue are create-only in the registry. A replacing update of an unnamed queue gets a
+        // fresh generated name; a named one cannot be replaced under the same name.
         String priorName = r.getAttributes() != null ? r.getAttributes().get("QueueName") : null;
+        // SQS cannot change a queue's mode in place and a FIFO queue's name always ends in .fifo, so
+        // the prior name tells the live mode; the engine reads an added FifoQueue as no change, which
+        // would apply the update in place and leave the mode as it was.
+        boolean replaces = ctx.isUpdate() && priorName != null && !priorName.isBlank()
+                && (ctx.changes("AWS::SQS::Queue", props).requiresReplacement() || priorName.endsWith(".fifo") != fifo);
+        if (replaces && queueName != null && queueName.equals(priorName)) {
+            throw CfnExceptions.customNamedReplacement(queueName);
+        }
         if (queueName == null || queueName.isBlank()) {
-            if (priorName != null && !priorName.isBlank() && priorName.endsWith(".fifo") == fifo) {
+            if (priorName != null && !priorName.isBlank() && !replaces) {
                 queueName = priorName;
             } else {
                 // Like real CloudFormation, generated names of FIFO queues must end in .fifo
@@ -183,15 +206,6 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // registry schema's update handler, rather than a second create. The prior physical id is
         // the queue URL SetQueueAttributes addresses. A replacing update derives a different name
         // and still creates.
-        // FifoQueue is createOnly and encoded in the name. An explicitly named queue keeps its name
-        // across updates, so a changed FifoQueue would need a replacement under the same name,
-        // which CloudFormation refuses for a custom-named resource: the SQS registry schema says a
-        // named queue cannot take an update that requires replacement. Fail it, as the other
-        // provisioners do, instead of reconciling everything but the mode.
-        if (ctx.isUpdate() && queueName.equals(priorName) && priorName.endsWith(".fifo") != fifo) {
-            throw new AwsException("ValidationError",
-                    "Updating FifoQueue requires resource replacement, which is not supported.", 400);
-        }
         String queueUrl;
         if (ctx.isUpdate() && queueName.equals(priorName)) {
             attrs.remove("FifoQueue");
@@ -275,10 +289,77 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void provisionQueuePolicy(StackResource r, ProvisionContext ctx) {
+    private void provisionQueuePolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
+        List<String> queues = ctx.resolveStringList(props, "Queues").stream()
+                .filter(q -> !q.isBlank())
+                .toList();
+        if (queues.isEmpty()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires at least one queue URL in Queues.", 400);
+        }
+        if (props == null || !props.hasNonNull("PolicyDocument")) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires a PolicyDocument.", 400);
+        }
+        String policy = ctx.engine().resolveJsonAttribute(props.path("PolicyDocument"));
+        if (policy == null || policy.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "AWS::SQS::QueuePolicy requires a PolicyDocument.", 400);
+        }
+        List<String> priorQueues = ctx.isUpdate() ? readQueueUrls(r) : List.of();
+        for (String queueUrl : queues) {
+            sqsService.setQueueAttributes(queueUrl, Map.of("Policy", policy), ctx.region());
+        }
+        Set<String> currentQueues = new HashSet<>(queues);
+        for (String priorQueue : priorQueues) {
+            if (!currentQueues.contains(priorQueue)) {
+                clearQueuePolicy(priorQueue, ctx.region());
+            }
+        }
         // A policy has no backing entity, so its id only has to stay put across updates.
         r.setPhysicalId(ctx.isUpdate()
                 ? ctx.priorPhysicalId()
                 : "queue-policy-" + UUID.randomUUID().toString().substring(0, 8));
+        r.getAttributes().put(POLICY_QUEUES_ATTR, writeQueueUrls(queues));
+    }
+
+    private void clearQueuePolicy(String queueUrl, String region) {
+        CfnDeletes.safeDelete("SQS queue policy", queueUrl,
+                () -> sqsService.setQueueAttributes(queueUrl, Map.of("Policy", ""), region),
+                "AWS.SimpleQueueService.NonExistentQueue", "QueueDoesNotExist");
+    }
+
+    private static String writeQueueUrls(List<String> queues) {
+        try {
+            return MAPPER.writeValueAsString(queues);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not serialize queue policy URLs", e);
+        }
+    }
+
+    private static List<String> readQueueUrls(StackResource r) {
+        if (r.getAttributes() == null) {
+            return List.of();
+        }
+        String raw = r.getAttributes().get(POLICY_QUEUES_ATTR);
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode node = MAPPER.readTree(raw);
+            if (!node.isArray()) {
+                return List.of();
+            }
+            List<String> urls = new ArrayList<>();
+            for (JsonNode entry : node) {
+                if (entry.isTextual() && !entry.asText().isBlank()) {
+                    urls.add(entry.asText());
+                }
+            }
+            return urls;
+        } catch (JsonProcessingException e) {
+            LOG.errorv("Could not parse queue policy URLs for {0}: {1}", r.getLogicalId(), e.getMessage());
+            return List.of();
+        }
     }
 }

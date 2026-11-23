@@ -13,11 +13,17 @@ public class EmrInstanceFleet {
     private String name;
     private String instanceFleetType;
     private List<String> instanceTypes = new ArrayList<>();
+    private String instanceTypeConfigs;
     private int targetOnDemandCapacity;
     private int targetSpotCapacity;
     private int provisionedOnDemandCapacity;
     private int provisionedSpotCapacity;
     private String state;
+    /** The LaunchSpecifications as given, raw JSON; null when none. */
+    private String launchSpecifications;
+    /** The ResizeSpecifications as given, or as ModifyInstanceFleet last set them, raw JSON; null when none. */
+    private String resizeSpecifications;
+    private String context;
 
     public EmrInstanceFleet() {}
 
@@ -33,6 +39,10 @@ public class EmrInstanceFleet {
     /** The instance types of its InstanceTypeConfigs, in their order. */
     public List<String> getInstanceTypes() { return instanceTypes; }
     public void setInstanceTypes(List<String> instanceTypes) { this.instanceTypes = instanceTypes; }
+
+    /** Its InstanceTypeConfigs as given, raw JSON; null for a fleet stored before they were kept. */
+    public String getInstanceTypeConfigs() { return instanceTypeConfigs; }
+    public void setInstanceTypeConfigs(String instanceTypeConfigs) { this.instanceTypeConfigs = instanceTypeConfigs; }
 
     public int getTargetOnDemandCapacity() { return targetOnDemandCapacity; }
     public void setTargetOnDemandCapacity(int targetOnDemandCapacity) {
@@ -54,4 +64,17 @@ public class EmrInstanceFleet {
 
     public String getState() { return state; }
     public void setState(String state) { this.state = state; }
+
+    public String getLaunchSpecifications() { return launchSpecifications; }
+    public void setLaunchSpecifications(String launchSpecifications) {
+        this.launchSpecifications = launchSpecifications;
+    }
+
+    public String getResizeSpecifications() { return resizeSpecifications; }
+    public void setResizeSpecifications(String resizeSpecifications) {
+        this.resizeSpecifications = resizeSpecifications;
+    }
+
+    public String getContext() { return context; }
+    public void setContext(String context) { this.context = context; }
 }

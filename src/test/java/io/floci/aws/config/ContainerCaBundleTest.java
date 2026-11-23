@@ -5,6 +5,7 @@ import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -65,6 +66,41 @@ class ContainerCaBundleTest {
         System.setProperty("floci.tls.enabled", "false");
         new TlsConfigSource();
         System.clearProperty("floci.tls.enabled");
+    }
+
+    @Test
+    void endpointTrustIsTheConfiguredCertificatesThenTheLocalCa() throws Exception {
+        FlociCertificateAuthority configured = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("configured"));
+        CertificateGenerator.GeneratedCertificate leaf = configured.issueServerCertificate("localhost",
+                List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+        Path chain = Files.writeString(tempDir.resolve("chain.pem"),
+                leaf.certificatePem() + leaf.privateKeyPem() + configured.caPem());
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(true);
+        when(config.tls().certPath()).thenReturn(Optional.of(chain.toString()));
+        when(config.tls().keyPath()).thenReturn(Optional.of(tempDir.resolve("server.key").toString()));
+
+        String trust = ContainerCaBundle.endpointTrustPem(config, "local-ca");
+
+        assertEquals(ContainerCaBundle.certificatePem(leaf.certificatePem() + configured.caPem()) + "local-ca", trust);
+        assertFalse(trust.contains("PRIVATE KEY"));
+    }
+
+    @Test
+    void endpointTrustKeepsLocalCaWithoutAnActiveConfiguredCertificate() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().certPath()).thenReturn(Optional.of("unreadable.pem"));
+        when(config.tls().keyPath()).thenReturn(Optional.of("server.key"));
+        when(config.tls().enabled()).thenReturn(false);
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().enabled()).thenReturn(true);
+        when(config.tls().keyPath()).thenReturn(Optional.of(" "));
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().keyPath()).thenReturn(Optional.of("server.key"));
+        when(config.tls().certPath()).thenReturn(Optional.of(" "));
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
+        when(config.tls().certPath()).thenReturn(Optional.empty());
+        assertEquals("local-ca", ContainerCaBundle.endpointTrustPem(config, "local-ca"));
     }
 
     @Test
@@ -494,9 +530,7 @@ class ContainerCaBundleTest {
     }
 
     private EmulatorConfig config(boolean tlsEnabled, Optional<String> extraCaPath) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.tls().enabled()).thenReturn(tlsEnabled);
-        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
+        EmulatorConfig config = ExtraCaConfigs.config(tlsEnabled, extraCaPath);
         when(config.storage().persistentPath()).thenReturn(tempDir.toString());
         return config;
     }

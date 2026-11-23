@@ -39,9 +39,26 @@ public class EmrCluster {
     private boolean autoTerminate;
     private boolean unhealthyNodeReplacement;
     private boolean keepJobFlowAliveWhenNoSteps;
+    // RunJobFlow's SessionEnabled: whether the cluster takes Spark Connect sessions.
+    private boolean sessionEnabled;
+    // Whether its security configuration turned on runtime roles as it was created; null for a cluster stored before
+    // Floci kept it.
+    private Boolean runtimeRoleEnabled;
     private int normalizedInstanceHours;
     private int stepConcurrencyLevel = 1;
     private int ebsRootVolumeSize;
+    // RunJobFlow's root volume IOPS and throughput; null when not given.
+    private Integer ebsRootVolumeIops;
+    private Integer ebsRootVolumeThroughput;
+    // The Amazon Linux release asked for, else the release's latest; null when neither is known.
+    private String osReleaseLabel;
+    private String logEncryptionKmsKeyId;
+    private String repoUpgradeOnBoot;
+    // The realm of the cluster's KerberosAttributes, and nothing else of them: their passwords are never kept.
+    private String kerberosRealm;
+    // Its PlacementGroupConfigs and MonitoringConfiguration as given, raw JSON; null when none.
+    private String placementGroups;
+    private String monitoringConfiguration;
     private String ec2Attributes;
     private String applications;
     private String configurations;
@@ -53,6 +70,10 @@ public class EmrCluster {
     private String bootstrapImage;
     // Whether that image holds what a node needs to run YARN, which an image from an earlier Floci may not; Floci's own.
     private boolean bootstrapImageRunsYarn;
+    // The image each core or task node's own bootstrap left, which it runs from, by node id, and those of the nodes the
+    // cluster no longer has, which one being decommissioned may still run from, until the cluster ends; Floci's own.
+    private Map<String, String> nodeBootstrapImages = new LinkedHashMap<>();
+    private List<String> retiredBootstrapImages = new ArrayList<>();
     // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
     // own, as the API has none.
     private boolean storageCreated;
@@ -68,7 +89,9 @@ public class EmrCluster {
     private Instant endDateTime;
     // When the cluster began TERMINATING; Floci's own, as the API's Timeline has no such time.
     private Instant terminatingDateTime;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
+    private List<EmrErrorDetail> errorDetails = new ArrayList<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
     private List<EmrInstanceFleet> instanceFleets = new ArrayList<>();
@@ -165,6 +188,36 @@ public class EmrCluster {
     public int getEbsRootVolumeSize() { return ebsRootVolumeSize; }
     public void setEbsRootVolumeSize(int ebsRootVolumeSize) { this.ebsRootVolumeSize = ebsRootVolumeSize; }
 
+    public Integer getEbsRootVolumeIops() { return ebsRootVolumeIops; }
+    public void setEbsRootVolumeIops(Integer ebsRootVolumeIops) { this.ebsRootVolumeIops = ebsRootVolumeIops; }
+
+    public Integer getEbsRootVolumeThroughput() { return ebsRootVolumeThroughput; }
+    public void setEbsRootVolumeThroughput(Integer ebsRootVolumeThroughput) {
+        this.ebsRootVolumeThroughput = ebsRootVolumeThroughput;
+    }
+
+    public String getOsReleaseLabel() { return osReleaseLabel; }
+    public void setOsReleaseLabel(String osReleaseLabel) { this.osReleaseLabel = osReleaseLabel; }
+
+    public String getLogEncryptionKmsKeyId() { return logEncryptionKmsKeyId; }
+    public void setLogEncryptionKmsKeyId(String logEncryptionKmsKeyId) {
+        this.logEncryptionKmsKeyId = logEncryptionKmsKeyId;
+    }
+
+    public String getRepoUpgradeOnBoot() { return repoUpgradeOnBoot; }
+    public void setRepoUpgradeOnBoot(String repoUpgradeOnBoot) { this.repoUpgradeOnBoot = repoUpgradeOnBoot; }
+
+    public String getKerberosRealm() { return kerberosRealm; }
+    public void setKerberosRealm(String kerberosRealm) { this.kerberosRealm = kerberosRealm; }
+
+    public String getPlacementGroups() { return placementGroups; }
+    public void setPlacementGroups(String placementGroups) { this.placementGroups = placementGroups; }
+
+    public String getMonitoringConfiguration() { return monitoringConfiguration; }
+    public void setMonitoringConfiguration(String monitoringConfiguration) {
+        this.monitoringConfiguration = monitoringConfiguration;
+    }
+
     public String getEc2Attributes() { return ec2Attributes; }
     public void setEc2Attributes(String ec2Attributes) { this.ec2Attributes = ec2Attributes; }
 
@@ -184,6 +237,16 @@ public class EmrCluster {
 
     public String getBootstrapImage() { return bootstrapImage; }
     public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
+
+    public Map<String, String> getNodeBootstrapImages() { return nodeBootstrapImages; }
+    public void setNodeBootstrapImages(Map<String, String> nodeBootstrapImages) {
+        this.nodeBootstrapImages = nodeBootstrapImages != null ? nodeBootstrapImages : new LinkedHashMap<>();
+    }
+
+    public List<String> getRetiredBootstrapImages() { return retiredBootstrapImages; }
+    public void setRetiredBootstrapImages(List<String> retiredBootstrapImages) {
+        this.retiredBootstrapImages = retiredBootstrapImages != null ? retiredBootstrapImages : new ArrayList<>();
+    }
 
     public boolean isBootstrapImageRunsYarn() { return bootstrapImageRunsYarn; }
     public void setBootstrapImageRunsYarn(boolean bootstrapImageRunsYarn) {
@@ -217,6 +280,9 @@ public class EmrCluster {
     public Instant getTerminatingDateTime() { return terminatingDateTime; }
     public void setTerminatingDateTime(Instant terminatingDateTime) { this.terminatingDateTime = terminatingDateTime; }
 
+    public List<EmrErrorDetail> getErrorDetails() { return errorDetails; }
+    public void setErrorDetails(List<EmrErrorDetail> errorDetails) { this.errorDetails = errorDetails; }
+
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
 
@@ -228,4 +294,10 @@ public class EmrCluster {
 
     public List<EmrInstanceFleet> getInstanceFleets() { return instanceFleets; }
     public void setInstanceFleets(List<EmrInstanceFleet> instanceFleets) { this.instanceFleets = instanceFleets; }
+
+    public boolean isSessionEnabled() { return sessionEnabled; }
+    public void setSessionEnabled(boolean sessionEnabled) { this.sessionEnabled = sessionEnabled; }
+
+    public Boolean getRuntimeRoleEnabled() { return runtimeRoleEnabled; }
+    public void setRuntimeRoleEnabled(Boolean runtimeRoleEnabled) { this.runtimeRoleEnabled = runtimeRoleEnabled; }
 }

@@ -101,7 +101,8 @@ public class RedshiftContainerManager {
                 .withEnv(envVars)
                 .withCmd(List.of("postgres", "-c", "allow_system_table_mods=on", "-c", "max_connections=" + maxConnections))
                 .withDockerNetwork(config.services().redshift().dockerNetwork())
-                .withLogRotation();
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("redshift", clusterIdentifier, accountId, null));
 
         int enginePort = 5432; // Default postgres port
         if (!containerDetector.isRunningInContainer()) {
@@ -220,7 +221,7 @@ public class RedshiftContainerManager {
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
 
         try {
-            Closeable stream = logStreamer.attach(
+            Closeable stream = logStreamer.attachPolled(
                     info.containerId(),
                     "/floci/redshift",
                     clusterIdentifier,
@@ -250,6 +251,9 @@ public class RedshiftContainerManager {
         String adoptedId = adoptedContainers.get(key);
         String containerId = handle == null
                 ? adoptedContainers.getOrDefault(key, containerName(accountId, clusterIdentifier)) : handle.getContainerId();
+        if (handle != null) {
+            lifecycleManager.readLogBeforeRemoval(handle.getLogStream());
+        }
         lifecycleManager.removeIfExistsStrict(containerId, true);
         releaseHandle(key, handle);
         if (containerId.equals(adoptedId)) {
@@ -461,6 +465,44 @@ public class RedshiftContainerManager {
         } catch (Exception e) {
             LOG.errorv(e, "Error restoring snapshot for cluster {0}", clusterIdentifier);
             throw new AwsException("InternalFailure", "Failed to restore snapshot for cluster " + clusterIdentifier + ": " + e.getMessage(), 500);
+        }
+    }
+
+    /** How long a table restore script may run before psql is killed; the exec timeout leaves it room to finish. */
+    static final int TABLE_RESTORE_PSQL_SECONDS = 600;
+    private static final int TABLE_RESTORE_EXEC_SECONDS = TABLE_RESTORE_PSQL_SECONDS + 30;
+
+    /**
+     * Replays a table restore script in one psql run and removes the copy of it from the container once psql
+     * has ended, whichever way it ended. psql is killed by {@code timeout} on its own deadline, so a script that
+     * is too slow ends before it commits instead of running on after the caller has reported a failure.
+     */
+    public void runTableRestoreScript(String accountId, String clusterIdentifier, String username, String dbname,
+                                      Path script) {
+        RedshiftContainerHandle handle = requireHandle(accountId, clusterIdentifier);
+        String fileName = script.getFileName().toString();
+        try {
+            RetryingTarCopier.copyHostResource(lifecycleManager.getDockerClient(), handle.getContainerId(),
+                    "/tmp", script.toString(), RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, retryBackoffMillis);
+            String[] cmd = {"sh", "-c", "timeout -s KILL " + TABLE_RESTORE_PSQL_SECONDS
+                    + " psql -U \"$1\" -d \"$2\" -v ON_ERROR_STOP=1 -f \"$3\"; status=$?; rm -f \"$3\"; exit $status",
+                    "sh", userOrDefault(username), databaseOrDefault(dbname), "/tmp/" + fileName};
+            ContainerExec.Result result = execInContainer(handle.getContainerId(), cmd, TABLE_RESTORE_EXEC_SECONDS);
+            if (result.timedOut() || result.exitCode() == 137) {
+                throw new AwsException("InternalFailure", "ERROR:  the restore ran longer than "
+                        + TABLE_RESTORE_PSQL_SECONDS + " seconds and was stopped", 500);
+            }
+            if (result.exitCode() != 0) {
+                LOG.warnv("Table restore failed in cluster {0} (exit {1}): {2}", clusterIdentifier,
+                        result.exitCode(), result.stderr());
+                throw new AwsException("InternalFailure", result.stderr(), 500);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            LOG.errorv(e, "Error restoring a table in cluster {0}", clusterIdentifier);
+            throw new AwsException("InternalFailure", "Failed to restore a table in cluster " + clusterIdentifier + ": "
+                    + e.getMessage(), 500);
         }
     }
 

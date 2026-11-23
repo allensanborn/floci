@@ -17,6 +17,7 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.RedshiftAuditSql;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChange;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChanges;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.proxy.CopyJobSql;
 import io.floci.aws.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
@@ -408,6 +409,12 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         if (stored.withEvent && requestContext != null && requestContext.getAccessKeyId() != null) {
             stored.principal = iamService.resolveCallerArn(requestContext.getAccessKeyId()).orElse(null);
         }
+        if (target.dbIdentity() != null) {
+            stored.dbGroups = target.dbIdentity().dbGroups();
+            if (stored.dbUser == null && target.workgroupName() != null) {
+                stored.dbUser = target.dbIdentity().role();
+            }
+        }
     }
 
     private PendingStatement prepareStatement(JsonNode request, String region, RedshiftDataSessions.Scope owner) {
@@ -423,7 +430,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         stored.sqls = List.of(sql);
         stored.clusterIdentifier = clusterIdentifierOrNull(resolved.parameters());
         stored.workgroupName = workgroupNameOrNull(resolved.parameters());
-        stored.dbUser = target.user();
+        stored.dbUser = target.auditUser() != null ? target.auditUser() : target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
         stored.queryParameters = storedParameters(parameters);
@@ -467,10 +474,28 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         }
     }
 
+    /**
+     * What the audit logs of the target's cluster or workgroup take: a cluster's settings, or the target its
+     * workgroup's namespace registered, which is none while the namespace exports no logs.
+     */
+    private RedshiftAuditTarget auditTarget(RedshiftDataResourceResolver.DatabaseTarget target) {
+        if (auditLogPublisher == null) {
+            return null;
+        }
+        if (target.cluster() != null) {
+            return RedshiftAuditLogPublisher.targetOf(target.cluster());
+        }
+        String backendKey = target.backendKey();
+        int separator = backendKey == null ? -1 : backendKey.indexOf(':');
+        return separator < 0 ? null : auditLogPublisher.registeredTarget(backendKey.substring(0, separator),
+                backendKey.substring(separator + 1)).orElse(null);
+    }
+
     private void publishConnection(RedshiftDataResourceResolver.DatabaseTarget target, String event, String error) {
-        if (auditLogPublisher != null && target.cluster() != null) {
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(target.arn());
-            auditLogPublisher.publishConnection(target.cluster(), arn.accountId(), arn.region(), target.database(),
+            auditLogPublisher.publishConnection(auditTarget, arn.accountId(), arn.region(), target.database(),
                     target.auditUser(), event, null, error);
         }
     }
@@ -523,7 +548,10 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 }
                 boolean autoCommit = AUTO_COMMIT_SQL.matcher(sql).find() || CopyJobSql.requiresAutoCommit(sql)
                         || preparation != null && target.spectrum() != null
-                        && preparation.handlesDdl(sql, target.spectrum());
+                        && (preparation.needsBackendForDdl(sql, target.spectrum())
+                                ? preparation.handlesDdl(sql, target.spectrum(),
+                                        new RedshiftDataBackendSql(connection, execution))
+                                : preparation.handlesDdl(sql, target.spectrum()));
                 if (autoCommit) {
                     if (session != null && session.inTransaction()) {
                         throw new SQLException("Statement cannot run inside a transaction block", "25001");
@@ -566,8 +594,9 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     private void publishActivity(RedshiftDataStatementStore.StoredStatement stored,
                                  RedshiftDataResourceResolver.DatabaseTarget target, String sql) {
-        if (auditLogPublisher != null && target.cluster() != null) {
-            auditLogPublisher.publishActivity(target.cluster(), stored.accountId, stored.region,
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
+            auditLogPublisher.publishActivity(auditTarget, stored.accountId, stored.region,
                     target.database(), target.auditUser(), sql);
         }
     }
@@ -584,9 +613,10 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     private void publishUserChanges(RedshiftDataStatementStore.StoredStatement stored,
                                     RedshiftDataResourceResolver.DatabaseTarget target, List<UserChange> changes) {
-        if (auditLogPublisher != null && target.cluster() != null) {
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
             for (UserChange change : changes) {
-                auditLogPublisher.publishUserChange(target.cluster(), stored.accountId, stored.region,
+                auditLogPublisher.publishUserChange(auditTarget, stored.accountId, stored.region,
                         target.database(), change.username(), change.action(), change.oldUsername());
             }
         }
@@ -731,7 +761,12 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         if (stored.dbUser != null) {
             response.put("DbUser", stored.dbUser);
         }
-        response.putArray("DbGroups");
+        ArrayNode dbGroups = response.putArray("DbGroups");
+        if (stored.dbGroups != null) {
+            for (String group : stored.dbGroups) {
+                dbGroups.add(group);
+            }
+        }
         putWorkgroupName(response, stored);
         response.put("HasResultSet", stored.hasResultSet);
         if (stored.sessionId == null) {
@@ -909,7 +944,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         parent.sqls = sqls;
         parent.clusterIdentifier = clusterIdentifierOrNull(resolved.parameters());
         parent.workgroupName = workgroupNameOrNull(resolved.parameters());
-        parent.dbUser = target.user();
+        parent.dbUser = target.auditUser() != null ? target.auditUser() : target.user();
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();

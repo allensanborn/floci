@@ -105,16 +105,18 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-tag-on-create.json"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "access-analyzer", "acm", "application-autoscaling", "athena", "autoscaling", "bcm-data-exports",
-    "bcm-pricing-calculator", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
+    "access-analyzer", "acm", "application-autoscaling", "aps", "athena", "autoscaling", "bcm-data-exports",
+    "bcm-pricing-calculator", "bedrock", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
     "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur",
     "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
-    "elasticmapreduce", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator", "glue",
+    "elasticmapreduce", "emr-containers", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator",
+    "glue",
     "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
     "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
-    "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "sagemaker",
-    "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso",
-    "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "s3tables",
+    "s3vectors", "sagemaker", "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns",
+    "sqs", "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer",
+    "translate", "wafv2",
     "xray",
 )
 
@@ -123,8 +125,8 @@ _NO_ROUTES = "REST routes no rule maps yet"
 # why. `TagOnCreateNamespacesIntegrationTest` fails for a namespace Floci serves that is in neither list.
 NOT_COVERED = {
     "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appconfig": _NO_ROUTES, "appsync": _NO_ROUTES,
-    "aps": _NO_ROUTES, "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
-    "batch": _NO_ROUTES, "bedrock": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
+    "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
+    "batch": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
     "cloudfront": "its creation tags are a Tags structure holding Items, which this file does not read yet",
     "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
@@ -132,7 +134,7 @@ NOT_COVERED = {
     "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
     "mq": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
-    "rum": _NO_ROUTES, "s3tables": _NO_ROUTES,
+    "rum": _NO_ROUTES,
     "s3": "authorized by route; S3 checks s3:PutObjectTagging for an object it creates with tags itself",
     "servicecatalog": "its operations that tag are AppRegistry's, whose REST routes no rule maps yet",
 }

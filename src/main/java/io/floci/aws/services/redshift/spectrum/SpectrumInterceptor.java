@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -16,18 +17,20 @@ public final class SpectrumInterceptor {
     private final SpectrumS3Reader reader;
     private final SpectrumMaterializer materializer;
     private final SpectrumQueryPreparation preparation;
+    private final EmulatorConfig config;
 
     public SpectrumInterceptor(SpectrumCatalog catalog, SpectrumStatementParser statementParser,
                                SpectrumQueryClassifier queryClassifier, SpectrumQueryRewriter queryRewriter,
                                SpectrumS3Reader reader, SpectrumMaterializer materializer) {
-        this(catalog, statementParser, queryClassifier, queryRewriter, reader, materializer, null);
+        this(catalog, statementParser, queryClassifier, queryRewriter, reader, materializer, null, null);
     }
 
     @Inject
     public SpectrumInterceptor(SpectrumCatalog catalog, SpectrumStatementParser statementParser,
                                SpectrumQueryClassifier queryClassifier, SpectrumQueryRewriter queryRewriter,
                                SpectrumS3Reader reader, SpectrumMaterializer materializer,
-                               SpectrumQueryPreparation preparation) {
+                               SpectrumQueryPreparation preparation, EmulatorConfig config) {
+        this.config = config;
         this.catalog = catalog;
         this.statementParser = statementParser;
         this.queryClassifier = queryClassifier;
@@ -42,7 +45,11 @@ public final class SpectrumInterceptor {
     }
 
     public Plan plan(String sql, SpectrumSession session) {
-        if (preparation != null && preparation.handlesDdl(sql, session)) {
+        return plan(sql, session, null);
+    }
+
+    public Plan plan(String sql, SpectrumSession session, BackendSql backend) {
+        if (preparation != null && preparation.handlesDdl(sql, session, backend)) {
             return new Plan.ExternalDdl(sql, session);
         }
         if (preparation != null && preparation.referencesExternal(sql, session)) {
@@ -52,9 +59,10 @@ public final class SpectrumInterceptor {
     }
 
     public Decision intercept(String sql, SpectrumSession session, Socket backend) {
-        Plan plan = plan(sql, session);
+        PostgresBackendSession backendSql = new PostgresBackendSession(backend);
+        Plan plan = plan(sql, session, backendSql);
         if (plan instanceof Plan.Forward && preparation != null) {
-            preparation.prepare(sql, session, new PostgresBackendSession(backend));
+            preparation.prepare(sql, session, backendSql);
         }
         return execute(plan, session.accountId(), session.databaseName(), backend);
     }
@@ -106,12 +114,24 @@ public final class SpectrumInterceptor {
                 return new Decision.Handled();
             }
             case Plan.Query(SpectrumQuery query, SpectrumExternalTable table, SpectrumExternalSchema schema, String identifier) -> {
+                requireLakeFormationFreeSchema(table);
                 SpectrumMaterializer.Materialization materialized = materializer.materialize(backend, table, schema, reader, identifier);
                 return new Decision.Rewritten(queryRewriter.rewrite(query, materialized.identifier()), materialized);
             }
             case Plan.Forward ignored -> {
                 return new Decision.Forward();
             }
+        }
+    }
+
+    /**
+     * A legacy-catalog table has no Glue resource, so no Lake Formation grant can ever cover it. With
+     * enforcement on it is refused rather than read unchecked.
+     */
+    private void requireLakeFormationFreeSchema(SpectrumExternalTable table) {
+        if (config != null && config.services().redshift().spectrumLakeFormationEnforcement()) {
+            throw new SpectrumSqlException("42501", "Insufficient Lake Formation permission(s) on external table \""
+                    + table.schemaName() + "." + table.tableName() + "\": the table is not in a Glue database");
         }
     }
 

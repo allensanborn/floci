@@ -481,4 +481,12 @@ class DynamoDbConditionKeysTest {
 
         assertTrue(result.attributes().contains("inStock"), result.attributes().toString());
     }
+
+    @Test
+    void partiQLStatementReadsTheTextOfOneStatementRequest() {
+        assertEquals("DELETE FROM b WHERE PK = ?", DynamoDbConditionKeys.partiQLStatement(
+                json("{\"Statement\":\"DELETE FROM b WHERE PK = ?\",\"Parameters\":[{\"S\":\"k\"}]}")));
+        assertNull(DynamoDbConditionKeys.partiQLStatement(json("{\"Statement\":1}")));
+        assertNull(DynamoDbConditionKeys.partiQLStatement(json("\"not-an-object\"")));
+    }
 }

@@ -30,6 +30,18 @@ import static org.mockito.Mockito.when;
 class ContainerBuilderTest {
 
     @Test
+    void withoutEnvRemovesEveryEntryOfThatVariableAndNoOther() {
+        ContainerSpec spec = new TestFixture().builder.newContainer("alpine")
+                .withEnv("POD", "1")
+                .withEnv("POD_CIDR", "10.0.0.0/16")
+                .withEnv("POD", "2")
+                .withoutEnv("POD")
+                .build();
+
+        assertEquals(List.of("POD_CIDR=10.0.0.0/16"), spec.env());
+    }
+
+    @Test
     void withHostDockerInternalOnLinux_omitsAutomaticAliasForPodmanDaemon() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
@@ -271,6 +283,33 @@ class ContainerBuilderTest {
                 .build();
 
         assertEquals(List.of(), spec.dnsServers());
+    }
+
+    @Test
+    void embeddedDnsServerIpReachableOnIsTheResolverWithEmbeddedDnsHandsFirst() {
+        TestFixture fixture = new TestFixture();
+        assertEquals(Optional.empty(), fixture.builder.embeddedDnsServerIpReachableOn(Optional.empty()));
+
+        when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.17.0.1"));
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withEmbeddedDns()
+                .build();
+
+        // Floci running natively listens on the Docker bridge, which every network routes to.
+        assertEquals(Optional.of(spec.dnsServers().getFirst()),
+                fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("app-network")));
+    }
+
+    @Test
+    void embeddedDnsServerIpReachableOnNeedsFlocisOwnNetworkWhenFlociRunsInAContainer() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(fixture.currentContainerNetworkResolver.resolveNetworkName()).thenReturn(Optional.of("floci-net"));
+
+        assertEquals(Optional.of("172.18.0.4"), fixture.builder.embeddedDnsServerIpReachableOn(Optional.empty()));
+        assertEquals(Optional.of("172.18.0.4"),
+                fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("floci-net")));
+        assertEquals(Optional.empty(), fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("app-network")));
     }
 
     @Test

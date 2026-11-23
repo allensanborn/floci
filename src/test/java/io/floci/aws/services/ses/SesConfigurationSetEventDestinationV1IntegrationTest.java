@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV1Requests.AUTH;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -21,8 +22,6 @@ import static org.hamcrest.Matchers.not;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetEventDestinationV1IntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request";
     private static final String CS = "v1-evt-cs";
     private static final String ED = "v1-ed-sns";
     private static final String TOPIC_ARN_A = "arn:aws:sns:us-east-1:000000000000:topic-a";
@@ -38,6 +37,8 @@ class SesConfigurationSetEventDestinationV1IntegrationTest {
             .formParam("ConfigurationSet.Name", CS)
         .when().post("/")
         .then().statusCode(200);
+        SnsTopicFixture.create("us-east-1", "topic-a");
+        SnsTopicFixture.create("us-east-1", "topic-b");
     }
 
     @Test
@@ -304,7 +305,28 @@ class SesConfigurationSetEventDestinationV1IntegrationTest {
         .when().post("/")
         .then()
             .statusCode(400)
-            .body(containsString("SnsDestination requires a non-blank TopicArn"));
+            .body(containsString("<Code>InvalidSNSDestination</Code>"))
+            .body(containsString("<Message>Invalid ARN provided: topic ARN = .</Message>"));
+    }
+
+    @Test
+    @Order(19)
+    void createConfigurationSetEventDestination_missingSnsTopic_rejected() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", "v1-ed-sns-missing")
+            .formParam("EventDestination.Enabled", "true")
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", "arn:aws:sns:us-east-1:000000000000:never-created")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidSNSDestination</Code>"))
+            .body(containsString("<Message>SNS topic &lt;arn:aws:sns:us-east-1:000000000000:never-created&gt; "
+                    + "not found.</Message>"));
     }
 
     @Test

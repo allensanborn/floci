@@ -2,6 +2,7 @@ package io.floci.aws.services.emrserverless;
 
 import io.floci.aws.testing.EmrServerlessRequests;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.config.JsonConfig;
@@ -13,11 +14,13 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.*;
@@ -35,6 +38,9 @@ class EmrServerlessJobRunIntegrationTest {
     @Inject
     MutableClock clock;
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -44,18 +50,39 @@ class EmrServerlessJobRunIntegrationTest {
         return EmrServerlessRequests.emrServerless("us-east-1");
     }
 
-    private static String createApplication(String extra) {
+    private String createApplication(String extra) {
         return createApplicationOn("emr-7.5.0", extra);
     }
 
-    private static String createApplicationOn(String releaseLabel, String extra) {
-        return givenReq()
+    /** Creates an application, deleted after the test: every {@code @QuarkusTest} class shares one emulator. */
+    private String createApplicationOn(String releaseLabel, String extra) {
+        String applicationId = givenReq()
                 .body("""
                         {"name": "jobs-%s", "releaseLabel": "%s", "type": "SPARK", "clientToken": "%s"%s}
                         """.formatted(UUID.randomUUID(), releaseLabel, UUID.randomUUID(), extra))
                 .when().post("/applications")
                 .then().statusCode(200)
                 .extract().path("applicationId");
+        cleanup.register(() -> deleteApplication(applicationId));
+        return applicationId;
+    }
+
+    /**
+     * Cancels the application's runs still going, which StopApplication requires, then stops and deletes it, unless
+     * the test deleted it already.
+     */
+    private static void deleteApplication(String applicationId) {
+        String application = "/applications/" + applicationId;
+        String state = givenReq().when().get(application).then().statusCode(200).extract().path("application.state");
+        if ("TERMINATED".equals(state)) {
+            return;
+        }
+        List<String> going = givenReq().when().get(application + "/jobruns").then().statusCode(200).extract()
+                .jsonPath().getList("jobRuns.findAll { !['SUCCESS', 'FAILED', 'CANCELLED'].contains(it.state) }.id");
+        for (String jobRunId : going) {
+            givenReq().when().delete(application + "/jobruns/" + jobRunId).then().statusCode(200);
+        }
+        EmrServerlessRequests.deleteApplication("us-east-1", applicationId);
     }
 
     private static String sparkRun(String clientToken, String extra) {
@@ -123,7 +150,27 @@ class EmrServerlessJobRunIntegrationTest {
                 .body("jobRun.attempt", equalTo(1))
                 .body("jobRun.attemptCreatedAt", instanceOf(Number.class))
                 .body("jobRun.attemptUpdatedAt", instanceOf(Number.class))
-                .body("jobRun", not(hasKey("hive")));
+                .body("jobRun", not(hasKey("hive")))
+                .body("jobRun", not(hasKey("imageConfiguration")))
+                .body("jobRun", not(hasKey("workerTypeSpecifications")));
+    }
+
+    @Test
+    void getJobRunReportsTheImageConfigurationsTheRunApplies() {
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String driverImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/driver:7.5.0";
+        String applicationId = createApplication("""
+                , "imageConfiguration": {"imageUri": "%s", "applicationLevelDigestResolution": false},
+                "workerTypeSpecifications": {"Driver": {"imageConfiguration": {"imageUri": "%s"}}}"""
+                .formatted(applicationImage, driverImage));
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+
+        // Without the docker runner mode no image is pulled, so neither has a digest.
+        givenReq().when().get("/applications/" + applicationId + "/jobruns/" + jobRunId)
+                .then().statusCode(200)
+                .body("jobRun.imageConfiguration", equalTo(Map.of("imageUri", applicationImage)))
+                .body("jobRun.workerTypeSpecifications",
+                        equalTo(Map.of("Driver", Map.of("imageConfiguration", Map.of("imageUri", driverImage)))));
     }
 
     @Test
@@ -363,6 +410,36 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void aRunBeyondMaxConcurrentRunsWaitsQueuedUntilTheRunningOneIsCancelled() {
+        String applicationId = createApplication(", \"schedulerConfiguration\": {\"maxConcurrentRuns\": 1}");
+        String application = "/applications/" + applicationId;
+        givenReq().when().get(application).then().statusCode(200)
+                .body("application.schedulerConfiguration.maxConcurrentRuns", equalTo(1))
+                .body("application.schedulerConfiguration.queueTimeoutMinutes", equalTo(360));
+        String running = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"mode\": \"STREAMING\""));
+        String queued = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"mode\": \"STREAMING\""));
+
+        givenReq().when().get(application + "/jobruns/" + queued).then().statusCode(200)
+                .body("jobRun.state", equalTo("QUEUED"))
+                .body("jobRun", not(hasKey("startedAt")));
+        givenReq().when().get(application + "/jobruns?states=QUEUED").then().statusCode(200)
+                .body("jobRuns.id", equalTo(List.of(queued)));
+
+        givenReq().when().delete(application + "/jobruns/" + running).then().statusCode(200);
+        givenReq().when().get(application + "/jobruns/" + queued).then().statusCode(200)
+                .body("jobRun.state", equalTo("RUNNING"))
+                .body("jobRun.queuedDurationMilliseconds", instanceOf(Number.class));
+        givenReq().when().delete(application + "/jobruns/" + queued).then().statusCode(200);
+        givenReq().when().post(application + "/stop").then().statusCode(200);
+        givenReq().body("{\"clientToken\": \"%s\", \"schedulerConfiguration\": {}}".formatted(UUID.randomUUID()))
+                .when().patch(application).then().statusCode(200)
+                .body("application.schedulerConfiguration", nullValue())
+                .body("application", not(hasKey("schedulerOff")));
+    }
+
+    @Test
     void anApplicationWithARunStillGoingIsNotStopped() {
         String applicationId = createApplication("");
         String application = "/applications/" + applicationId;
@@ -553,6 +630,25 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void theAwsRuntimeForApacheSparksBatchRunsTimeoutIsOneToTenThousandEightyMinutesToo() {
+        for (String release : List.of("emr-spark-8.0.0", "emr-spark-8.0-preview")) {
+            String runtime = createApplicationOn(release, "");
+            for (String timeout : List.of(", \"executionTimeoutMinutes\": 0", ", \"executionTimeoutMinutes\": 10081")) {
+                startJobRun(runtime, sparkRun(UUID.randomUUID().toString(), timeout))
+                        .then().statusCode(400)
+                        .body("__type", equalTo("ValidationException"))
+                        .body("message", equalTo("executionTimeoutMinutes must be between 1 and 10080 for a BATCH "
+                                + "job run on release emr-7.11.0 or later."));
+            }
+            startJobRun(runtime, sparkRun(UUID.randomUUID().toString(), ", \"executionTimeoutMinutes\": 10080"))
+                    .then().statusCode(200);
+            startJobRun(runtime, sparkRun(UUID.randomUUID().toString(),
+                    ", \"mode\": \"STREAMING\", \"executionTimeoutMinutes\": 0"))
+                    .then().statusCode(200);
+        }
+    }
+
+    @Test
     void aRunIsItsOneAttempt() {
         String applicationId = createApplication("");
         String path = "/applications/" + applicationId + "/jobruns/"
@@ -644,5 +740,47 @@ class EmrServerlessJobRunIntegrationTest {
                 .then().statusCode(404);
         EmrServerlessRequests.emrServerless("eu-west-1").when().get("/applications/" + applicationId + "/jobruns")
                 .then().statusCode(200).body("jobRuns", empty());
+    }
+
+    @Test
+    void aRunKeepsItsFlexExecutionAndCancelJobRunChecksItsGracePeriod() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(),
+                ", \"mode\": \"STREAMING\", \"flexExecution\": {\"enabled\": true}"));
+        String run = "/applications/" + applicationId + "/jobruns/" + jobRunId;
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.flexExecution.enabled", equalTo(true));
+        givenReq().when().get("/applications/" + applicationId + "/jobruns").then().statusCode(200)
+                .body("jobRuns.find { it.id == '" + jobRunId + "' }.flexExecution.enabled", equalTo(true));
+        startJobRun(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"flexExecution\": {\"enabled\": \"yes\"}"))
+                .then().statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+
+        givenReq().queryParam("shutdownGracePeriodInSeconds", "soon").when().delete(run)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("shutdownGracePeriodInSeconds must be an integer."));
+        givenReq().queryParam("shutdownGracePeriodInSeconds", 10).when().delete(run)
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("shutdownGracePeriodInSeconds must be 0, or from 15 to 1800 seconds."));
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.state", equalTo("RUNNING"));
+        givenReq().queryParam("shutdownGracePeriodInSeconds", 30).when().delete(run).then().statusCode(200);
+        givenReq().when().get(run).then().statusCode(200).body("jobRun.state", equalTo("CANCELLED"));
+    }
+
+    @Test
+    void anEndedSparkRunGivesItsTotalAndBilledResourceUtilization() {
+        String applicationId = createApplication("");
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+
+        // Ended as it started, it used nothing, and is billed a minute of its workers and none of their disk.
+        givenReq().when().get("/applications/" + applicationId + "/jobruns/" + jobRunId).then().statusCode(200)
+                .body("jobRun.state", equalTo("SUCCESS"))
+                .body("jobRun.totalResourceUtilization.keySet()",
+                        containsInAnyOrder("vCPUHour", "memoryGBHour", "storageGBHour"))
+                .body("jobRun.totalResourceUtilization.vCPUHour", equalTo(0.0f))
+                .body("jobRun.billedResourceUtilization.storageGBHour", equalTo(0.0f))
+                .body("jobRun.billedResourceUtilization.memoryGBHour", greaterThan(1.0f));
     }
 }

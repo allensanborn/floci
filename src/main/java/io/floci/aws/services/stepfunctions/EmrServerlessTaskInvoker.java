@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
@@ -80,9 +81,15 @@ public class EmrServerlessTaskInvoker {
 
     private record Wait(Set<String> done, Set<String> deadEnds) {}
 
+    /** Whether {@link #start} takes the integration, as one of the six APIs itself or its {@code .sync}. */
+    static boolean serves(StatesIntegration integration) {
+        return WAITS.containsKey(integration.api())
+                && (integration.suffix().isEmpty() || ".sync".equals(integration.suffix()));
+    }
+
     Job start(StatesIntegration integration, JsonNode input, String region) {
         String api = integration.api();
-        if (!WAITS.containsKey(api) || !integration.suffix().isEmpty() && !".sync".equals(integration.suffix())) {
+        if (!serves(integration)) {
             throw unsupported(integration);
         }
         JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();
@@ -107,7 +114,13 @@ public class EmrServerlessTaskInvoker {
             case "cancelJobRun" -> {
                 String applicationId = requiredId(request, "ApplicationId");
                 String jobRunId = requiredId(request, "JobRunId");
-                ObjectNode response = toStates(call(region, () -> emrServerless.cancelJobRun(applicationId, jobRunId)),
+                // Read in either case, as the other members are; a value of another JSON type than a number is passed
+                // on as its JSON, for the cancel to refuse as it refuses one in the query string.
+                JsonNode grace = field(request, "ShutdownGracePeriodInSeconds");
+                String gracePeriod = grace.isMissingNode() || grace.isNull() ? null
+                        : grace.isValueNode() ? grace.asText() : grace.toString();
+                ObjectNode response = toStates(call(region,
+                        () -> emrServerless.cancelJobRun(applicationId, jobRunId, gracePeriod)),
                         "CancelJobRunResponse");
                 yield new Job(api, applicationId, jobRunId, response);
             }
@@ -150,7 +163,7 @@ public class EmrServerlessTaskInvoker {
         Supplier<Object> undo = switch (job.api()) {
             case "createApplication" -> () -> emrServerless.deleteApplication(job.applicationId());
             case "startApplication" -> () -> emrServerless.stopApplication(job.applicationId());
-            case "startJobRun" -> () -> emrServerless.cancelJobRun(job.applicationId(), job.jobRunId());
+            case "startJobRun" -> () -> emrServerless.cancelJobRun(job.applicationId(), job.jobRunId(), null);
             default -> null;
         };
         if (undo == null) {
@@ -226,7 +239,7 @@ public class EmrServerlessTaskInvoker {
      * the model does not have is dropped, as the API has no place for it, such as a request's
      * {@code ApplicationId}, which travels in the path.
      */
-    private JsonNode recase(JsonNode node, String shapeName, boolean toStates) {
+    private static JsonNode recase(JsonNode node, String shapeName, boolean toStates) {
         RequestShapeModel.Shape shape = shapeName == null ? null : SHAPES.shapes().get(shapeName);
         if (shape == null) {
             return node.deepCopy();
@@ -237,7 +250,7 @@ public class EmrServerlessTaskInvoker {
                 if (!node.isArray()) {
                     yield node.deepCopy();
                 }
-                ArrayNode items = objectMapper.createArrayNode();
+                ArrayNode items = JsonNodeFactory.instance.arrayNode();
                 node.forEach(item -> items.add(recase(item, shape.element(), toStates)));
                 yield items;
             }
@@ -245,7 +258,7 @@ public class EmrServerlessTaskInvoker {
                 if (!node.isObject()) {
                     yield node.deepCopy();
                 }
-                ObjectNode entries = objectMapper.createObjectNode();
+                ObjectNode entries = JsonNodeFactory.instance.objectNode();
                 node.properties().forEach(entry ->
                         entries.set(entry.getKey(), recase(entry.getValue(), shape.element(), toStates)));
                 yield entries;
@@ -255,8 +268,8 @@ public class EmrServerlessTaskInvoker {
     }
 
     /** The structure's members in the model's order, each from the first field naming it in any case. */
-    private ObjectNode recaseStructure(JsonNode node, RequestShapeModel.Shape shape, boolean toStates) {
-        ObjectNode members = objectMapper.createObjectNode();
+    private static ObjectNode recaseStructure(JsonNode node, RequestShapeModel.Shape shape, boolean toStates) {
+        ObjectNode members = JsonNodeFactory.instance.objectNode();
         for (Map.Entry<String, String> member : shape.members().entrySet()) {
             String name = member.getKey();
             JsonNode value = field(node, name);
@@ -273,8 +286,36 @@ public class EmrServerlessTaskInvoker {
         return requiredText(field(request, name), name);
     }
 
+    /**
+     * The request the API sends EMR Serverless, its members as the operation's model names them, with the ids it sends
+     * in the path as members too ({@code applicationId}, and {@code jobRunId} to cancel), each read in either case as
+     * the integration reads it: what IAM checks the call on, as it checks the same request made directly.
+     */
+    static ObjectNode apiRequest(String api, JsonNode input) {
+        JsonNode request = input != null && input.isObject() ? input : JsonNodeFactory.instance.objectNode();
+        ObjectNode sent = switch (api) {
+            case "createApplication" -> recaseStructure(request, SHAPES.shapes().get("CreateApplicationRequest"), false);
+            case "startJobRun" -> recaseStructure(request, SHAPES.shapes().get("StartJobRunRequest"), false);
+            default -> JsonNodeFactory.instance.objectNode();
+        };
+        if (!"createApplication".equals(api)) {
+            putId(sent, request, "applicationId");
+        }
+        if ("cancelJobRun".equals(api)) {
+            putId(sent, request, "jobRunId");
+        }
+        return sent;
+    }
+
+    private static void putId(ObjectNode sent, JsonNode request, String name) {
+        JsonNode id = field(request, name);
+        if (id.isTextual() && !id.asText().isBlank()) {
+            sent.put(name, id.asText());
+        }
+    }
+
     /** The first of {@code node}'s fields named {@code name} in any case, or a missing node. */
-    private static JsonNode field(JsonNode node, String name) {
+    static JsonNode field(JsonNode node, String name) {
         for (Map.Entry<String, JsonNode> field : node.properties()) {
             if (field.getKey().equalsIgnoreCase(name)) {
                 return field.getValue();

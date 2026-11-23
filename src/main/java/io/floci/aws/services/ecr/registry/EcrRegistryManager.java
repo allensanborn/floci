@@ -66,6 +66,7 @@ public class EcrRegistryManager {
     private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
     private static final int GC_KILL_GRACE_SECONDS = 2;
+    static final long RECONCILE_RETRY_MILLIS = 30_000;
 
     /**
      * Matches an AWS-shaped ECR image URI in any partition:
@@ -87,6 +88,11 @@ public class EcrRegistryManager {
             + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
             + "|" + FLOCI_REGISTRY_HOST + "/[0-9]{12}/([a-z0-9-]+))/.+$");
 
+    /** The account, Region and path of an image in an ECR repository, in {@link #ECR_IMAGE_REGION}'s forms. */
+    private static final Pattern ECR_IMAGE_PARTS = Pattern.compile("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(?:"
+            + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
+            + "|" + FLOCI_REGISTRY_HOST + "/([0-9]{12})/([a-z0-9-]+))/(.+)$");
+
     /**
      * The container name actually in use. Differs from {@link #registryContainerName()} only when
      * a legacy-named container surviving a pre-migration version was adopted.
@@ -107,6 +113,8 @@ public class EcrRegistryManager {
     private volatile boolean started;
     private volatile boolean ready;
     private volatile boolean reconciled;
+    /** When a reconcile retry last failed, by {@link #clock}; 0 while none has. */
+    private volatile long reconcileRetryFailedAt;
     // Bug #6150: Track active garbage collection window
     private volatile boolean garbageCollecting;
     private final Object writeAdmissionLock = new Object();
@@ -221,6 +229,36 @@ public class EcrRegistryManager {
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
+
+    /**
+     * The ECR repository an image URI names, in any of the forms {@link #imageRegion} reads, and the tag or digest it
+     * asks for, its tag {@code latest} where it names neither; empty for an image outside ECR.
+     */
+    public static Optional<EcrImage> ecrImage(String image) {
+        Matcher m = image != null ? ECR_IMAGE_PARTS.matcher(image) : null;
+        if (m == null || !m.matches()) {
+            return Optional.empty();
+        }
+        String path = m.group(5);
+        String digest = null;
+        int at = path.indexOf('@');
+        if (at >= 0) {
+            digest = path.substring(at + 1);
+            path = path.substring(0, at);
+        }
+        String tag = null;
+        int colon = path.lastIndexOf(':');
+        if (colon > path.lastIndexOf('/')) {
+            tag = path.substring(colon + 1);
+            path = path.substring(0, colon);
+        }
+        return Optional.of(new EcrImage(m.group(1) != null ? m.group(1) : m.group(3),
+                m.group(2) != null ? m.group(2) : m.group(4), path, digest == null && tag == null ? "latest" : tag,
+                digest));
+    }
+
+    /** An image in an ECR repository: its registry, Region and repository, and the tag or the digest asked for. */
+    public record EcrImage(String registryId, String region, String repository, String tag, String digest) {}
 
     /**
      * The Region of the ECR repository an image URI names, AWS-shaped or one Floci's ECR hands out; empty for an
@@ -368,6 +406,33 @@ public class EcrRegistryManager {
     }
 
     /**
+     * Reads the catalog into the reconcile hook again when the read at start failed, so a
+     * registry that answered its health check but not its catalog does not leave the
+     * repositories it holds without metadata. A no-op once a read succeeded, with no hook,
+     * or before the registry started. A retry that fails waits {@link #RECONCILE_RETRY_MILLIS}
+     * before the next, so a lookup made meanwhile does not pay a catalog read each time.
+     *
+     * <p>Holds the monitor {@link #ensureStarted()} and the storage deletes take, so the
+     * hook's metadata writes cannot interleave with a forced repository delete.
+     */
+    public synchronized void ensureCatalogReconciled() {
+        if (reconciled || reconcileHook == null || !started) {
+            return;
+        }
+        long now = clock.millis();
+        if (reconcileRetryFailedAt != 0 && now - reconcileRetryFailedAt < RECONCILE_RETRY_MILLIS) {
+            return;
+        }
+        runReconcileOnce();
+        reconcileRetryFailedAt = reconciled ? 0 : now;
+    }
+
+    /** Whether the registry's catalog has been read into the reconcile hook since it started. */
+    public boolean isCatalogReconciled() {
+        return reconciled;
+    }
+
+    /**
      * Attempts {@link #ensureStarted()} and reports whether the backing registry is
      * usable, instead of propagating the failure. Callers that only need repository
      * metadata (ARN, URI, tags) use this so ECR's control plane keeps working when
@@ -433,6 +498,9 @@ public class EcrRegistryManager {
             registryAddress = null;
             started = false;
             ready = false;
+            // The recovered registry's catalog is read again: it can hold images the one read before did not.
+            reconciled = false;
+            reconcileRetryFailedAt = 0;
             if (presence == ContainerPresence.ABSENT) {
                 portAllocator.release(hostPort);
                 hostPort = config.services().ecr().registryBasePort();
@@ -562,8 +630,8 @@ public class EcrRegistryManager {
         String region = regionResolver.getDefaultRegion();
 
         this.logStream = adopted
-                ? logStreamer.attachFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
-                : logStreamer.attach(containerId, logGroup, logStreamName, region, "ecr:registry");
+                ? logStreamer.attachPolledFromNow(containerId, logGroup, logStreamName, region, "ecr:registry")
+                : logStreamer.attachPolled(containerId, logGroup, logStreamName, region, "ecr:registry");
     }
 
     private void closeLogStream() {
@@ -595,7 +663,9 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            List<String> repos = httpClient().catalog();
+            // The strict read: a catalog the registry failed to give is not an empty one, and taking
+            // it as one would leave the repositories it holds without metadata.
+            List<String> repos = httpClient().catalogStrict();
             reconcileHook.accept(repos);
             reconciled = true;
         } catch (Exception e) {
@@ -680,7 +750,8 @@ public class EcrRegistryManager {
                 final String finalExecId = execId;
 
                 try {
-                    ResultCallback.Adapter<Frame> asyncCallback = dockerClient.execStartCmd(finalExecId)
+                    ResultCallback.Adapter<Frame> asyncCallback = lifecycleManager.getStreamingDockerClient()
+                            .execStartCmd(finalExecId)
                             .exec(new ResultCallback.Adapter<Frame>() {
                                 @Override
                                 public void onNext(Frame frame) {
@@ -834,6 +905,7 @@ public class EcrRegistryManager {
         started = false;
         ready = false;
         reconciled = false;
+        reconcileRetryFailedAt = 0;
         reopenWriteAdmission();
         hostPort = config.services().ecr().registryBasePort();
     }

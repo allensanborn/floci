@@ -15,6 +15,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Proper tokenizer/parser/evaluator for DynamoDB filter expressions and key condition expressions.
@@ -537,6 +538,9 @@ final class ExpressionEvaluator {
                     if (segment.startsWith("#") && (names == null || !names.has(segment))) {
                         throw undefinedName(exprType, segment);
                     }
+                    if (DynamoDbReservedWords.isReserved(segment)) {
+                        throw DynamoDbReservedWords.reservedWord(exprType, segment);
+                    }
                 }
             }
             case PlaceholderOperand placeholder -> {
@@ -559,9 +563,12 @@ final class ExpressionEvaluator {
         }
     }
 
+    private static AwsException invalidExpression(String exprType, String message) {
+        return new AwsException("ValidationException", "Invalid " + exprType + ": " + message, 400);
+    }
+
     private static AwsException incorrectOperandType(String exprType, String operator, String type) {
-        return new AwsException("ValidationException", "Invalid " + exprType + ": "
-                + DynamoDbPartiQLParser.incorrectOperandType(operator, type), 400);
+        return invalidExpression(exprType, DynamoDbPartiQLParser.incorrectOperandType(operator, type));
     }
 
     // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
@@ -628,6 +635,15 @@ final class ExpressionEvaluator {
     private static void validateFunction(FunctionCallExpr f, String exprType,
                                          JsonNode names, JsonNode values) {
         String name = f.functionName().toLowerCase();
+        if (name.equals("attribute_exists") || name.equals("attribute_not_exists")) {
+            if (f.args().size() != 1) {
+                throw invalidExpression(exprType,
+                        DynamoDbPartiQLParser.incorrectOperandCount(f.functionName(), f.args().size()));
+            }
+            if (!(f.args().getFirst() instanceof PathOperand)) {
+                throw invalidExpression(exprType, DynamoDbPartiQLParser.documentPathRequired(f.functionName()));
+            }
+        }
         if (name.equals("contains") && f.args().size() >= 2
                 && operandsIdentical(f.args().get(0), f.args().get(1), names)) {
             throw new AwsException("ValidationException",
@@ -756,6 +772,7 @@ final class ExpressionEvaluator {
     // ── Evaluator ──
 
     private static final String DOT_ESCAPE = "\uFF0E";
+    private static final Pattern LIST_INDEX_SEGMENT = Pattern.compile("\\[\\d+\\]");
 
     /**
      * Evaluates a parsed expression against a DynamoDB item.
@@ -1094,7 +1111,7 @@ final class ExpressionEvaluator {
         for (int i = 0; i < segments.size(); i++) {
             if (current == null) return null;
             String segment = segments.get(i);
-            if (segment.matches("\\[\\d+\\]")) {
+            if (LIST_INDEX_SEGMENT.matcher(segment).matches()) {
                 // List index navigation
                 int idx = Integer.parseInt(segment.substring(1, segment.length() - 1));
                 JsonNode listNode = current.has("L") ? current.get("L") : (current.isArray() ? current : null);

@@ -1490,7 +1490,8 @@ class DynamoDbIntegrationTest {
                 {
                     "TableName": "TestTable",
                     "KeyConditionExpression": "pk = :pk",
-                    "FilterExpression": "total >= :min",
+                    "FilterExpression": "#total >= :min",
+                    "ExpressionAttributeNames": {"#total": "total"},
                     "ExpressionAttributeValues": {
                         ":pk": {"S": "user-1"},
                         ":min": {"N": "50"}
@@ -1516,7 +1517,8 @@ class DynamoDbIntegrationTest {
                 {
                     "TableName": "TestTable",
                     "KeyConditionExpression": "pk = :pk",
-                    "FilterExpression": "total >= :min",
+                    "FilterExpression": "#total >= :min",
+                    "ExpressionAttributeNames": {"#total": "total"},
                     "Limit": 2,
                     "ExpressionAttributeValues": {
                         ":pk": {"S": "user-1"},
@@ -5979,6 +5981,10 @@ given()
             PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"} | 1 validation error detected: Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
             DeleteItem         | {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :b AND :a AND y = :missing", "ExpressionAttributeValues": {":a": {"N": "1"}, ":b": {"N": "2"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:2}, upper bound operand: AttributeValue: {N:1}
             TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"}}]} | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "attribute_exists(x, :v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | Invalid FilterExpression: Incorrect number of operands for operator or function; operator or function: attribute_exists, number of operands: 2
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "attribute_exists(:v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | Invalid FilterExpression: Operator or function requires a document path; operator or function: attribute_exists
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(x, :v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | 1 validation error detected: Invalid ConditionExpression: Incorrect number of operands for operator or function; operator or function: attribute_exists, number of operands: 2
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(:v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | 1 validation error detected: Invalid ConditionExpression: Operator or function requires a document path; operator or function: attribute_exists
             """)
     void expressionErrorsComeFromTheFirstFailingConditionInWrittenOrder(String operation, String body, String message) {
         createOnDemandTableForGsiUpdates("ConditionOrderTable");
@@ -6006,7 +6012,7 @@ given()
             "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                      | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
             "UpdateExpression": ""                                                                                                                   | Invalid UpdateExpression: The expression can not be empty;
             "UpdateExpression": "", "ConditionExpression": "a = :missing"                                                                            | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :missing
-            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved word: name
+            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved keyword: name
             "UpdateExpression": "SET q = :w", "AttributeUpdates": {"q": {"Action": "PUT", "Value": {"S": "w"}}}                                      | Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}
             """)
     void updateItemPutsExpressionErrorsInTheValidationEnvelope(String members, String message) {

@@ -11,6 +11,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.core.common.docker.DockerExitEvents;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -253,10 +254,12 @@ class LambdaImageConfigTest {
             ContainerReachableEndpoint reachableEndpoint =
                     new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
-            launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
-                    runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
+            launcher = new ContainerLauncher(containerBuilder, lifecycleManager, mock(DockerClient.class),
+                    logStreamer, imageResolver,
+                    runtimeApiServerFactory, dockerHostResolver, config,
+                    new RegionResolver("us-east-1", "000000000000"), ecrRegistryManager,
                     mock(LambdaLayerService.class), awsEnv,
-                    mock(LambdaExecutionRoleCredentials.class), null);
+                    mock(LambdaExecutionRoleCredentials.class), null, mock(DockerExitEvents.class));
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);

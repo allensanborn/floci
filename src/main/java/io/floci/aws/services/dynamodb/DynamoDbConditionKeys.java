@@ -187,6 +187,13 @@ public final class DynamoDbConditionKeys {
                 "TransactGetItems", "TransactItems.*.Get.", body), table);
     }
 
+    /** The statement text of one PartiQL request, or {@code null} when it has none. */
+    public static String partiQLStatement(JsonNode request) {
+        return DynamoDbConditionKeyMembers.values("ExecuteStatement", "dynamodb:Attributes", "Statement", request)
+                .stream().map(DynamoDbConditionKeys::textOrNull).filter(value -> value != null)
+                .findFirst().orElse(null);
+    }
+
     private static String effectiveSelect(String action, JsonNode body) {
         if (!DynamoDbConditionKeyMembers.supports(action, "dynamodb:Select")) {
             return null;
