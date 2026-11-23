@@ -2288,6 +2288,33 @@ class RdsCfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
     }
 
+    /** A cluster record of an update that kept the cluster, saved with {@code roles} on it. */
+    private StackResource clusterAfterUpdate(String roles) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Cluster");
+        r.setResourceType("AWS::RDS::DBCluster");
+        r.setPhysicalId("cluster");
+        r.getAttributes().put(IN_PLACE_ATTR, "{\"region\":\"us-east-1\",\"cluster\":true,"
+                + "\"otherChanges\":false,\"httpEndpoint\":false,\"vpcSecurityGroups\":[],"
+                + "\"min\":null,\"max\":null,\"autoPause\":null,\"roles\":" + roles + "}");
+        when(rdsService.getDbCluster("cluster", "us-east-1")).thenReturn(new DbCluster());
+        return r;
+    }
+
+    @Test
+    void aRoleTheRollbackCannotPutBackFailsItAndKeepsTheRecordForARetry() {
+        StackResource r = clusterAfterUpdate("[{\"RoleArn\":\"arn:role/a\"}]");
+        when(rdsService.addRoleToDbCluster("us-east-1", "cluster", "arn:role/a", null))
+                .thenThrow(new AwsException("InvalidDBClusterStateFault", "not available", 400));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+        assertTrue(r.getAttributes().containsKey(IN_PLACE_ATTR), "a retry has the record to work from");
+
+        doReturn(null).when(rdsService).addRoleToDbCluster("us-east-1", "cluster", "arn:role/a", null);
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
+    }
+
     @Test
     void droppedGroupsPutTheInstanceOnItsVpcsDefaultGroupAndARollbackPutsThemBack() {
         vpcDefaultGroups(List.of("sg-default"));

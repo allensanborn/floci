@@ -664,6 +664,16 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 - A failed update puts the groups back. The rollback is complete when the update changed nothing
   else Floci applies; a change to the password, IAM authentication, subnet group, CA certificate or
   roles is still reported as not rolled back.
+- A failed update of a kept `AWS::RDS::DBCluster` puts back what the update changed in place, as AWS
+  sends the previous template's declared values on rollback: the master password, IAM authentication,
+  backup and maintenance windows and `DeletionProtection` when that template declared them,
+  and always the groups the cluster had (the VPC default if no template declared any),
+  `EnableHttpEndpoint`, Serverless v2 scaling the cluster had, and its `AssociatedRoles`: roles the
+  update added are removed and roles it removed are associated again. A role that cannot be put back
+  leaves the stack in `UPDATE_ROLLBACK_FAILED`. The stack otherwise reaches `UPDATE_ROLLBACK_COMPLETE`. A property the previous template did not declare keeps
+  the update's value, and so does scaling the cluster did not have, as AWS sends nothing for them.
+  Floci keeps the previous password with the rollback record, as the cluster itself does, and drops
+  the record when the update commits.
 - `StorageEncrypted` is createOnly, so changing it, including dropping `StorageEncrypted: true`,
   replaces the instance under a new generated name. The old instance is deleted once the update
   commits, or kept, with the replacement deleted, when the update rolls back. An instance with a
