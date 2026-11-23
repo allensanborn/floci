@@ -454,9 +454,7 @@ AWS::RDS::DBCluster	EnableLocalWriteForwarding	accepted and ignored
 AWS::RDS::DBCluster	EngineLifecycleSupport	accepted and ignored
 AWS::RDS::DBCluster	GlobalClusterIdentifier	accepted and ignored
 AWS::RDS::DBCluster	Iops	accepted and ignored
-AWS::RDS::DBCluster	ManageMasterUserPassword	accepted and ignored
 AWS::RDS::DBCluster	MasterUserAuthenticationType	accepted and ignored
-AWS::RDS::DBCluster	MasterUserSecret	accepted and ignored
 AWS::RDS::DBCluster	MonitoringInterval	accepted and ignored
 AWS::RDS::DBCluster	MonitoringRoleArn	accepted and ignored
 AWS::RDS::DBCluster	NetworkType	accepted and ignored
