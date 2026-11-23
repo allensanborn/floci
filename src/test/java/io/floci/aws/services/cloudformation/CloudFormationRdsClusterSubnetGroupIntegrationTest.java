@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.Ec2Requests;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -8,6 +9,7 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.RdsRequests.rds;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -21,12 +23,6 @@ class CloudFormationRdsClusterSubnetGroupIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261014/us-east-1/cloudformation/aws4_request";
-    private static final String RDS_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261014/us-east-1/rds/aws4_request, "
-            + "SignedHeaders=content-type;host, Signature=test";
-    private static final String EC2_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261014/us-east-1/ec2/aws4_request, "
-            + "SignedHeaders=content-type;host, Signature=test";
 
     @Test
     void clusterLandsInTheSubnetGroupsNonDefaultVpc() {
@@ -34,7 +30,7 @@ class CloudFormationRdsClusterSubnetGroupIntegrationTest {
         String stackName = "cfn-cluster-subnets-" + suffix;
         String clusterId = "cfn-cluster-subnets-" + suffix;
         String groupName = "cfn-cluster-sng-" + suffix;
-        String vpc = ec2("CreateVpc").formParam("CidrBlock", "10.91.0.0/16")
+        String vpc = ec2Query("CreateVpc").formParam("CidrBlock", "10.91.0.0/16")
                 .when().post("/").then().statusCode(200).extract().xmlPath().getString("CreateVpcResponse.vpc.vpcId");
         String subnetA = subnet(vpc, "10.91.1.0/24", "us-east-1a");
         String subnetB = subnet(vpc, "10.91.2.0/24", "us-east-1b");
@@ -65,22 +61,15 @@ class CloudFormationRdsClusterSubnetGroupIntegrationTest {
     }
 
     private static String subnet(String vpc, String cidr, String az) {
-        return ec2("CreateSubnet").formParam("VpcId", vpc).formParam("CidrBlock", cidr)
+        return ec2Query("CreateSubnet").formParam("VpcId", vpc).formParam("CidrBlock", cidr)
                 .formParam("AvailabilityZone", az)
                 .when().post("/").then().statusCode(200).extract().xmlPath()
                 .getString("CreateSubnetResponse.subnet.subnetId");
     }
 
-    private static RequestSpecification ec2(String action) {
-        return given().header("Authorization", EC2_AUTH)
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action).formParam("Version", "2016-11-15");
-    }
-
-    private static RequestSpecification rds(String action) {
-        return given().header("Authorization", RDS_AUTH)
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action).formParam("Version", "2014-10-31");
+    private static RequestSpecification ec2Query(String action) {
+        return Ec2Requests.ec2(action, "test", "us-east-1")
+                .contentType("application/x-www-form-urlencoded").formParam("Version", "2016-11-15");
     }
 
     private static void stack(String action, String stackName, String template) {

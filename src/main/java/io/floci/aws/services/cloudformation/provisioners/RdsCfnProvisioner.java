@@ -65,8 +65,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * emulate a KMS key, public access or a restore source on a cluster, so a change to one of
      * these can only be seen against what the template said last time. {@code DBSubnetGroupName}
      * is placed on the cluster, but is recorded as well so a change to it replaces the cluster
-     * as the template's change rather than the live entity's. The values the last successful provision resolved are kept on the
-     * resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
+     * as the template's change rather than the live entity's. The values the last successful
+     * provision resolved are kept on the resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
      * on the template's change, not on the live entity.
      */
     static final List<String> DB_CLUSTER_RECORDED_CREATE_ONLY = List.of(
@@ -730,7 +730,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     masterPassword, databaseName, iamEnabled, parameterGroup,
                     resolveOptional(props, "DBSubnetGroupName", engine), null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
-                    parseBoolProp(props, "ManageMasterUserPassword", engine),
+                    Boolean.TRUE.equals(ctx.resolveOptionalBoolean(props, "ManageMasterUserPassword")),
                     masterUserSecretKmsKeyId(props, engine),
                     engineMode, storageEncrypted, null, deletionProtection);
         }

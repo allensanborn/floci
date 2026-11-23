@@ -1659,6 +1659,19 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void createRefusesANonBooleanManagedPasswordFlag() {
+        StackResource r = provision("Cluster", "AWS::RDS::DBCluster", """
+                {"DBClusterIdentifier":"mycluster","Engine":"aurora-postgresql","ManageMasterUserPassword":"yes"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("ManageMasterUserPassword must be a boolean"), r.getStatusReason());
+        verify(rdsService, never()).createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(), any(),
+                anyBoolean(), any(), anyBoolean());
+    }
+
+    @Test
     void updateStackRefusesANonBooleanPreviousManagedPasswordFlag() {
         when(rdsService.getDbCluster("mycluster")).thenReturn(mock(DbCluster.class));
         String base = "\"DBClusterIdentifier\":\"mycluster\",\"Engine\":\"aurora-postgresql\"";
