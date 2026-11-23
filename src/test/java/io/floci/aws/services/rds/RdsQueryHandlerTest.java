@@ -331,6 +331,7 @@ class RdsQueryHandlerTest {
         when(service.modifyDbInstance(eq("mydb"), isNull(), eq(enabled), isNull(), any(), isNull(), any(),
                 isNull(), settings.capture(), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull()))
                 .thenReturn(makeInstance("mydb"));
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(makeInstance("mydb"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBInstanceIdentifier", "mydb");
         // Encryption is not a ModifyDBInstance request member and remains ignored.
@@ -4036,5 +4037,94 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Type>Receiver</Type>"), body);
         assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
         assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "ManageMasterUserPassword=true,MasterUserPassword=Secret123!|InvalidParameterValue|"
+                    + "MasterUserPassword and ManageMasterUserPassword are mutually exclusive. "
+                    + "Specify only one of these parameters.",
+            "MasterUserSecretKmsKeyId=kms-key-1|InvalidParameterCombination|"
+                    + "You can't specify MasterUserSecretKmsKeyId without also specifying "
+                    + "ManageMasterUserPassword as true."})
+    void modifyDbInstanceRefusesInvalidManagedPasswordCombinations(String members, String code, String message) {
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(makeInstance("mydb"));
+        for (String member : members.split(",")) {
+            p.add(member.substring(0, member.indexOf('=')), member.substring(member.indexOf('=') + 1));
+        }
+        Response response = handler.handle("ModifyDBInstance", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+        assertTrue(body.contains("<Message>" + message.replace("'", "&apos;") + "</Message>"), body);
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsSecretKeyOnAnAlreadyManagedInstance() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(instance);
+        when(service.modifyDbInstance(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any())).thenReturn(instance);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+
+        assertEquals(200, handler.handle("ModifyDBInstance", p).getStatus());
+    }
+
+    @Test
+    void modifyDbInstanceAnswersNotFoundBeforeTheSecretKeyRule() {
+        when(service.getDbInstance(eq("missing"), any()))
+                .thenThrow(new AwsException("DBInstanceNotFound", "DB instance missing not found.", 404));
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "missing");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+
+        Response response = handler.handle("ModifyDBInstance", p);
+
+        assertEquals(404, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>DBInstanceNotFound</Code>"));
+    }
+
+    private Response modifyInstanceManage(boolean managed, String password) {
+        DbInstance instance = makeInstance("mydb");
+        if (managed) {
+            instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        }
+        when(service.getDbInstance(eq("mydb"), any())).thenReturn(instance);
+        when(service.modifyDbInstance(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any())).thenReturn(instance);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("ManageMasterUserPassword", "false");
+        if (password != null) {
+            p.add("MasterUserPassword", password);
+        }
+        return handler.handle("ModifyDBInstance", p);
+    }
+
+    @Test
+    void modifyDbInstanceRefusesUnmanagingWithoutAPassword() {
+        Response response = modifyInstanceManage(true, null);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InvalidParameterCombination</Code>"), body);
+        assertTrue(body.contains("<Message>You must specify MasterUserPassword when you stop managing the "
+                + "master user password with Amazon Web Services Secrets Manager.</Message>"), body);
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsUnmanagingWithAPassword() {
+        assertEquals(200, modifyInstanceManage(true, "Other123!").getStatus());
+    }
+
+    @Test
+    void modifyDbInstanceAcceptsFalseWithoutAPasswordOnAnUnmanagedInstance() {
+        assertEquals(200, modifyInstanceManage(false, null).getStatus());
     }
 }
