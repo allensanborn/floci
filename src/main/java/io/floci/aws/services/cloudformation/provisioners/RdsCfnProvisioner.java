@@ -60,9 +60,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * The createOnlyProperties of {@code AWS::RDS::DBCluster} that nothing on the cluster on file
      * records. {@code DBClusterIdentifier} is the physical id, {@code EngineMode},
      * {@code StorageEncrypted} and {@code DatabaseName} are fields of the cluster, but Floci does not
-     * emulate a KMS key, public access, a subnet group placement chosen by the template or a
-     * restore source on a cluster, so a change to one of these can only be seen against what the
-     * template said last time. The values the last successful provision resolved are kept on the
+     * emulate a KMS key, public access or a restore source on a cluster, so a change to one of
+     * these can only be seen against what the template said last time. {@code DBSubnetGroupName}
+     * is placed on the cluster, but is recorded as well so a change to it replaces the cluster
+     * as the template's change rather than the live entity's. The values the last successful provision resolved are kept on the
      * resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
      * on the template's change, not on the live entity.
      */
@@ -701,7 +702,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             boolean iamEnabled = parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine);
             String parameterGroup = resolveOptional(props, "DBClusterParameterGroupName", engine);
             cluster = rdsService.createDbCluster(id, engineName, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, parameterGroup, null, null, false, region,
+                    masterPassword, databaseName, iamEnabled, parameterGroup,
+                    resolveOptional(props, "DBSubnetGroupName", engine), null, false, region,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted, null, deletionProtection);
         }
