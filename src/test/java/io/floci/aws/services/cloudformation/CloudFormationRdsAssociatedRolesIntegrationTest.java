@@ -438,6 +438,17 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(List.of(EXPORT_ROLE), clusterRoles(clusterId));
 
+            // a role whose feature the failed update changed gets its own feature back
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\", \"FeatureName\": \"s3Export\"}]".formatted(EXPORT_ROLE), ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            stack("UpdateStack", stackName, cluster.formatted(clusterId,
+                    "[{\"RoleArn\": \"%s\", \"FeatureName\": \"s3Import\"}]".formatted(EXPORT_ROLE),
+                    failingMember));
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(List.of(EXPORT_ROLE), clusterRoles(clusterId));
+            assertEquals(List.of("s3Export"), clusterRoleFeatures(clusterId));
+
             // and a role the update added to a cluster that had none comes off again
             stack("UpdateStack", stackName, cluster.formatted(clusterId, "[]", ""));
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
@@ -627,6 +638,12 @@ class CloudFormationRdsAssociatedRolesIntegrationTest {
         XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
                 .when().post("/").then().statusCode(200).extract().xmlPath();
         return xml.getList("**.findAll { it.name() == 'DBClusterRole' }.RoleArn", String.class);
+    }
+
+    private static List<String> clusterRoleFeatures(String clusterId) {
+        XmlPath xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", clusterId)
+                .when().post("/").then().statusCode(200).extract().xmlPath();
+        return xml.getList("**.findAll { it.name() == 'DBClusterRole' }.FeatureName", String.class);
     }
 
     private static List<String> instanceRoles(String instanceId) {

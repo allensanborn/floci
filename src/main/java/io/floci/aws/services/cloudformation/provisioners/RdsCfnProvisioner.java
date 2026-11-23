@@ -217,8 +217,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * record the update was in place: a cluster's settings are put back from its snapshot, and an
      * instance's VPC security groups, and the rollback counts as done when the update changed nothing
      * else. A record carrying the {@code cluster} flag puts back a DB cluster's settings and its roles;
-     * a role that cannot be put back fails the rollback. Any other in-place change to an instance needs a snapshot this provisioner does not keep,
-     * so the engine keeps reporting it as not rolled back.
+     * a role that cannot be put back fails the rollback and keeps the record, so a retry tries again.
+     * Any other in-place change to an instance needs a snapshot this provisioner does not keep, so
+     * the engine keeps reporting it as not rolled back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
@@ -252,7 +253,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * Puts back the VPC security groups an update that kept the instance changed, and answers whether
      * that undid the whole update. The saved record is dropped only once the groups are back, so an
      * instance gone since the update fails the rollback, and a retried one tries again. A record
-     * carrying the {@code cluster} flag puts back a DB cluster's settings the same way.
+     * carrying the {@code cluster} flag puts back a DB cluster's settings the same way, and is kept
+     * too when a role could not be put back.
      */
     private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
         String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
@@ -269,7 +271,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         JsonNode groups = prior.path("vpcSecurityGroups");
         boolean otherChanges = prior.path("otherChanges").asBoolean(true);
         if (prior.path("cluster").asBoolean(false)) {
-            otherChanges |= !DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior);
+            if (!DbClusterInPlaceState.restore(rdsService, resource.getPhysicalId(), prior)) {
+                return false;
+            }
         } else if (groups.isArray()) {
             List<String> groupIds = new ArrayList<>();
             groups.forEach(group -> groupIds.add(group.asText()));
