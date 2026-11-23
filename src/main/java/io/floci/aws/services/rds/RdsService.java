@@ -809,7 +809,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DBName must be null for SQL Server.", 400);
         }
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank() && !"default".equalsIgnoreCase(dbSubnetGroupName)) {
-            getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+            getInstanceSubnetGroup(dbSubnetGroupName, effectiveRegion);
         }
         validateInstanceParameterGroup(
                 paramGroupName, engineParam, engineVersion, effectiveRegion);
@@ -941,7 +941,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
             instance.setRequestedPort(advertisedPort);
             instance.setOptionGroupName(optionGroupName);
-            instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setDbSubnetGroupName(subnetGroupName(dbSubnetGroupName));
             instance.setContainerId(containerId);
             instance.setContainerHost(containerHost);
             instance.setContainerPort(containerPort);
@@ -2287,7 +2287,7 @@ public class RdsService implements Resettable, ResourceProvider {
         // The source's groups belong to its VPC, so a replica placed in another one gets that VPC's
         // default group instead.
         boolean inSourceVpc = sameRegion && (isBlank(request.dbSubnetGroupName()) || Objects.equals(
-                getDbSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
+                getInstanceSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
         List<String> vpcSecurityGroupIds = request.vpcSecurityGroupIds() != null
                 ? request.vpcSecurityGroupIds()
                 : inSourceVpc ? source.getVpcSecurityGroupIds() : List.of();
@@ -3390,10 +3390,15 @@ public class RdsService implements Resettable, ResourceProvider {
                 if (group == null) {
                     yield null;
                 }
-                yield new TagHandle(group.getTags(), updated -> {
-                    group.setTags(updated);
+                // A group an older build stored under a mixed-case name is renamed here, and written
+                // back under its stored name so no second record outlives its deletion.
+                DbSubnetGroup stored = findSubnetGroupForScope(
+                        currentAccountId(), effectiveRegion, group.getDbSubnetGroupName());
+                DbSubnetGroup tagged = stored != null ? stored : group;
+                yield new TagHandle(tagged.getTags(), updated -> {
+                    tagged.setTags(updated);
                     putSubnetGroupForScope(
-                            currentAccountId(), effectiveRegion, resourceId, group);
+                            currentAccountId(), effectiveRegion, tagged.getDbSubnetGroupName(), tagged);
                 });
             }
             case "cluster-snapshot" -> {
@@ -4215,7 +4220,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
         if (newSubnetGroup != null) {
-            instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setDbSubnetGroupName(newSubnetGroup.getDbSubnetGroupName());
             instance.setVpcId(newSubnetGroup.getVpcId());
         }
         if (securityGroupIdsAfter != null) {
@@ -8270,6 +8275,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
+        name = subnetGroupName(name);
         String effectiveRegion = effectiveRegion(region);
         if (findSubnetGroupForScope(currentAccountId(), effectiveRegion, name) != null
                 || scopedKeyExists(subnetGroups, currentAccountId(),
@@ -8340,7 +8346,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup resolveDbSubnetGroupView(String name, String region) {
-        String effectiveName = (name == null || name.isBlank()) ? "default" : name;
+        String effectiveName = (name == null || name.isBlank()) ? "default" : subnetGroupName(name);
         if ("default".equalsIgnoreCase(effectiveName)) {
             return buildDefaultSubnetGroup(effectiveRegion(region));
         }
@@ -8348,7 +8354,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 currentAccountId(), effectiveRegion(region), effectiveName);
         if (group == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + effectiveName + " not found.", 404);
+                    "DB Subnet group '" + effectiveName + "' not found.", 404);
         }
         return group;
     }
@@ -8532,7 +8538,21 @@ public class RdsService implements Resettable, ResourceProvider {
         return getDbSubnetGroup(name, regionResolver.getDefaultRegion());
     }
 
+    /** The group a DB instance is placed in; AWS words its absence differently from the calls that act on a group. */
+    private DbSubnetGroup getInstanceSubnetGroup(String name, String region) {
+        try {
+            return getDbSubnetGroup(name, region);
+        } catch (AwsException e) {
+            if ("DBSubnetGroupNotFoundFault".equals(e.getErrorCode())) {
+                throw new AwsException("DBSubnetGroupNotFoundFault",
+                        "DBSubnetGroup '" + subnetGroupName(name) + "' not found.", 404);
+            }
+            throw e;
+        }
+    }
+
     public DbSubnetGroup getDbSubnetGroup(String name, String region) {
+        name = subnetGroupName(name);
         if ("default".equalsIgnoreCase(name)) {
             return buildDefaultSubnetGroup(effectiveRegion(region));
         }
@@ -8540,7 +8560,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 currentAccountId(), effectiveRegion(region), name);
         if (group == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + name + " not found.", 404);
+                    "DB subnet group '" + name + "' does not exist.", 404);
         }
         return group;
     }
@@ -8550,6 +8570,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbSubnetGroup modifyDbSubnetGroup(String name, List<String> subnetIds, String region) {
+        name = subnetGroupName(name);
         DbSubnetGroup existing = getDbSubnetGroup(name, region);
         if (subnetIds == null || subnetIds.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
@@ -8567,11 +8588,12 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void deleteDbSubnetGroup(String name, String region) {
+        name = subnetGroupName(name);
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         if (findSubnetGroupForScope(accountId, effectiveRegion, name) == null) {
             throw new AwsException("DBSubnetGroupNotFoundFault",
-                    "DB subnet group " + name + " not found.", 404);
+                    "DB subnet group '" + name + "' does not exist.", 404);
         }
         deleteSubnetGroupForScope(accountId, effectiveRegion, name);
     }
@@ -10770,7 +10792,65 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * The group named {@code groupName}. A group an older build stored under a mixed-case name is
+     * renamed to lower case the first time it is looked up, so it keeps working.
+     */
     private synchronized DbSubnetGroup findSubnetGroupForScope(
+            String accountId, String region, String requestedName) {
+        String groupName = subnetGroupName(requestedName);
+        DbSubnetGroup found = findExactSubnetGroupForScope(accountId, region, groupName);
+        if (found != null || groupName == null) {
+            return found;
+        }
+        // ponytail: O(groups) scan on a miss; a lower-case index if a lookup miss gets hot.
+        String effectiveRegion = effectiveRegion(region);
+        List<DbSubnetGroup> stored = new ArrayList<>();
+        List<DbSubnetGroup> unprefixed = new ArrayList<>();
+        if (subnetGroups instanceof AccountAwareStorageBackend<DbSubnetGroup> aware) {
+            stored.addAll(aware.scanForAccount(accountId, k -> true));
+            // Keys from before accounts were prefixed; the list reads these too.
+            unprefixed.addAll(aware.scanUnscopedLegacy(g -> g != null && g.getDbSubnetGroupName() != null));
+            stored.addAll(unprefixed);
+        } else {
+            stored.addAll(subnetGroups.scan(k -> true));
+        }
+        for (DbSubnetGroup group : stored) {
+            String oldName = group.getDbSubnetGroupName();
+            String oldArn = group.getDbSubnetGroupArn();
+            if (oldName != null && !oldName.equals(groupName) && oldName.equalsIgnoreCase(groupName)
+                    && hasRdsResourceIdentity(group.getDbSubnetGroupArn(), accountId, effectiveRegion,
+                    "subgrp", oldName)) {
+                group.setDbSubnetGroupName(groupName);
+                group.setDbSubnetGroupArn(regionResolver.buildArn("rds", effectiveRegion, "subgrp:" + groupName));
+                // Tags first: a failure there leaves the legacy record in place for a later retry.
+                moveTags(effectiveRegion, oldArn, group.getDbSubnetGroupArn());
+                putSubnetGroupForScope(accountId, effectiveRegion, groupName, group);
+                deleteSubnetGroupForScope(accountId, effectiveRegion, oldName);
+                if (unprefixed.contains(group)) {
+                    ((AccountAwareStorageBackend<DbSubnetGroup>) subnetGroups)
+                            .deleteRaw(dbResourceKey(effectiveRegion, oldName));
+                }
+                return group;
+            }
+        }
+        return null;
+    }
+
+    /** Tags applied through the tagging API live under the ARN, so a renamed group's follow its new one. */
+    private void moveTags(String region, String oldArn, String newArn) {
+        if (taggingService == null) {
+            return;
+        }
+        Map<String, String> tags = taggingService.getTagsForResource(region, oldArn);
+        if (!tags.isEmpty()) {
+            Map<String, String> copy = new LinkedHashMap<>(tags);
+            taggingService.tagResources(List.of(newArn), copy, region);
+            taggingService.deleteResources(List.of(oldArn), region);
+        }
+    }
+
+    private DbSubnetGroup findExactSubnetGroupForScope(
             String accountId, String region, String groupName) {
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, groupName);
@@ -11401,7 +11481,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                                  String region) {
         String effectiveSubnetGroupName = (dbSubnetGroupName == null || dbSubnetGroupName.isBlank())
                 ? "default"
-                : dbSubnetGroupName;
+                : subnetGroupName(dbSubnetGroupName);
         DbSubnetGroup group = "default".equals(effectiveSubnetGroupName)
                 ? buildDefaultSubnetGroup(region)
                 : getDbSubnetGroup(effectiveSubnetGroupName, region);
@@ -11520,6 +11600,11 @@ public class RdsService implements Resettable, ResourceProvider {
                             + "VpcSubnetIds entry to have an associated IPv6 CIDR block; missing on "
                             + missing + ".", 400);
         }
+    }
+
+    /** AWS stores DBSubnetGroupName as a lowercase string. */
+    private static String subnetGroupName(String name) {
+        return name == null ? null : name.toLowerCase(Locale.ROOT);
     }
 
     private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds, String region) {

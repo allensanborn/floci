@@ -295,7 +295,7 @@ public class DocDbService {
                 throw new IllegalStateException("DocDbService was built without an RdsService");
             }
             try {
-                rdsService.getDbSubnetGroup(subnetGroup, region);
+                subnetGroup = rdsService.getDbSubnetGroup(subnetGroup, region).getDbSubnetGroupName();
             } catch (AwsException e) {
                 throw new AwsException("DBSubnetGroupNotFoundFault",
                         "DB subnet group '" + subnetGroup + "' does not exist.", 404);
