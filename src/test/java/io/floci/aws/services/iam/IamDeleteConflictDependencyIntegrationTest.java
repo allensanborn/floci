@@ -41,7 +41,7 @@ class IamDeleteConflictDependencyIntegrationTest {
             "This policy has more than one version. Before you delete a policy, you must delete"
                     + " the policy's versions. The default version is deleted with the policy.";
     private static final String MUST_DETACH_FROM_ENTITIES =
-            "Cannot delete a policy attached to entities. Detach it first.";
+            "Cannot delete a policy attached to entities.";
 
     private static final String TRUST_POLICY = "{\"Version\":\"2012-10-17\",\"Statement\":"
             + "[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},"

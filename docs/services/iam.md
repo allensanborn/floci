@@ -1062,21 +1062,46 @@ the four operations that carry state into the token they mint: `AssumeRole`, `As
 minted, which is where AWS answers it. A token asked through `MinimumSessionTokenSize` to be the
 limit itself therefore leaves nothing to carry a policy or a tag on top of it, and a request that
 asks for both is refused. `GetDelegatedAccessToken` carries no such state, and the member stays out
-of its response as the model deprecates it there. `SessionTokenSize` and `SessionTokenUtilization`,
-the two members the model now carries beside `PackedPolicySize`, are not published yet.
+of its response as the model deprecates it there.
+
+What a session that fits cost is published three ways, one number each time. `SessionTokenSize` is
+"the size, in bytes, of the session token returned in the Credentials for this response",
+`SessionTokenUtilization` is that size as "the percentage (0-100) of the maximum allowed session
+token size that the returned session token consumes", and `PackedPolicySize` carries the same
+percentage where a response still declares it, truncated rather than rounded. AWS's own example
+responses are the pattern: 1428 bytes published as 34 in both percentage members, 1105 as 26, and
+856 as 20 on `GetSessionToken`, whose response declares no deprecated member at all. All six
+operations that mint a session publish the pair, `AssumeRole`, `AssumeRoleWithSAML`,
+`AssumeRoleWithWebIdentity`, `AssumeRoot`, `GetFederationToken` and `GetSessionToken`, and the four
+that carry state into their token publish the deprecated member ahead of it, which is the order
+AWS prints the three in.
+
+The size published is that measure rather than the length of the string in `Credentials`. AWS packs
+the session's state into the token it hands back, so there the two are one number; this emulator
+mints an opaque token and keeps the state beside it, and a size read off the returned string would
+tell a caller its session cost nothing while the same request was refused for being over the limit.
 
 The measure is this emulator's own and the number will differ from AWS's. It is the token this
 emulator will mint for the request, whose length `MinimumSessionTokenSize` can ask to be raised,
-plus the state the request asks to carry into it in UTF-8 bytes: the inline document, every policy
-ARN, and every tag key and value. AWS assembles the real thing instead, and its size follows the
-input in neither direction. STS "serializes and compresses your session policies and tags when
-assembling the token", where "compression results vary based on the actual content, not just its
-length" and "two sets of tags with identical character counts can produce different token sizes",
-so a repetitive set can assemble smaller than the bytes it was written in. The one size recorded
+plus the state the request asks to carry into it in UTF-8 bytes, counted where the operation
+declares it: the inline document, every policy ARN, and every tag key and value. AWS assembles the
+real thing instead, and its size follows the input in neither direction. STS "serializes and
+compresses your session policies and tags when assembling the token", where "compression results
+vary based on the actual content, not just its length" and "two sets of tags with identical
+character counts can produce different token sizes", so a repetitive set can assemble smaller than
+the bytes it was written in. The one size recorded
 here ran larger than its input: for a request of 50 tags with 124-character keys and 256-character
 values, every field inside its own limit, AWS reported 26092 bytes against the limit of 4096, where
 those fields are about 19000 bytes of input. A recording of a second size would let the measure be
 calibrated, and that is the only thing this reading waits on.
+
+Which of the three a request can be charged for is read from the generated request shapes rather
+than from the parameters it happens to carry, so a member STS would ignore costs its caller
+nothing. `AssumeRole` and `GetFederationToken` declare the document, the policy ARNs and the tags;
+`AssumeRoleWithSAML` and `AssumeRoleWithWebIdentity` declare the documents and no tags, a session
+tag reaching them inside the assertion or the web identity token, which Floci does not read as
+session tags yet, so it costs their token nothing here; and `AssumeRoot` and `GetSessionToken`
+declare none of the three, their tokens carrying nothing but themselves.
 
 ### Policy Simulation
 
@@ -2278,7 +2303,7 @@ exchange its token. A token past that window, and one nothing matches, both answ
 token", and the remedy the reference gives, requesting a new token, is the same either way. A
 token offered by any other account answers `AccessDenied`, which is a refusal rather than an
 expiry. `PackedPolicySize` is left out of the response, the model deprecating it and stating it is
-not populated here.
+not populated here, and this operation declares neither of the two members that replace it.
 
 IAM tells the partner how the request is going on the SNS topic it named, which is the only channel
 this family has outwards. Every state AWS lists notifies, `ASSIGNED`, `PENDING_APPROVAL`,
@@ -2517,7 +2542,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups and Amazon CloudWatch Logs they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch and Amazon Comprehend they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -3815,12 +3840,16 @@ floci populates:
   `o-.../r-.../ou-.../`, which is the value the key's own published condition compares with
   `StringEquals`, and is `o-.../r-.../` for an account the organization holds at its root.
 - `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
-  `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
+  `GetSessionToken` session, or of the role an assumed-role session represents, with the session
+  tags the credentials were minted with over them. Tags are read
   from that identity's account and copied for the request; later requests see tag updates and
-  removals. Identity policies, resource policies and `AssumeRole` trust policies see the same
-  caller tags. A role session uses its role's tags, not those of the user that assumed it.
-  Untagged identities, account-root principals and federated users have no stored principal tags.
-  STS session tags, their overrides and transitive inheritance are not implemented.
+  removals, while the session tags are the session's own and do not change after it is minted.
+  Identity policies, resource policies and `AssumeRole` trust policies see the same
+  caller tags. A role session uses its role's tags, not those of the user that assumed it, and a
+  federated user carries the tags of the user whose key minted it. An account-root principal has
+  no stored tags and no way to pass one. A session tag replaces the identity's tag of that key
+  whatever its case; [STS](sts.md#session-tags) has where each operation takes its session tags
+  from, and the transitive inheritance that is not implemented.
 - `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
   they always describe the same credential. The values follow the user guide's principal key
   values list: `Account` with the account id for the account-root principal and for a session

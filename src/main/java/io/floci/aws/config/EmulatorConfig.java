@@ -4315,6 +4315,22 @@ public interface EmulatorConfig {
         boolean imdsPodNetwork();
 
         /**
+         * When true, pods get addresses from IPv4 /28 prefixes of their node's subnet, which the node holds on its network
+         * interface, as the Amazon VPC CNI plugin's prefix delegation assigns them, instead of k3s's own pod network. A
+         * node needs an address in a Docker-backed subnet for it.
+         */
+        @WithDefault("false")
+        boolean vpcPodNetwork();
+
+        /**
+         * How many /28 prefixes a node holds with {@link #vpcPodNetwork()}: two, as a node running pods holds under the
+         * VPC CNI's default {@code WARM_PREFIX_TARGET} of one. With {@link #vpcPodNetwork()} on, Floci refuses to start
+         * unless it is between 1 and 16.
+         */
+        @WithDefault("2")
+        int vpcPodPrefixes();
+
+        /**
          * When true, configures k3s with the cluster's per-cluster OIDC signing keypair and
          * advertises Floci's OIDC issuer URL, enabling in-cluster IAM Roles for Service Accounts (IRSA).
          */
