@@ -23,6 +23,23 @@ AWS::Pipes::Pipe	CreationTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	CurrentState	pipe state transitions are not modelled
 AWS::Pipes::Pipe	LastModifiedTime	pipe lifecycle timestamps are not tracked
 AWS::Pipes::Pipe	StateReason	pipe state transitions are not modelled
+AWS::RDS::ClusterSnapshot	AllocatedStorage	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	AvailabilityZones	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	ClusterCreateTime	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	DbClusterResourceId	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	Engine	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	EngineMode	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	EngineVersion	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	IAMDatabaseAuthenticationEnabled	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	KmsKeyId	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	LicenseModel	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	MasterUsername	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	Port	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	SnapshotCreateTime	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	SnapshotType	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	Status	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	StorageEncrypted	not set on the resource; read it through DescribeDBClusterSnapshots
+AWS::RDS::ClusterSnapshot	VpcId	not set on the resource; read it through DescribeDBClusterSnapshots
 AWS::RDS::DBCluster	Endpoint	the dotted Endpoint.Address and Endpoint.Port are set instead, which is the form AWS's GetAtt actually exposes
 AWS::RDS::DBCluster	ReadEndpoint	ReadEndpoint.Address is set instead, the form AWS's GetAtt exposes
 AWS::RDS::DBCluster	StorageEncryptionType	cluster storage encryption is not emulated

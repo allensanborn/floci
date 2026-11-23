@@ -9,6 +9,7 @@ import io.floci.aws.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
+import io.floci.aws.services.rds.model.DbClusterSnapshot;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceSettings;
@@ -1058,6 +1059,53 @@ class RdsCfnProvisionerTest {
         assertEquals("CREATE_FAILED", resource.getStatus());
         assertTrue(resource.getStatusReason().contains("cannot both be specified"));
         verifyNoInteractions(secretsManagerService, rdsService);
+    }
+
+    private static final String SNAPSHOT_ARN = "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap1";
+
+    private DbClusterSnapshot snapshotWithArn() {
+        DbClusterSnapshot snapshot = new DbClusterSnapshot();
+        snapshot.setDbClusterSnapshotArn(SNAPSHOT_ARN);
+        return snapshot;
+    }
+
+    @Test
+    void provisionsClusterSnapshotWithTagsAndExposesTheArn() {
+        when(rdsService.createDbClusterSnapshot(any(), any(), anyMap(), any())).thenReturn(snapshotWithArn());
+
+        StackResource r = provision("Snap", "AWS::RDS::ClusterSnapshot", """
+                {"DBClusterIdentifier":"c1","DBClusterSnapshotIdentifier":"snap1",
+                 "Tags":[{"Key":"k","Value":"v"}]}
+                """);
+
+        assertEquals(SNAPSHOT_ARN, r.getPhysicalId());
+        assertEquals(SNAPSHOT_ARN, r.getAttributes().get("DBClusterSnapshotArn"));
+        verify(rdsService).createDbClusterSnapshot("snap1", "c1", Map.of("k", "v"), "us-east-1");
+    }
+
+    @Test
+    void clusterSnapshotRerunOnUpdateKeepsTheSnapshot() {
+        StackResource r = provisionExisting("Snap", "AWS::RDS::ClusterSnapshot", """
+                {"DBClusterIdentifier":"c1","DBClusterSnapshotIdentifier":"snap1"}
+                """, "us-east-1", SNAPSHOT_ARN, Map.of("DBClusterSnapshotArn", SNAPSHOT_ARN));
+
+        assertEquals(SNAPSHOT_ARN, r.getPhysicalId());
+        verify(rdsService, never()).createDbClusterSnapshot(any(), any(), anyMap(), any());
+    }
+
+    @Test
+    void deletesClusterSnapshotByTheIdentifierInItsArn() {
+        provisioner.delete("AWS::RDS::ClusterSnapshot", SNAPSHOT_ARN, "us-east-1");
+
+        verify(rdsService).deleteDbClusterSnapshot("snap1", "us-east-1");
+    }
+
+    @Test
+    void deleteToleratesAnAlreadyGoneClusterSnapshot() {
+        doThrow(new AwsException("DBClusterSnapshotNotFoundFault", "DBClusterSnapshot not found: snap1", 404))
+                .when(rdsService).deleteDbClusterSnapshot("snap1", "us-east-1");
+
+        assertDoesNotThrow(() -> provisioner.delete("AWS::RDS::ClusterSnapshot", SNAPSHOT_ARN, "us-east-1"));
     }
 
     @Test
